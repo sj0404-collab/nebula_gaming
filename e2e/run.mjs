@@ -295,6 +295,23 @@ await test('x64: real third-party binaries — busybox-w32 awk/sha256sum and PuT
   await page.screenshot({ path: resolve(SHOTS, 'x64-busybox.png') });
   await closeAll();
 });
+await test('x64: processes & pipes — busybox sh spawns real child processes (CreateProcess/_spawnve), pipes, $(…), background jobs and ps', async () => {
+  const w = await x64Open();
+  await w.locator('[data-x64-exe="busybox64.exe"]').waitFor({ timeout: 30_000 });
+  await w.locator('[data-x64-exe="busybox64.exe"]').click();
+  await w.getByPlaceholder('arguments').fill('sh -c "echo hello | tr a-z A-Z; seq 1 5 | sort -rn | head -2; x=$(echo sub); echo got:$x; yes | head -1; sleep 1 & ps; wait; echo jobs-done"');
+  await w.locator('[data-x64-run]').click();
+  await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout: 60_000 });
+  const con = await w.locator('[data-x64-console]').innerText();
+  expect(/HELLO/.test(con), 'pipe echo | tr failed: ' + con.slice(0, 300));
+  expect(/5\s+4/.test(con), 'seq | sort | head pipeline failed: ' + con.slice(0, 300));
+  expect(/got:sub/.test(con), 'command substitution failed: ' + con.slice(0, 300));
+  expect(/PID\s+PPID[\s\S]*4242[\s\S]*sleep 1/.test(con), 'ps did not list the background child: ' + con.slice(0, 400));
+  expect(/jobs-done/.test(con), 'wait for background job failed: ' + con.slice(-200));
+  await page.screenshot({ path: resolve(SHOTS, 'x64-processes.png') });
+  await closeAll();
+});
+
 await test('x64: virtual disk + stdin — files mounted from the host, read/written by busybox, console input feeds blocking reads', async () => {
   const w = await x64Open();
   await w.locator('[data-x64-exe="busybox64.exe"]').waitFor({ timeout: 30_000 });

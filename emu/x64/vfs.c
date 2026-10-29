@@ -9,14 +9,17 @@
 #define VFS_PATH      512
 
 typedef struct { char path[VFS_PATH]; u8 *data; u64 size, cap; int is_dir; int written; int used; } VNode;
-typedef struct { int node; u64 pos; int used; int append; int eof; int err; int unget; int alias; } VFile;
-typedef struct { int used; char dir[VFS_PATH]; char pat[128]; int cursor; int dots; } VFind;
 
 static VNode g_nodes[VFS_MAX_NODES];
-static VFile g_open[VFS_MAX_OPEN];
-static VFind g_find[VFS_MAX_FIND];
-static char  g_cwd[VFS_PATH] = "C:\\nebula";
-static int   g_redir[3] = { -1, -1, -1 };   /* std fds: -1 = console, otherwise an open-table fd */
+/* per-process state (fd table, cwd, redirections, find handles, environment) lives in a ProcFs; the scheduler
+ * points vfs_P at the running process.  Files, pipes and mappings are kernel objects shared by all processes. */
+static ProcFs g_root_fs = { .cwd = "C:\\nebula", .redir = { -1, -1, -1 } };
+ProcFs *vfs_P = &g_root_fs;
+#define g_cwd (vfs_P->cwd)
+#define g_redir (vfs_P->redir)
+#define g_find (vfs_P->find)
+void vfs_use(ProcFs *p) { vfs_P = p ? p : &g_root_fs; }
+ProcFs *vfs_root_fs(void) { return &g_root_fs; }
 /* stdin */
 static u8 *g_in; static u64 g_in_len, g_in_cap, g_in_pos; static int g_in_eof, g_in_wait;
 
@@ -88,20 +91,54 @@ int vfs_mkdir(const char *path) {
   if (vfs_find_node(norm) != -1) return 0;
   int i = node_alloc(norm); if (i < 0) return 0; g_nodes[i].is_dir = 1; ensure_parents(norm); return 1;
 }
-int vfs_remove(const char *path) { int i = vfs_find_node(path); if (i < 0) return 0; for (int k = 0; k < VFS_MAX_OPEN; k++) if (g_open[k].used && g_open[k].node == i) return 0; g_nodes[i].used = 0; return 1; }
+int vfs_remove(const char *path) { int i = vfs_find_node(path); if (i < 0) return 0; if (g_nodes[i].is_dir) { for (int k = 0; k < VFS_MAX_NODES; k++) if (g_nodes[k].used && k != i && !e_strncmp(g_nodes[k].path, g_nodes[i].path, e_strlen(g_nodes[i].path)) && g_nodes[k].path[e_strlen(g_nodes[i].path)] == '\\') return 0; } g_nodes[i].used = 0; return 1; }
 int vfs_rename(const char *from, const char *to) { int i = vfs_find_node(from); if (i < 0) return 0; char norm[VFS_PATH]; vfs_normalize(to, norm, sizeof norm); int j = vfs_find_node(norm); if (j >= 0) g_nodes[j].used = 0; e_snprintf(g_nodes[i].path, VFS_PATH, "%s", norm); ensure_parents(norm); return 1; }
 int vfs_chdir(const char *path) { char norm[VFS_PATH]; vfs_normalize(path, norm, sizeof norm); int i = vfs_find_node(norm); if (i == -1 || (i >= 0 && !g_nodes[i].is_dir)) return 0; e_snprintf(g_cwd, sizeof g_cwd, "%s", norm); return 1; }
 /* stat: returns 0 missing, 1 file, 2 dir */
-int vfs_stat(const char *path, u64 *size) { int i = vfs_find_node(path); if (i == -1) return 0; if (i == -2) { if (size) *size = 0; return 2; } if (size) *size = g_nodes[i].size; return g_nodes[i].is_dir ? 2 : 1; }
+int vfs_stat(const char *path, u64 *size) { if (vfs_is_null_dev(path)) { if (size) *size = 0; return 3; } int i = vfs_find_node(path); if (i == -1) return 0; if (i == -2) { if (size) *size = 0; return 2; } if (size) *size = g_nodes[i].size; return g_nodes[i].is_dir ? 2 : 1; }
 const VNodeInfo *vfs_node_info(int i, VNodeInfo *out) { if (i < 0 || i >= VFS_MAX_NODES || !g_nodes[i].used) return 0; out->path = g_nodes[i].path; out->data = g_nodes[i].data; out->size = g_nodes[i].size; out->is_dir = g_nodes[i].is_dir; out->written = g_nodes[i].written; return out; }
 int vfs_node_count(void) { return VFS_MAX_NODES; }
 
-/* ---------- open files (fd ≥ 3) ---------- */
+/* ---------- kernel objects: pipes and anonymous mappings ---------- */
+#define PIPE_MAX 32
+#define PIPE_CAP 65536
+typedef struct { int used; u8 *buf; u32 head, len; int readers, writers; } Pipe;
+static Pipe g_pipes[PIPE_MAX];
+#define MAP_MAX 32
+typedef struct { int used; u8 *data; u64 size; int refs; int node; } Mapping;   /* node ≥ 0: backed by a VFS file */
+static Mapping g_maps[MAP_MAX];
+
+/* ---------- per-process fd table (fd ≥ 3) ---------- */
 /* access: 1 read, 2 write; disp: 1 CREATE_NEW, 2 CREATE_ALWAYS, 3 OPEN_EXISTING, 4 OPEN_ALWAYS, 5 TRUNCATE_EXISTING; returns fd or -errno (-2 ENOENT, -17 EEXIST, -13 EACCES, -24 EMFILE, -21 EISDIR) */
+static FdEnt *vf(int fd) { fd -= 3; if (fd < 0 || fd >= FD_MAX || !vfs_P->fd[fd].kind) return 0; return &vfs_P->fd[fd]; }
+static int slot_alloc(void) { for (int k = 0; k < FD_MAX; k++) if (!vfs_P->fd[k].kind) return k; return -1; }
+static void ent_addref(FdEnt *e) {
+  if (e->kind == FD_PIPE) { if (e->wend) g_pipes[e->obj].writers++; else g_pipes[e->obj].readers++; }
+  else if (e->kind == FD_MAP) g_maps[e->obj].refs++;
+  else if (e->kind == FD_PROC) proc_handle_ref(e->obj, 1);
+}
+static void ent_release(FdEnt *e) {
+  if (e->kind == FD_PIPE) { Pipe *p = &g_pipes[e->obj]; if (e->wend) p->writers--; else p->readers--; if (p->readers <= 0 && p->writers <= 0) p->used = 0; }
+  else if (e->kind == FD_MAP) { if (--g_maps[e->obj].refs <= 0) g_maps[e->obj].used = 0; }
+  else if (e->kind == FD_PROC) proc_handle_ref(e->obj, -1);
+  e->kind = 0;
+}
+static int ent_new(int kind) { int k = slot_alloc(); if (k < 0) return -1; FdEnt *e = &vfs_P->fd[k]; e_memset(e, 0, sizeof *e); e->kind = kind; e->node = -1; e->unget = -1; return k + 3; }
+/* NUL / /dev/null / /dev/zero: a character device that swallows writes and reads EOF (zero for /dev/zero) */
+int vfs_is_null_dev(const char *path) {
+  if (!e_stricmp(path, "NUL") || !e_stricmp(path, "\\\\.\\NUL") || !e_stricmp(path, "/dev/null") || !e_stricmp(path, "\\dev\\null")) return 1;
+  if (!e_stricmp(path, "/dev/zero") || !e_stricmp(path, "\\dev\\zero")) return 2;
+  char norm[VFS_PATH]; vfs_normalize(path, norm, sizeof norm);
+  if (!e_stricmp(norm, "C:\\dev\\null") || !e_stricmp(norm, "C:\\nebula\\.nul") || !e_stricmp(norm, "C:\\NUL")) return 1;
+  if (!e_stricmp(norm, "C:\\dev\\zero")) return 2;
+  return 0;
+}
 int vfs_open(const char *path, int access, int disp, int append) {
+  int nd = vfs_is_null_dev(path);
+  if (nd) { int fd = ent_new(FD_NULL); if (fd < 0) return -24; vf(fd)->node = -1; vf(fd)->obj = nd; return fd; }
   char norm[VFS_PATH]; vfs_normalize(path, norm, sizeof norm);
   int i = vfs_find_node(norm);
-  if (i == -2 || (i >= 0 && g_nodes[i].is_dir)) { if (access & 2) return -21; /* allow opening a dir read-only (handle used for info) */ }
+  if (i == -2 || (i >= 0 && g_nodes[i].is_dir)) { if (access & 2) return -21; }
   if (i == -1) {
     if (disp == 3 || disp == 5) return -2;
     i = node_alloc(norm); if (i < 0) return -24; ensure_parents(norm); g_nodes[i].written = 1;
@@ -109,63 +146,130 @@ int vfs_open(const char *path, int access, int disp, int append) {
     if (disp == 1) return -17;
     if (disp == 2 || disp == 5) { g_nodes[i].size = 0; g_nodes[i].written = 1; }
   }
-  for (int k = 0; k < VFS_MAX_OPEN; k++) if (!g_open[k].used) { e_memset(&g_open[k], 0, sizeof g_open[k]); g_open[k].used = 1; g_open[k].node = i; g_open[k].append = append; g_open[k].unget = -1; return k + 3; }
-  return -24;
+  int fd = ent_new(FD_FILE); if (fd < 0) return -24; FdEnt *e = vf(fd); e->node = i; e->append = append; return fd;
 }
-static VFile *vf(int fd) { fd -= 3; if (fd < 0 || fd >= VFS_MAX_OPEN || !g_open[fd].used) return 0; return &g_open[fd]; }
-int vfs_close(int fd) { if (fd >= 0 && fd < 3) { if (g_redir[fd] != -1) { vfs_close(g_redir[fd]); g_redir[fd] = -1; } return 1; } VFile *f = vf(fd); if (!f) return 0; f->used = 0; return 1; }
+/* std slots: -1 console, -2 closed (POSIX close(0); open() must then return 0), >=3 an fd-table entry */
+int vfs_close(int fd) { if (fd >= 0 && fd < 3) { if (g_redir[fd] == -2) return 0; if (g_redir[fd] >= 3) vfs_close(g_redir[fd]); g_redir[fd] = -2; return 1; } FdEnt *f = vf(fd); if (!f) return 0; ent_release(f); return 1; }
+/* CRT open/dup/pipe: a closed std slot is the lowest free descriptor */
+int vfs_place_low(int fd) { if (fd < 3) return fd; for (int k = 0; k < 3; k++) if (g_redir[k] == -2) { g_redir[k] = fd; return k; } return fd; }
+int vfs_set_inherit(int fd, int inherit) { if (fd >= 0 && fd < 3) { if (g_redir[fd] < 3) return 1; fd = g_redir[fd]; } FdEnt *f = vf(fd); if (!f) return -1; int prev = !f->noinherit; f->noinherit = !inherit; return prev; }
 int vfs_is_open(int fd) { return vf(fd) != 0; }
-int vfs_fd_node(int fd) { VFile *f = vf(fd); return f ? f->node : -1; }
+int vfs_kind(int fd) { FdEnt *f = vf(fd); return f ? f->kind : 0; }
+int vfs_fd_obj(int fd) { FdEnt *f = vf(fd); return f ? f->obj : -1; }
+int vfs_fd_node(int fd) { FdEnt *f = vf(fd); return f ? f->node : -1; }
+/* resolve any fd to: -1 console stdin, 1/2 console out, >=3 table entry, 0 invalid */
+int vfs_resolve(int fd) {
+  if (fd >= 0 && fd < 3) { if (g_redir[fd] == -1) return fd == 0 ? -1 : fd; if (g_redir[fd] == -2) return 0; fd = g_redir[fd]; }
+  FdEnt *f = vf(fd); if (!f) return 0; if (f->kind == FD_CONSOLE) return f->alias; return fd;
+}
+int vfs_dup(int fd) {
+  if (fd >= 0 && fd < 3) {
+    if (g_redir[fd] == -1) { int d = ent_new(FD_CONSOLE); if (d < 0) return -1; vf(d)->alias = fd == 0 ? -1 : fd; return d; }
+    if (g_redir[fd] == -2) return -1;
+    fd = g_redir[fd];
+  }
+  FdEnt *f = vf(fd); if (!f) return -1; int k = slot_alloc(); if (k < 0) return -1; vfs_P->fd[k] = *f; vfs_P->fd[k].noinherit = 0; ent_addref(&vfs_P->fd[k]); return k + 3;
+}
+int vfs_dup2(int src, int dst) {
+  if (src == dst) return dst;
+  if (dst >= 0 && dst < 3) {
+    int r = vfs_resolve(src); if (!r) return -1;
+    if (g_redir[dst] >= 3) vfs_close(g_redir[dst]);
+    if (r < 3) { g_redir[dst] = -1; return dst; }
+    int d = vfs_dup(src); if (d < 0) return -1; g_redir[dst] = d; return dst;
+  }
+  if (dst < 3 || dst - 3 >= FD_MAX) return -1;
+  int d = vfs_dup(src); if (d < 0) return -1;
+  FdEnt *old = vf(dst); if (old) ent_release(old);
+  vfs_P->fd[dst - 3] = vfs_P->fd[d - 3]; vfs_P->fd[d - 3].kind = 0; return dst;
+}
+/* pipes: returns 0 on success */
+int vfs_pipe(int *rfd, int *wfd) {
+  int pi = -1; for (int i = 0; i < PIPE_MAX; i++) if (!g_pipes[i].used) { pi = i; break; } if (pi < 0) return -1;
+  Pipe *p = &g_pipes[pi]; if (!p->buf) p->buf = emu_alloc(PIPE_CAP); p->used = 1; p->head = p->len = 0; p->readers = p->writers = 0;
+  int r = ent_new(FD_PIPE); if (r < 0) { p->used = 0; return -1; } vf(r)->obj = pi; vf(r)->wend = 0; p->readers = 1;
+  int w = ent_new(FD_PIPE); if (w < 0) { ent_release(vf(r)); return -1; } vf(w)->obj = pi; vf(w)->wend = 1; p->writers = 1;
+  *rfd = r; *wfd = w; return 0;
+}
+int vfs_pipe_avail(int fd) { FdEnt *f = vf(fd); if (!f || f->kind != FD_PIPE) return -1; return (int)g_pipes[f->obj].len; }
+int vfs_pipe_id(int fd) { FdEnt *f = vf(fd); return f && f->kind == FD_PIPE ? f->obj : -1; }
+/* does a blocked pipe read/write still have to wait? (used by the scheduler) */
+int vfs_pipe_would_block(int pi, int for_write) { if (pi < 0 || pi >= PIPE_MAX || !g_pipes[pi].used) return 0; Pipe *p = &g_pipes[pi]; return for_write ? (p->len >= PIPE_CAP && p->readers > 0) : (p->len == 0 && p->writers > 0); }
+static s64 pipe_read(Pipe *p, u8 *buf, u64 n) {
+  if (p->len == 0) return p->writers > 0 ? -2 : 0;
+  u64 o = 0; while (o < n && p->len) { buf[o++] = p->buf[p->head]; p->head = (p->head + 1) % PIPE_CAP; p->len--; }
+  return (s64)o;
+}
+static s64 pipe_write(Pipe *p, const u8 *buf, u64 n) {
+  if (p->readers <= 0) return -3;                       /* EPIPE */
+  if (p->len >= PIPE_CAP) return -2;
+  u64 o = 0; while (o < n && p->len < PIPE_CAP) { p->buf[(p->head + p->len) % PIPE_CAP] = buf[o++]; p->len++; }
+  return (s64)o;
+}
+/* anonymous / file-backed mappings */
+int vfs_map_create(int file_fd, u64 size) {
+  int mi = -1; for (int i = 0; i < MAP_MAX; i++) if (!g_maps[i].used) { mi = i; break; } if (mi < 0) return -1;
+  Mapping *m = &g_maps[mi]; m->used = 1; m->refs = 0; m->node = -1;
+  if (file_fd >= 3) { FdEnt *f = vf(file_fd); if (!f || f->kind != FD_FILE || f->node < 0) { m->used = 0; return -1; } m->node = f->node; m->data = 0; m->size = size ? size : g_nodes[f->node].size; }
+  else { if (!size) { m->used = 0; return -1; } m->data = emu_alloc((size_t)size); m->size = size; }
+  int fd = ent_new(FD_MAP); if (fd < 0) { m->used = 0; return -1; } vf(fd)->obj = mi; m->refs = 1; return fd;
+}
+/* host pointer + size of a mapping's backing store (file-backed → the file bytes, grown to size) */
+u8 *vfs_map_data(int fd, u64 *size) {
+  FdEnt *f = vf(fd); if (!f || f->kind != FD_MAP) return 0; Mapping *m = &g_maps[f->obj];
+  if (m->node >= 0) { VNode *v = &g_nodes[m->node]; if (!grow(v, m->size)) return 0; if (v->size < m->size) { e_memset(v->data + v->size, 0, (size_t)(m->size - v->size)); } *size = m->size; return v->data; }
+  *size = m->size; return m->data;
+}
+int vfs_map_write_back(int fd, const u8 *src, u64 n) { u64 sz; u8 *d = vfs_map_data(fd, &sz); if (!d) return 0; if (n > sz) n = sz; e_memcpy(d, src, (size_t)n); FdEnt *f = vf(fd); if (f && g_maps[f->obj].node >= 0) { VNode *v = &g_nodes[g_maps[f->obj].node]; if (v->size < n) v->size = n; v->written = 1; } return 1; }
+/* process handles */
+int vfs_proc_handle(int pid) { int fd = ent_new(FD_PROC); if (fd < 0) return -1; vf(fd)->obj = pid; proc_handle_ref(pid, 1); return fd; }
+int vfs_fd_pid(int fd) { FdEnt *f = vf(fd); return f && f->kind == FD_PROC ? f->obj : -1; }
+
 s64 vfs_read(int fd, u8 *buf, u64 n) {
-  VFile *f = vf(fd); if (!f) return -1; if (f->node < 0) return 0; VNode *v = &g_nodes[f->node]; if (v->is_dir) return -1;
+  FdEnt *f = vf(fd); if (!f) return -1;
+  if (f->kind == FD_PIPE) return f->wend ? -1 : pipe_read(&g_pipes[f->obj], buf, n);
+  if (f->kind == FD_NULL) { if (f->obj == 2) { e_memset(buf, 0, (size_t)n); return (s64)n; } f->eof = 1; return 0; }
+  if (f->kind != FD_FILE) return -1;
+  if (f->node < 0) return 0; VNode *v = &g_nodes[f->node]; if (v->is_dir) return -1;
   u64 o = 0;
   if (f->unget >= 0 && n) { buf[o++] = (u8)f->unget; f->unget = -1; }
   u64 avail = f->pos < v->size ? v->size - f->pos : 0; u64 c = n - o < avail ? n - o : avail;
   if (c) e_memcpy(buf + o, v->data + f->pos, (size_t)c); f->pos += c; o += c; if (o == 0 && n) f->eof = 1; return (s64)o;
 }
 s64 vfs_write(int fd, const u8 *buf, u64 n) {
-  VFile *f = vf(fd); if (!f || f->node < 0) return -1; VNode *v = &g_nodes[f->node]; if (v->is_dir) return -1;
+  FdEnt *f = vf(fd); if (!f) return -1;
+  if (f->kind == FD_PIPE) return f->wend ? pipe_write(&g_pipes[f->obj], buf, n) : -1;
+  if (f->kind == FD_NULL) return (s64)n;
+  if (f->kind != FD_FILE || f->node < 0) return -1; VNode *v = &g_nodes[f->node]; if (v->is_dir) return -1;
   if (f->append) f->pos = v->size;
   if (!grow(v, f->pos + n)) return -1;
   if (f->pos > v->size) e_memset(v->data + v->size, 0, (size_t)(f->pos - v->size));
   e_memcpy(v->data + f->pos, buf, (size_t)n); f->pos += n; if (f->pos > v->size) v->size = f->pos; v->written = 1; return (s64)n;
 }
 s64 vfs_seek(int fd, s64 off, int whence) {
-  VFile *f = vf(fd); if (!f || f->node < 0) return -1; VNode *v = &g_nodes[f->node];
+  FdEnt *f = vf(fd); if (f && f->kind == FD_NULL) return 0; if (!f || f->kind != FD_FILE || f->node < 0) return -1; VNode *v = &g_nodes[f->node];
   s64 base = whence == 0 ? 0 : whence == 1 ? (s64)f->pos : (s64)v->size; s64 np = base + off; if (np < 0) return -1; f->pos = (u64)np; f->eof = 0; f->unget = -1; return np;
 }
-s64 vfs_tell(int fd) { VFile *f = vf(fd); return f ? (s64)f->pos : -1; }
-s64 vfs_size(int fd) { VFile *f = vf(fd); if (!f || f->node < 0) return -1; return (s64)g_nodes[f->node].size; }
-int vfs_eof(int fd) { VFile *f = vf(fd); return f ? f->eof : 1; }
-void vfs_clearerr(int fd) { VFile *f = vf(fd); if (f) { f->eof = 0; f->err = 0; } }
-int vfs_ungetc(int fd, int ch) { VFile *f = vf(fd); if (!f) return -1; f->unget = ch & 0xff; f->eof = 0; return ch & 0xff; }
-int vfs_truncate(int fd) { VFile *f = vf(fd); if (!f || f->node < 0) return 0; g_nodes[f->node].size = f->pos; g_nodes[f->node].written = 1; return 1; }
-int vfs_fd_isdir(int fd) { VFile *f = vf(fd); if (!f) return 0; return f->node == -2 || (f->node >= 0 && g_nodes[f->node].is_dir); }
-const char *vfs_fd_path(int fd) { VFile *f = vf(fd); if (!f || f->node < 0) return g_cwd; return g_nodes[f->node].path; }
-/* resolve any fd to: -1 console stdin, 1/2 console out, >=3 file, 0 invalid */
-int vfs_resolve(int fd) {
-  if (fd >= 0 && fd < 3) { if (g_redir[fd] == -1) return fd == 0 ? -1 : fd; fd = g_redir[fd]; }
-  VFile *f = vf(fd); if (!f) return 0; if (f->alias) return f->alias; return fd;
-}
-static int slot_alloc(void) { for (int k = 0; k < VFS_MAX_OPEN; k++) if (!g_open[k].used) return k; return -1; }
-int vfs_dup(int fd) {
-  int k = slot_alloc(); if (k < 0) return -1;
-  if (fd >= 0 && fd < 3) { if (g_redir[fd] == -1) { e_memset(&g_open[k], 0, sizeof g_open[k]); g_open[k].used = 1; g_open[k].node = -1; g_open[k].unget = -1; g_open[k].alias = fd == 0 ? -1 : fd; return k + 3; } fd = g_redir[fd]; }
-  VFile *f = vf(fd); if (!f) return -1; g_open[k] = *f; return k + 3;
-}
-int vfs_dup2(int src, int dst) {
-  if (src == dst) return dst;
-  if (dst >= 0 && dst < 3) {
-    int r = vfs_resolve(src); if (!r) return -1;
-    if (g_redir[dst] != -1) vfs_close(g_redir[dst]);
-    if (r < 3 && r != 0) { g_redir[dst] = -1; return dst; }
-    int d = vfs_dup(src); if (d < 0) return -1; g_redir[dst] = d; return dst;
+s64 vfs_tell(int fd) { FdEnt *f = vf(fd); return f && f->kind == FD_NULL ? 0 : f && f->kind == FD_FILE ? (s64)f->pos : -1; }
+s64 vfs_size(int fd) { FdEnt *f = vf(fd); if (!f) return -1; if (f->kind == FD_PIPE) return (s64)g_pipes[f->obj].len; if (f->kind != FD_FILE || f->node < 0) return -1; return (s64)g_nodes[f->node].size; }
+int vfs_eof(int fd) { FdEnt *f = vf(fd); return f ? f->eof : 1; }
+void vfs_clearerr(int fd) { FdEnt *f = vf(fd); if (f) { f->eof = 0; f->err = 0; } }
+int vfs_ungetc(int fd, int ch) { FdEnt *f = vf(fd); if (!f) return -1; f->unget = ch & 0xff; f->eof = 0; return ch & 0xff; }
+int vfs_truncate(int fd) { FdEnt *f = vf(fd); if (!f || f->kind != FD_FILE || f->node < 0) return 0; g_nodes[f->node].size = f->pos; g_nodes[f->node].written = 1; return 1; }
+int vfs_fd_isdir(int fd) { FdEnt *f = vf(fd); if (!f || f->kind != FD_FILE) return 0; return f->node == -2 || (f->node >= 0 && g_nodes[f->node].is_dir); }
+const char *vfs_fd_path(int fd) { FdEnt *f = vf(fd); if (!f || f->kind != FD_FILE || f->node < 0) return g_cwd; return g_nodes[f->node].path; }
+/* new process: inherit the parent's table (all entries, same numbers — Windows semantics for inheritable handles) */
+void vfs_init_proc(ProcFs *p, const ProcFs *parent) {
+  e_memset(p, 0, sizeof *p); p->redir[0] = p->redir[1] = p->redir[2] = -1; e_snprintf(p->cwd, sizeof p->cwd, "%s", parent ? parent->cwd : "C:\\nebula");
+  if (parent) {
+    for (int k = 0; k < FD_MAX; k++) if (parent->fd[k].kind && !parent->fd[k].noinherit) { p->fd[k] = parent->fd[k]; ent_addref(&p->fd[k]); }
+    for (int k = 0; k < 3; k++) { if (parent->redir[k] >= 3) { ProcFs *save = vfs_P; vfs_P = p; int d = vfs_dup(parent->redir[k]); vfs_P = save; p->redir[k] = d; } else p->redir[k] = parent->redir[k]; }
+    p->nenv = parent->nenv; for (int i = 0; i < parent->nenv; i++) p->env[i] = parent->env[i]; p->env_dirty = 1;
   }
-  VFile *f = vf(dst); if (f) f->used = 0;
-  if (src >= 0 && src < 3) { int d = vfs_dup(src); if (d < 0) return -1; if (d != dst) { g_open[dst - 3] = g_open[d - 3]; g_open[d - 3].used = 0; } return dst; }
-  VFile *sf = vf(src); if (!sf || dst < 3 || dst - 3 >= VFS_MAX_OPEN) return -1; g_open[dst - 3] = *sf; return dst;
 }
-void vfs_close_all(void) { for (int k = 0; k < VFS_MAX_OPEN; k++) g_open[k].used = 0; g_redir[0] = g_redir[1] = g_redir[2] = -1; for (int k = 0; k < VFS_MAX_FIND; k++) g_find[k].used = 0; g_in_pos = 0; g_in_len = 0; g_in_eof = 0; g_in_wait = 0; e_snprintf(g_cwd, sizeof g_cwd, "C:\\nebula"); }
+/* release every handle of a process (exit) */
+void vfs_release_proc(ProcFs *p) { ProcFs *save = vfs_P; vfs_P = p; for (int k = 0; k < 3; k++) if (p->redir[k] >= 3) { vfs_close(p->redir[k]); p->redir[k] = -1; } for (int k = 0; k < FD_MAX; k++) if (p->fd[k].kind) ent_release(&p->fd[k]); for (int k = 0; k < VFS_MAX_FIND; k++) p->find[k].used = 0; vfs_P = save; }
+void vfs_close_all(void) { vfs_release_proc(&g_root_fs); e_snprintf(g_root_fs.cwd, sizeof g_root_fs.cwd, "C:\\nebula"); g_root_fs.nenv = 0; g_root_fs.env_dirty = 1; for (int i = 0; i < PIPE_MAX; i++) g_pipes[i].used = 0; for (int i = 0; i < MAP_MAX; i++) g_maps[i].used = 0; g_in_pos = 0; g_in_len = 0; g_in_eof = 0; g_in_wait = 0; vfs_P = &g_root_fs; }
 
 /* ---------- directory enumeration (FindFirstFile semantics) ---------- */
 static int glob_match(const char *pat, const char *s) {

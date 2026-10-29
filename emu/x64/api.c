@@ -1,8 +1,75 @@
 /* Entry points shared by the wasm64 build (exported to JS) and the native test runner. */
 #include "emu.h"
 
-static Mem g_mem; static Cpu g_cpu; static Win32 g_w32; static int g_loaded;
+/* ---------- process table ---------- */
+#define PROC_MAX 32
+typedef struct { int used, pid, ppid, state, exit_code, handles; Mem mem; Cpu cpu; Win32 w32; char name[64]; double wake_ms; int lastc[MAX_SHIMS]; } Proc;
+static Proc *g_procs[PROC_MAX]; static int g_nprocs; static int g_cur; static int g_next_pid = 4242;
+static Proc *g_root; static int g_loaded;
+#define g_cpu (g_root->cpu)
+#define g_w32 (g_root->w32)
+#define g_mem (g_root->mem)
 static char g_inspect[16384];
+extern Win32 *g_root_w32;
+
+static Proc *proc_find(int pid) { for (int i = 0; i < PROC_MAX; i++) if (g_procs[i] && g_procs[i]->used && g_procs[i]->pid == pid) return g_procs[i]; return 0; }
+static void proc_free_slot(Proc *p) { p->used = 0; if (p == g_root) return; }
+static Proc *proc_alloc(void) {
+  for (int i = 0; i < PROC_MAX; i++) if (g_procs[i] && !g_procs[i]->used) { Proc *p = g_procs[i]; ProcFs *fs = p->w32.fs; e_memset(&p->mem, 0, sizeof p->mem); p->w32.fs = fs; p->used = 1; return p; }
+  for (int i = 0; i < PROC_MAX; i++) if (!g_procs[i]) { Proc *p = emu_alloc(sizeof(Proc)); if (!p) return 0; g_procs[i] = p; p->used = 1; if (i >= g_nprocs) g_nprocs = i + 1; return p; }
+  /* table full: reclaim the oldest zombie nobody holds a handle to */
+  for (int i = 0; i < PROC_MAX; i++) if (g_procs[i]->state == 2 && g_procs[i]->handles <= 0 && g_procs[i] != g_root) { Proc *p = g_procs[i]; ProcFs *fs = p->w32.fs; e_memset(&p->mem, 0, sizeof p->mem); p->w32.fs = fs; p->used = 1; return p; }
+  return 0;
+}
+static void proc_exit(Proc *p, int code) {
+  if (p->state == 2) return;
+  p->state = 2; p->exit_code = code;
+  vfs_release_proc(p->w32.fs);
+  if (p != g_root) mem_release(&p->mem);
+}
+int proc_state(int pid, int *exit_code) { Proc *p = proc_find(pid); if (!p) return 0; if (exit_code) *exit_code = p->exit_code; return p->state == 2 ? 2 : 1; }
+void proc_handle_ref(int pid, int delta) { Proc *p = proc_find(pid); if (p) p->handles += delta; }
+ProcFs *proc_fs(int pid) { Proc *p = proc_find(pid); return p ? p->w32.fs : 0; }
+int proc_read_mem(int pid, u64 addr, u8 *buf, u64 n) { Proc *p = proc_find(pid); if (!p || p->state != 1) return 0; const u8 *s = mem_ptr(&p->mem, addr, n, 0); if (!s) return 0; e_memcpy(buf, s, (size_t)n); return 1; }
+u64 proc_image_base(int pid, const char **name) { Proc *p = proc_find(pid); if (!p) return 0; if (name) *name = p->name; return p->w32.image_base; }
+double proc_start_ms(int pid) { Proc *p = proc_find(pid); return p ? p->w32.start_ms : 0; }
+void proc_kill(int pid, int code) { Proc *p = proc_find(pid); if (p) proc_exit(p, code); }
+/* idx 0 is a synthetic parent for the root process ("explorer.exe", pid 1000): busybox treats getppid()==1 as "orphan, do not wait" */
+#define HOST_PID 1000
+int proc_enum(int idx, int *pid, int *ppid, const char **name) { if (idx == 0) { *pid = HOST_PID; *ppid = 4; *name = "explorer.exe"; return 1; } idx--; int k = 0; for (int i = 0; i < PROC_MAX; i++) { Proc *p = g_procs[i]; if (!p || !p->used || p->state == 2) continue; if (k++ == idx) { *pid = p->pid; *ppid = p->ppid; *name = p->name; return 1; } } return 0; }
+static const char *basename_of(const char *p) { const char *b = p; for (const char *q = p; *q; q++) if (*q == '\\' || *q == '/') b = q + 1; return b; }
+/* CreateProcess: load an exe from the VFS into a fresh address space; std_fd[k]: -2 inherit, -1 console, >=3 parent's table entry */
+int proc_spawn(Win32 *parent, const char *exe_path, const char *cmdline, const int std_fd[3]) {
+  int node = vfs_find_node(exe_path); VNodeInfo in; if (node < 0 || !vfs_node_info(node, &in) || in.is_dir) return -2;
+  Proc *p = proc_alloc(); if (!p) return -8;
+  p->pid = ++g_next_pid; p->ppid = parent->pid; p->state = 1; p->exit_code = 0; p->handles = 0; p->wake_ms = 0;
+  e_snprintf(p->name, sizeof p->name, "%s", basename_of(in.path));
+  ProcFs *save = vfs_P;
+  cpu_reset(&p->cpu); w32_init(&p->w32, &p->cpu, &p->mem); p->w32.pid = p->pid; p->w32.ppid = p->ppid;
+  vfs_init_proc(p->w32.fs, parent->fs);
+  for (int k = 0; k < 3; k++) if (std_fd[k] != -2) { ProcFs *f = p->w32.fs; if (f->redir[k] != -1) { vfs_use(f); vfs_close(f->redir[k]); } f->redir[k] = -1; if (std_fd[k] >= 3 && f->fd[std_fd[k] - 3].kind) { vfs_use(f); f->redir[k] = vfs_dup(std_fd[k]); } }
+  vfs_use(p->w32.fs);
+  int rc = pe_load(&p->w32, in.data, (size_t)in.size, p->name);
+  if (rc) { vfs_use(save); proc_exit(p, 127); p->used = 0; return -2; }
+  w32_start(&p->w32, cmdline);
+  vfs_use(save); w32_set_current(parent);
+  return p->pid;
+}
+/* is this process ready to run? (clears the block when the condition is satisfied) */
+static int proc_runnable(Proc *p) {
+  if (p->state != 1) return 0; Win32 *w = &p->w32;
+  switch (w->block) {
+    case BLOCK_NONE: return 1;
+    case BLOCK_STDIN: if (!vfs_stdin_available()) return 0; break;
+    case BLOCK_PROC: { int all_running = 1; for (int i = 0; i < w->nblock_pids; i++) { Proc *q = proc_find(w->block_pids[i]); if (!q || q->state == 2) { all_running = 0; break; } } if (all_running && w->nblock_pids) return 0; break; }
+    case BLOCK_PIPE_R: if (vfs_pipe_would_block(w->block_pipe, 0)) return 0; break;
+    case BLOCK_PIPE_W: if (vfs_pipe_would_block(w->block_pipe, 1)) return 0; break;
+    case BLOCK_SLEEP: if (w->sleeping && w->sleep_until_ms > host_now_ms()) return 0; break;
+  }
+  w->block = BLOCK_NONE; return 1;
+}
+static void switch_to(Proc *p) { vfs_use(p->w32.fs); w32_set_current(&p->w32); }
+static int g_want_stdin; static int g_trace;
 
 #ifdef __wasm__
 #define EXPORT(name) __attribute__((export_name(#name)))
@@ -13,14 +80,60 @@ static char g_inspect[16384];
 EXPORT(x64_alloc) void *x64_alloc(size_t n) { return emu_alloc(n); }
 EXPORT(x64_inspect) const char *x64_inspect(const u8 *bytes, size_t len) { pe_inspect(bytes, len, g_inspect, sizeof g_inspect); return g_inspect; }
 EXPORT(x64_load) int x64_load(const u8 *bytes, size_t len, const char *name, const char *cmdline) {
-  e_memset(&g_mem, 0, sizeof g_mem); cpu_reset(&g_cpu);
-  w32_init(&g_w32, &g_cpu, &g_mem);
-  int rc = pe_load(&g_w32, bytes, len, name ? name : "app.exe");
+  /* tear down a previous session: every process dies, kernel objects are dropped, the VFS files stay */
+  for (int i = 0; i < PROC_MAX; i++) if (g_procs[i] && g_procs[i]->used) { proc_exit(g_procs[i], 0); g_procs[i]->used = 0; }
+  g_loaded = 0; g_want_stdin = 0; vfs_close_all(); vfs_mkdir("C:\\tmp"); vfs_mkdir("C:\\nebula");
+  Proc *p = proc_alloc(); if (!p) return 8; g_root = p; g_cur = 0; g_root_w32 = &p->w32;
+  p->pid = 4242; p->ppid = HOST_PID; p->state = 1; p->exit_code = 0; p->handles = 0; g_next_pid = 4242;
+  e_snprintf(p->name, sizeof p->name, "%s", name ? basename_of(name) : "app.exe");
+  mem_release(&p->mem); cpu_reset(&p->cpu);
+  w32_init(&p->w32, &p->cpu, &p->mem); p->w32.pid = p->pid; p->w32.ppid = HOST_PID;
+  vfs_init_proc(p->w32.fs, 0); vfs_use(p->w32.fs);
+  int rc = pe_load(&p->w32, bytes, len, name ? name : "app.exe");
   if (rc) return rc;
-  w32_start(&g_w32, cmdline ? cmdline : name ? name : "app.exe");
-  vfs_close_all(); vfs_mkdir("C:\\tmp"); vfs_mkdir("C:\\nebula");
-  { char p[600]; e_snprintf(p, sizeof p, "C:\\nebula\\%s", name ? name : "app.exe"); if (vfs_find_node(p) < 0) vfs_add(p, bytes, len); }
+  w32_start(&p->w32, cmdline ? cmdline : name ? name : "app.exe");
+  { char fp[600]; e_snprintf(fp, sizeof fp, "C:\\nebula\\%s", p->name); if (vfs_find_node(fp) < 0) vfs_add(fp, bytes, len); }
   g_loaded = 1; return 0;
+}
+/* scheduler: run runnable processes round-robin; the host sees the root process' lifecycle */
+static int run_one(Proc *p, u64 budget) {
+  switch_to(p); u64 ic0 = p->cpu.icount; int r = cpu_run(&p->cpu, budget);
+  if (g_trace) { char msg[256]; e_snprintf(msg, sizeof msg, "[sched] pid %d %.40s ran %llu insns -> r=%d block=%d rip=0x%llx\n", p->pid, p->w32.cmdline, (unsigned long long)(p->cpu.icount - ic0), r, p->w32.block, (unsigned long long)p->cpu.rip); host_write(3, msg, e_strlen(msg));
+    if (g_trace > 1) { int *lastc = p->lastc; for (int i = 2; i < p->w32.nslots; i++) if (p->w32.slots[i].calls != lastc[i]) { e_snprintf(msg, sizeof msg, "   %s!%s +%d\n", p->w32.slots[i].dll, p->w32.slots[i].name, p->w32.slots[i].calls - lastc[i]); host_write(3, msg, e_strlen(msg)); lastc[i] = p->w32.slots[i].calls; } } }
+  if (p->w32.dirty && p->w32.screen) { host_present(p->w32.screen, p->w32.screen_w, p->w32.screen_h); p->w32.dirty = 0; }
+  return r;
+}
+EXPORT(x64_run) int x64_run(u64 budget) {
+  if (!g_loaded) return RUN_FAULT;
+  g_want_stdin = 0;
+  for (int attempt = 0; attempt < PROC_MAX * 2; attempt++) {
+    /* pick the next runnable process after g_cur */
+    Proc *p = 0; int start = g_cur;
+    for (int k = 0; k < g_nprocs; k++) { int i = (start + 1 + k) % g_nprocs; Proc *q = g_procs[i]; if (q && q->used && proc_runnable(q)) { p = q; g_cur = i; break; } }
+    if (!p) {
+      /* nothing runnable: waiting on the host (stdin / time) or deadlocked */
+      int stdin_wait = 0, sleeping = 0;
+      for (int i = 0; i < g_nprocs; i++) { Proc *q = g_procs[i]; if (!q || !q->used || q->state != 1) continue; if (q->w32.block == BLOCK_STDIN) stdin_wait = 1; if (q->w32.block == BLOCK_SLEEP) sleeping = 1; }
+      if (g_root->state == 2) return RUN_EXIT;
+      if (stdin_wait) { g_want_stdin = 1; return RUN_YIELD; }
+      if (sleeping) return RUN_YIELD;
+      cpu_fault(&g_root->cpu, "deadlock: every process is blocked on another process or pipe"); return RUN_FAULT;
+    }
+    int r = run_one(p, budget);
+    if (r == RUN_EXIT) {
+      proc_exit(p, p->cpu.exit_code);
+      if (p == g_root) { for (int i = 0; i < g_nprocs; i++) if (g_procs[i] && g_procs[i]->used && g_procs[i] != g_root) proc_exit(g_procs[i], 0); return RUN_EXIT; }
+      continue;
+    }
+    if (r == RUN_FAULT || r == RUN_BREAK) {
+      if (p == g_root) return r;
+      { char msg[512]; e_snprintf(msg, sizeof msg, "[x64] child %s (pid %d) %s at rip=0x%llx: %s\n", p->name, p->pid, r == RUN_FAULT ? "faulted" : "hit a breakpoint", (unsigned long long)p->cpu.err_rip, p->cpu.err); host_write(3, msg, e_strlen(msg)); }
+      proc_exit(p, 0xC0000005); continue;
+    }
+    if (r == RUN_YIELD) { if (p->w32.block != BLOCK_NONE) continue; return RUN_YIELD; }
+    return RUN_OK;   /* budget used up; next call continues with the following process */
+  }
+  return RUN_YIELD;
 }
 /* ---- virtual file system / stdin (host side) ---- */
 EXPORT(x64_vfs_add) int x64_vfs_add(const char *path, const u8 *data, size_t n) { return vfs_add(path, data, n) >= 0; }
@@ -41,11 +154,11 @@ EXPORT(x64_vfs_list) const char *x64_vfs_list(void) {
 }
 EXPORT(x64_stdin_write) void x64_stdin_write(const u8 *data, size_t n) { vfs_stdin_push(data, n); }
 EXPORT(x64_stdin_eof) void x64_stdin_eof(void) { vfs_stdin_eof(); }
-EXPORT(x64_wants_stdin) int x64_wants_stdin(void) { return vfs_stdin_waiting(); }
-EXPORT(x64_run) int x64_run(u64 budget) { if (!g_loaded) return RUN_FAULT; int r = cpu_run(&g_cpu, budget); if (g_w32.dirty && g_w32.screen) { host_present(g_w32.screen, g_w32.screen_w, g_w32.screen_h); g_w32.dirty = 0; g_w32.frames_presented++; } return r; }
+EXPORT(x64_trace) void x64_trace(int on) { g_trace = on; }
+EXPORT(x64_wants_stdin) int x64_wants_stdin(void) { return g_want_stdin; }
 EXPORT(x64_key) void x64_key(int vk, int down) { w32_key(&g_w32, vk, down); }
 EXPORT(x64_mouse) void x64_mouse(int x, int y, int ev) { w32_mouse(&g_w32, x, y, ev); }
-EXPORT(x64_icount) u64 x64_icount(void) { return g_cpu.icount; }
+EXPORT(x64_icount) u64 x64_icount(void) { u64 n = 0; for (int i = 0; i < g_nprocs; i++) if (g_procs[i]) n += g_procs[i]->cpu.icount; return n; }
 EXPORT(x64_exit_code) int x64_exit_code(void) { return g_cpu.exit_code; }
 EXPORT(x64_error) const char *x64_error(void) { return g_cpu.err; }
 EXPORT(x64_error_rip) u64 x64_error_rip(void) { return g_cpu.err_rip; }
@@ -59,7 +172,8 @@ EXPORT(x64_screen_h) int x64_screen_h(void) { return g_w32.screen ? g_w32.screen
 EXPORT(x64_screen) const u32 *x64_screen(void) { return g_w32.screen; }
 EXPORT(x64_title) const char *x64_title(void) { return g_w32.win.title; }
 EXPORT(x64_subsystem) int x64_subsystem(void) { return g_w32.subsystem; }
-EXPORT(x64_sleep_ms) double x64_sleep_ms(void) { return w32_sleep_remaining_ms(&g_w32); }
+EXPORT(x64_sleep_ms) double x64_sleep_ms(void) { double best = -1; for (int i = 0; i < g_nprocs; i++) { Proc *q = g_procs[i]; if (!q || !q->used || q->state != 1) continue; if (q->w32.block == BLOCK_NONE) return 0; double s = w32_sleep_remaining_ms(&q->w32); if (q->w32.block == BLOCK_SLEEP && (best < 0 || s < best)) best = s; } return best < 0 ? 0 : best; }
+EXPORT(x64_proc_count) int x64_proc_count(void) { int n = 0; for (int i = 0; i < g_nprocs; i++) if (g_procs[i] && g_procs[i]->used && g_procs[i]->state == 1) n++; return n; }
 EXPORT(x64_mem_used) u64 x64_mem_used(void) { return emu_alloc_used(); }
 EXPORT(x64_has_window) int x64_has_window(void) { return g_w32.win.created; }
 EXPORT(x64_api_stats) const char *x64_api_stats(void) {

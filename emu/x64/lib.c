@@ -37,7 +37,7 @@ void *e_memcpy(void *d, const void *s, size_t n) { u8 *dd = d; const u8 *ss = s;
 void *e_memmove(void *d, const void *s, size_t n) { u8 *dd = d; const u8 *ss = s; if (dd < ss) { while (n--) *dd++ = *ss++; } else { dd += n; ss += n; while (n--) *--dd = *--ss; } return d; }
 void *e_memset(void *d, int c, size_t n) { u8 *dd = d; while (n--) *dd++ = (u8)c; return d; }
 int e_memcmp(const void *a, const void *b, size_t n) { const u8 *x = a, *y = b; while (n--) { if (*x != *y) return *x - *y; x++; y++; } return 0; }
-char *e_strcpy(char *d, const char *s) { char *r = d; while ((*d++ = *s++)); return r; }
+char *e_strcpy(char *d, const char *s) { char *r = d; while ((*d++ = *s++)) { } return r; }
 char *e_strchr(const char *s, int c) { for (;; s++) { if (*s == (char)c) return (char *)s; if (!*s) return 0; } }
 
 #ifdef __wasm__
@@ -224,10 +224,15 @@ int e_snprintf(char *buf, size_t n, const char *fmt, ...) { va_list ap; va_start
 void e_log(const char *fmt, ...) { char b[1024]; va_list ap; va_start(ap, fmt); int n = e_vsnprintf(b, sizeof b, fmt, ap); va_end(ap); if (n > (int)sizeof b - 1) n = sizeof b - 1; host_write(3, b, n); }
 
 /* ---------- guest memory ---------- */
+/* exited processes return their regions to a pool keyed by size (the arena itself never shrinks) */
+#define POOL_MAX 128
+static struct { u8 *host; u64 size; } g_pool[POOL_MAX]; static int g_npool;
+static u8 *pool_take(u64 size) { for (int i = 0; i < g_npool; i++) if (g_pool[i].size == size) { u8 *h = g_pool[i].host; g_pool[i] = g_pool[--g_npool]; e_memset(h, 0, (size_t)size); return h; } return 0; }
+void mem_release(Mem *m) { for (int i = 0; i < m->n; i++) { if (g_npool < POOL_MAX) { g_pool[g_npool].host = m->r[i].host; g_pool[g_npool].size = m->r[i].size; g_npool++; } } m->n = 0; m->last = 0; }
 u8 *mem_map(Mem *m, u64 base, u64 size, const char *name) {
   if (m->n >= MAX_REGIONS) return 0;
   size = (size + 0xfff) & ~0xfffull;
-  u8 *h = emu_alloc((size_t)size);
+  u8 *h = pool_take(size); if (!h) h = emu_alloc((size_t)size);
   if (!h) return 0;
   Region *r = &m->r[m->n++];
   r->base = base; r->size = size; r->host = h; r->name = name; r->prot = 7;

@@ -40,6 +40,7 @@ typedef struct {
 u8  *mem_map(Mem *m, u64 base, u64 size, const char *name);   /* add region (host memory allocated) */
 u8  *mem_ptr(Mem *m, u64 addr, u64 size, int write);          /* NULL on fault */
 Region *mem_region(Mem *m, u64 addr);
+void mem_release(Mem *m);                                     /* give all regions back to the pool */
 void *emu_alloc(size_t n);                                    /* zeroed host memory, never freed (bump) */
 size_t emu_alloc_used(void);
 
@@ -130,6 +131,35 @@ typedef struct {
 #define MAX_MSGS 256
 typedef struct { u64 hwnd; u32 msg; u64 wparam, lparam; u32 time; } GuestMsg;
 
+/* ---- per-process file-descriptor / environment state (vfs.c) ---- */
+#define FD_MAX 128
+enum { FD_FILE = 1, FD_CONSOLE, FD_PIPE, FD_MAP, FD_PROC, FD_NULL };
+typedef struct { int kind; int node; u64 pos; int append, eof, err, unget, alias, obj, wend; int noinherit; } FdEnt;   /* noinherit: not copied into children */
+typedef struct { int used; char dir[512]; char pat[128]; int cursor; int dots; } VFind;
+typedef struct { u64 addr, size; int fd; } MapView;
+typedef struct {
+  FdEnt fd[FD_MAX]; int redir[3]; char cwd[512]; VFind find[32];
+  char *env[256]; int nenv, env_dirty; u64 strtok_next;
+  MapView views[32]; int nviews;
+} ProcFs;
+extern ProcFs *vfs_P;
+void vfs_use(ProcFs *p); ProcFs *vfs_root_fs(void); void vfs_init_proc(ProcFs *p, const ProcFs *parent); void vfs_release_proc(ProcFs *p);
+int  vfs_kind(int fd); int vfs_fd_obj(int fd);
+int  vfs_pipe(int *rfd, int *wfd); int vfs_pipe_avail(int fd); int vfs_pipe_id(int fd); int vfs_pipe_would_block(int pi, int for_write);
+int  vfs_map_create(int file_fd, u64 size); u8 *vfs_map_data(int fd, u64 *size); int vfs_map_write_back(int fd, const u8 *src, u64 n);
+int  vfs_proc_handle(int pid); int vfs_fd_pid(int fd);
+/* ---- process table (api.c) ---- */
+enum { BLOCK_NONE = 0, BLOCK_STDIN, BLOCK_PROC, BLOCK_PIPE_R, BLOCK_PIPE_W, BLOCK_SLEEP };
+int  proc_spawn(Win32 *parent, const char *exe_path, const char *cmdline, const int std_fd[3]);   /* returns pid or -errno */
+int  proc_state(int pid, int *exit_code);           /* 0 unknown, 1 running, 2 exited */
+void proc_handle_ref(int pid, int delta);
+ProcFs *proc_fs(int pid);
+int  proc_read_mem(int pid, u64 addr, u8 *buf, u64 n);           /* ReadProcessMemory */
+u64  proc_image_base(int pid, const char **name);
+double proc_start_ms(int pid);
+void proc_kill(int pid, int code);
+int  proc_enum(int idx, int *pid, int *ppid, const char **name);   /* 1 if idx valid */
+
 struct Win32 {
   Cpu *cpu;
   Mem *mem;
@@ -165,9 +195,15 @@ struct Win32 {
   int quit_posted;
   /* x87 / misc */
   u32 rand_state;
+  /* process */
+  ProcFs *fs; int pid, ppid; u64 str_cur;
+  int block; int block_pids[8]; int nblock_pids; int block_pipe;
+  int spawn_wait_pid, spawn_wait_mode;
+  int pw_active, pw_fd; u64 pw_rip, pw_total, pw_done;         /* partially completed pipe write, resumed on shim retry */                        /* _spawn*(P_WAIT/P_OVERLAY) in progress */
 };
 
 void   w32_init(Win32 *w, Cpu *c, Mem *m);
+void   w32_set_current(Win32 *w);
 u64    w32_shim_slot(Win32 *w, const char *dll, const char *name);   /* returns guest address of the import trampoline */
 int    w32_dispatch(Cpu *c, u64 addr);                              /* called by cpu when RIP enters the shim region */
 u64    w32_heap_alloc(Win32 *w, u64 size, int zero);
@@ -216,6 +252,9 @@ const VNodeInfo *vfs_node_info(int i, VNodeInfo *out);
 int  vfs_node_count(void);
 int  vfs_open(const char *path, int access, int disp, int append);
 int  vfs_close(int fd);
+int  vfs_is_null_dev(const char *path);
+int  vfs_place_low(int fd);
+int  vfs_set_inherit(int fd, int inherit);   /* returns previous flag or -1 */
 int  vfs_is_open(int fd);
 int  vfs_fd_node(int fd);
 s64  vfs_read(int fd, u8 *buf, u64 n);
