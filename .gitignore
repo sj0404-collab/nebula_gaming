@@ -42,3 +42,4 @@ emu/tests/*.ppm
 emu/tests/*.png
 emu/tests/*.pdb
 emu/tests/*.lib
+emu/third_party/
