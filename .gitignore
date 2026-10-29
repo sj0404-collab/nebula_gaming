@@ -37,3 +37,8 @@ android/.gradle/
 android/build/
 android/app/build/
 android/local.properties
+emu/x64/x64run
+emu/tests/*.ppm
+emu/tests/*.png
+emu/tests/*.pdb
+emu/tests/*.lib
