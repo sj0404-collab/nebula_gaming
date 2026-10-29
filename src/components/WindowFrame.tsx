@@ -12,6 +12,7 @@ import ExplorerApp from './apps/ExplorerApp';
 import NotepadApp from './apps/NotepadApp';
 import SettingsApp from './apps/SettingsApp';
 import DownloadsApp from './apps/DownloadsApp';
+import X64App from './apps/X64App';
 
 const appContent: Record<string, React.ComponentType<{ win: WinState }>> = {
   edge: EdgeApp,
@@ -24,6 +25,7 @@ const appContent: Record<string, React.ComponentType<{ win: WinState }>> = {
   notepad: NotepadApp,
   settings: SettingsApp,
   downloads: DownloadsApp,
+  x64: X64App,
 };
 
 export default function WindowFrame({ win }: { win: WinState }) {

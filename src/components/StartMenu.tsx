@@ -14,6 +14,7 @@ const PINNED: { app: Parameters<ReturnType<typeof useOS>['openApp']>[0]; label: 
   { app: 'notepad', label: 'Notepad', icon: 'notepad' },
   { app: 'settings', label: 'Settings', icon: 'settings' },
   { app: 'downloads', label: 'Downloads', icon: 'downloads' },
+  { app: 'x64', label: 'x64 Runner', icon: 'x64' },
 ];
 
 export default function StartMenu() {

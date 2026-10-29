@@ -4,7 +4,7 @@ import { W as VW, H as VH } from './nebula';
 
 export type AppId =
   | 'edge' | 'nebula' | 'steam' | 'epic' | 'terminal' | 'opencode'
-  | 'explorer' | 'notepad' | 'settings' | 'downloads' | 'snipping';
+  | 'explorer' | 'notepad' | 'settings' | 'downloads' | 'snipping' | 'x64';
 
 export interface WinState {
   id: string;
@@ -133,6 +133,7 @@ export function OSProvider({ children }: { children: ReactNode }) {
       notepad:   { title: 'Notepad',                    icon: 'notepad',   size: { w: 640, h: 500 } },
       settings:  { title: 'Settings',                   icon: 'settings',  size: { w: 900, h: 580 } },
       downloads: { title: 'Downloads',                  icon: 'downloads', size: { w: 760, h: 480 } },
+      x64:       { title: 'x64 Runner — Nebula x64 (wasm64 + WebGL)', icon: 'x64', size: { w: 1040, h: 660 } },
       snipping:  { title: 'Snipping Tool',              icon: 'snipping',  size: { w: 560, h: 420 } },
     };
     const m = meta[app];

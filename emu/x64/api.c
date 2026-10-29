@@ -27,6 +27,8 @@ EXPORT(x64_icount) u64 x64_icount(void) { return g_cpu.icount; }
 EXPORT(x64_exit_code) int x64_exit_code(void) { return g_cpu.exit_code; }
 EXPORT(x64_error) const char *x64_error(void) { return g_cpu.err; }
 EXPORT(x64_error_rip) u64 x64_error_rip(void) { return g_cpu.err_rip; }
+static char g_regs[512];
+EXPORT(x64_regs) const char *x64_regs(void) { static const char *nm[16] = {"rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi","r8","r9","r10","r11","r12","r13","r14","r15"}; int o = 0; for (int i = 0; i < 16; i++) o += e_snprintf(g_regs + o, sizeof g_regs - o, "%s=%llx ", nm[i], (unsigned long long)g_cpu.r[i]); u64 sp = g_cpu.r[4]; const u8 *st = mem_ptr(&g_mem, sp, 32, 0); if (st) for (int k = 0; k < 4; k++) { u64 v = 0; for (int b = 7; b >= 0; b--) v = (v << 8) | st[k * 8 + b]; o += e_snprintf(g_regs + o, sizeof g_regs - o, "[rsp+%d]=%llx ", k * 8, (unsigned long long)v); } return g_regs; }
 EXPORT(x64_rip) u64 x64_rip(void) { return g_cpu.rip; }
 EXPORT(x64_report) const char *x64_report(void) { return g_w32.report; }
 EXPORT(x64_console) const char *x64_console(void) { return g_w32.con; }

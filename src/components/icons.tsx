@@ -97,6 +97,20 @@ export function AppIcon({ id, size = 24, className = '' }: { id: string; size?: 
           <path d="M16 24l8 9 8-9" stroke="#fff" strokeWidth="3.4" fill="none" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       );
+    case 'x64':
+      return (
+        <svg viewBox="0 0 48 48" style={s} className={className}>
+          <defs>
+            <linearGradient id="x64G" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stopColor="#4f46e5" /><stop offset="100%" stopColor="#1e1b4b" />
+            </linearGradient>
+          </defs>
+          <rect x="3" y="3" width="42" height="42" rx="8" fill="url(#x64G)" />
+          <rect x="12" y="12" width="24" height="24" rx="3" fill="none" stroke="#c7d2fe" strokeWidth="2" />
+          {[16, 22, 28, 32].map(p => <g key={p} stroke="#c7d2fe" strokeWidth="2"><path d={`M${p} 6v6`} /><path d={`M${p} 36v6`} /><path d={`M6 ${p}h6`} /><path d={`M36 ${p}h6`} /></g>)}
+          <text x="24" y="28" textAnchor="middle" fontFamily="Segoe UI, sans-serif" fontWeight="700" fontSize="11" fill="#fff">x64</text>
+        </svg>
+      );
     case 'snipping':
       return (
         <svg viewBox="0 0 48 48" style={s} className={className}>
@@ -197,5 +211,5 @@ export function WindowsLogo({ size = 22, className = '' }: { size?: number; clas
 export const AppIdToName: Record<string, string> = {
   edge: 'Microsoft Edge', nebula: 'Nebula Strike', steam: 'Steam', epic: 'Epic Games',
   terminal: 'Command Prompt', opencode: 'opencode', explorer: 'File Explorer', notepad: 'Notepad',
-  settings: 'Settings', downloads: 'Downloads', snipping: 'Snipping Tool',
+  settings: 'Settings', downloads: 'Downloads', snipping: 'Snipping Tool', x64: 'x64 Runner',
 };

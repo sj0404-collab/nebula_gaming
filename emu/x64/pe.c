@@ -74,11 +74,13 @@ static int pe_walk_imports(PeHdr *h, ImportCb cb, void *ctx) {
 }
 
 /* ---------- loader ---------- */
+u64 w32_data_import(Win32 *w, const char *name);
+int w32_data_import_off(const char *name);
 typedef struct { Win32 *w; u8 *img; u64 base; int unknown; } LoadCtx;
 static void load_import(void *ctx, const char *dll, const char *name, u32 ordinal, u32 iat_rva) {
   LoadCtx *lc = ctx; char tmp[32]; const char *n = name;
   if (!n) { e_snprintf(tmp, sizeof tmp, "#%u", ordinal); n = tmp; }
-  u64 slot = w32_shim_slot(lc->w, dll, n);
+  u64 slot = w32_data_import(lc->w, n); if (!slot) slot = w32_shim_slot(lc->w, dll, n);
   u8 *p = lc->img + iat_rva; p[0] = slot; p[1] = slot >> 8; p[2] = slot >> 16; p[3] = slot >> 24; p[4] = slot >> 32; p[5] = slot >> 40; p[6] = slot >> 48; p[7] = slot >> 56;
 }
 
@@ -151,7 +153,7 @@ static void ins_import(void *ctx, const char *dll, const char *name, u32 ordinal
   char tmp[32]; if (!name) { e_snprintf(tmp, sizeof tmp, "#%u", ordinal); name = tmp; }
   int found = 0; for (int i = 0; i < x->ndll; i++) if (!e_stricmp(x->dlls[i], dll)) { found = 1; break; }
   if (!found && x->ndll < 64) { e_snprintf(x->dlls[x->ndll++], 48, "%s", dll); }
-  if (w32_have_shim(dll, name)) x->known++;
+  if (w32_have_shim(dll, name) || (name && w32_data_import_off(name))) x->known++;
   else { x->unknown++; if (x->unknown_listed < 60) { ins_put(x, "%s%s!%s", x->unknown_listed ? ", " : "", dll, name); x->unknown_listed++; } else if (x->unknown_listed == 60) { ins_put(x, ", ..."); x->unknown_listed++; } }
 }
 int pe_inspect(const u8 *bytes, size_t len, char *out, size_t out_sz) {
@@ -180,10 +182,10 @@ int pe_inspect(const u8 *bytes, size_t len, char *out, size_t out_sz) {
   else if (is_clr) { verdict = "unsupported"; why = ".NET executable — needs the CLR"; }
   else {
     int heavy = 0; for (int i = 0; i < x.ndll; i++) { const char *d = x.dlls[i];
-      if (!e_strncmp(d, "d3d", 3) || !e_strncmp(d, "D3D", 3) || !e_stricmp(d, "opengl32.dll") || !e_stricmp(d, "dxgi.dll") || !e_stricmp(d, "vulkan-1.dll") || !e_stricmp(d, "xinput1_4.dll") || !e_stricmp(d, "dsound.dll") || !e_stricmp(d, "xaudio2_9.dll") || !e_stricmp(d, "ws2_32.dll") || !e_stricmp(d, "mono-2.0-bdwgc.dll") || !e_stricmp(d, "UnityPlayer.dll") || !e_stricmp(d, "GameAssembly.dll")) heavy = 1; }
-    if (heavy) { verdict = "unsupported"; why = "needs GPU/audio/network subsystems (Direct3D, OpenGL, Vulkan, XAudio, Winsock, Unity/Mono) that have no wasm64 implementation here"; }
+      if (!e_strncmp(d, "d3d", 3) || !e_strncmp(d, "D3D", 3) || !e_stricmp(d, "opengl32.dll") || !e_stricmp(d, "dxgi.dll") || !e_stricmp(d, "vulkan-1.dll") || !e_stricmp(d, "xinput1_4.dll") || !e_stricmp(d, "dsound.dll") || !e_stricmp(d, "xaudio2_9.dll") || !e_stricmp(d, "mono-2.0-bdwgc.dll") || !e_stricmp(d, "UnityPlayer.dll") || !e_stricmp(d, "GameAssembly.dll")) heavy = 1; }
+    if (heavy) { verdict = "unsupported"; why = "needs GPU/audio subsystems (Direct3D, OpenGL, Vulkan, XAudio, Unity/Mono) that have no wasm64 implementation here"; }
     else if (x.unknown == 0) { verdict = "likely"; why = "all imports have shims"; }
-    else if (x.unknown * 4 <= x.n) { verdict = "partial"; why = "most imports have shims; the program will stop at the first unimplemented call"; }
+    else if (x.unknown * 5 <= x.n * 2) { verdict = "partial"; why = "most imports have shims (no network/threads/real files); the program runs until the first unimplemented call"; }
     else { verdict = "unlikely"; why = "most imports are not implemented"; }
   }
   ins_put(&x, "],\"verdict\":\"%s\",\"why\":\"%s\"}", verdict, why);

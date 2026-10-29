@@ -56,7 +56,7 @@ page.on('console', m => { if (m.type() === 'error' && !/favicon|net::ERR|designa
 
 const win = (title) => page.locator(`[aria-label="${title}"]`);
 const windowsCount = () => page.locator('[data-window]').count();
-const ICON = { 'This PC': 'pc', 'Recycle Bin': 'recycle', 'Nebula Strike': 'game', 'Steam': 'steam', 'Epic Games': 'epic', 'Command Prompt': 'terminal', 'opencode': 'opencode', 'Microsoft Edge': 'edge' };
+const ICON = { 'This PC': 'pc', 'Recycle Bin': 'recycle', 'Nebula Strike': 'game', 'Steam': 'steam', 'Epic Games': 'epic', 'Command Prompt': 'terminal', 'opencode': 'opencode', 'Microsoft Edge': 'edge', 'x64 Runner': 'x64' };
 const iconOf = (p, label) => p.locator(`[data-desktop-icon="${ICON[label]}"]`);
 const openFromDesktop = async (label) => { await iconOf(page, label).dblclick(); await sleep(300); };
 const closeAll = async () => {
@@ -69,7 +69,7 @@ const closeAll = async () => {
 
 console.log(`\nNebula OS e2e → ${url}\n`);
 
-await test('desktop loads with 8 icons, taskbar, no page errors', async () => {
+await test('desktop loads with 9 icons, taskbar, no page errors', async () => {
   await page.goto(url, { waitUntil: 'load' });
   await page.waitForSelector('[aria-label="Start"]');
   for (const l of Object.keys(ICON))
@@ -98,7 +98,7 @@ await test('single-instance apps focus the existing window instead of duplicatin
 
 await test('every app opens, renders and closes', async () => {
   const apps = [['This PC', 'File Explorer'], ['Nebula Strike', 'NEBULA STRIKE'], ['Steam', 'Steam'], ['Epic Games', 'Epic Games Launcher'],
-    ['Command Prompt', 'Command Prompt'], ['opencode', 'opencode'], ['Microsoft Edge', 'Microsoft Edge']];
+    ['Command Prompt', 'Command Prompt'], ['opencode', 'opencode'], ['Microsoft Edge', 'Microsoft Edge'], ['x64 Runner', 'x64 Runner']];
   for (const [label, title] of apps) {
     await openFromDesktop(label);
     const w = page.locator(`[data-window][aria-label*="${title}"]`);
@@ -214,6 +214,100 @@ await test('Nebula Strike: real WebGL renderer (WebGL2) draws the wasm64 scene',
   expect(stats.lit > stats.total * 0.01, `too few lit pixels: ${JSON.stringify(stats)}`);
   expect(stats.cyan > 100, `ship/bolts (cyan) not drawn: ${JSON.stringify(stats)}`);
   await page.screenshot({ path: resolve(SHOTS, 'nebula-webgl.png') });
+  await closeAll();
+});
+
+// ───────────── Nebula x64: real Windows x86-64 executables through the wasm64 emulator ─────────────
+const x64Open = async () => {
+  await openFromDesktop('x64 Runner');
+  const w = page.locator('[data-window][aria-label*="x64 Runner"]');
+  await w.locator('[data-x64-exe="NebulaStrike.exe"]').waitFor({ timeout: 30_000 });
+  return w;
+};
+await test('x64: emulator loads (wasm64), scans the bundled samples and reports verdicts', async () => {
+  const w = await x64Open();
+  for (const n of ['NebulaStrike.exe', 'hello.exe', 'bench.exe'])
+    expect(await w.locator(`[data-x64-exe="${n}"] [data-x64-verdict="likely"]`).count() === 1, `${n} not scanned as "likely"`);
+  await w.getByRole('button', { name: /report/i }).click();
+  const rep = await w.locator('[data-x64-report]').innerText();
+  expect(/x86-64/.test(rep) && /80 total · 80 implemented/.test(rep), 'PE report missing import coverage: ' + rep.slice(0, 200));
+  await page.screenshot({ path: resolve(SHOTS, 'x64-report.png') });
+  await closeAll();
+});
+await test('x64: hello.exe (UCRT console, printf/qsort/malloc/math) runs to exit code 7 with correct output', async () => {
+  const w = await x64Open();
+  await w.locator('[data-x64-exe="hello.exe"]').click();
+  await w.locator('[data-x64-run]').click();
+  await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout: 30_000 });
+  const con = await w.locator('[data-x64-console]').innerText();
+  expect(/Hello from x86-64 Windows!/.test(con), 'greeting missing: ' + con.slice(0, 200));
+  expect(/fnv=76a25757d9d78283/.test(con), 'FNV hash wrong (64-bit arithmetic)');
+  expect(/sqrt\(2\)=1\.414214 sin\(1\)=0\.8415 pow\(2,10\)=1024/.test(con), 'math/printf wrong');
+  expect(/18446744073709551615/.test(con), '%llu wrong');
+  expect(/code 7/.test(await w.innerText()), 'exit code 7 not reported');
+  await page.screenshot({ path: resolve(SHOTS, 'x64-hello.png') });
+  await closeAll();
+});
+await test('x64: NebulaStrike.exe (real Win32 GDI PE32+) renders frames through WebGL and reacts to keys', async () => {
+  const w = await x64Open();
+  await w.locator('[data-x64-exe="NebulaStrike.exe"]').click();
+  await w.locator('[data-x64-run]').click();
+  await page.waitForFunction(() => Number(document.querySelector('[data-x64-screen]')?.getAttribute('data-frames') ?? 0) >= 30, null, { timeout: 30_000 });
+  const canvas = w.locator('[data-x64-screen]');
+  await canvas.click();
+  const lum = async () => canvas.evaluate((c) => {
+    const gl = c.getContext('webgl2') || c.getContext('webgl'); const px = new Uint8Array(c.width * c.height * 4); gl.readPixels(0, 0, c.width, c.height, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    let s = 0, n = 0; for (let i = 0; i < px.length; i += 16) { s += px[i] + px[i + 1] + px[i + 2]; n++; } return s / n;
+  });
+  const before = await lum();
+  expect(before > 2, 'emulated window is black: ' + before);
+  const status0 = await w.locator('[data-x64-status]').getAttribute('data-x64-status');
+  expect(status0 === 'running', 'not running: ' + status0);
+  await page.keyboard.down('Space'); await page.keyboard.down('ArrowLeft'); await sleep(600); await page.keyboard.up('ArrowLeft'); await page.keyboard.up('Space');
+  const f1 = Number(await canvas.getAttribute('data-frames'));
+  await sleep(1000);
+  const f2 = Number(await canvas.getAttribute('data-frames'));
+  expect(f2 - f1 >= 10, `frame rate too low: ${f2 - f1} frames/s`);
+  const text = await w.innerText();
+  expect(/MIPS/.test(text) && /RUNNING/.test(text), 'status bar missing stats: ' + text.slice(-200));
+  await page.screenshot({ path: resolve(SHOTS, 'x64-nebulastrike.png') });
+  await w.locator('[data-x64-stop]').click();
+  expect(await w.locator('[data-x64-status]').getAttribute('data-x64-status') === 'stopped', 'stop failed');
+  await closeAll();
+});
+await test('x64: real third-party binaries — busybox-w32 awk/sha256sum and PuTTY plink -V run with correct output', async () => {
+  const w = await x64Open();
+  await w.locator('[data-x64-exe="busybox64.exe"]').waitFor({ timeout: 30_000 });
+  const run = async (exe, args, expectRe) => {
+    await w.locator(`[data-x64-exe="${exe}"]`).click();
+    await w.getByPlaceholder('arguments').fill(args);
+    await w.locator('[data-x64-run]').click();
+    await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout: 30_000 });
+    const con = await w.locator('[data-x64-console]').innerText();
+    expect(expectRe.test(con), `${exe} ${args}: unexpected output: ${con.slice(0, 300)}`);
+  };
+  await run('busybox64.exe', 'awk BEGIN{print(6*7)}', /^42/m);
+  await run('busybox64.exe', 'sha256sum', /e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855/);
+  await run('busybox64.exe', 'date -u -d @1761750000 +%Y-%m-%dT%H:%M:%S', /2025-10-29T15:00:00/);
+  await run('plink.exe', '-V', /plink: Release 0\.85/);
+  const vb = await w.locator('[data-x64-exe="busybox64.exe"] [data-x64-verdict]').getAttribute('data-x64-verdict');
+  expect(vb === 'partial', 'busybox verdict should be honest "partial": ' + vb);
+  await page.screenshot({ path: resolve(SHOTS, 'x64-busybox.png') });
+  await closeAll();
+});
+await test('x64: opening a non-PE file and a 32-bit / unsupported PE gives an honest verdict', async () => {
+  const w = await x64Open();
+  // garbage → not a PE; minimal 32-bit PE header → unsupported
+  const pe32 = new Uint8Array(0x200); const dv = new DataView(pe32.buffer);
+  pe32[0] = 0x4d; pe32[1] = 0x5a; dv.setUint32(0x3c, 0x80, true); pe32[0x80] = 0x50; pe32[0x81] = 0x45; dv.setUint16(0x84, 0x14c, true); dv.setUint16(0x94, 0xe0, true); dv.setUint16(0x98, 0x10b, true);
+  await w.locator('[data-x64-file]').setInputFiles([
+    { name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('this is not an executable') },
+    { name: 'legacy32.exe', mimeType: 'application/octet-stream', buffer: Buffer.from(pe32) },
+  ]);
+  await w.locator('[data-x64-exe="legacy32.exe"]').waitFor();
+  expect(await w.locator('[data-x64-exe="notes.txt"] [data-x64-verdict="invalid"]').count() === 1, 'text file not flagged');
+  const v32 = await w.locator('[data-x64-exe="legacy32.exe"] [data-x64-verdict]').getAttribute('data-x64-verdict');
+  expect(v32 === 'unsupported', '32-bit PE verdict: ' + v32);
   await closeAll();
 });
 

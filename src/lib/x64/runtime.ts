@@ -1,0 +1,147 @@
+// Nebula x64 — JS host for the wasm64 x86-64 emulator (emu/x64).  Pointers/sizes cross the boundary as BigInt (memory64).
+export type RunStatus = 'idle' | 'running' | 'exited' | 'fault' | 'break' | 'stopped';
+
+export interface PeInfo {
+  ok: boolean; error?: string;
+  arch?: string; machine?: number; pe32plus?: boolean; subsystem?: string; dll?: boolean; clr?: boolean;
+  imageBase?: string; sizeOfImage?: number; entry?: string; sections?: number; relocs?: boolean; tls?: boolean; exceptions?: boolean; resources?: number;
+  sectionNames?: string[]; unknownImports?: string; imports?: number; knownImports?: number; unknownImportsCount?: number; dlls?: string[];
+  verdict?: 'likely' | 'partial' | 'unlikely' | 'unsupported'; why?: string;
+}
+
+export interface RunStats {
+  status: RunStatus; icount: number; mips: number; frames: number; elapsedMs: number; exitCode: number;
+  error: string; errorRip: string; errorBytes: string; report: string; title: string; subsystem: number; hasWindow: boolean; memMB: number;
+}
+
+type Exports = {
+  memory: WebAssembly.Memory;
+  x64_alloc(n: bigint): bigint; x64_inspect(p: bigint, n: bigint): bigint; x64_load(p: bigint, n: bigint, name: bigint, cmd: bigint): number;
+  x64_run(budget: bigint): number; x64_key(vk: number, down: number): void; x64_mouse(x: number, y: number, ev: number): void;
+  x64_icount(): bigint; x64_exit_code(): number; x64_error(): bigint; x64_error_rip(): bigint; x64_rip(): bigint; x64_report(): bigint; x64_console(): bigint;
+  x64_screen_w(): number; x64_screen_h(): number; x64_screen(): bigint; x64_title(): bigint; x64_subsystem(): number; x64_sleep_ms(): number; x64_mem_used(): bigint; x64_has_window(): number;
+  x64_api_stats(): bigint; x64_error_bytes(): bigint;
+};
+
+export const RUN_OK = 0, RUN_EXIT = 1, RUN_FAULT = 2, RUN_YIELD = 3, RUN_BREAK = 4;
+
+export function wasm64Supported(): boolean {
+  try {
+    // memory64 feature probe: (module (memory i64 1))
+    return WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 5, 3, 1, 4, 1]));
+  } catch { return false; }
+}
+
+const MATH = [Math.sin, Math.cos, Math.tan, Math.exp, Math.log, Math.pow, Math.atan2, Math.asin, Math.acos, Math.atan, Math.sinh, Math.cosh, Math.tanh, Math.log10, Math.log2, Math.cbrt];
+
+export class X64Runtime {
+  private ex: Exports | null = null;
+  private dec = new TextDecoder(); private enc = new TextEncoder();
+  private t0 = 0; private frames = 0; private raf = 0; private running = false;
+  status: RunStatus = 'idle';
+  moduleBytes = 0;
+  onConsole: ((fd: number, text: string) => void) | null = null;
+  onPresent: ((px: Uint8Array, w: number, h: number) => void) | null = null;
+  onStop: ((stats: RunStats) => void) | null = null;
+  onLog: ((text: string) => void) | null = null;
+
+  async init(url = '/x64/nebula_x64.wasm'): Promise<void> {
+    if (this.ex) return;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`cannot fetch ${url}: ${res.status}`);
+    const bytes = await res.arrayBuffer();
+    this.moduleBytes = bytes.byteLength;
+    const imports = {
+      env: {
+        host_write: (fd: number, p: bigint, n: bigint) => {
+          const text = this.dec.decode(this.bytesAt(p, Number(n)));
+          if (fd === 3) this.onLog?.(text); else this.onConsole?.(fd, text);
+        },
+        host_now_ms: () => performance.now(),
+        host_present: (p: bigint, w: number, h: number) => { this.frames++; this.onPresent?.(this.bytesAt(p, w * h * 4), w, h); },
+        host_math: (op: number, a: number, b: number) => MATH[op] ? MATH[op](a, b) : 0,
+      },
+    };
+    const { instance } = await WebAssembly.instantiate(bytes, imports);
+    this.ex = instance.exports as unknown as Exports;
+  }
+
+  private bytesAt(p: bigint, n: number): Uint8Array { return new Uint8Array(this.ex!.memory.buffer, Number(p), n); }
+  private cstr(p: bigint): string {
+    if (!p) return '';
+    const a = new Uint8Array(this.ex!.memory.buffer, Number(p)); let n = 0; while (a[n]) n++;
+    return this.dec.decode(a.subarray(0, n));
+  }
+  private put(bytes: Uint8Array): bigint { const p = this.ex!.x64_alloc(BigInt(bytes.length)); new Uint8Array(this.ex!.memory.buffer, Number(p), bytes.length).set(bytes); return p; }
+  private putStr(s: string): bigint { return this.put(this.enc.encode(s + '\0')); }
+
+  inspect(bytes: Uint8Array): PeInfo {
+    const ex = this.ex!; const p = this.put(bytes);
+    const json = this.cstr(ex.x64_inspect(p, BigInt(bytes.length)));
+    try { return JSON.parse(json) as PeInfo; } catch { return { ok: false, error: 'inspector returned malformed data: ' + json.slice(0, 120) }; }
+  }
+
+  /** Load an exe and start the frame loop.  Returns the loader error text, or null on success. */
+  start(bytes: Uint8Array, name: string, cmdline?: string): string | null {
+    const ex = this.ex!; this.stop();
+    const p = this.put(bytes);
+    const rc = ex.x64_load(p, BigInt(bytes.length), this.putStr(name), this.putStr(cmdline ?? name));
+    if (rc !== 0) { this.status = 'fault'; return this.cstr(ex.x64_report()) || `loader error ${rc}`; }
+    this.status = 'running'; this.running = true; this.t0 = performance.now(); this.frames = 0;
+    this.schedule();
+    return null;
+  }
+
+  private schedule() { this.raf = requestAnimationFrame(() => this.frame()); }
+  /** one host frame: run guest code for up to ~12 ms or until it yields for a presented frame / sleep */
+  private frame() {
+    if (!this.running || !this.ex) return;
+    const ex = this.ex; const start = performance.now(); let r = RUN_OK;
+    for (let i = 0; i < 64; i++) {
+      r = ex.x64_run(400_000n);
+      if (r === RUN_YIELD) { if (ex.x64_sleep_ms() > 0.5 || ex.x64_has_window()) break; continue; }
+      if (r !== RUN_OK) break;
+      if (performance.now() - start > 12) break;
+    }
+    if (r === RUN_EXIT || r === RUN_FAULT || r === RUN_BREAK) {
+      this.running = false; this.status = r === RUN_EXIT ? 'exited' : r === RUN_FAULT ? 'fault' : 'break';
+      this.onStop?.(this.stats());
+      return;
+    }
+    this.schedule();
+  }
+
+  stop() { if (this.running) { this.running = false; this.status = 'stopped'; cancelAnimationFrame(this.raf); } }
+
+  key(vk: number, down: boolean) { if (this.running) this.ex!.x64_key(vk, down ? 1 : 0); }
+  mouse(x: number, y: number, ev: number) { if (this.running) this.ex!.x64_mouse(x | 0, y | 0, ev); }
+
+  stats(): RunStats {
+    const ex = this.ex; if (!ex) return { status: this.status, icount: 0, mips: 0, frames: 0, elapsedMs: 0, exitCode: 0, error: '', errorRip: '', errorBytes: '', report: '', title: '', subsystem: 0, hasWindow: false, memMB: 0 };
+    const el = Math.max(1, performance.now() - this.t0); const ic = Number(ex.x64_icount());
+    return {
+      status: this.status, icount: ic, mips: ic / el / 1000, frames: this.frames, elapsedMs: el, exitCode: ex.x64_exit_code(),
+      error: this.cstr(ex.x64_error()), errorRip: '0x' + ex.x64_error_rip().toString(16), errorBytes: this.cstr(ex.x64_error_bytes()), report: this.cstr(ex.x64_report()),
+      title: this.cstr(ex.x64_title()), subsystem: ex.x64_subsystem(), hasWindow: !!ex.x64_has_window(), memMB: Number(ex.x64_mem_used()) / 1048576,
+    };
+  }
+  apiStats(): string { return this.ex ? this.cstr(this.ex.x64_api_stats()) : ''; }
+  screenSize(): { w: number; h: number } { return this.ex ? { w: this.ex.x64_screen_w(), h: this.ex.x64_screen_h() } : { w: 0, h: 0 }; }
+}
+
+/** DOM KeyboardEvent → Windows virtual-key code */
+export function vkFromEvent(e: KeyboardEvent): number {
+  const c = e.code;
+  if (/^Key[A-Z]$/.test(c)) return c.charCodeAt(3);
+  if (/^Digit[0-9]$/.test(c)) return c.charCodeAt(5);
+  if (/^Numpad[0-9]$/.test(c)) return 0x60 + (c.charCodeAt(6) - 48);
+  if (/^F([1-9]|1[0-2])$/.test(c)) return 0x70 + parseInt(c.slice(1), 10) - 1;
+  const map: Record<string, number> = {
+    ArrowLeft: 0x25, ArrowUp: 0x26, ArrowRight: 0x27, ArrowDown: 0x28, Space: 0x20, Escape: 0x1B, Enter: 0x0D, NumpadEnter: 0x0D, Tab: 0x09, Backspace: 0x08,
+    ShiftLeft: 0x10, ShiftRight: 0x10, ControlLeft: 0x11, ControlRight: 0x11, AltLeft: 0x12, AltRight: 0x12, CapsLock: 0x14,
+    Home: 0x24, End: 0x23, PageUp: 0x21, PageDown: 0x22, Insert: 0x2D, Delete: 0x2E, Pause: 0x13,
+    Minus: 0xBD, Equal: 0xBB, Comma: 0xBC, Period: 0xBE, Slash: 0xBF, Semicolon: 0xBA, Quote: 0xDE, BracketLeft: 0xDB, BracketRight: 0xDD, Backslash: 0xDC, Backquote: 0xC0,
+    NumpadAdd: 0x6B, NumpadSubtract: 0x6D, NumpadMultiply: 0x6A, NumpadDivide: 0x6F, NumpadDecimal: 0x6E,
+  };
+  return map[c] ?? 0;
+}

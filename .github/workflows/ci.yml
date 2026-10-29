@@ -1,4 +1,4 @@
-name: CI (Linux · Windows · macOS)
+name: CI (emulator · Linux · Windows · macOS · Android)
 
 on:
   push:
@@ -11,7 +11,32 @@ permissions:
   contents: write
 
 jobs:
+  emulator:
+    name: Nebula x64 emulator · native tests + wasm64 build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with: { version: 0.17.0 }
+      - name: Build native runner + wasm64 module (zig cc -target wasm64-freestanding)
+        run: ZIG=zig ./emu/x64/build.sh
+      - name: Native capability tests (hello/bench/busybox-w32/plink/NebulaStrike/rejections)
+        run: ./emu/tests/run.sh
+      - name: wasm64 module is bit-identical to the committed public/x64/nebula_x64.wasm
+        run: |
+          git status --porcelain public/x64/nebula_x64.wasm
+          if ! git diff --quiet -- public/x64/nebula_x64.wasm; then echo "::warning::committed wasm differs from CI build (zig version drift?) — CI build is used"; fi
+          ls -la public/x64/nebula_x64.wasm
+      - name: PE compatibility scan of the bundled samples (report)
+        run: |
+          for f in public/downloads/NebulaStrike.exe public/x64/samples/*.exe; do echo "== $f"; ./emu/x64/x64run --inspect "$f" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['verdict'], '|', d['why']); print('imports', d['imports'], 'known', d['knownImports'], 'missing', d['unknownImportsCount'])"; done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nebula_x64-wasm64
+          path: public/x64/nebula_x64.wasm
+
   test:
+    needs: emulator
     name: test · ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -44,7 +69,7 @@ jobs:
 
       - name: Playwright chromium
         run: npx playwright install --with-deps chromium
-      - name: Desktop e2e (21 scenarios, incl. LIVE + NATIVE opencode and WebGL)
+      - name: Desktop e2e (26 scenarios, incl. x64 emulator: hello/NebulaStrike/busybox/plink, LIVE + NATIVE opencode, WebGL)
         run: node e2e/with-bridge.mjs
         timeout-minutes: 15
 

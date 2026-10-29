@@ -10,6 +10,7 @@ export default function Desktop() {
     { id: 'pc', label: 'This PC', onOpen: () => openApp('explorer') },
     { id: 'recycle', label: 'Recycle Bin', onOpen: () => openApp('explorer') },
     { id: 'game', label: 'Nebula Strike', onOpen: () => openApp('nebula') },
+    { id: 'x64', label: 'x64 Runner', onOpen: () => openApp('x64') },
     { id: 'steam', label: 'Steam', onOpen: () => openApp('steam') },
     { id: 'epic', label: 'Epic Games', onOpen: () => openApp('epic') },
     { id: 'terminal', label: 'Command Prompt', onOpen: () => openApp('terminal') },

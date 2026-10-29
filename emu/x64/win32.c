@@ -72,6 +72,18 @@ u64 w32_shim_slot(Win32 *w, const char *dll, const char *name) {
   return SLOT_ADDR(i);
 }
 
+/* data imports (variables exported by msvcrt/ucrt) → real guest storage instead of a code slot */
+int w32_data_import_off(const char *name) {
+  static const struct { const char *n; u32 off; } tab[] = {
+    { "__argc", 0x200 }, { "__argv", 0x208 }, { "__wargv", 0x218 }, { "_environ", 0x228 }, { "__initenv", 0x228 }, { "_wenviron", 0x230 }, { "__winitenv", 0x230 },
+    { "_fmode", 0x240 }, { "_commode", 0x248 }, { "_pgmptr", 0x250 }, { "_wpgmptr", 0x258 }, { "_iob", 0x000 }, { "__mb_cur_max", 0x268 }, { "_timezone", 0x270 }, { "_daylight", 0x274 }, { "_tzname", 0x278 },
+    { "_sys_nerr", 0x288 }, { "_sys_errlist", 0x290 }, { "_HUGE", 0x298 }, { "_acmdln", 0x220 }, { "_wcmdln", 0x210 }, { "__lc_codepage", 0x2a0 }, { "_pctype", 0x2a8 }, { "_osplatform", 0x2b0 }, { "_osver", 0x2b4 }, { "_winmajor", 0x2b8 }, { "_winminor", 0x2bc }, { "_winver", 0x2c0 },
+  };
+  for (size_t i = 0; i < sizeof tab / sizeof tab[0]; i++) if (!e_strcmp(tab[i].n, name)) return (int)tab[i].off + 1;
+  return 0;
+}
+u64 w32_data_import(Win32 *w, const char *name) { int o = w32_data_import_off(name); return o ? w->ubuf + o - 1 : 0; }
+
 /* ---------- continuations ---------- */
 static void guest_call(Cpu *c, u64 fn, u64 a0, u64 a1, u64 a2, u64 a3) {
   c->r[RCX] = a0; c->r[RDX] = a1; c->r[R8] = a2; c->r[R9] = a3;
@@ -227,7 +239,7 @@ static void con_out(Win32 *w, int fd, const char *s, size_t n) {
   e_memcpy(w->con + w->con_len, s, n); w->con_len += (int)n; w->con[w->con_len] = 0;
 }
 static int fd_of_file(Win32 *w, u64 file) {   /* guest FILE* → 1/2, or 0 */
-  u64 iob = w->ubuf; if (file == iob + 0x60) return 1; if (file == iob + 0xC0) return 2; if (file == iob) return -1; return 0;
+  u64 iob = w->ubuf; if (file == iob + 0x30) return 1; if (file == iob + 0x60) return 2; if (file == iob) return -1; return 0;
 }
 static int fd_of_handle(u64 h) { if (h == 0x11 || h == 0x12) return (int)(h - 0x10); if (h == 0x10) return -1; return 0; }
 
@@ -544,6 +556,35 @@ static void s_msize(Cpu *c) { RET(w32_heap_size(W, ARG(0))); }
 static void s_aligned_malloc(Cpu *c) { u64 al = ARG(1); if (al < 16) al = 16; u64 a = w32_heap_alloc(W, ARG(0) + al, 0); RET((a + al - 1) & ~(al - 1)); }
 static void s_aligned_free(Cpu *c) { }
 static void s_set_new_mode(Cpu *c) { RET(0); }
+static void s_CryptAcquireContextA(Cpu *c) { if (ARG(0)) wr64(c, ARG(0), 0xC0FFEE); RET(1); }
+static void s_CryptGenRandom(Cpu *c) { Win32 *w = W; u64 a = ARG(2); u32 n = (u32)ARG(1); for (u32 i = 0; i < n; i++) { w->rand_state = w->rand_state * 1103515245u + 12345u; wr8(c, a + i, (u8)(w->rand_state >> 16)); } RET(1); }
+static void s_OpenProcessToken(Cpu *c) { if (ARG(2)) wr64(c, ARG(2), 0x7001); RET(1); }
+static void s_GetTokenInformation(Cpu *c) { if (ARG(4)) wr32(c, ARG(4), 0); W->last_error = 122; RET(0); }
+static void s_fullpath(Cpu *c) { const char *n = rd_str(c, ARG(1), 1024); char out[1100]; if (!n || !*n) e_snprintf(out, sizeof out, "C:\\nebula"); else if ((n[0] >= 'A' && n[0] <= 'Z' && n[1] == ':') || (n[0] >= 'a' && n[0] <= 'z' && n[1] == ':')) e_snprintf(out, sizeof out, "%s", n); else if (n[0] == '\\' || n[0] == '/') e_snprintf(out, sizeof out, "C:%s", n); else e_snprintf(out, sizeof out, "C:\\nebula\\%s", n); for (char *q = out; *q; q++) if (*q == '/') *q = '\\'; size_t l = e_strlen(out) + 1; u64 dst = ARG(0); if (!dst) dst = w32_heap_alloc(W, l, 0); else if (ARG(2) < l) { RET(0); return; } u8 *p = mem_ptr(c->mem, dst, l, 1); if (p) e_memcpy(p, out, l); RET(dst); }
+static void s_retm1e(Cpu *c) { RET((u64)(s64)-1); wr32(c, W->ubuf + 0x258, 2); }
+static void s_umask(Cpu *c) { RET(0); }
+static void s_getpid(Cpu *c) { RET(4242); }
+static void s_wcsnicmp(Cpu *c) { u64 n = ARG(2); u64 a = ARG(0), b = ARG(1); for (u64 i = 0; i < n; i++) { u16 x = rd16(c, a + i * 2), y = rd16(c, b + i * 2); if (x >= 'A' && x <= 'Z') x += 32; if (y >= 'A' && y <= 'Z') y += 32; if (x != y) { RET((u64)(s64)(x - y)); return; } if (!x) break; } RET(0); }
+static void s_telli64(Cpu *c) { RET(0); }
+static void s_localeconv(Cpu *c) { u64 b = W->ubuf + 0x700; if (!rd64(c, b)) { wr8(c, b + 0xa0, '.'); wr8(c, b + 0xa1, 0); wr8(c, b + 0xa2, 0); wr64(c, b, b + 0xa0); for (int i = 1; i < 9; i++) wr64(c, b + i * 8, b + 0xa2); for (int i = 0; i < 8; i++) wr8(c, b + 72 + i, 127); } RET(b); }
+/* WS2_32: no network — sockets fail cleanly */
+static void s_WSAStartup(Cpu *c) { u64 d = ARG(1); if (d) { wr16(c, d, 0x0202); wr16(c, d + 2, 0x0202); } RET(0); }
+static void s_WSAGetLastError(Cpu *c) { RET(10093); }
+static void s_sock_err(Cpu *c) { W->last_error = 10093; RET((u64)(s64)-1); }
+static void s_gethostname(Cpu *c) { const char *h = "nebula"; if ((u32)ARG(1) > 6) { u8 *p = mem_ptr(c->mem, ARG(0), 7, 1); if (p) e_memcpy(p, h, 7); } RET(0); }
+static void s_htons(Cpu *c) { u16 v = (u16)ARG(0); RET((u16)((v >> 8) | (v << 8))); }
+static void s_htonl(Cpu *c) { RET(__builtin_bswap32((u32)ARG(0))); }
+static void s_VerSetConditionMask(Cpu *c) { u64 mask = ARG(0); u32 type = (u32)ARG(1), cond = (u32)ARG(2) & 7; u64 shift = 0; for (u32 b = 0; b < 32; b++) if (type & (1u << b)) { shift = (u64)b * 3; break; } RET(mask | ((u64)cond << shift)); }
+static void s_InterlockedPushEntrySList(Cpu *c) { u64 head = ARG(0), e = ARG(1); u64 old = rd64(c, head); wr64(c, e, old); wr64(c, head, e); RET(old); }
+static void s_InterlockedPopEntrySList(Cpu *c) { u64 head = ARG(0); u64 e = rd64(c, head); if (e) wr64(c, head, rd64(c, e)); RET(e); }
+static void s_InterlockedFlushSList(Cpu *c) { u64 head = ARG(0); u64 e = rd64(c, head); wr64(c, head, 0); RET(e); }
+static void s_GetUserNameW(Cpu *c) { u32 sz = rd32(c, ARG(1)); if (sz > 4) { const char *n = "user"; for (int i = 0; i < 5; i++) wr16(c, ARG(0) + i * 2, (u8)n[i]); wr32(c, ARG(1), 5); RET(1); } else RET(0); }
+static void s_GetComputerNameW(Cpu *c) { u32 sz = rd32(c, ARG(1)); if (sz > 6) { const char *n = "NEBULA"; for (int i = 0; i < 7; i++) wr16(c, ARG(0) + i * 2, (u8)n[i]); wr32(c, ARG(1), 6); RET(1); } else RET(0); }
+static void s_GetComputerNameExW(Cpu *c) { c->r[RCX] = ARG(1); c->r[RDX] = ARG(2); s_GetComputerNameW(c); }
+static void s_GetSystemDirectoryW(Cpu *c) { const char *d = "C:\\Windows\\System32"; size_t l = e_strlen(d); if ((u32)ARG(1) > l) for (size_t i = 0; i <= l; i++) wr16(c, ARG(0) + i * 2, (u8)d[i]); RET(l); }
+static void s_LocalFileTimeToFileTime(Cpu *c) { wr64(c, ARG(1), rd64(c, ARG(0))); RET(1); }
+static void s_GlobalMemoryStatus(Cpu *c) { u64 a = ARG(0); wr32(c, a + 4, 30); wr64(c, a + 8, 4ull << 30); wr64(c, a + 16, 3ull << 30); wr64(c, a + 24, 4ull << 30); wr64(c, a + 32, 3ull << 30); wr64(c, a + 40, 8ull << 40); wr64(c, a + 48, 8ull << 40); }
+static void s_ReadConsoleW(Cpu *c) { if (ARG(3)) wr32(c, ARG(3), 0); RET(1); }
 static void s_ret0(Cpu *c) { RET(0); }
 static void s_ret1(Cpu *c) { RET(1); }
 static void s_retm1(Cpu *c) { RET(~0ull); }
@@ -570,7 +611,7 @@ static void s_get_initial_narrow_environment(Cpu *c) { RET(rd64(c, W->ubuf + 0x2
 static void s_get_initial_wide_environment(Cpu *c) { RET(rd64(c, W->ubuf + 0x230)); }
 static void s_errno(Cpu *c) { RET(W->ubuf + 0x258); }
 static void s_doserrno(Cpu *c) { RET(W->ubuf + 0x25c); }
-static void s_acrt_iob_func(Cpu *c) { RET(W->ubuf + (u64)(u32)ARG(0) * 0x60); }
+static void s_acrt_iob_func(Cpu *c) { RET(W->ubuf + (u64)(u32)ARG(0) * 0x30); }
 static void s_iob_func(Cpu *c) { RET(W->ubuf); }
 static void s_getmainargs(Cpu *c) { wr32(c, ARG(0), rd32(c, W->ubuf + 0x200)); wr64(c, ARG(1), rd64(c, W->ubuf + 0x208)); wr64(c, ARG(2), rd64(c, W->ubuf + 0x228)); RET(0); }
 static void s_wgetmainargs(Cpu *c) { wr32(c, ARG(0), rd32(c, W->ubuf + 0x200)); wr64(c, ARG(1), rd64(c, W->ubuf + 0x218)); wr64(c, ARG(2), rd64(c, W->ubuf + 0x230)); RET(0); }
@@ -612,6 +653,8 @@ static void s_sprintf(Cpu *c) { ArgSrc src = { c, 0, 2, 0 }; int n = g_format(c,
 static void s_snprintf(Cpu *c) { ArgSrc src = { c, 0, 3, 0 }; int n = g_format(c, g_fmt_out, sizeof g_fmt_out, ARG(2), 0, &src); if (c->status) return; u64 len = ARG(1); if (len) { u64 cp = (u64)n < len ? (u64)n : len - 1; u8 *p = mem_ptr(c->mem, ARG(0), cp + 1, 1); if (p) { e_memcpy(p, g_fmt_out, cp); p[cp] = 0; } } RET(n); }
 static void s_vsnprintf(Cpu *c) { ArgSrc src = { c, 1, 0, ARG(3) }; int n = g_format(c, g_fmt_out, sizeof g_fmt_out, ARG(2), 0, &src); if (c->status) return; u64 len = ARG(1); if (len) { u64 cp = (u64)n < len ? (u64)n : len - 1; u8 *p = mem_ptr(c->mem, ARG(0), cp + 1, 1); if (p) { e_memcpy(p, g_fmt_out, cp); p[cp] = 0; } } RET(n); }
 static void s_vsprintf(Cpu *c) { ArgSrc src = { c, 1, 0, ARG(2) }; int n = g_format(c, g_fmt_out, sizeof g_fmt_out, ARG(1), 0, &src); if (c->status) return; u8 *p = mem_ptr(c->mem, ARG(0), n + 1, 1); if (p) e_memcpy(p, g_fmt_out, n + 1); RET(n); }
+static void s_vscprintf(Cpu *c) { ArgSrc src = { c, 1, 0, ARG(1) }; int n = g_format(c, g_fmt_out, sizeof g_fmt_out, ARG(0), 0, &src); if (c->status) return; RET(n); }
+static void s_vscwprintf(Cpu *c) { ArgSrc src = { c, 1, 0, ARG(1) }; int n = g_format(c, g_fmt_out, sizeof g_fmt_out, ARG(0), 1, &src); if (c->status) return; RET(n); }
 static void s_puts(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 20); if (!s) { RET(~0ull); return; } con_out(W, 1, s, e_strlen(s)); con_out(W, 1, "\n", 1); RET(0); }
 static void s_putws(Cpu *c) { char b[4096]; int n = wstr_to_utf8(c, ARG(0), b, sizeof b, -1); con_out(W, 1, b, n); con_out(W, 1, "\n", 1); RET(0); }
 static void s_fputs(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 20); if (!s) { RET(~0ull); return; } stream_write(c, ARG(1), s, e_strlen(s)); RET(0); }
@@ -643,7 +686,49 @@ static void s_localtime64(Cpu *c) { u64 t = rd64(c, ARG(0)); u64 a = W->ubuf + 0
 static void s_gmtime64(Cpu *c) { s_localtime64(c); }
 static void s_localtime64_s(Cpu *c) { c->r[RCX] = ARG(1); u64 dst = ARG(0); s_localtime64(c); u8 *s = mem_ptr(c->mem, c->r[RAX], 36, 0), *d = mem_ptr(c->mem, dst, 36, 1); if (s && d) e_memcpy(d, s, 36); RET(0); }
 static void s_mktime64(Cpu *c) { RET(unix_time()); }
-static void s_strftime(Cpu *c) { const char *f = rd_str(c, ARG(2), 256); char out[256]; int n = e_snprintf(out, sizeof out, "%s", f ? f : ""); if ((u64)n + 1 > ARG(1)) { RET(0); return; } u8 *p = mem_ptr(c->mem, ARG(0), n + 1, 1); if (p) e_memcpy(p, out, n + 1); RET(n); }
+static int fmt_tm(Cpu *c, char *out, size_t cap, const char *f, u64 tmp) {
+  static const char *wd[7] = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+  static const char *mn[12] = { "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
+  int sec = (int)rd32(c, tmp), min = (int)rd32(c, tmp + 4), hour = (int)rd32(c, tmp + 8), mday = (int)rd32(c, tmp + 12), mon = (int)rd32(c, tmp + 16), year = (int)rd32(c, tmp + 20), wday = (int)rd32(c, tmp + 24), yday = (int)rd32(c, tmp + 28);
+  if (wday < 0 || wday > 6) wday = 0; if (mon < 0 || mon > 11) mon = 0;
+  size_t o = 0; char b[64];
+  #define PUT(str) do { const char *q_ = (str); while (*q_ && o + 1 < cap) out[o++] = *q_++; } while (0)
+  for (; *f; f++) {
+    if (*f != '%') { if (o + 1 < cap) out[o++] = *f; continue; }
+    f++; if (*f == 'E' || *f == 'O') f++; if (!*f) break;
+    switch (*f) {
+      case 'a': e_snprintf(b, sizeof b, "%.3s", wd[wday]); PUT(b); break;   case 'A': PUT(wd[wday]); break;
+      case 'b': case 'h': e_snprintf(b, sizeof b, "%.3s", mn[mon]); PUT(b); break; case 'B': PUT(mn[mon]); break;
+      case 'c': e_snprintf(b, sizeof b, "%.3s %.3s %2d %02d:%02d:%02d %d", wd[wday], mn[mon], mday, hour, min, sec, year + 1900); PUT(b); break;
+      case 'C': e_snprintf(b, sizeof b, "%02d", (year + 1900) / 100); PUT(b); break;
+      case 'd': e_snprintf(b, sizeof b, "%02d", mday); PUT(b); break;       case 'e': e_snprintf(b, sizeof b, "%2d", mday); PUT(b); break;
+      case 'D': e_snprintf(b, sizeof b, "%02d/%02d/%02d", mon + 1, mday, year % 100); PUT(b); break;
+      case 'F': e_snprintf(b, sizeof b, "%d-%02d-%02d", year + 1900, mon + 1, mday); PUT(b); break;
+      case 'H': e_snprintf(b, sizeof b, "%02d", hour); PUT(b); break;       case 'I': e_snprintf(b, sizeof b, "%02d", hour % 12 ? hour % 12 : 12); PUT(b); break;
+      case 'j': e_snprintf(b, sizeof b, "%03d", yday + 1); PUT(b); break;   case 'k': e_snprintf(b, sizeof b, "%2d", hour); PUT(b); break;
+      case 'l': e_snprintf(b, sizeof b, "%2d", hour % 12 ? hour % 12 : 12); PUT(b); break;
+      case 'm': e_snprintf(b, sizeof b, "%02d", mon + 1); PUT(b); break;    case 'M': e_snprintf(b, sizeof b, "%02d", min); PUT(b); break;
+      case 'n': PUT("\n"); break; case 't': PUT("\t"); break; case '%': PUT("%"); break;
+      case 'p': PUT(hour < 12 ? "AM" : "PM"); break; case 'P': PUT(hour < 12 ? "am" : "pm"); break;
+      case 'r': e_snprintf(b, sizeof b, "%02d:%02d:%02d %s", hour % 12 ? hour % 12 : 12, min, sec, hour < 12 ? "AM" : "PM"); PUT(b); break;
+      case 'R': e_snprintf(b, sizeof b, "%02d:%02d", hour, min); PUT(b); break;
+      case 'S': e_snprintf(b, sizeof b, "%02d", sec); PUT(b); break;
+      case 's': { s64 y = year + 1900, m2 = mon + 1; if (m2 <= 2) { y--; m2 += 12; } s64 era = (y >= 0 ? y : y - 399) / 400; s64 yoe = y - era * 400; s64 doy = (153 * (m2 - 3) + 2) / 5 + mday - 1; s64 doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; s64 days = era * 146097 + doe - 719468; e_snprintf(b, sizeof b, "%lld", (long long)(days * 86400 + hour * 3600 + min * 60 + sec)); PUT(b); break; }
+      case 'T': case 'X': e_snprintf(b, sizeof b, "%02d:%02d:%02d", hour, min, sec); PUT(b); break;
+      case 'u': e_snprintf(b, sizeof b, "%d", wday ? wday : 7); PUT(b); break; case 'w': e_snprintf(b, sizeof b, "%d", wday); PUT(b); break;
+      case 'x': e_snprintf(b, sizeof b, "%02d/%02d/%02d", mon + 1, mday, year % 100); PUT(b); break;
+      case 'y': e_snprintf(b, sizeof b, "%02d", year % 100); PUT(b); break; case 'Y': case 'G': e_snprintf(b, sizeof b, "%d", year + 1900); PUT(b); break;
+      case 'Z': PUT("UTC"); break; case 'z': PUT("+0000"); break;
+      case 'U': case 'W': case 'V': e_snprintf(b, sizeof b, "%02d", (yday + 7 - (*f == 'W' ? (wday + 6) % 7 : wday)) / 7); PUT(b); break;
+      default: if (o + 2 < cap) { out[o++] = '%'; out[o++] = *f; } break;
+    }
+  }
+  #undef PUT
+  out[o] = 0; return (int)o;
+}
+static void s_strftime(Cpu *c) { const char *f = rd_str(c, ARG(2), 1024); char out[1024]; int n = fmt_tm(c, out, sizeof out, f ? f : "", ARG(3)); if ((u64)n + 1 > ARG(1)) { RET(0); return; } u8 *p = mem_ptr(c->mem, ARG(0), n + 1, 1); if (p) e_memcpy(p, out, n + 1); RET(n); }
+static void s_asctime(Cpu *c) { char out[64]; fmt_tm(c, out, sizeof out, "%c\n", ARG(0)); u64 a = W->ubuf + 0x3c0; u8 *p = mem_ptr(c->mem, a, 32, 1); if (p) e_memcpy(p, out, e_strlen(out) + 1); RET(a); }
+static void s_ctime64(Cpu *c) { c->r[RCX] = ARG(0); s_localtime64(c); c->r[RCX] = c->r[RAX]; s_asctime(c); }
 static void s_tzset(Cpu *c) { }
 static void s_timezone(Cpu *c) { RET(W->ubuf + 0x260); }
 static void s_daylight(Cpu *c) { RET(W->ubuf + 0x264); }
@@ -761,15 +846,30 @@ static const ShimDef shims[] = {
   S(GetThreadLocale), S(GetUserDefaultLCID), S(GetUserDefaultLangID), S(GetSystemDefaultLangID), S(GetUserDefaultUILanguage), S(GetLocaleInfoA), S(GetLocaleInfoW), S(GetLocaleInfoEx), S(IsValidLocale), S(IsValidCodePage), S(EnumSystemLocalesW), S(GetUserDefaultLocaleName), S(LCMapStringW), S(LCMapStringEx), S(LCMapStringA), S(CompareStringW), S(CompareStringA), S(CompareStringEx), S(GetStringTypeW), S(GetStringTypeA), S(MultiByteToWideChar), S(WideCharToMultiByte), S(CharUpperA),
   S(lstrlenA), S(lstrlenW), S(lstrcpyA), S(lstrcmpiA), S(lstrcmpA), S(InterlockedCompareExchange), S(InterlockedExchange), S(InterlockedIncrement), S(InterlockedDecrement), S(InterlockedExchangeAdd), S(QueueUserAPC),
   S(GetTimeZoneInformation), S(FileTimeToSystemTime), S(SystemTimeToFileTime), S(FileTimeToLocalFileTime), S(GetDateFormatA), S(GetTimeFormatA), S(SystemFunction036), S(GetComputerNameA), S(GetUserNameA), S(GetDriveTypeA), S(GetLogicalDrives), S(GetDiskFreeSpaceExA), S(SetHandleCount), S(GetHandleInformation), S(SetHandleInformation), S(DuplicateHandle), S(CreatePipe), S(PeekNamedPipe), S(GetOverlappedResult), S(CreateIoCompletionPort), S(Beep), S(DebugBreak), S(GetProcessId), S(K32GetProcessMemoryInfo),
+  /* file system stubs — no VFS yet: everything "does not exist" */
+  SA("GetFileAttributesExA", GetFileAttributesA), SA("GetFileAttributesExW", GetFileAttributesA), SA("FindFirstFileExA", FindFirstFileA), SA("FindFirstFileExW", FindFirstFileA), SA("FindNextFileA", ret0), SA("FindNextFileW", ret0), SA("FindClose", ret1),
+  SA("DeleteFileA", ret0), SA("DeleteFileW", ret0), SA("RemoveDirectoryA", ret0), SA("RemoveDirectoryW", ret0), SA("CreateDirectoryA", ret0), SA("CreateDirectoryW", ret0), SA("MoveFileA", ret0), SA("MoveFileW", ret0), SA("MoveFileExA", ret0), SA("MoveFileExW", ret0), SA("CopyFileA", ret0), SA("CopyFileW", ret0),
+  SA("SetFileAttributesA", ret0), SA("SetFileAttributesW", ret0), SA("SetCurrentDirectoryA", ret0), SA("SetCurrentDirectoryW", ret0), SA("GetFileSizeEx", ret0), SA("GetFileSize", ret0), SA("SetFilePointer", ret0), SA("SetFilePointerEx", ret0), SA("SetEndOfFile", ret0), SA("FlushFileBuffers", ret1), SA("GetFileInformationByHandle", ret0), SA("GetFileInformationByHandleEx", ret0), SA("GetFileTime", ret0), SA("SetFileTime", ret0),
+  SA("CreateFileMappingA", ret0), SA("CreateFileMappingW", ret0), SA("MapViewOfFile", ret0), SA("UnmapViewOfFile", ret1), SA("LockFileEx", ret1), SA("UnlockFileEx", ret1), SA("LockFile", ret1), SA("UnlockFile", ret1), SA("GetTempPathA", ret0), SA("GetTempPathW", ret0), SA("GetTempFileNameA", ret0), SA("GetTempFileNameW", ret0),
+  SA("CreateProcessA", ret0), SA("CreateProcessW", ret0), SA("GetExitCodeProcess", ret0), SA("OpenProcess", ret0), SA("TerminateThread", ret0), SA("CreatePipe", ret0), SA("CreateNamedPipeA", ret0), SA("ConnectNamedPipe", ret0), SA("PeekNamedPipe", ret0), SA("CreateRemoteThread", ret0), SA("CreateToolhelp32Snapshot", ret0), SA("WaitForInputIdle", ret0), SA("SetConsoleCtrlHandler", ret1), SA("GenerateConsoleCtrlEvent", ret0),
+  SA("_fullpath", fullpath), SA("_umask", umask), SA("_getpid", getpid), SA("_chdir", retm1e), SA("_spawnve", retm1e), SA("_spawnv", retm1e), SA("_spawnvp", retm1e), SA("_execve", retm1e), SA("_filbuf", retm1e), SA("_getch", retm1e), SA("_getche", retm1e), SA("_telli64", telli64), SA("_open_osfhandle", retm1e), SA("_creat", retm1e), SA("_chmod", retm1e), SA("_rmdir", retm1e), SA("_mktemp", ret0), SA("_wcsnicmp", wcsnicmp), SA("_ctime64", ctime64), S(asctime), SA("_ctime64_s", ret0), SA("_wmkdir", retm1e), SA("_wchdir", retm1e), SA("_wunlink", retm1e), SA("_wrmdir", retm1e), SA("_popen", ret0), SA("_pclose", retm1e), SA("system", retm1e), SA("_wsystem", retm1e),
+  SA("AreFileApisANSI", ret1), SA("SetFileApisToANSI", ret0), SA("SetFileApisToOEM", ret0),
+  /* WS2_32 */
+  S(WSAStartup), SA("WSACleanup", ret0), S(WSAGetLastError), SA("WSASetLastError", ret0), S(gethostname), S(htons), SA("ntohs", htons), S(htonl), SA("ntohl", htonl), SA("socket", sock_err), SA("WSASocketW", sock_err), SA("WSASocketA", sock_err), SA("connect", sock_err), SA("bind", sock_err), SA("listen", sock_err), SA("accept", sock_err), SA("send", sock_err), SA("recv", sock_err), SA("sendto", sock_err), SA("recvfrom", sock_err), SA("select", sock_err), SA("closesocket", ret0), SA("shutdown", sock_err), SA("ioctlsocket", sock_err), SA("setsockopt", sock_err), SA("getsockopt", sock_err), SA("getsockname", sock_err), SA("getpeername", sock_err), SA("gethostbyname", ret0), SA("gethostbyaddr", ret0), SA("getaddrinfo", sock_err), SA("freeaddrinfo", ret0), SA("getnameinfo", sock_err), SA("inet_addr", ret0), SA("inet_ntoa", ret0), SA("inet_pton", ret0), SA("inet_ntop", ret0), SA("__WSAFDIsSet", ret0), SA("WSAIoctl", sock_err), SA("WSAEventSelect", sock_err), SA("WSAWaitForMultipleEvents", sock_err), SA("WSAEnumNetworkEvents", sock_err), SA("WSACreateEvent", ret0), SA("WSACloseEvent", ret1), SA("WSAResetEvent", ret1), SA("WSASend", sock_err), SA("WSARecv", sock_err), SA("WSAPoll", sock_err), SA("getservbyname", ret0), SA("getprotobyname", ret0), SA("WSADuplicateSocketW", sock_err), SA("WSAAddressToStringW", sock_err), SA("WSAStringToAddressW", sock_err),
+  SA("InitializeSListHead", ret0), S(VerSetConditionMask), SA("VerifyVersionInfoW", ret1), SA("VerifyVersionInfoA", ret1), SA("RtlUnwind", ret0), SA("SetStdHandle", ret1), SA("ExitThread", ret0), S(GlobalMemoryStatus), S(ReadConsoleW), SA("ReadConsoleA", ReadConsoleW), SA("GetDateFormatW", ret0), SA("GetTimeFormatW", ret0), SA("GetDateFormatEx", ret0), S(LocalFileTimeToFileTime), S(InterlockedPushEntrySList), S(InterlockedPopEntrySList), S(InterlockedFlushSList), SA("QueryDepthSList", ret0), S(GetSystemDirectoryW), SA("GetWindowsDirectoryW", GetSystemDirectoryW), SA("GetWindowsDirectoryA", GetSystemDirectoryA), SA("SearchPathW", ret0), SA("SearchPathA", ret0), S(GetUserNameW), S(GetComputerNameW), S(GetComputerNameExW), SA("GetComputerNameExA", GetComputerNameA), SA("SwitchToThread", ret0), SA("GetCompressedFileSizeA", retm1), SA("GetCompressedFileSizeW", retm1),
+  /* COMCTL32 */
+  SA("InitCommonControls", ret0), SA("InitCommonControlsEx", ret1), SA("MakeDragList", ret1), SA("LBItemFromPt", retm1), SA("DrawInsert", ret0),
+  /* ADVAPI32 (minimal) */
+  S(CryptAcquireContextA), SA("CryptAcquireContextW", CryptAcquireContextA), S(CryptGenRandom), SA("CryptReleaseContext", ret1), S(OpenProcessToken), S(GetTokenInformation), SA("CheckTokenMembership", ret0), SA("DuplicateToken", ret0), SA("EqualSid", ret0), SA("AccessCheck", ret0), SA("GetSecurityInfo", ret1), SA("SaferCreateLevel", ret0), SA("SaferComputeTokenFromLevel", ret0), SA("SetTokenInformation", ret0),
   /* CRT */
   S(malloc), S(calloc), S(realloc), S(free), SA("_msize", msize), SA("_aligned_malloc", aligned_malloc), SA("_aligned_free", aligned_free), SA("_set_new_mode", set_new_mode), SA("_callnewh", ret0), SA("_query_new_handler", ret0), SA("_set_new_handler", ret0),
   SA("_initterm", initterm), SA("_initterm_e", initterm_e), S(atexit), SA("_onexit", onexit), SA("_crt_atexit", atexit), SA("_crt_at_quick_exit", atexit), SA("_register_onexit_function", register_onexit_function), SA("_initialize_onexit_table", ret0), SA("_execute_onexit_table", ret0),
   S(exit), SA("_Exit", _exit), SA("_exit", _exit), SA("_cexit", cexit), SA("_c_exit", ret0), S(abort), SA("quick_exit", _exit),
   SA("__p___argc", p___argc), SA("__p___argv", p___argv), SA("__p___wargv", p___wargv), SA("__p__acmdln", p__acmdln), SA("__p__wcmdln", p__wcmdln), SA("__p__environ", p__environ), SA("__p__wenviron", p__wenviron), SA("__p__fmode", p__fmode), SA("__p__commode", p__commode), SA("__p__pgmptr", p__pgmptr), SA("_get_initial_narrow_environment", get_initial_narrow_environment), SA("_get_initial_wide_environment", get_initial_wide_environment), SA("_errno", errno), SA("__doserrno", doserrno), SA("_get_errno", ret0),
   SA("__acrt_iob_func", acrt_iob_func), SA("__iob_func", iob_func), SA("__getmainargs", getmainargs), SA("__wgetmainargs", wgetmainargs), SA("__set_app_type", set_app_type), SA("_set_app_type", set_app_type), SA("__setusermatherr", setusermatherr), SA("_controlfp", controlfp), SA("_controlfp_s", controlfp_s), SA("_fpreset", fpreset), SA("_set_fmode", set_fmode), S(signal), S(raise), SA("_amsg_exit", abort),
-  SA("_configure_narrow_argv", ret0), SA("_configure_wide_argv", ret0), SA("_initialize_narrow_environment", ret0), SA("_initialize_wide_environment", ret0), SA("_set_invalid_parameter_handler", ret0), SA("_set_thread_local_invalid_parameter_handler", ret0), SA("_seh_filter_exe", ret0), SA("_seh_filter_dll", ret0), SA("_configthreadlocale", ret0), SA("__lconv_init", ret0), SA("_setmode", ret0), SA("_set_abort_behavior", ret0), SA("_set_error_mode", ret0), SA("_set_printf_count_output", ret0), SA("_get_osfhandle", retm1), SA("_crt_debugger_hook", ret0), SA("_invalid_parameter_noinfo", invalid_parameter_noinfo), SA("_invalid_parameter_noinfo_noreturn", invalid_parameter_noinfo), SA("_beginthreadex", ret0), SA("_beginthread", retm1), SA("_endthreadex", _exit), SA("__threadid", ret0), SA("_lock", ret0), SA("_unlock", ret0), SA("__pctype_func", pctype_func), SA("___mb_cur_max_func", ret1), SA("___lc_codepage_func", ret0), SA("___lc_handle_func", ret0), SA("___lc_collate_cp_func", ret0), SA("_create_locale", ret0), SA("_free_locale", ret0), SA("_get_current_locale", ret0), SA("setlocale", ret0), SA("localeconv", ret0), SA("_setlocale", ret0),
+  SA("_configure_narrow_argv", ret0), SA("_configure_wide_argv", ret0), SA("_initialize_narrow_environment", ret0), SA("_initialize_wide_environment", ret0), SA("_set_invalid_parameter_handler", ret0), SA("_set_thread_local_invalid_parameter_handler", ret0), SA("_seh_filter_exe", ret0), SA("_seh_filter_dll", ret0), SA("_configthreadlocale", ret0), SA("__lconv_init", ret0), SA("_setmode", ret0), SA("_set_abort_behavior", ret0), SA("_set_error_mode", ret0), SA("_set_printf_count_output", ret0), SA("_get_osfhandle", retm1), SA("_crt_debugger_hook", ret0), SA("_invalid_parameter_noinfo", invalid_parameter_noinfo), SA("_invalid_parameter_noinfo_noreturn", invalid_parameter_noinfo), SA("_beginthreadex", ret0), SA("_beginthread", retm1), SA("_endthreadex", _exit), SA("__threadid", ret0), SA("_lock", ret0), SA("_unlock", ret0), SA("__pctype_func", pctype_func), SA("___mb_cur_max_func", ret1), SA("___lc_codepage_func", ret0), SA("___lc_handle_func", ret0), SA("___lc_collate_cp_func", ret0), SA("_create_locale", ret0), SA("_free_locale", ret0), SA("_get_current_locale", ret0), SA("setlocale", ret0), S(localeconv), SA("_setlocale", ret0),
   SA("__stdio_common_vfprintf", stdio_common_vfprintf), SA("__stdio_common_vfprintf_s", stdio_common_vfprintf), SA("__stdio_common_vfwprintf", stdio_common_vfwprintf), SA("__stdio_common_vsprintf", stdio_common_vsprintf), SA("__stdio_common_vsprintf_s", stdio_common_vsprintf_s), SA("__stdio_common_vsnprintf_s", stdio_common_vsnprintf_s), SA("__stdio_common_vswprintf", stdio_common_vswprintf), SA("__stdio_common_vswprintf_s", stdio_common_vswprintf_s), SA("__stdio_common_vsprintf_p", stdio_common_vsprintf),
-  S(printf), S(wprintf), S(vprintf), S(fprintf), S(vfprintf), S(sprintf), SA("_snprintf", snprintf), S(snprintf), SA("_vsnprintf", vsnprintf), S(vsnprintf), S(vsprintf), SA("__mingw_vfprintf", vfprintf), SA("__mingw_vprintf", vprintf), SA("__mingw_vsprintf", vsprintf), SA("__mingw_vsnprintf", vsnprintf), SA("__mingw_printf", printf), SA("__mingw_fprintf", fprintf), SA("__mingw_sprintf", sprintf), SA("__mingw_snprintf", snprintf), SA("__ms_vsnprintf", vsnprintf),
+  SA("_vscprintf", vscprintf), SA("_vscwprintf", vscwprintf), S(printf), S(wprintf), S(vprintf), S(fprintf), S(vfprintf), S(sprintf), SA("_snprintf", snprintf), S(snprintf), SA("_vsnprintf", vsnprintf), S(vsnprintf), S(vsprintf), SA("__mingw_vfprintf", vfprintf), SA("__mingw_vprintf", vprintf), SA("__mingw_vsprintf", vsprintf), SA("__mingw_vsnprintf", vsnprintf), SA("__mingw_printf", printf), SA("__mingw_fprintf", fprintf), SA("__mingw_sprintf", sprintf), SA("__mingw_snprintf", snprintf), SA("__ms_vsnprintf", vsnprintf),
   S(puts), SA("_putws", putws), S(fputs), S(putchar), S(fputc), SA("putc", fputc), S(fwrite), S(fflush), S(setvbuf), S(fopen), S(fopen_s), S(fclose), S(fgets), S(fread), S(getchar), S(fgetc), S(getc), S(feof), S(ferror), SA("_fileno", fileno), SA("_isatty", isatty), SA("_write", write), SA("_read", read), SA("_open", open), SA("_close", close), SA("_fdopen", ret0), SA("_wfopen", ret0), SA("_lseek", retm1), SA("_lseeki64", retm1), SA("_stat64", retm1), SA("_fstat64", retm1), SA("_wstat64", retm1), SA("_access", retm1), SA("_chsize", retm1), SA("_unlink", retm1), SA("remove", retm1), SA("rename", retm1), SA("_mkdir", retm1), SA("_getcwd", ret0), SA("_dup", retm1), SA("_dup2", retm1), SA("_pipe", retm1), SA("_commit", ret0), SA("_locking", ret0), SA("_filelengthi64", retm1), SA("_get_stream_buffer_pointers", ret0), SA("ungetc", retm1),
   SA("_time64", time64), SA("time", time64), S(clock), SA("_localtime64", localtime64), SA("_gmtime64", gmtime64), SA("_localtime64_s", localtime64_s), SA("_mktime64", mktime64), S(strftime), SA("_tzset", tzset), SA("__timezone", timezone), SA("__daylight", daylight), SA("__tzname", tzname), SA("_get_timezone", ret0), SA("_ftime64", ret0), SA("_difftime64", ret0),
   S(getenv), S(getenv_s), SA("_dupenv_s", ret0), SA("_putenv", ret0), S(system), S(rand), S(srand), SA("rand_s", ret0),
@@ -800,6 +900,7 @@ void w32_init(Win32 *w, Cpu *c, Mem *m) {
   /* FILE structures: 3 × 0x60; mark fileno at +0x30?  UCRT layout is opaque; keep zero */
   wr32(c, w->ubuf + 0x240, 0x4000); wr32(c, w->ubuf + 0x248, 0);
   /* ctype table at ubuf+0x400: 256 shorts (pctype returns pointer to table) */
+  wr64(c, w->ubuf + 0x2a8, w->ubuf + 0x400); wr32(c, w->ubuf + 0x288, 43); wr64(c, w->ubuf + 0x298, 0x7ff0000000000000ull); wr32(c, w->ubuf + 0x268, 1); wr64(c, w->ubuf + 0x278, w->ubuf + 0x7c0); wr64(c, w->ubuf + 0x280, w->ubuf + 0x7c0); wr8(c, w->ubuf + 0x7c0, 'U'); wr8(c, w->ubuf + 0x7c1, 'T'); wr8(c, w->ubuf + 0x7c2, 'C'); wr32(c, w->ubuf + 0x2b8, 10); wr32(c, w->ubuf + 0x2c0, 0x0a00); wr32(c, w->ubuf + 0x2b0, 2); wr32(c, w->ubuf + 0x2b4, 0x4a61); wr32(c, w->ubuf + 0x2a0, 1252);
   for (int i = 0; i < 256; i++) { u16 t = 0; if (i >= 'A' && i <= 'Z') t |= 0x101; if (i >= 'a' && i <= 'z') t |= 0x102; if (i >= '0' && i <= '9') t |= 0x204; if (i == ' ' || (i >= 9 && i <= 13)) t |= 0x48; if (i < 32 || i == 127) t |= 0x20; if ((i >= 33 && i <= 47) || (i >= 58 && i <= 64) || (i >= 91 && i <= 96) || (i >= 123 && i <= 126)) t |= 0x10; wr16(c, w->ubuf + 0x400 + i * 2, t); }
   /* fixed slots */
   w->nslots = SLOT_FIRST; w->slots[SLOT_STARTUP].name = "__nebula_startup"; w->slots[SLOT_STARTUP].dll = "nebula"; w->slots[SLOT_CONT].name = "__nebula_continue"; w->slots[SLOT_CONT].dll = "nebula";
