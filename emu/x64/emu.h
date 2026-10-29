@@ -200,4 +200,46 @@ double e_strtod(const char *s, char **end); long long e_strtoll(const char *s, c
 double e_sqrt(double x); double e_floor(double x); double e_ceil(double x); double e_fabs(double x); double e_fmod(double a, double b);
 void e_log(const char *fmt, ...);                      /* emulator diagnostics → host fd 3 */
 
+
+/* ---- vfs.c: in-memory file system + stdin queue ---- */
+typedef struct { const char *path; const u8 *data; u64 size; int is_dir; int written; } VNodeInfo;
+const char *vfs_cwd(void);
+void vfs_normalize(const char *in, char *out, size_t cap);
+int  vfs_find_node(const char *path);
+int  vfs_add(const char *path, const u8 *data, u64 n);
+int  vfs_mkdir(const char *path);
+int  vfs_remove(const char *path);
+int  vfs_rename(const char *from, const char *to);
+int  vfs_chdir(const char *path);
+int  vfs_stat(const char *path, u64 *size);
+const VNodeInfo *vfs_node_info(int i, VNodeInfo *out);
+int  vfs_node_count(void);
+int  vfs_open(const char *path, int access, int disp, int append);
+int  vfs_close(int fd);
+int  vfs_is_open(int fd);
+int  vfs_fd_node(int fd);
+s64  vfs_read(int fd, u8 *buf, u64 n);
+s64  vfs_write(int fd, const u8 *buf, u64 n);
+s64  vfs_seek(int fd, s64 off, int whence);
+s64  vfs_tell(int fd);
+s64  vfs_size(int fd);
+int  vfs_eof(int fd);
+void vfs_clearerr(int fd);
+int  vfs_ungetc(int fd, int ch);
+int  vfs_truncate(int fd);
+int  vfs_fd_isdir(int fd);
+const char *vfs_fd_path(int fd);
+int  vfs_dup(int fd);
+int  vfs_dup2(int src, int dst);
+int  vfs_resolve(int fd);
+void vfs_close_all(void);
+int  vfs_find_first(const char *pattern);
+int  vfs_find_next(int h, char *name, size_t cap, u64 *size, int *is_dir);
+void vfs_find_close(int h);
+void vfs_stdin_push(const u8 *d, u64 n);
+void vfs_stdin_eof(void);
+int  vfs_stdin_waiting(void);
+s64  vfs_stdin_read(u8 *buf, u64 n);
+int  vfs_stdin_available(void);
+
 #endif

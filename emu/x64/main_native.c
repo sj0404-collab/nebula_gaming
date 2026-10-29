@@ -8,10 +8,27 @@
 
 int x64_load(const u8 *bytes, size_t len, const char *name, const char *cmdline);
 int x64_run(u64 budget); const char *x64_inspect(const u8 *b, size_t n); const char *x64_error(void); u64 x64_error_rip(void); const char *x64_report(void); u64 x64_icount(void); int x64_exit_code(void); const char *x64_error_bytes(void); const char *x64_regs(void); void x64_key(int vk, int down); double x64_sleep_ms(void); const char *x64_api_stats(void); int x64_has_window(void);
+int x64_vfs_add(const char *path, const u8 *data, size_t n); int x64_vfs_mkdir(const char *path); const char *x64_vfs_list(void); void x64_stdin_write(const u8 *data, size_t n); void x64_stdin_eof(void); int x64_wants_stdin(void);
 void host_set_dump(int every, const char *prefix); int host_frames(void); double host_now_ms(void);
 
+
+#include <dirent.h>
+#include <sys/stat.h>
+static int mount_dir(const char *host, const char *guest, int depth) {   /* copies a host directory tree into the VFS */
+  DIR *d = opendir(host); if (!d) return 0; struct dirent *e; int n = 0; x64_vfs_mkdir(guest);
+  while ((e = readdir(d))) {
+    if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+    char hp[2048], gp[2048]; snprintf(hp, sizeof hp, "%s/%s", host, e->d_name); snprintf(gp, sizeof gp, "%s\\%s", guest, e->d_name);
+    struct stat st; if (stat(hp, &st)) continue;
+    if (S_ISDIR(st.st_mode)) { if (depth < 8) n += mount_dir(hp, gp, depth + 1); continue; }
+    FILE *f = fopen(hp, "rb"); if (!f) continue; u8 *buf = malloc((size_t)st.st_size + 1); size_t got = fread(buf, 1, (size_t)st.st_size, f); fclose(f);
+    x64_vfs_add(gp, buf, got); free(buf); n++;
+  }
+  closedir(d); return n;
+}
 int main(int argc, char **argv) {
   int inspect = 0, dump_every = 0; double max_ms = 60000; const char *prefix = "frame"; int quiet = 0;
+  const char *mounts[16][2]; int nmounts = 0; int no_stdin = 0;
   struct { int vk; double at; int down; } keys[64]; int nkeys = 0; int ai = 1; int stats = 0;
   for (; ai < argc && argv[ai][0] == '-'; ai++) {
     if (!strcmp(argv[ai], "--inspect")) inspect = 1;
@@ -19,6 +36,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[ai], "--prefix") && ai + 1 < argc) prefix = argv[++ai];
     else if (!strcmp(argv[ai], "--max-ms") && ai + 1 < argc) max_ms = atof(argv[++ai]);
     else if (!strcmp(argv[ai], "--quiet")) quiet = 1;
+    else if (!strcmp(argv[ai], "--mount") && ai + 1 < argc) { const char *spec = argv[++ai]; char hostd[1024]; const char *eq = strchr(spec, '='); const char *guest = "C:\\nebula"; if (eq) { snprintf(hostd, sizeof hostd, "%.*s", (int)(eq - spec), spec); guest = eq + 1; } else snprintf(hostd, sizeof hostd, "%s", spec); nmounts++; mounts[nmounts - 1][0] = strdup(hostd); mounts[nmounts - 1][1] = guest; }
+    else if (!strcmp(argv[ai], "--no-stdin")) no_stdin = 1;
     else if (!strcmp(argv[ai], "--stats")) stats = 1;
     else if (!strcmp(argv[ai], "--key") && ai + 1 < argc) { int vk; double at; int dur = 100; if (sscanf(argv[++ai], "%i@%lf:%d", &vk, &at, &dur) >= 2 && nkeys < 62) { keys[nkeys].vk = vk; keys[nkeys].at = at; keys[nkeys].down = 1; nkeys++; keys[nkeys].vk = vk; keys[nkeys].at = at + dur; keys[nkeys].down = 0; nkeys++; } }
     else { fprintf(stderr, "unknown option %s\n", argv[ai]); return 2; }
@@ -32,6 +51,7 @@ int main(int argc, char **argv) {
   for (int i = ai + 1; i < argc; i++) { int q = strchr(argv[i], ' ') != 0 || !argv[i][0]; strncat(cmdline, q ? " \"" : " ", sizeof cmdline - strlen(cmdline) - 1); strncat(cmdline, argv[i], sizeof cmdline - strlen(cmdline) - 1); if (q) strncat(cmdline, "\"", sizeof cmdline - strlen(cmdline) - 1); }
   host_set_dump(dump_every, prefix);
   int rc = x64_load(bytes, len, base, cmdline);
+  for (int mi = 0; mi < nmounts; mi++) { int n = mount_dir(mounts[mi][0], mounts[mi][1], 0); if (!quiet) fprintf(stderr, "[x64run] mounted %s -> %s (%d files)\n", mounts[mi][0], mounts[mi][1], n); }
   if (rc) { fprintf(stderr, "load failed (%d): %s", rc, x64_report()); return 3; }
   double t0 = host_now_ms(); int r; int ki = 0; u64 yields = 0;
   for (;;) {
@@ -39,6 +59,7 @@ int main(int argc, char **argv) {
     if (el > max_ms) { if (!quiet) fprintf(stderr, "[x64run] time limit reached\n"); r = -1; break; }
     while (ki < nkeys && keys[ki].at <= el) { x64_key(keys[ki].vk, keys[ki].down); ki++; }
     r = x64_run(2000000);
+    if (r == RUN_YIELD && x64_wants_stdin()) { char line[4096]; if (!no_stdin && fgets(line, sizeof line, stdin)) x64_stdin_write((const u8 *)line, strlen(line)); else x64_stdin_eof(); continue; }
     if (r == RUN_YIELD) { yields++; double s = x64_sleep_ms(); if (s > 0) { if (s > 16) s = 16; usleep((useconds_t)(s * 1000)); } else if (x64_has_window()) usleep(1000); continue; }
     if (r != RUN_OK) break;
   }

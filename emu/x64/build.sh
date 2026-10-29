@@ -3,7 +3,7 @@
 set -e
 cd "$(dirname "$0")"
 ZIG=${ZIG:-zig}
-SRC="lib.c cpu.c pe.c win32.c gdi.c api.c"
+SRC="lib.c cpu.c pe.c win32.c gdi.c vfs.c api.c"
 echo "[1/2] native x64run"
 cc -O2 -Wall -Wno-unused-function -Wno-unused-parameter -Wno-misleading-indentation -o x64run $SRC host_native.c main_native.c -lm
 echo "[2/2] wasm64 module"

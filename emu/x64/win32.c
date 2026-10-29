@@ -6,7 +6,7 @@
 #define RET(v) (c->r[RAX] = (u64)(v))
 #define W (c->w)
 
-enum { CONT_STARTUP = 1, CONT_INITTERM, CONT_ATEXIT, CONT_RET_RAX, CONT_RET_VAL, CONT_CREATEWND, CONT_QSORT };
+enum { CONT_STARTUP = 1, CONT_INITTERM, CONT_ATEXIT, CONT_RET_RAX, CONT_RET_VAL, CONT_CREATEWND, CONT_QSORT, CONT_BSEARCH };
 enum { SLOT_STARTUP = 0, SLOT_CONT = 1, SLOT_FIRST = 2 };
 #define SLOT_ADDR(i) (G_SHIM_BASE + (u64)(i) * SHIM_SLOT_SIZE)
 #define TEB_OFF   0x10000
@@ -140,6 +140,15 @@ void w32_cont_resume(Cpu *c) {
       w->cont[i].data[4] = ii; w->cont[i].data[5] = jj;
       guest_call(c, cmp, base + (jj - 1) * sz, base + jj * sz, 0, 0);
       return; }
+    case CONT_BSEARCH: {
+      /* data0=key data1=base data2=hi data3=size data4=cmp data5=lo; the last probe was mid=(lo+hi)/2 */
+      u64 key = w->cont[i].data[0], base = w->cont[i].data[1], hi = w->cont[i].data[2], sz = w->cont[i].data[3], cmp = w->cont[i].data[4], lo = w->cont[i].data[5];
+      u64 mid = lo + (hi - lo) / 2;
+      if ((int)rax == 0) { cont_finish(c, base + mid * sz); return; }
+      if ((int)rax < 0) hi = mid; else lo = mid + 1;
+      if (lo >= hi) { cont_finish(c, 0); return; }
+      w->cont[i].data[2] = hi; w->cont[i].data[5] = lo; mid = lo + (hi - lo) / 2;
+      guest_call(c, cmp, key, base + mid * sz, 0, 0); return; }
   }
   extern void gdi_cont_resume(Cpu *c, int kind, u64 rax);
   gdi_cont_resume(c, w->cont[i].kind, rax);
@@ -243,9 +252,11 @@ static int fd_of_file(Win32 *w, u64 file) {   /* guest FILE* → 1/2, or 0 */
 }
 static int fd_of_handle(u64 h) { if (h == 0x11 || h == 0x12) return (int)(h - 0x10); if (h == 0x10) return -1; return 0; }
 
+
 /* ---------- misc helpers ---------- */
 static u64 now_100ns(void) { return (u64)(host_now_ms() * 10000.0) + 116444736000000000ull + 0x1d0000000000000ull / 0x1d; }
 static u64 unix_time(void) { return 1793000000ull + (u64)(host_now_ms() / 1000.0); }   /* ~2026-10-26 + run time (host clock has no calendar in freestanding wasm) */
+#include "win32_fs.inc"
 
 /* ================= kernel32 ================= */
 static void s_GetLastError(Cpu *c) { RET(W->last_error); }
@@ -276,11 +287,8 @@ static void s_Sleep(Cpu *c) {
 double w32_sleep_remaining_ms(Win32 *w) { if (!w->sleeping) return 0; double r = w->sleep_until_ms - host_now_ms(); return r > 0 ? r : 0; }
 static void s_SleepEx(Cpu *c) { s_Sleep(c); }
 static void s_GetStdHandle(Cpu *c) { u32 n = (u32)ARG(0); RET(n == 0xfffffff6u ? 0x10 : n == 0xfffffff5u ? 0x11 : n == 0xfffffff4u ? 0x12 : ~0ull); }
-static void s_WriteFile(Cpu *c) { int fd = fd_of_handle(ARG(0)); u32 n = (u32)ARG(2); if (fd <= 0) { W->last_error = 6; RET(0); return; } const u8 *p = mem_ptr(c->mem, ARG(1), n, 0); if (!p) { RET(0); return; } con_out(W, fd, (const char *)p, n); if (ARG(3)) wr32(c, ARG(3), n); RET(1); }
 static void s_WriteConsoleA(Cpu *c) { s_WriteFile(c); }
-static void s_WriteConsoleW(Cpu *c) { int fd = fd_of_handle(ARG(0)); u32 n = (u32)ARG(2); if (fd <= 0) { RET(0); return; } char buf[4096]; int m = wstr_to_utf8(c, ARG(1), buf, sizeof buf, (int)n); con_out(W, fd, buf, m); if (ARG(3)) wr32(c, ARG(3), n); RET(1); }
-static void s_ReadFile(Cpu *c) { if (ARG(3)) wr32(c, ARG(3), 0); RET(fd_of_handle(ARG(0)) == -1 ? 1 : 0); }
-static void s_ReadConsoleA(Cpu *c) { if (ARG(3)) wr32(c, ARG(3), 0); RET(1); }
+static void s_WriteConsoleW(Cpu *c) { int fd = fd_of_handle(ARG(0)); u32 n = (u32)ARG(2); if (fd <= 0) { RET(0); return; } char buf[4096]; int m = wstr_to_utf8(c, ARG(1), buf, sizeof buf, (int)n); raw_write(fd, (const u8 *)buf, m); if (ARG(3)) wr32(c, ARG(3), n); RET(1); }
 static void s_GetConsoleMode(Cpu *c) { if (fd_of_handle(ARG(0))) { wr32(c, ARG(1), 3); RET(1); } else RET(0); }
 static void s_SetConsoleMode(Cpu *c) { RET(1); }
 static void s_GetConsoleOutputCP(Cpu *c) { RET(65001); }
@@ -294,34 +302,11 @@ static void s_GetConsoleWindow(Cpu *c) { RET(0); }
 static void s_AllocConsole(Cpu *c) { RET(1); }
 static void s_SetConsoleCtrlHandler(Cpu *c) { RET(1); }
 static void s_FlushFileBuffers(Cpu *c) { RET(1); }
-static void s_GetFileType(Cpu *c) { RET(fd_of_handle(ARG(0)) ? 2 : 0); }
-static void s_CloseHandle(Cpu *c) { RET(1); }
-static void s_CreateFileA(Cpu *c) { const char *n = rd_str(c, ARG(0), 1024); w32_report(W, "CreateFileA(\"%s\") → no file system in the sandbox", n ? n : "?"); W->last_error = 2; RET(~0ull); }
-static void s_CreateFileW(Cpu *c) { char n[512]; wstr_to_utf8(c, ARG(0), n, sizeof n, -1); w32_report(W, "CreateFileW(\"%s\") → no file system in the sandbox", n); W->last_error = 2; RET(~0ull); }
-static void s_GetFileAttributesA(Cpu *c) { W->last_error = 2; RET(0xffffffffu); }
-static void s_GetFileAttributesW(Cpu *c) { W->last_error = 2; RET(0xffffffffu); }
-static void s_GetFileAttributesExW(Cpu *c) { W->last_error = 2; RET(0); }
-static void s_FindFirstFileA(Cpu *c) { W->last_error = 2; RET(~0ull); }
-static void s_FindFirstFileW(Cpu *c) { W->last_error = 2; RET(~0ull); }
-static void s_FindClose(Cpu *c) { RET(1); }
-static void s_DeleteFileA(Cpu *c) { RET(0); }
-static void s_GetFullPathNameA(Cpu *c) { const char *n = rd_str(c, ARG(0), 1024); if (!n) { RET(0); return; } char out[600]; e_snprintf(out, sizeof out, "C:\\%s", n); size_t l = e_strlen(out); if ((u32)ARG(1) > l) { u8 *p = mem_ptr(c->mem, ARG(2), l + 1, 1); if (p) e_memcpy(p, out, l + 1); } RET(l); }
-static void s_GetCurrentDirectoryA(Cpu *c) { const char *d = "C:\\nebula"; size_t l = e_strlen(d); if ((u32)ARG(0) > l) { u8 *p = mem_ptr(c->mem, ARG(1), l + 1, 1); if (p) e_memcpy(p, d, l + 1); } RET(l); }
-static void s_GetCurrentDirectoryW(Cpu *c) { const char *d = "C:\\nebula"; size_t l = e_strlen(d); if ((u32)ARG(0) > l) for (size_t i = 0; i <= l; i++) wr16(c, ARG(1) + i * 2, (u8)d[i]); RET(l); }
-static void s_GetTempPathA(Cpu *c) { const char *d = "C:\\tmp\\"; size_t l = e_strlen(d); if ((u32)ARG(0) > l) { u8 *p = mem_ptr(c->mem, ARG(1), l + 1, 1); if (p) e_memcpy(p, d, l + 1); } RET(l); }
-static void s_SetFilePointer(Cpu *c) { RET(0xffffffffu); }
-static void s_GetFileSize(Cpu *c) { RET(0xffffffffu); }
 
 static void s_GetCommandLineA(Cpu *c) { RET(W->cmdline_a); }
 static void s_GetCommandLineW(Cpu *c) { RET(W->cmdline_w); }
-static void s_GetEnvironmentStrings(Cpu *c) { RET(W->env_a); }
-static void s_GetEnvironmentStringsW(Cpu *c) { RET(W->env_w); }
 static void s_FreeEnvironmentStringsW(Cpu *c) { RET(1); }
 static void s_FreeEnvironmentStringsA(Cpu *c) { RET(1); }
-static void s_GetEnvironmentVariableA(Cpu *c) { W->last_error = 203; RET(0); }
-static void s_GetEnvironmentVariableW(Cpu *c) { W->last_error = 203; RET(0); }
-static void s_SetEnvironmentVariableA(Cpu *c) { RET(1); }
-static void s_ExpandEnvironmentStringsA(Cpu *c) { RET(0); }
 static void s_GetStartupInfoA(Cpu *c) { u64 a = ARG(0); u8 *p = mem_ptr(c->mem, a, 104, 1); if (p) { e_memset(p, 0, 104); wr32(c, a, 104); wr64(c, a + 80, 0x10); wr64(c, a + 88, 0x11); wr64(c, a + 96, 0x12); } }
 static void s_GetStartupInfoW(Cpu *c) { s_GetStartupInfoA(c); }
 static void s_GetModuleHandleA(Cpu *c) { const char *n = rd_str(c, ARG(0), 260); if (!n) { RET(W->image_base); return; } RET(0x7ff00000000ull + ((u64)(u8)n[0] << 12)); }
@@ -560,7 +545,6 @@ static void s_CryptAcquireContextA(Cpu *c) { if (ARG(0)) wr64(c, ARG(0), 0xC0FFE
 static void s_CryptGenRandom(Cpu *c) { Win32 *w = W; u64 a = ARG(2); u32 n = (u32)ARG(1); for (u32 i = 0; i < n; i++) { w->rand_state = w->rand_state * 1103515245u + 12345u; wr8(c, a + i, (u8)(w->rand_state >> 16)); } RET(1); }
 static void s_OpenProcessToken(Cpu *c) { if (ARG(2)) wr64(c, ARG(2), 0x7001); RET(1); }
 static void s_GetTokenInformation(Cpu *c) { if (ARG(4)) wr32(c, ARG(4), 0); W->last_error = 122; RET(0); }
-static void s_fullpath(Cpu *c) { const char *n = rd_str(c, ARG(1), 1024); char out[1100]; if (!n || !*n) e_snprintf(out, sizeof out, "C:\\nebula"); else if ((n[0] >= 'A' && n[0] <= 'Z' && n[1] == ':') || (n[0] >= 'a' && n[0] <= 'z' && n[1] == ':')) e_snprintf(out, sizeof out, "%s", n); else if (n[0] == '\\' || n[0] == '/') e_snprintf(out, sizeof out, "C:%s", n); else e_snprintf(out, sizeof out, "C:\\nebula\\%s", n); for (char *q = out; *q; q++) if (*q == '/') *q = '\\'; size_t l = e_strlen(out) + 1; u64 dst = ARG(0); if (!dst) dst = w32_heap_alloc(W, l, 0); else if (ARG(2) < l) { RET(0); return; } u8 *p = mem_ptr(c->mem, dst, l, 1); if (p) e_memcpy(p, out, l); RET(dst); }
 static void s_retm1e(Cpu *c) { RET((u64)(s64)-1); wr32(c, W->ubuf + 0x258, 2); }
 static void s_umask(Cpu *c) { RET(0); }
 static void s_getpid(Cpu *c) { RET(4242); }
@@ -584,7 +568,6 @@ static void s_GetComputerNameExW(Cpu *c) { c->r[RCX] = ARG(1); c->r[RDX] = ARG(2
 static void s_GetSystemDirectoryW(Cpu *c) { const char *d = "C:\\Windows\\System32"; size_t l = e_strlen(d); if ((u32)ARG(1) > l) for (size_t i = 0; i <= l; i++) wr16(c, ARG(0) + i * 2, (u8)d[i]); RET(l); }
 static void s_LocalFileTimeToFileTime(Cpu *c) { wr64(c, ARG(1), rd64(c, ARG(0))); RET(1); }
 static void s_GlobalMemoryStatus(Cpu *c) { u64 a = ARG(0); wr32(c, a + 4, 30); wr64(c, a + 8, 4ull << 30); wr64(c, a + 16, 3ull << 30); wr64(c, a + 24, 4ull << 30); wr64(c, a + 32, 3ull << 30); wr64(c, a + 40, 8ull << 40); wr64(c, a + 48, 8ull << 40); }
-static void s_ReadConsoleW(Cpu *c) { if (ARG(3)) wr32(c, ARG(3), 0); RET(1); }
 static void s_ret0(Cpu *c) { RET(0); }
 static void s_ret1(Cpu *c) { RET(1); }
 static void s_retm1(Cpu *c) { RET(~0ull); }
@@ -602,18 +585,15 @@ static void s_p___argv(Cpu *c) { RET(W->ubuf + 0x208); }
 static void s_p___wargv(Cpu *c) { RET(W->ubuf + 0x218); }
 static void s_p__acmdln(Cpu *c) { RET(W->ubuf + 0x210); }
 static void s_p__wcmdln(Cpu *c) { RET(W->ubuf + 0x220); }
-static void s_p__environ(Cpu *c) { RET(W->ubuf + 0x228); }
 static void s_p__wenviron(Cpu *c) { RET(W->ubuf + 0x230); }
 static void s_p__fmode(Cpu *c) { RET(W->ubuf + 0x240); }
 static void s_p__commode(Cpu *c) { RET(W->ubuf + 0x248); }
 static void s_p__pgmptr(Cpu *c) { RET(W->ubuf + 0x250); }
-static void s_get_initial_narrow_environment(Cpu *c) { RET(rd64(c, W->ubuf + 0x228)); }
 static void s_get_initial_wide_environment(Cpu *c) { RET(rd64(c, W->ubuf + 0x230)); }
 static void s_errno(Cpu *c) { RET(W->ubuf + 0x258); }
 static void s_doserrno(Cpu *c) { RET(W->ubuf + 0x25c); }
 static void s_acrt_iob_func(Cpu *c) { RET(W->ubuf + (u64)(u32)ARG(0) * 0x30); }
 static void s_iob_func(Cpu *c) { RET(W->ubuf); }
-static void s_getmainargs(Cpu *c) { wr32(c, ARG(0), rd32(c, W->ubuf + 0x200)); wr64(c, ARG(1), rd64(c, W->ubuf + 0x208)); wr64(c, ARG(2), rd64(c, W->ubuf + 0x228)); RET(0); }
 static void s_wgetmainargs(Cpu *c) { wr32(c, ARG(0), rd32(c, W->ubuf + 0x200)); wr64(c, ARG(1), rd64(c, W->ubuf + 0x218)); wr64(c, ARG(2), rd64(c, W->ubuf + 0x230)); RET(0); }
 static void s_set_app_type(Cpu *c) { }
 static void s_setusermatherr(Cpu *c) { }
@@ -624,7 +604,7 @@ static void s_set_fmode(Cpu *c) { RET(0); }
 static void s_signal(Cpu *c) { RET(0); }
 static void s_raise(Cpu *c) { cpu_fault(c, "raise(%d)", (int)ARG(0)); }
 
-static void stream_write(Cpu *c, u64 file, const char *s, size_t n) { int fd = fd_of_file(W, file); if (fd > 0) con_out(W, fd, s, n); }
+static void stream_write(Cpu *c, u64 file, const char *s, size_t n) { int fd = file_fd(c, file); if (fd) raw_write(fd, (const u8 *)s, n); }
 static void s_stdio_common_vfprintf(Cpu *c) { ArgSrc src = { c, 1, 0, ARG(4) }; int n = g_format(c, g_fmt_out, sizeof g_fmt_out, ARG(2), 0, &src); if (c->status) return; stream_write(c, ARG(1), g_fmt_out, n < (int)sizeof g_fmt_out ? n : sizeof g_fmt_out - 1); RET(n); }
 static void s_stdio_common_vfwprintf(Cpu *c) { ArgSrc src = { c, 1, 0, ARG(4) }; int n = g_format(c, g_fmt_out, sizeof g_fmt_out, ARG(2), 1, &src); if (c->status) return; stream_write(c, ARG(1), g_fmt_out, n < (int)sizeof g_fmt_out ? n : sizeof g_fmt_out - 1); RET(n); }
 static void vsprintf_common(Cpu *c, u64 opts, u64 buf, u64 len, u64 fmt, u64 va, int wide) {
@@ -644,9 +624,9 @@ static void s_stdio_common_vsprintf_s(Cpu *c) { vsprintf_common(c, ARG(0) | 2, A
 static void s_stdio_common_vsnprintf_s(Cpu *c) { vsprintf_common(c, ARG(0) | 2, ARG(1), ARG(2) < ARG(3) ? ARG(2) : ARG(3) + 1, ARG(4), ARG(6), 0); }
 static void s_stdio_common_vswprintf(Cpu *c) { vsprintf_common(c, ARG(0), ARG(1), ARG(2), ARG(3), ARG(5), 1); }
 static void s_stdio_common_vswprintf_s(Cpu *c) { vsprintf_common(c, ARG(0) | 2, ARG(1), ARG(2), ARG(3), ARG(5), 1); }
-static void s_printf(Cpu *c) { ArgSrc src = { c, 0, 1, 0 }; int n = g_format(c, g_fmt_out, sizeof g_fmt_out, ARG(0), 0, &src); if (c->status) return; con_out(W, 1, g_fmt_out, n < (int)sizeof g_fmt_out ? n : sizeof g_fmt_out - 1); RET(n); }
-static void s_wprintf(Cpu *c) { ArgSrc src = { c, 0, 1, 0 }; int n = g_format(c, g_fmt_out, sizeof g_fmt_out, ARG(0), 1, &src); if (c->status) return; con_out(W, 1, g_fmt_out, n < (int)sizeof g_fmt_out ? n : sizeof g_fmt_out - 1); RET(n); }
-static void s_vprintf(Cpu *c) { ArgSrc src = { c, 1, 0, ARG(1) }; int n = g_format(c, g_fmt_out, sizeof g_fmt_out, ARG(0), 0, &src); if (c->status) return; con_out(W, 1, g_fmt_out, n < (int)sizeof g_fmt_out ? n : sizeof g_fmt_out - 1); RET(n); }
+static void s_printf(Cpu *c) { ArgSrc src = { c, 0, 1, 0 }; int n = g_format(c, g_fmt_out, sizeof g_fmt_out, ARG(0), 0, &src); if (c->status) return; raw_write(1, (const u8 *)g_fmt_out, n < (int)sizeof g_fmt_out ? n : sizeof g_fmt_out - 1); RET(n); }
+static void s_wprintf(Cpu *c) { ArgSrc src = { c, 0, 1, 0 }; int n = g_format(c, g_fmt_out, sizeof g_fmt_out, ARG(0), 1, &src); if (c->status) return; raw_write(1, (const u8 *)g_fmt_out, n < (int)sizeof g_fmt_out ? n : sizeof g_fmt_out - 1); RET(n); }
+static void s_vprintf(Cpu *c) { ArgSrc src = { c, 1, 0, ARG(1) }; int n = g_format(c, g_fmt_out, sizeof g_fmt_out, ARG(0), 0, &src); if (c->status) return; raw_write(1, (const u8 *)g_fmt_out, n < (int)sizeof g_fmt_out ? n : sizeof g_fmt_out - 1); RET(n); }
 static void s_fprintf(Cpu *c) { ArgSrc src = { c, 0, 2, 0 }; int n = g_format(c, g_fmt_out, sizeof g_fmt_out, ARG(1), 0, &src); if (c->status) return; stream_write(c, ARG(0), g_fmt_out, n < (int)sizeof g_fmt_out ? n : sizeof g_fmt_out - 1); RET(n); }
 static void s_vfprintf(Cpu *c) { ArgSrc src = { c, 1, 0, ARG(2) }; int n = g_format(c, g_fmt_out, sizeof g_fmt_out, ARG(1), 0, &src); if (c->status) return; stream_write(c, ARG(0), g_fmt_out, n < (int)sizeof g_fmt_out ? n : sizeof g_fmt_out - 1); RET(n); }
 static void s_sprintf(Cpu *c) { ArgSrc src = { c, 0, 2, 0 }; int n = g_format(c, g_fmt_out, sizeof g_fmt_out, ARG(1), 0, &src); if (c->status) return; u8 *p = mem_ptr(c->mem, ARG(0), n + 1, 1); if (p) e_memcpy(p, g_fmt_out, n + 1); RET(n); }
@@ -655,30 +635,14 @@ static void s_vsnprintf(Cpu *c) { ArgSrc src = { c, 1, 0, ARG(3) }; int n = g_fo
 static void s_vsprintf(Cpu *c) { ArgSrc src = { c, 1, 0, ARG(2) }; int n = g_format(c, g_fmt_out, sizeof g_fmt_out, ARG(1), 0, &src); if (c->status) return; u8 *p = mem_ptr(c->mem, ARG(0), n + 1, 1); if (p) e_memcpy(p, g_fmt_out, n + 1); RET(n); }
 static void s_vscprintf(Cpu *c) { ArgSrc src = { c, 1, 0, ARG(1) }; int n = g_format(c, g_fmt_out, sizeof g_fmt_out, ARG(0), 0, &src); if (c->status) return; RET(n); }
 static void s_vscwprintf(Cpu *c) { ArgSrc src = { c, 1, 0, ARG(1) }; int n = g_format(c, g_fmt_out, sizeof g_fmt_out, ARG(0), 1, &src); if (c->status) return; RET(n); }
-static void s_puts(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 20); if (!s) { RET(~0ull); return; } con_out(W, 1, s, e_strlen(s)); con_out(W, 1, "\n", 1); RET(0); }
-static void s_putws(Cpu *c) { char b[4096]; int n = wstr_to_utf8(c, ARG(0), b, sizeof b, -1); con_out(W, 1, b, n); con_out(W, 1, "\n", 1); RET(0); }
+static void s_puts(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 20); if (!s) { RET(~0ull); return; } raw_write(1, (const u8 *)s, e_strlen(s)); raw_write(1, (const u8 *)"\n", 1); RET(0); }
+static void s_putws(Cpu *c) { char b[4096]; int n = wstr_to_utf8(c, ARG(0), b, sizeof b, -1); raw_write(1, (const u8 *)b, n); raw_write(1, (const u8 *)"\n", 1); RET(0); }
 static void s_fputs(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 20); if (!s) { RET(~0ull); return; } stream_write(c, ARG(1), s, e_strlen(s)); RET(0); }
-static void s_putchar(Cpu *c) { char ch = (char)ARG(0); con_out(W, 1, &ch, 1); RET(ARG(0) & 0xff); }
+static void s_putchar(Cpu *c) { char ch = (char)ARG(0); raw_write(1, (const u8 *)&ch, 1); RET(ARG(0) & 0xff); }
 static void s_fputc(Cpu *c) { char ch = (char)ARG(0); stream_write(c, ARG(1), &ch, 1); RET(ARG(0) & 0xff); }
-static void s_fwrite(Cpu *c) { u64 n = ARG(1) * ARG(2); const u8 *p = mem_ptr(c->mem, ARG(0), n, 0); if (!p) { RET(0); return; } stream_write(c, ARG(3), (const char *)p, n); RET(ARG(2)); }
 static void s_fflush(Cpu *c) { RET(0); }
 static void s_setvbuf(Cpu *c) { RET(0); }
-static void s_fopen(Cpu *c) { const char *n = rd_str(c, ARG(0), 1024); w32_report(W, "fopen(\"%s\") → no file system in the sandbox", n ? n : "?"); wr32(c, W->ubuf + 0x258, 2); RET(0); }
-static void s_fopen_s(Cpu *c) { wr64(c, ARG(0), 0); RET(2); }
-static void s_fclose(Cpu *c) { RET(0); }
-static void s_fgets(Cpu *c) { RET(0); }
-static void s_fread(Cpu *c) { RET(0); }
-static void s_getchar(Cpu *c) { RET(~0ull); }
-static void s_fgetc(Cpu *c) { RET(~0ull); }
 static void s_getc(Cpu *c) { RET(~0ull); }
-static void s_feof(Cpu *c) { RET(1); }
-static void s_ferror(Cpu *c) { RET(0); }
-static void s_fileno(Cpu *c) { int fd = fd_of_file(W, ARG(0)); RET(fd < 0 ? 0 : fd); }
-static void s_isatty(Cpu *c) { RET(ARG(0) <= 2 ? 1 : 0); }
-static void s_write(Cpu *c) { u64 fd = ARG(0); u32 n = (u32)ARG(2); if (fd == 1 || fd == 2) { const u8 *p = mem_ptr(c->mem, ARG(1), n, 0); if (p) con_out(W, (int)fd, (const char *)p, n); RET(n); } else RET(~0ull); }
-static void s_read(Cpu *c) { RET(0); }
-static void s_open(Cpu *c) { RET(~0ull); }
-static void s_close(Cpu *c) { RET(0); }
 static void s_time64(Cpu *c) { u64 t = unix_time(); if (ARG(0)) wr64(c, ARG(0), t); RET(t); }
 static void s_clock(Cpu *c) { RET((u64)(host_now_ms() - W->start_ms)); }
 static void s_localtime64(Cpu *c) { u64 t = rd64(c, ARG(0)); u64 a = W->ubuf + 0x300; u64 days = t / 86400, rem = t % 86400; s64 z = (s64)days + 719468; s64 era = z / 146097; s64 doe = z - era * 146097; s64 yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; s64 y = yoe + era * 400; s64 doy = doe - (365 * yoe + yoe / 4 - yoe / 100); s64 mp = (5 * doy + 2) / 153; s64 d = doy - (153 * mp + 2) / 5 + 1; s64 m = mp < 10 ? mp + 3 : mp - 9; if (m <= 2) y++;
@@ -733,8 +697,6 @@ static void s_tzset(Cpu *c) { }
 static void s_timezone(Cpu *c) { RET(W->ubuf + 0x260); }
 static void s_daylight(Cpu *c) { RET(W->ubuf + 0x264); }
 static void s_tzname(Cpu *c) { RET(W->ubuf + 0x268); }
-static void s_getenv(Cpu *c) { RET(0); }
-static void s_getenv_s(Cpu *c) { if (ARG(0)) wr64(c, ARG(0), 0); RET(0); }
 static void s_system(Cpu *c) { RET(ARG(0) ? ~0ull : 0); }
 static void s_rand(Cpu *c) { Win32 *w = W; w->rand_state = w->rand_state * 214013u + 2531011u; RET((w->rand_state >> 16) & 0x7fff); }
 static void s_srand(Cpu *c) { W->rand_state = (u32)ARG(0); }
@@ -779,7 +741,8 @@ static void s_memcmp(Cpu *c) { u64 n = ARG(2); if (!n) { RET(0); return; } const
 static void s_memchr(Cpu *c) { u64 n = ARG(2); const u8 *a = mem_ptr(c->mem, ARG(0), n, 0); if (!a) { RET(0); return; } for (u64 i = 0; i < n; i++) if (a[i] == (u8)ARG(1)) { RET(ARG(0) + i); return; } RET(0); }
 static void s_qsort(Cpu *c) { u64 n = ARG(1); if (n < 2) return; cont_push(c, CONT_QSORT); Win32 *w = W; int i = w->ncont - 1; w->cont[i].data[0] = ARG(0); w->cont[i].data[1] = n; w->cont[i].data[2] = ARG(2); w->cont[i].data[3] = ARG(3); w->cont[i].data[4] = 1; w->cont[i].data[5] = 1;
   guest_call(c, ARG(3), ARG(0), ARG(0) + ARG(2), 0, 0); }
-static void s_bsearch(Cpu *c) { cpu_fault(c, "bsearch with guest callback is not supported yet"); }
+static void s_bsearch(Cpu *c) { u64 n = ARG(2); if (!n) { RET(0); return; } cont_push(c, CONT_BSEARCH); Win32 *w = W; int i = w->ncont - 1; w->cont[i].data[0] = ARG(0); w->cont[i].data[1] = ARG(1); w->cont[i].data[2] = n; w->cont[i].data[3] = ARG(3); w->cont[i].data[4] = ARG(4); w->cont[i].data[5] = 0;
+  guest_call(c, ARG(4), ARG(0), ARG(1) + (n / 2) * ARG(3), 0, 0); }
 static void s_setjmp(Cpu *c) { u64 a = ARG(0); wr64(c, a, 0); wr64(c, a + 8, c->r[RBX]); wr64(c, a + 16, c->r[RSP]); wr64(c, a + 24, c->r[RBP]); wr64(c, a + 32, c->r[RSI]); wr64(c, a + 40, c->r[RDI]); wr64(c, a + 48, c->r[R12]); wr64(c, a + 56, c->r[R13]); wr64(c, a + 64, c->r[R14]); wr64(c, a + 72, c->r[R15]); wr64(c, a + 80, c->rip); for (int k = 6; k < 16; k++) { wr64(c, a + 96 + (k - 6) * 16, c->x[k].q[0]); wr64(c, a + 104 + (k - 6) * 16, c->x[k].q[1]); } RET(0); }
 static void s_longjmp(Cpu *c) { u64 a = ARG(0); u64 v = ARG(1); c->r[RBX] = rd64(c, a + 8); c->r[RSP] = rd64(c, a + 16); c->r[RBP] = rd64(c, a + 24); c->r[RSI] = rd64(c, a + 32); c->r[RDI] = rd64(c, a + 40); c->r[R12] = rd64(c, a + 48); c->r[R13] = rd64(c, a + 56); c->r[R14] = rd64(c, a + 64); c->r[R15] = rd64(c, a + 72); c->rip = rd64(c, a + 80); for (int k = 6; k < 16; k++) { c->x[k].q[0] = rd64(c, a + 96 + (k - 6) * 16); c->x[k].q[1] = rd64(c, a + 104 + (k - 6) * 16); } RET(v ? v : 1); }
 static void s_invalid_parameter_noinfo(Cpu *c) { cpu_fault(c, "CRT invalid parameter"); }
@@ -828,6 +791,7 @@ static void s_dsign(Cpu *c) { RET(c->x[0].f64[0] < 0 ? 1 : 0); }
 #define S(n) { "", #n, s_##n }
 #define SA(api, fn) { "", api, s_##fn }
 static const ShimDef shims[] = {
+  FS_SHIMS
   S(GetLastError), S(SetLastError), S(GetCurrentProcess), S(GetCurrentThread), S(GetCurrentProcessId), S(GetCurrentThreadId), S(ExitProcess), S(TerminateProcess),
   S(GetTickCount), S(GetTickCount64), S(QueryPerformanceCounter), S(QueryPerformanceFrequency), S(GetSystemTimeAsFileTime), S(GetSystemTimePreciseAsFileTime), S(GetSystemTime), S(GetLocalTime), S(Sleep), S(SleepEx),
   S(GetStdHandle), S(WriteFile), S(WriteConsoleA), S(WriteConsoleW), S(ReadFile), S(ReadConsoleA), S(GetConsoleMode), S(SetConsoleMode), S(GetConsoleOutputCP), S(GetConsoleCP), S(SetConsoleOutputCP), S(SetConsoleCP), S(GetConsoleScreenBufferInfo), S(SetConsoleTextAttribute), S(SetConsoleTitleA), S(GetConsoleWindow), S(AllocConsole), S(SetConsoleCtrlHandler), S(FlushFileBuffers), S(GetFileType), S(CloseHandle),
@@ -874,7 +838,7 @@ static const ShimDef shims[] = {
   SA("_time64", time64), SA("time", time64), S(clock), SA("_localtime64", localtime64), SA("_gmtime64", gmtime64), SA("_localtime64_s", localtime64_s), SA("_mktime64", mktime64), S(strftime), SA("_tzset", tzset), SA("__timezone", timezone), SA("__daylight", daylight), SA("__tzname", tzname), SA("_get_timezone", ret0), SA("_ftime64", ret0), SA("_difftime64", ret0),
   S(getenv), S(getenv_s), SA("_dupenv_s", ret0), SA("_putenv", ret0), S(system), S(rand), S(srand), SA("rand_s", ret0),
   S(strlen), S(wcslen), S(strnlen), S(strcmp), SA("_stricmp", stricmp), SA("_strcmpi", stricmp), SA("stricmp", stricmp), S(strncmp), SA("_strnicmp", strnicmp), S(wcscmp), S(strcpy), S(strncpy), S(strcat), S(strchr), S(strrchr), S(strstr), SA("_strdup", strdup), S(strdup), S(strtol), S(strtoul), S(strtoll), SA("_strtoi64", strtoll), SA("_strtoui64", strtoll), SA("strtoull", strtoll), S(atoi), S(atol), S(atoll), SA("_atoi64", atoll), S(strtod), S(atof), S(toupper), S(tolower), S(isdigit), S(isalpha), S(isalnum), S(isspace), S(isupper), S(islower), S(isprint), S(isxdigit), S(ispunct), SA("iscntrl", ret0), SA("isgraph", isprint), SA("iswspace", isspace), SA("iswdigit", isdigit), SA("iswalpha", isalpha), SA("towupper", toupper), SA("towlower", tolower), SA("_isctype", ret0), SA("strerror", ret0), SA("_strerror", ret0), SA("strerror_s", ret0), SA("strcpy_s", ret0), SA("strcat_s", ret0), SA("strncpy_s", ret0), SA("memcpy_s", ret0), SA("memmove_s", ret0), SA("strtok", ret0), SA("strtok_s", ret0), SA("strspn", ret0), SA("strcspn", ret0), SA("strpbrk", ret0), SA("_strlwr", ret0), SA("_strupr", ret0), SA("_strrev", ret0), SA("strcoll", strcmp), SA("_itoa", ret0), SA("_ltoa", ret0), SA("_ultoa", ret0), SA("_i64toa", ret0), SA("_ui64toa", ret0),
-  S(memcpy), SA("memmove", memcpy), S(memset), S(memcmp), S(memchr), S(qsort), SA("qsort_s", bsearch), S(bsearch), SA("_setjmp", setjmp), SA("_setjmpex", setjmp), S(longjmp), S(div), SA("ldiv", div), S(abs), S(labs), SA("_abs64", llabs), S(llabs),
+  S(memcpy), SA("memmove", memcpy), S(memset), S(memcmp), S(memchr), S(qsort), SA("qsort_s", qsort), S(bsearch), SA("_setjmp", setjmp), SA("_setjmpex", setjmp), S(longjmp), S(div), SA("ldiv", div), S(abs), S(labs), SA("_abs64", llabs), S(llabs),
   S(sin), S(cos), S(tan), S(exp), S(log), S(pow), S(atan2), S(asin), S(acos), S(atan), S(sinh), S(cosh), S(tanh), S(log10), S(log2), S(cbrt), S(sqrt), S(floor), S(ceil), S(fabs), S(fmod), S(round), S(trunc), S(ldexp), S(frexp), S(modf), S(hypot), SA("_hypot", hypot), S(sinf), S(cosf), S(tanf), S(expf), S(logf), S(powf), S(atan2f), S(sqrtf), S(floorf), S(ceilf), S(fabsf), S(fmodf), S(roundf), SA("_dclass", dclass), SA("_fdclass", fdclass), SA("_dsign", dsign), SA("_fdsign", dsign), SA("_dtest", dclass), SA("_fdtest", fdclass), SA("_finite", ret1), SA("_isnan", ret0), SA("_copysign", copysign), S(copysign), S(exp2), SA("nearbyint", round), SA("rint", round), S(lround), SA("llround", lround), S(fmin), S(fmax),
   SA("__C_specific_handler", ret1), SA("__CxxFrameHandler3", ret1), SA("__CxxFrameHandler4", ret1), SA("_CxxThrowException", raise), SA("__std_exception_copy", ret0), SA("__std_exception_destroy", ret0), SA("__std_type_info_destroy_list", ret0), SA("__current_exception", ret0), SA("__current_exception_context", ret0), SA("_except_handler4_common", ret1), SA("__intrinsic_setjmp", setjmp), SA("__report_gsfailure", abort), SA("_purecall", abort), SA("terminate", abort), SA("__p__mbctype", pctype_func), SA("_ismbblead", ret0), SA("__mb_cur_max", ret1),
 };
@@ -882,7 +846,7 @@ static ShimFn find_shim(const char *dll, const char *name) { (void)dll; for (siz
 int w32_have_shim(const char *dll, const char *name) { return find_shim(dll, name) != 0; }
 
 /* ---------- init ---------- */
-void w32_init(Win32 *w, Cpu *c, Mem *m) {
+void w32_init(Win32 *w, Cpu *c, Mem *m) { g_fs_w = w;
   e_memset(w, 0, sizeof *w); w->cpu = c; w->mem = m; c->w = w; c->mem = m;
   w->start_ms = host_now_ms(); w->rand_state = 1; w->next_handle = 0x100;
   u8 *shim = mem_map(m, G_SHIM_BASE, G_SHIM_SIZE, "shim"); e_memset(shim, 0xCC, 0x10000);
@@ -927,6 +891,7 @@ void w32_start(Win32 *w, const char *cmdline) {
   u64 blk = w32_heap_alloc(w, total, 1), wblk = w32_heap_alloc(w, total * 2, 1); u64 o = 0;
   for (int i = 0; envs[i]; i++) { size_t l = e_strlen(envs[i]) + 1; u8 *d = mem_ptr(w->mem, blk + o, l, 1); if (d) e_memcpy(d, envs[i], l); for (size_t k = 0; k < l; k++) wr16(c, wblk + (o + k) * 2, (u8)envs[i][k]); wr64(c, envp + i * 8, blk + o); o += l; }
   w->env_a = blk; w->env_w = wblk; wr64(c, w->ubuf + 0x228, envp); wr64(c, w->ubuf + 0x230, 0);
+  { extern void w32_env_init(const char **envs); w32_env_init(envs); }
   wr64(c, w->ubuf + 0x250, w32_guest_strdup(w, "C:\\nebula\\app.exe"));
   /* ProcessParameters: CommandLine UNICODE_STRING at +0x70, ImagePathName at +0x60 */
   u64 params = G_SHIM_BASE + PARAMS_OFF; size_t cl = e_strlen(w->cmdline);

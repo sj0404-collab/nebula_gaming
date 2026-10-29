@@ -1,5 +1,6 @@
 // Nebula x64 — JS host for the wasm64 x86-64 emulator (emu/x64).  Pointers/sizes cross the boundary as BigInt (memory64).
-export type RunStatus = 'idle' | 'running' | 'exited' | 'fault' | 'break' | 'stopped';
+export type RunStatus = 'idle' | 'running' | 'waiting-stdin' | 'exited' | 'fault' | 'break' | 'stopped';
+export interface VfsEntry { path: string; size: number; dir: boolean; written: boolean }
 
 export interface PeInfo {
   ok: boolean; error?: string;
@@ -21,6 +22,9 @@ type Exports = {
   x64_icount(): bigint; x64_exit_code(): number; x64_error(): bigint; x64_error_rip(): bigint; x64_rip(): bigint; x64_report(): bigint; x64_console(): bigint;
   x64_screen_w(): number; x64_screen_h(): number; x64_screen(): bigint; x64_title(): bigint; x64_subsystem(): number; x64_sleep_ms(): number; x64_mem_used(): bigint; x64_has_window(): number;
   x64_api_stats(): bigint; x64_error_bytes(): bigint;
+  x64_vfs_add(path: bigint, data: bigint, n: bigint): number; x64_vfs_mkdir(path: bigint): number; x64_vfs_remove(path: bigint): number;
+  x64_vfs_size(path: bigint): bigint; x64_vfs_data(path: bigint): bigint; x64_vfs_list(): bigint;
+  x64_stdin_write(data: bigint, n: bigint): void; x64_stdin_eof(): void; x64_wants_stdin(): number;
 };
 
 export const RUN_OK = 0, RUN_EXIT = 1, RUN_FAULT = 2, RUN_YIELD = 3, RUN_BREAK = 4;
@@ -44,6 +48,8 @@ export class X64Runtime {
   onPresent: ((px: Uint8Array, w: number, h: number) => void) | null = null;
   onStop: ((stats: RunStats) => void) | null = null;
   onLog: ((text: string) => void) | null = null;
+  onStdinWait: ((waiting: boolean) => void) | null = null;
+  private waitingStdin = false;
 
   async init(url = '/x64/nebula_x64.wasm'): Promise<void> {
     if (this.ex) return;
@@ -73,10 +79,13 @@ export class X64Runtime {
     return this.dec.decode(a.subarray(0, n));
   }
   private put(bytes: Uint8Array): bigint { const p = this.ex!.x64_alloc(BigInt(bytes.length)); new Uint8Array(this.ex!.memory.buffer, Number(p), bytes.length).set(bytes); return p; }
+  /** guest memory is bump-allocated, so large exe images are uploaded once and reused on every Run */
+  private putCache = new WeakMap<Uint8Array, bigint>();
+  private putCached(bytes: Uint8Array): bigint { let p = this.putCache.get(bytes); if (p === undefined) { p = this.put(bytes); this.putCache.set(bytes, p); } return p; }
   private putStr(s: string): bigint { return this.put(this.enc.encode(s + '\0')); }
 
   inspect(bytes: Uint8Array): PeInfo {
-    const ex = this.ex!; const p = this.put(bytes);
+    const ex = this.ex!; const p = this.putCached(bytes);
     const json = this.cstr(ex.x64_inspect(p, BigInt(bytes.length)));
     try { return JSON.parse(json) as PeInfo; } catch { return { ok: false, error: 'inspector returned malformed data: ' + json.slice(0, 120) }; }
   }
@@ -84,7 +93,7 @@ export class X64Runtime {
   /** Load an exe and start the frame loop.  Returns the loader error text, or null on success. */
   start(bytes: Uint8Array, name: string, cmdline?: string): string | null {
     const ex = this.ex!; this.stop();
-    const p = this.put(bytes);
+    const p = this.putCached(bytes);
     const rc = ex.x64_load(p, BigInt(bytes.length), this.putStr(name), this.putStr(cmdline ?? name));
     if (rc !== 0) { this.status = 'fault'; return this.cstr(ex.x64_report()) || `loader error ${rc}`; }
     this.status = 'running'; this.running = true; this.t0 = performance.now(); this.frames = 0;
@@ -99,7 +108,10 @@ export class X64Runtime {
     const ex = this.ex; const start = performance.now(); let r = RUN_OK;
     for (let i = 0; i < 64; i++) {
       r = ex.x64_run(400_000n);
-      if (r === RUN_YIELD) { if (ex.x64_sleep_ms() > 0.5 || ex.x64_has_window()) break; continue; }
+      if (r === RUN_YIELD) {
+        if (ex.x64_wants_stdin()) { this.waitingStdin = true; this.status = 'waiting-stdin'; this.onStdinWait?.(true); return; }
+        if (ex.x64_sleep_ms() > 0.5 || ex.x64_has_window()) break; continue;
+      }
       if (r !== RUN_OK) break;
       if (performance.now() - start > 12) break;
     }
@@ -111,7 +123,25 @@ export class X64Runtime {
     this.schedule();
   }
 
-  stop() { if (this.running) { this.running = false; this.status = 'stopped'; cancelAnimationFrame(this.raf); } }
+  stop() { if (this.running) { this.running = false; this.status = 'stopped'; cancelAnimationFrame(this.raf); if (this.waitingStdin) { this.waitingStdin = false; this.onStdinWait?.(false); } } }
+
+  private resumeFromStdin() { if (this.waitingStdin && this.running) { this.waitingStdin = false; this.status = 'running'; this.onStdinWait?.(false); this.schedule(); } }
+  /** feed text to the guest's stdin (a trailing newline is what line-oriented programs expect) */
+  writeStdin(text: string) { if (!this.ex) return; const b = this.enc.encode(text); const p = this.put(b); this.ex.x64_stdin_write(p, BigInt(b.length)); this.resumeFromStdin(); }
+  /** close stdin: blocked reads return 0 bytes (Ctrl-D / Ctrl-Z) */
+  closeStdin() { if (!this.ex) return; this.ex.x64_stdin_eof(); this.resumeFromStdin(); }
+  get waitingForStdin() { return this.waitingStdin; }
+
+  /* ---- virtual file system (shared by every program run in this runtime; survives start()) ---- */
+  vfsAdd(path: string, data: Uint8Array): boolean { const ex = this.ex!; return !!ex.x64_vfs_add(this.putStr(path), this.put(data), BigInt(data.length)); }
+  vfsMkdir(path: string): boolean { return !!this.ex!.x64_vfs_mkdir(this.putStr(path)); }
+  vfsRemove(path: string): boolean { return !!this.ex!.x64_vfs_remove(this.putStr(path)); }
+  vfsList(): VfsEntry[] { if (!this.ex) return []; try { return JSON.parse(this.cstr(this.ex.x64_vfs_list())) as VfsEntry[]; } catch { return []; } }
+  vfsRead(path: string): Uint8Array | null {
+    const ex = this.ex!; const n = Number(ex.x64_vfs_size(this.putStr(path))); if (n < 0) return null;
+    const p = ex.x64_vfs_data(this.putStr(path)); if (!p && n > 0) return null;
+    return n ? this.bytesAt(p, n).slice() : new Uint8Array(0);
+  }
 
   key(vk: number, down: boolean) { if (this.running) this.ex!.x64_key(vk, down ? 1 : 0); }
   mouse(x: number, y: number, ev: number) { if (this.running) this.ex!.x64_mouse(x | 0, y | 0, ev); }

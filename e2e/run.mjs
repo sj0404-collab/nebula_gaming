@@ -10,7 +10,7 @@
  */
 import { chromium } from 'playwright';
 import { spawn } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const PORT = 4199;
@@ -287,12 +287,56 @@ await test('x64: real third-party binaries — busybox-w32 awk/sha256sum and PuT
     expect(expectRe.test(con), `${exe} ${args}: unexpected output: ${con.slice(0, 300)}`);
   };
   await run('busybox64.exe', 'awk BEGIN{print(6*7)}', /^42/m);
-  await run('busybox64.exe', 'sha256sum', /e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855/);
+  await run('busybox64.exe', 'sha256sum readme.txt', /^[0-9a-f]{64}  readme\.txt/m);
   await run('busybox64.exe', 'date -u -d @1761750000 +%Y-%m-%dT%H:%M:%S', /2025-10-29T15:00:00/);
   await run('plink.exe', '-V', /plink: Release 0\.85/);
   const vb = await w.locator('[data-x64-exe="busybox64.exe"] [data-x64-verdict]').getAttribute('data-x64-verdict');
   expect(vb === 'partial', 'busybox verdict should be honest "partial": ' + vb);
   await page.screenshot({ path: resolve(SHOTS, 'x64-busybox.png') });
+  await closeAll();
+});
+await test('x64: virtual disk + stdin — files mounted from the host, read/written by busybox, console input feeds blocking reads', async () => {
+  const w = await x64Open();
+  await w.locator('[data-x64-exe="busybox64.exe"]').waitFor({ timeout: 30_000 });
+  const start = async (args) => {
+    await w.locator('[data-x64-exe="busybox64.exe"]').click();
+    await w.getByPlaceholder('arguments').fill(args);
+    await w.locator('[data-x64-run]').click();
+  };
+  const waitStatus = (st) => page.waitForFunction((s) => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === s, st, { timeout: 30_000 });
+  const consoleText = () => w.locator('[data-x64-console]').innerText();
+  // 1. a host file added to the virtual disk is visible to the program
+  const tmp = resolve(SHOTS, 'words.txt'); writeFileSync(tmp, 'pear\napple\nmango\n');
+  await w.locator('[data-x64-tab="files"]').click();
+  await w.locator('[data-x64-addfiles]').setInputFiles(tmp);
+  await w.locator('[data-x64-vfs="C:\\\\nebula\\\\words.txt"]').waitFor({ timeout: 10_000 });
+  await start('sort words.txt'); await waitStatus('exited');
+  expect(/apple\s+mango\s+pear/.test(await consoleText()), 'sort of a mounted file failed: ' + (await consoleText()).slice(0, 200));
+  // 2. blocking stdin: program waits, we type lines, EOF ends it
+  await start('sort -r'); await waitStatus('waiting-stdin');
+  for (const line of ['banana', 'cherry', 'apple']) { await w.locator('[data-x64-stdin]').fill(line); await w.locator('[data-x64-stdin-send]').click(); }
+  await w.locator('[data-x64-stdin-eof]').click(); await waitStatus('exited');
+  const sorted = await consoleText();
+  expect(/cherry\s+banana\s+apple\s*$/.test(sorted.trim()), 'stdin → sort -r failed: ' + sorted.slice(-200));
+  // 3. a file written by the program shows up on the virtual disk, can be read back and downloaded
+  await start('tee out.txt'); await waitStatus('waiting-stdin');
+  await w.locator('[data-x64-stdin]').fill('hello disk'); await w.locator('[data-x64-stdin-send]').click();
+  await w.locator('[data-x64-stdin-eof]').click(); await waitStatus('exited');
+  await start('cat out.txt'); await waitStatus('exited');
+  expect(/hello disk/.test(await consoleText()), 'written file could not be read back');
+  await w.locator('[data-x64-tab="files"]').click();
+  const row = w.locator('[data-x64-vfs="C:\\\\nebula\\\\out.txt"]');
+  await row.waitFor({ timeout: 10_000 });
+  expect(/written/.test(await row.innerText()), 'out.txt not marked as written');
+  const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 10_000 }), row.locator('[data-x64-download]').click()]);
+  expect(dl.suggestedFilename() === 'out.txt', 'download name: ' + dl.suggestedFilename());
+  // 4. directory listing + environment through the Win32 layer
+  await start('ls -l'); await waitStatus('exited');
+  const ls = await consoleText();
+  expect(/words\.txt/.test(ls) && /out\.txt/.test(ls) && /readme\.txt/.test(ls), 'ls -l missing files: ' + ls.slice(0, 300));
+  await start('env'); await waitStatus('exited');
+  expect(/TEMP=C:\\tmp/.test(await consoleText()), 'environment block not visible');
+  await page.screenshot({ path: resolve(SHOTS, 'x64-files.png') });
   await closeAll();
 });
 await test('x64: opening a non-PE file and a 32-bit / unsupported PE gives an honest verdict', async () => {

@@ -1,0 +1,372 @@
+/* ---------- file system + stdin shims (included by win32.c; these entries come first in the table) ---------- */
+static Win32 *g_fs_w;
+static int lc_(int ch) { return ch >= 'A' && ch <= 'Z' ? ch + 32 : ch; }
+#define H_FILE_BASE 0x1000ull
+#define H_FIND_BASE 0x3000ull
+#define H_MAP_BASE  0x4000ull
+#define FILE_MAGIC  0x4E58F11Eu
+#define ERRNO_ADDR  (W->ubuf + 0x258)
+static void set_errno(Cpu *c, int v) { wr32(c, ERRNO_ADDR, (u32)v); }
+static int errno_of(int rc) { return rc == -2 ? 2 : rc == -17 ? 17 : rc == -21 ? 21 : rc == -13 ? 13 : 24; }
+static u32 lasterr_of(int rc) { return rc == -2 ? 2 : rc == -17 ? 80 : rc == -21 ? 5 : rc == -13 ? 5 : 4; }
+/* HANDLE → fd: -1 stdin, 1/2 console, ≥3 file, 0 invalid */
+static int handle_fd(u64 h) { if (h == 0x11 || h == 0x12) return (int)(h - 0x10); if (h == 0x10) return -1; if (h >= H_FILE_BASE && h < H_FILE_BASE + 0x1000 && vfs_is_open((int)(h - H_FILE_BASE))) return (int)(h - H_FILE_BASE); return 0; }
+/* guest FILE* → fd (std streams live in ubuf; file streams are 48-byte heap blocks with a magic) */
+static int file_fd(Cpu *c, u64 f) { u64 iob = W->ubuf; if (f == iob + 0x30) return 1; if (f == iob + 0x60) return 2; if (f == iob) return -1; if (f < 0x10000) return 0; if (rd32(c, f + 32) == FILE_MAGIC) { int fd = (int)rd32(c, f + 28); return vfs_is_open(fd) ? fd : 0; } return 0; }
+static u64 make_file(Cpu *c, int fd) { u64 f = w32_heap_alloc(W, 48, 1); wr32(c, f + 28, (u32)fd); wr32(c, f + 32, FILE_MAGIC); wr32(c, f + 24, 1); return f; }
+static void put_a(Cpu *c, u64 dst, const char *s, u32 cap) { size_t l = e_strlen(s); if (cap && l + 1 > cap) l = cap - 1; u8 *p = mem_ptr(c->mem, dst, l + 1, 1); if (p) { e_memcpy(p, s, l); p[l] = 0; } }
+static void put_w(Cpu *c, u64 dst, const char *s, u32 cap) { size_t l = e_strlen(s); if (cap && l + 1 > cap) l = cap - 1; for (size_t i = 0; i < l; i++) wr16(c, dst + i * 2, (u8)s[i]); wr16(c, dst + l * 2, 0); }
+static const char *gstr(Cpu *c, u64 a) { const char *s = rd_str(c, a, 1 << 30); return s ? s : ""; }
+static const char *name_a(Cpu *c, u64 a) { const char *s = rd_str(c, a, 1024); return s ? s : ""; }
+static char g_wname[1024];
+static const char *name_w(Cpu *c, u64 a) { if (!a) return ""; wstr_to_utf8(c, a, g_wname, sizeof g_wname, -1); return g_wname; }
+static u64 vfs_filetime(void) { return (unix_time() + 11644473600ull) * 10000000ull; }
+
+/* generic read/write used by ReadFile/_read/fread */
+static s64 fd_read(Cpu *c, int fd, u64 buf, u64 n) {
+  u8 *p = mem_ptr(c->mem, buf, n, 1); if (!p) return -1;
+  fd = vfs_resolve(fd == -1 ? 0 : fd);
+  if (fd == -1) { s64 r = vfs_stdin_read(p, n); return r; }
+  if (fd >= 3) return vfs_read(fd, p, n);
+  return -1;
+}
+static s64 fd_write(Cpu *c, int fd, u64 buf, u64 n) {
+  const u8 *p = mem_ptr(c->mem, buf, n, 0); if (!p) return -1;
+  fd = vfs_resolve(fd == -1 ? 0 : fd);
+  if (fd == 1 || fd == 2) { con_out(W, fd, (const char *)p, n); return (s64)n; }
+  if (fd >= 3) return vfs_write(fd, p, n);
+  return -1;
+}
+static s64 raw_read(int fd, u8 *p, u64 n) { fd = vfs_resolve(fd == -1 ? 0 : fd); if (fd == -1) return vfs_stdin_read(p, n); if (fd >= 3) return vfs_read(fd, p, n); return -1; }
+static s64 raw_write(int fd, const u8 *p, u64 n) { fd = vfs_resolve(fd == -1 ? 0 : fd); if (fd == 1 || fd == 2) { con_out(g_fs_w, fd, (const char *)p, n); return (s64)n; } if (fd >= 3) return vfs_write(fd, p, n); return -1; }
+/* ---- KERNEL32 ---- */
+static void create_file(Cpu *c, const char *n) {
+  u32 access = (u32)ARG(1), disp = (u32)ARG(4);
+  if (!e_stricmp(n, "CONOUT$")) { RET(0x11); return; } if (!e_stricmp(n, "CONIN$")) { RET(0x10); return; }
+  if (!e_stricmp(n, "NUL") || !e_stricmp(n, "\\\\.\\NUL")) n = "C:\\nebula\\.nul";
+  int acc = ((access & 0x80000000u) ? 1 : 0) | ((access & 0x40000004u) ? 2 : 0); if (!acc) acc = 1;
+  int fd = vfs_open(n, acc, (int)disp, (access & 4) && !(access & 0x40000000u));
+  if (fd < 0) { W->last_error = lasterr_of(fd); RET(~0ull); return; }
+  W->last_error = (disp == 4 || disp == 2) && vfs_tell(fd) == 0 ? 0 : 0; RET(H_FILE_BASE + fd);
+}
+static void s_CreateFileA(Cpu *c) { create_file(c, name_a(c, ARG(0))); }
+static void s_CreateFileW(Cpu *c) { create_file(c, name_w(c, ARG(0))); }
+static void s_ReadFile(Cpu *c) {
+  int fd = handle_fd(ARG(0)); if (!fd || fd == 1 || fd == 2) { W->last_error = 6; RET(0); return; }
+  s64 r = fd_read(c, fd, ARG(1), (u32)ARG(2));
+  if (r == -2) { retry_and_yield(c, g_cur_slot); return; }
+  if (r < 0) { W->last_error = 5; RET(0); return; }
+  if (ARG(3)) wr32(c, ARG(3), (u32)r); RET(1);
+}
+static void s_WriteFile(Cpu *c) {
+  int fd = handle_fd(ARG(0)); if (fd <= 0) { W->last_error = 6; RET(0); return; }
+  s64 r = fd_write(c, fd, ARG(1), (u32)ARG(2)); if (r < 0) { W->last_error = 5; RET(0); return; }
+  if (ARG(3)) wr32(c, ARG(3), (u32)r); RET(1);
+}
+static void s_CloseHandle(Cpu *c) { u64 h = ARG(0); if (h >= H_FILE_BASE && h < H_FILE_BASE + 0x1000) vfs_close((int)(h - H_FILE_BASE)); RET(1); }
+static void s_GetFileType(Cpu *c) { int fd = handle_fd(ARG(0)); RET(fd >= 3 ? 1 : fd ? 2 : 0); }
+static void s_GetFileSize(Cpu *c) { int fd = handle_fd(ARG(0)); s64 s = fd >= 3 ? vfs_size(fd) : -1; if (s < 0) { W->last_error = 6; RET(0xffffffffu); return; } if (ARG(1)) wr32(c, ARG(1), (u32)((u64)s >> 32)); RET((u32)s); }
+static void s_GetFileSizeEx(Cpu *c) { int fd = handle_fd(ARG(0)); s64 s = fd >= 3 ? vfs_size(fd) : -1; if (s < 0) { W->last_error = 6; RET(0); return; } wr64(c, ARG(1), (u64)s); RET(1); }
+static void s_SetFilePointer(Cpu *c) { int fd = handle_fd(ARG(0)); s64 off = (s32)(u32)ARG(1); if (ARG(2)) off |= (s64)rd32(c, ARG(2)) << 32; s64 r = fd >= 3 ? vfs_seek(fd, off, (int)ARG(3)) : -1; if (r < 0) { W->last_error = 6; RET(0xffffffffu); return; } if (ARG(2)) wr32(c, ARG(2), (u32)((u64)r >> 32)); RET((u32)r); }
+static void s_SetFilePointerEx(Cpu *c) { int fd = handle_fd(ARG(0)); s64 r = fd >= 3 ? vfs_seek(fd, (s64)ARG(1), (int)ARG(3)) : -1; if (r < 0) { W->last_error = 6; RET(0); return; } if (ARG(2)) wr64(c, ARG(2), (u64)r); RET(1); }
+static void s_SetEndOfFile(Cpu *c) { int fd = handle_fd(ARG(0)); RET(fd >= 3 && vfs_truncate(fd)); }
+static u32 attrs_of(int st) { return st == 2 ? 0x10 : 0x80; }
+static void file_attrs(Cpu *c, const char *n) { u64 sz; int st = vfs_stat(n, &sz); if (!st) { W->last_error = 2; RET(0xffffffffu); return; } RET(attrs_of(st)); }
+static void s_GetFileAttributesA(Cpu *c) { file_attrs(c, name_a(c, ARG(0))); }
+static void s_GetFileAttributesW(Cpu *c) { file_attrs(c, name_w(c, ARG(0))); }
+static void file_attrs_ex(Cpu *c, const char *n) { u64 sz; int st = vfs_stat(n, &sz); if (!st) { W->last_error = 2; RET(0); return; } u64 a = ARG(2); u64 ft = vfs_filetime(); wr32(c, a, attrs_of(st)); wr64(c, a + 4, ft); wr64(c, a + 12, ft); wr64(c, a + 20, ft); wr32(c, a + 28, (u32)(sz >> 32)); wr32(c, a + 32, (u32)sz); RET(1); }
+static void s_GetFileAttributesExA(Cpu *c) { file_attrs_ex(c, name_a(c, ARG(0))); }
+static void s_GetFileAttributesExW(Cpu *c) { file_attrs_ex(c, name_w(c, ARG(0))); }
+static void s_GetFileInformationByHandle(Cpu *c) { int fd = handle_fd(ARG(0)); if (fd < 3) { W->last_error = 6; RET(0); return; } u64 a = ARG(1); u64 ft = vfs_filetime(); s64 sz = vfs_size(fd); wr32(c, a, vfs_fd_isdir(fd) ? 0x10 : 0x80); wr64(c, a + 4, ft); wr64(c, a + 12, ft); wr64(c, a + 20, ft); wr32(c, a + 28, 0x4e45); wr32(c, a + 32, (u32)((u64)sz >> 32)); wr32(c, a + 36, (u32)sz); wr32(c, a + 40, 1); wr32(c, a + 44, 0); wr32(c, a + 48, (u32)fd); RET(1); }
+static void s_GetFileTime(Cpu *c) { u64 ft = vfs_filetime(); if (ARG(1)) wr64(c, ARG(1), ft); if (ARG(2)) wr64(c, ARG(2), ft); if (ARG(3)) wr64(c, ARG(3), ft); RET(1); }
+/* FindFirstFile family: data layout A = 320 bytes, W = 592 bytes */
+static void fill_find(Cpu *c, u64 a, const char *name, u64 sz, int dir, int wide) {
+  u64 ft = vfs_filetime(); wr32(c, a, dir ? 0x10 : 0x80); wr64(c, a + 4, ft); wr64(c, a + 12, ft); wr64(c, a + 20, ft); wr32(c, a + 28, (u32)(sz >> 32)); wr32(c, a + 32, (u32)sz); wr32(c, a + 36, 0); wr32(c, a + 40, 0);
+  if (wide) { put_w(c, a + 44, name, 260); wr16(c, a + 44 + 520, 0); } else { put_a(c, a + 44, name, 260); wr8(c, a + 44 + 260, 0); }
+}
+static void find_first(Cpu *c, const char *pat, u64 data, int wide) {
+  int h = vfs_find_first(pat); char name[260]; u64 sz; int dir;
+  if (h < 0 || !vfs_find_next(h, name, sizeof name, &sz, &dir)) { if (h >= 0) vfs_find_close(h); W->last_error = 2; RET(~0ull); return; }
+  fill_find(c, data, name, sz, dir, wide); RET(H_FIND_BASE + h);
+}
+static void s_FindFirstFileA(Cpu *c) { find_first(c, name_a(c, ARG(0)), ARG(1), 0); }
+static void s_FindFirstFileW(Cpu *c) { find_first(c, name_w(c, ARG(0)), ARG(1), 1); }
+static void s_FindFirstFileExA(Cpu *c) { find_first(c, name_a(c, ARG(0)), ARG(2), 0); }
+static void s_FindFirstFileExW(Cpu *c) { find_first(c, name_w(c, ARG(0)), ARG(2), 1); }
+static void find_next(Cpu *c, int wide) { u64 h = ARG(0); char name[260]; u64 sz; int dir; if (h < H_FIND_BASE || h >= H_FIND_BASE + 64 || !vfs_find_next((int)(h - H_FIND_BASE), name, sizeof name, &sz, &dir)) { W->last_error = 18; RET(0); return; } fill_find(c, ARG(1), name, sz, dir, wide); RET(1); }
+static void s_FindNextFileA(Cpu *c) { find_next(c, 0); }
+static void s_FindNextFileW(Cpu *c) { find_next(c, 1); }
+static void s_FindClose(Cpu *c) { u64 h = ARG(0); if (h >= H_FIND_BASE && h < H_FIND_BASE + 64) vfs_find_close((int)(h - H_FIND_BASE)); RET(1); }
+static void s_DeleteFileA(Cpu *c) { if (vfs_remove(name_a(c, ARG(0)))) RET(1); else { W->last_error = 2; RET(0); } }
+static void s_DeleteFileW(Cpu *c) { if (vfs_remove(name_w(c, ARG(0)))) RET(1); else { W->last_error = 2; RET(0); } }
+static void s_CreateDirectoryA(Cpu *c) { if (vfs_mkdir(name_a(c, ARG(0)))) RET(1); else { W->last_error = 183; RET(0); } }
+static void s_CreateDirectoryW(Cpu *c) { if (vfs_mkdir(name_w(c, ARG(0)))) RET(1); else { W->last_error = 183; RET(0); } }
+static void s_RemoveDirectoryA(Cpu *c) { RET(vfs_remove(name_a(c, ARG(0)))); }
+static void s_RemoveDirectoryW(Cpu *c) { RET(vfs_remove(name_w(c, ARG(0)))); }
+static void s_MoveFileA(Cpu *c) { char from[1024]; e_snprintf(from, sizeof from, "%s", name_a(c, ARG(0))); RET(vfs_rename(from, name_a(c, ARG(1)))); }
+static void s_MoveFileW(Cpu *c) { char from[1024]; e_snprintf(from, sizeof from, "%s", name_w(c, ARG(0))); RET(vfs_rename(from, name_w(c, ARG(1)))); }
+static void copy_file(Cpu *c, const char *from, const char *to, int fail_exists) {
+  int src = vfs_open(from, 1, 3, 0); if (src < 0) { W->last_error = 2; RET(0); return; }
+  int dst = vfs_open(to, 2, fail_exists ? 1 : 2, 0); if (dst < 0) { vfs_close(src); W->last_error = lasterr_of(dst); RET(0); return; }
+  u8 buf[4096]; s64 r; while ((r = vfs_read(src, buf, sizeof buf)) > 0) vfs_write(dst, buf, (u64)r);
+  vfs_close(src); vfs_close(dst); RET(1);
+}
+static void s_CopyFileA(Cpu *c) { char from[1024]; e_snprintf(from, sizeof from, "%s", name_a(c, ARG(0))); copy_file(c, from, name_a(c, ARG(1)), (int)ARG(2)); }
+static void s_CopyFileW(Cpu *c) { char from[1024]; e_snprintf(from, sizeof from, "%s", name_w(c, ARG(0))); copy_file(c, from, name_w(c, ARG(1)), (int)ARG(2)); }
+static void s_GetCurrentDirectoryA(Cpu *c) { const char *d = vfs_cwd(); size_t l = e_strlen(d); if ((u32)ARG(0) > l) put_a(c, ARG(1), d, 0); RET((u32)ARG(0) > l ? l : l + 1); }
+static void s_GetCurrentDirectoryW(Cpu *c) { const char *d = vfs_cwd(); size_t l = e_strlen(d); if ((u32)ARG(0) > l) put_w(c, ARG(1), d, 0); RET((u32)ARG(0) > l ? l : l + 1); }
+static void s_SetCurrentDirectoryA(Cpu *c) { if (vfs_chdir(name_a(c, ARG(0)))) RET(1); else { W->last_error = 2; RET(0); } }
+static void s_SetCurrentDirectoryW(Cpu *c) { if (vfs_chdir(name_w(c, ARG(0)))) RET(1); else { W->last_error = 2; RET(0); } }
+static void full_path(Cpu *c, const char *n, int wide) { char out[1024]; vfs_normalize(n, out, sizeof out); size_t l = e_strlen(out); u32 cap = (u32)ARG(1); if (cap <= l) { RET(l + 1); return; } if (wide) put_w(c, ARG(2), out, 0); else put_a(c, ARG(2), out, 0); if (ARG(3)) { size_t b = l; while (b > 0 && out[b - 1] != '\\') b--; wr64(c, ARG(3), ARG(2) + (wide ? b * 2 : b)); } RET(l); }
+static void s_GetFullPathNameA(Cpu *c) { full_path(c, name_a(c, ARG(0)), 0); }
+static void s_GetFullPathNameW(Cpu *c) { full_path(c, name_w(c, ARG(0)), 1); }
+static void s_GetTempPathA(Cpu *c) { const char *d = "C:\\tmp\\"; size_t l = e_strlen(d); if ((u32)ARG(0) > l) put_a(c, ARG(1), d, 0); RET(l); }
+static void s_GetTempPathW(Cpu *c) { const char *d = "C:\\tmp\\"; size_t l = e_strlen(d); if ((u32)ARG(0) > l) put_w(c, ARG(1), d, 0); RET(l); }
+static u32 g_tmp_seq = 0x1a2b;
+static void s_GetTempFileNameA(Cpu *c) { char out[1024]; const char *dir = name_a(c, ARG(0)); char pre[8]; e_snprintf(pre, sizeof pre, "%s", ARG(1) ? name_a(c, ARG(1)) : "tmp"); u32 u = (u32)ARG(2) ? (u32)ARG(2) : ++g_tmp_seq; e_snprintf(out, sizeof out, "%s%s%s%04X.TMP", dir, (dir[0] && dir[e_strlen(dir) - 1] == '\\') ? "" : "\\", pre, u & 0xffff); if (!ARG(2)) { u8 z = 0; vfs_add(out, &z, 0); } put_a(c, ARG(3), out, 260); RET(u & 0xffff); }
+static void s_GetTempFileNameW(Cpu *c) { char dir[1024]; e_snprintf(dir, sizeof dir, "%s", name_w(c, ARG(0))); char pre[8]; e_snprintf(pre, sizeof pre, "%s", ARG(1) ? name_w(c, ARG(1)) : "tmp"); u32 u = (u32)ARG(2) ? (u32)ARG(2) : ++g_tmp_seq; char out[1024]; e_snprintf(out, sizeof out, "%s%s%s%04X.TMP", dir, (dir[0] && dir[e_strlen(dir) - 1] == '\\') ? "" : "\\", pre, u & 0xffff); if (!ARG(2)) { u8 z = 0; vfs_add(out, &z, 0); } put_w(c, ARG(3), out, 260); RET(u & 0xffff); }
+/* file mappings: MapViewOfFile copies the file into guest memory (read-only semantics) */
+static void s_CreateFileMappingA(Cpu *c) { int fd = handle_fd(ARG(0)); if (fd < 3) { W->last_error = 6; RET(0); return; } int d = vfs_dup(fd); RET(d >= 0 ? H_MAP_BASE + d : 0); }
+static void s_CreateFileMappingW(Cpu *c) { s_CreateFileMappingA(c); }
+static void s_MapViewOfFile(Cpu *c) { u64 h = ARG(0); if (h < H_MAP_BASE || h >= H_MAP_BASE + 0x1000) { RET(0); return; } int fd = (int)(h - H_MAP_BASE); s64 sz = vfs_size(fd); if (sz < 0) { RET(0); return; } u64 off = ((u64)(u32)ARG(2) << 32) | (u32)ARG(3); u64 n = ARG(4) ? ARG(4) : (u64)sz - off; u64 a = w32_heap_alloc(W, n ? n : 1, 1); u8 *p = mem_ptr(c->mem, a, n, 1); if (p) { vfs_seek(fd, (s64)off, 0); vfs_read(fd, p, n); } RET(a); }
+static void s_MapViewOfFileEx(Cpu *c) { s_MapViewOfFile(c); }
+static void s_UnmapViewOfFile(Cpu *c) { w32_heap_free(W, ARG(0)); RET(1); }
+/* MinGW inlines getc/putc: getc = (--f->_cnt >= 0 ? *f->_ptr++ : _filbuf(f)); so FILE needs a real guest buffer:
+   _ptr +0, _cnt +8, _base +16, _flag +24, _file +28.  file_sync() discards an unread buffer (seeking back) before any
+   operation that bypasses it. */
+#define FBUF 4096
+static void file_sync(Cpu *c, u64 f, int fd) { if (!f || f < 0x10000) return; s32 cnt = (s32)rd32(c, f + 8); if (cnt > 0 && fd >= 3) vfs_seek(fd, -cnt, 1); if (cnt > 0 && fd == -1) return; wr32(c, f + 8, 0); wr64(c, f, rd64(c, f + 16)); }
+static u64 file_base(Cpu *c, u64 f) { u64 b = rd64(c, f + 16); if (!b) { b = w32_heap_alloc(W, FBUF, 0); wr64(c, f + 16, b); } return b; }
+/* take up to n bytes buffered in a FILE (used so fgets/fread see what getc left) */
+static u64 file_take(Cpu *c, u64 f, u64 dst, u64 n, int stop_nl) { if (!f || f < 0x10000) return 0; s32 cnt = (s32)rd32(c, f + 8); if (cnt <= 0) return 0; u64 p = rd64(c, f); u64 o = 0; while (o < n && cnt > 0) { u8 ch = rd8(c, p++); wr8(c, dst + o, ch); o++; cnt--; if (stop_nl && ch == '\n') break; } wr32(c, f + 8, (u32)cnt); wr64(c, f, p); return o; }
+static void s_filbuf(Cpu *c) {
+  u64 f = ARG(0); int fd = file_fd(c, f); if (!fd || fd == 1 || fd == 2) { RET(~0ull); return; }
+  u64 b = file_base(c, f); u8 *p = mem_ptr(c->mem, b, FBUF, 1); if (!p) { RET(~0ull); return; }
+  s64 r = raw_read(fd, p, FBUF);
+  if (r == -2) { retry_and_yield(c, g_cur_slot); return; }
+  if (r <= 0) { wr32(c, f + 8, 0); wr32(c, f + 24, rd32(c, f + 24) | 0x10); RET(~0ull); return; }
+  wr64(c, f, b + 1); wr32(c, f + 8, (u32)(r - 1)); RET(p[0]);
+}
+static void s_flsbuf(Cpu *c) { int fd = file_fd(c, ARG(1)); u8 ch = (u8)ARG(0); if (!fd || raw_write(fd, &ch, 1) < 0) { RET(~0ull); return; } RET(ch); }
+static void s_fdopen(Cpu *c) { int fd = (int)ARG(0); if (fd == 0) { RET(W->ubuf); return; } if (fd == 1 || fd == 2) { RET(W->ubuf + 0x30 * fd); return; } if (!vfs_is_open(fd)) { set_errno(c, 9); RET(0); return; } RET(make_file(c, fd)); }
+/* ---- CRT ---- */
+static int parse_mode(const char *m, int *acc, int *disp, int *append) {
+  *append = 0; char k = m[0]; int plus = e_strchr(m, '+') != 0;
+  if (k == 'r') { *acc = plus ? 3 : 1; *disp = 3; } else if (k == 'w') { *acc = plus ? 3 : 2; *disp = 2; } else if (k == 'a') { *acc = plus ? 3 : 2; *disp = 4; *append = 1; } else return 0;
+  return 1;
+}
+static u64 crt_fopen(Cpu *c, const char *n, const char *m) { int acc, disp, app; if (!parse_mode(m, &acc, &disp, &app)) { set_errno(c, 22); return 0; } int fd = vfs_open(n, acc, disp, app); if (fd < 0) { set_errno(c, errno_of(fd)); return 0; } return make_file(c, fd); }
+static void s_fopen(Cpu *c) { char n[1024]; e_snprintf(n, sizeof n, "%s", name_a(c, ARG(0))); RET(crt_fopen(c, n, name_a(c, ARG(1)))); }
+static void s_wfopen(Cpu *c) { char n[1024]; e_snprintf(n, sizeof n, "%s", name_w(c, ARG(0))); RET(crt_fopen(c, n, name_w(c, ARG(1)))); }
+static void s_fopen_s(Cpu *c) { char n[1024]; e_snprintf(n, sizeof n, "%s", name_a(c, ARG(1))); u64 f = crt_fopen(c, n, name_a(c, ARG(2))); wr64(c, ARG(0), f); RET(f ? 0 : rd32(c, ERRNO_ADDR)); }
+static void s_wfopen_s(Cpu *c) { char n[1024]; e_snprintf(n, sizeof n, "%s", name_w(c, ARG(1))); u64 f = crt_fopen(c, n, name_w(c, ARG(2))); wr64(c, ARG(0), f); RET(f ? 0 : rd32(c, ERRNO_ADDR)); }
+static void s_fsopen(Cpu *c) { s_fopen(c); }
+static void s_freopen(Cpu *c) { /* redirect only supported for files → new FILE*, std streams unchanged */ int old = file_fd(c, ARG(2)); if (old >= 3) vfs_close(old); char n[1024]; e_snprintf(n, sizeof n, "%s", name_a(c, ARG(0))); int acc, disp, app; if (!parse_mode(name_a(c, ARG(1)), &acc, &disp, &app)) { RET(0); return; } int fd = vfs_open(n, acc, disp, app); if (fd < 0) { set_errno(c, errno_of(fd)); RET(0); return; } if (old >= 3) { wr32(c, ARG(2) + 28, (u32)fd); RET(ARG(2)); } else RET(make_file(c, fd)); }
+static void s_fclose(Cpu *c) { int fd = file_fd(c, ARG(0)); if (fd >= 3) { vfs_close(fd); w32_heap_free(W, ARG(0)); RET(0); } else RET(fd ? 0 : ~0ull); }
+static void s_fread(Cpu *c) { int fd = file_fd(c, ARG(3)); u64 sz = ARG(1), cnt = ARG(2); if (!fd || !sz) { RET(0); return; } u64 pre = file_take(c, ARG(3), ARG(0), sz * cnt, 0); if (pre == sz * cnt) { RET(cnt); return; } s64 r = fd_read(c, fd, ARG(0) + pre, sz * cnt - pre); if (r == -2 && pre) { RET(pre / sz); return; } if (r >= 0) r += (s64)pre; if (r == -2) { retry_and_yield(c, g_cur_slot); return; } if (r < 0) r = 0; RET((u64)r / sz); }
+static void s_fwrite(Cpu *c) { int fd = file_fd(c, ARG(3)); u64 sz = ARG(1), cnt = ARG(2); if (fd <= 0 || !sz) { RET(0); return; } s64 r = fd_write(c, fd, ARG(0), sz * cnt); if (r < 0) r = 0; RET((u64)r / sz); }
+static void s_fgets(Cpu *c) {
+  int fd = file_fd(c, ARG(2)); u64 buf = ARG(0); int n = (int)ARG(1); if (!fd || n <= 1) { RET(0); return; }
+  { u64 pre = file_take(c, ARG(2), buf, (u64)(n - 1), 1); if (pre) { if (rd8(c, buf + pre - 1) != '\n' && (int)pre < n - 1 && fd >= 3) { int i = (int)pre; u8 ch; while (i < n - 1) { s64 r = vfs_read(fd, &ch, 1); if (r <= 0) break; wr8(c, buf + i, ch); i++; if (ch == '\n') break; } pre = (u64)i; } wr8(c, buf + pre, 0); RET(buf); return; } }
+  if (fd == -1 && vfs_resolve(0) == -1) { u8 tmp[4096]; s64 r = vfs_stdin_read(tmp, (u64)(n - 1) < sizeof tmp ? (u64)(n - 1) : sizeof tmp); if (r == -2) { retry_and_yield(c, g_cur_slot); return; } if (r <= 0) { RET(0); return; } u8 *p = mem_ptr(c->mem, buf, (u64)r + 1, 1); if (p) { e_memcpy(p, tmp, (size_t)r); p[r] = 0; } RET(buf); return; }
+  int i = 0; u8 ch; while (i < n - 1) { s64 r = raw_read(fd, &ch, 1); if (r <= 0) break; wr8(c, buf + i, ch); i++; if (ch == '\n') break; }
+  if (!i) { RET(0); return; } wr8(c, buf + i, 0); RET(buf);
+}
+static void s_fgetc(Cpu *c) { int fd = file_fd(c, ARG(0)); u8 ch; if (!fd) { RET(~0ull); return; } if (file_take(c, ARG(0), W->ubuf + 0x7f0, 1, 0)) { RET(rd8(c, W->ubuf + 0x7f0)); return; } s64 r = raw_read(fd, &ch, 1); if (r == -2) { retry_and_yield(c, g_cur_slot); return; } RET(r == 1 ? ch : ~0ull); }
+static void s_getchar(Cpu *c) { u8 ch; s64 r = raw_read(0, &ch, 1); if (r == -2) { retry_and_yield(c, g_cur_slot); return; } RET(r == 1 ? ch : ~0ull); }
+static void s_ungetc(Cpu *c) { int fd = file_fd(c, ARG(1)); RET(fd >= 3 ? vfs_ungetc(fd, (int)ARG(0)) : ~0ull); }
+static void s_fseek(Cpu *c) { int fd = file_fd(c, ARG(0)); file_sync(c, ARG(0), fd); wr32(c, ARG(0) + 24, rd32(c, ARG(0) + 24) & ~0x10u); RET(fd >= 3 && vfs_seek(fd, (s64)(s32)(u32)ARG(1), (int)ARG(2)) >= 0 ? 0 : ~0ull); }
+static void s_fseeki64(Cpu *c) { int fd = file_fd(c, ARG(0)); file_sync(c, ARG(0), fd); wr32(c, ARG(0) + 24, rd32(c, ARG(0) + 24) & ~0x10u); RET(fd >= 3 && vfs_seek(fd, (s64)ARG(1), (int)ARG(2)) >= 0 ? 0 : ~0ull); }
+static void s_ftell(Cpu *c) { int fd = file_fd(c, ARG(0)); file_sync(c, ARG(0), fd); RET(fd >= 3 ? (u64)vfs_tell(fd) : ~0ull); }
+static void s_rewind(Cpu *c) { int fd = file_fd(c, ARG(0)); file_sync(c, ARG(0), fd); wr32(c, ARG(0) + 24, rd32(c, ARG(0) + 24) & ~0x10u); if (fd >= 3) vfs_seek(fd, 0, 0); }
+static void s_feof(Cpu *c) { int fd = file_fd(c, ARG(0)); if (ARG(0) >= 0x10000 && (rd32(c, ARG(0) + 24) & 0x10)) { RET(1); return; } RET(fd >= 3 ? vfs_eof(fd) && (s32)rd32(c, ARG(0) + 8) <= 0 : 0); }
+static void s_ferror(Cpu *c) { RET(0); }
+static void s_clearerr(Cpu *c) { int fd = file_fd(c, ARG(0)); if (fd >= 3) vfs_clearerr(fd); if (ARG(0) >= 0x10000) wr32(c, ARG(0) + 24, rd32(c, ARG(0) + 24) & ~0x30u); }
+static void s_fileno(Cpu *c) { int fd = file_fd(c, ARG(0)); RET(fd == -1 ? 0 : fd > 0 ? fd : ~0ull); }
+static void s_filelengthi64(Cpu *c) { s64 s = vfs_size((int)ARG(0)); RET(s < 0 ? ~0ull : (u64)s); }
+static void s_isatty(Cpu *c) { int r = vfs_resolve((int)ARG(0)); RET(r == -1 || r == 1 || r == 2); }
+static void s_get_osfhandle(Cpu *c) { u64 fd = ARG(0); RET(fd <= 2 ? 0x10 + fd : vfs_is_open((int)fd) ? H_FILE_BASE + fd : ~0ull); }
+static void s_open_osfhandle(Cpu *c) { int fd = handle_fd(ARG(0)); RET(fd == -1 ? 0 : fd > 0 ? fd : ~0ull); }
+static int oflag_to_disp(u32 o) { if ((o & 0x100) && (o & 0x400)) return 1; if ((o & 0x100) && (o & 0x200)) return 2; if (o & 0x100) return 4; if (o & 0x200) return 5; return 3; }
+static u64 crt_open(Cpu *c, const char *n, u32 oflag) { int acc = (oflag & 3) == 0 ? 1 : (oflag & 3) == 1 ? 2 : 3; int fd = vfs_open(n, acc, oflag_to_disp(oflag), (oflag & 8) != 0); if (fd < 0) { set_errno(c, errno_of(fd)); return ~0ull; } return (u64)fd; }
+static void s_open(Cpu *c) { RET(crt_open(c, name_a(c, ARG(0)), (u32)ARG(1))); }
+static void s_wopen(Cpu *c) { RET(crt_open(c, name_w(c, ARG(0)), (u32)ARG(1))); }
+static void s_sopen_s(Cpu *c) { u64 fd = crt_open(c, name_a(c, ARG(1)), (u32)ARG(2)); wr32(c, ARG(0), (u32)fd); RET(fd == ~0ull ? rd32(c, ERRNO_ADDR) : 0); }
+static void s_wsopen_s(Cpu *c) { u64 fd = crt_open(c, name_w(c, ARG(1)), (u32)ARG(2)); wr32(c, ARG(0), (u32)fd); RET(fd == ~0ull ? rd32(c, ERRNO_ADDR) : 0); }
+static void s_sopen(Cpu *c) { s_open(c); }
+static void s_close(Cpu *c) { RET(vfs_close((int)ARG(0)) ? 0 : ~0ull); }
+static void s_read(Cpu *c) { int fd = (int)ARG(0); if (fd == 0) fd = -1; s64 r = fd_read(c, fd, ARG(1), (u32)ARG(2)); if (r == -2) { retry_and_yield(c, g_cur_slot); return; } if (r < 0) { set_errno(c, 9); RET(~0ull); return; } RET((u64)r); }
+static void s_write(Cpu *c) { s64 r = fd_write(c, (int)ARG(0), ARG(1), (u32)ARG(2)); if (r < 0) { set_errno(c, 9); RET(~0ull); return; } RET((u64)r); }
+static void s_lseek(Cpu *c) { s64 r = vfs_seek((int)ARG(0), (s64)(s32)(u32)ARG(1), (int)ARG(2)); RET(r < 0 ? ~0ull : (u64)r); }
+static void s_lseeki64(Cpu *c) { s64 r = vfs_seek((int)ARG(0), (s64)ARG(1), (int)ARG(2)); RET(r < 0 ? ~0ull : (u64)r); }
+static void s_tell(Cpu *c) { s64 r = vfs_tell((int)ARG(0)); RET(r < 0 ? ~0ull : (u64)r); }
+static void s_eof(Cpu *c) { int fd = (int)ARG(0); s64 p = vfs_tell(fd), s = vfs_size(fd); RET(p < 0 ? ~0ull : p >= s); }
+static void s_chsize(Cpu *c) { int fd = (int)ARG(0); s64 keep = vfs_tell(fd); if (keep < 0) { RET(~0ull); return; } vfs_seek(fd, (s64)ARG(1), 0); vfs_truncate(fd); vfs_seek(fd, keep, 0); RET(0); }
+static void s_dup(Cpu *c) { int d = vfs_dup((int)ARG(0)); if (d < 0) set_errno(c, 9); RET(d < 0 ? ~0ull : (u64)d); }
+static void s_dup2(Cpu *c) { int d = vfs_dup2((int)ARG(0), (int)ARG(1)); if (d < 0) set_errno(c, 9); RET(d < 0 ? ~0ull : 0); }
+static void s_setbuf(Cpu *c) { }
+/* Toolhelp: a single process (ourselves) so shells can find their parent */
+static void s_CreateToolhelp32Snapshot(Cpu *c) { RET(0x5000); }
+static void s_Process32First(Cpu *c) { u64 a = ARG(1); wr32(c, a + 8, 4242); wr32(c, a + 32, 1); wr32(c, a + 36, 1); wr32(c, a + 40, 8); put_a(c, a + 44, W->exe_name, 260); RET(1); }
+static void s_Process32Next(Cpu *c) { W->last_error = 18; RET(0); }
+static void s_Process32FirstW(Cpu *c) { u64 a = ARG(1); wr32(c, a + 8, 4242); wr32(c, a + 32, 1); wr32(c, a + 36, 1); wr32(c, a + 40, 8); put_w(c, a + 44, W->exe_name, 260); RET(1); }
+static void s_commit(Cpu *c) { RET(0); }
+/* stat family */
+static void fill_stat(Cpu *c, u64 st, int kind, u64 size, int big) {
+  u64 t = unix_time(); wr32(c, st, 0); wr16(c, st + 4, 0); wr16(c, st + 6, (u16)((kind == 2 ? 0x4000 | 0x1ff : kind == 3 ? 0x2000 | 0x1b6 : 0x8000 | 0x1b6))); wr16(c, st + 8, 1); wr16(c, st + 10, 0); wr16(c, st + 12, 0); wr32(c, st + 16, 0);
+  if (big) { wr64(c, st + 24, size); wr64(c, st + 32, t); wr64(c, st + 40, t); wr64(c, st + 48, t); } else { wr32(c, st + 20, (u32)size); wr64(c, st + 24, t); wr64(c, st + 32, t); wr64(c, st + 40, t); }
+}
+static void stat_path(Cpu *c, const char *n, u64 st, int big) { u64 sz; int k = vfs_stat(n, &sz); if (!k) { set_errno(c, 2); RET(~0ull); return; } fill_stat(c, st, k, sz, big); RET(0); }
+static void s_stat64(Cpu *c) { stat_path(c, name_a(c, ARG(0)), ARG(1), 1); }
+static void s_stat64i32(Cpu *c) { stat_path(c, name_a(c, ARG(0)), ARG(1), 0); }
+static void s_wstat64(Cpu *c) { stat_path(c, name_w(c, ARG(0)), ARG(1), 1); }
+static void s_wstat64i32(Cpu *c) { stat_path(c, name_w(c, ARG(0)), ARG(1), 0); }
+static void fstat_fd(Cpu *c, int fd, u64 st, int big) { if (fd <= 2) { fill_stat(c, st, 3, 0, big); RET(0); return; } s64 s = vfs_size(fd); if (s < 0) { set_errno(c, 9); RET(~0ull); return; } fill_stat(c, st, vfs_fd_isdir(fd) ? 2 : 1, (u64)s, big); RET(0); }
+static void s_fstat64(Cpu *c) { fstat_fd(c, (int)ARG(0), ARG(1), 1); }
+static void s_fstat64i32(Cpu *c) { fstat_fd(c, (int)ARG(0), ARG(1), 0); }
+static void s_access(Cpu *c) { u64 sz; if (vfs_stat(name_a(c, ARG(0)), &sz)) RET(0); else { set_errno(c, 2); RET(~0ull); } }
+static void s_waccess(Cpu *c) { u64 sz; if (vfs_stat(name_w(c, ARG(0)), &sz)) RET(0); else { set_errno(c, 2); RET(~0ull); } }
+static void s_access_s(Cpu *c) { u64 sz; RET(vfs_stat(name_a(c, ARG(0)), &sz) ? 0 : 2); }
+static void s_unlink(Cpu *c) { if (vfs_remove(name_a(c, ARG(0)))) RET(0); else { set_errno(c, 2); RET(~0ull); } }
+static void s_wunlink(Cpu *c) { if (vfs_remove(name_w(c, ARG(0)))) RET(0); else { set_errno(c, 2); RET(~0ull); } }
+static void s_mkdir(Cpu *c) { if (vfs_mkdir(name_a(c, ARG(0)))) RET(0); else { set_errno(c, 17); RET(~0ull); } }
+static void s_wmkdir(Cpu *c) { if (vfs_mkdir(name_w(c, ARG(0)))) RET(0); else { set_errno(c, 17); RET(~0ull); } }
+static void s_rmdir(Cpu *c) { RET(vfs_remove(name_a(c, ARG(0))) ? 0 : ~0ull); }
+static void s_rename(Cpu *c) { char from[1024]; e_snprintf(from, sizeof from, "%s", name_a(c, ARG(0))); RET(vfs_rename(from, name_a(c, ARG(1))) ? 0 : ~0ull); }
+static void s_wrename(Cpu *c) { char from[1024]; e_snprintf(from, sizeof from, "%s", name_w(c, ARG(0))); RET(vfs_rename(from, name_w(c, ARG(1))) ? 0 : ~0ull); }
+static void s_getcwd(Cpu *c) { const char *d = vfs_cwd(); size_t l = e_strlen(d); u64 buf = ARG(0); u32 n = (u32)ARG(1); if (!buf) { buf = w32_heap_alloc(W, l + 1, 0); n = (u32)l + 1; } if (n <= l) { set_errno(c, 34); RET(0); return; } put_a(c, buf, d, 0); RET(buf); }
+static void s_wgetcwd(Cpu *c) { const char *d = vfs_cwd(); size_t l = e_strlen(d); u64 buf = ARG(0); u32 n = (u32)ARG(1); if (!buf) { buf = w32_heap_alloc(W, (l + 1) * 2, 0); n = (u32)l + 1; } if (n <= l) { set_errno(c, 34); RET(0); return; } put_w(c, buf, d, 0); RET(buf); }
+static void s_chdir(Cpu *c) { if (vfs_chdir(name_a(c, ARG(0)))) RET(0); else { set_errno(c, 2); RET(~0ull); } }
+static void s_wchdir(Cpu *c) { if (vfs_chdir(name_w(c, ARG(0)))) RET(0); else { set_errno(c, 2); RET(~0ull); } }
+static void s_fullpath(Cpu *c) { char out[1024]; vfs_normalize(ARG(1) ? name_a(c, ARG(1)) : ".", out, sizeof out); size_t l = e_strlen(out) + 1; u64 dst = ARG(0); if (!dst) dst = w32_heap_alloc(W, l, 0); else if (ARG(2) < l) { RET(0); return; } put_a(c, dst, out, 0); RET(dst); }
+static void s_wfullpath(Cpu *c) { char out[1024]; vfs_normalize(ARG(1) ? name_w(c, ARG(1)) : ".", out, sizeof out); size_t l = e_strlen(out) + 1; u64 dst = ARG(0); if (!dst) dst = w32_heap_alloc(W, l * 2, 0); else if (ARG(2) < l) { RET(0); return; } put_w(c, dst, out, 0); RET(dst); }
+/* _findfirst64 family (struct _finddata64_t: attrib(4) pad(4) ctime(8) atime(8) wtime(8) size(8) name[260]) */
+static void s_findfirst64(Cpu *c) { int h = vfs_find_first(name_a(c, ARG(0))); char nm[260]; u64 sz; int dir; if (h < 0 || !vfs_find_next(h, nm, sizeof nm, &sz, &dir)) { if (h >= 0) vfs_find_close(h); set_errno(c, 2); RET(~0ull); return; } u64 a = ARG(1); u64 t = unix_time(); wr32(c, a, dir ? 0x10 : 0x80); wr64(c, a + 8, t); wr64(c, a + 16, t); wr64(c, a + 24, t); wr64(c, a + 32, sz); put_a(c, a + 40, nm, 260); RET(H_FIND_BASE + h); }
+static void s_findnext64(Cpu *c) { u64 h = ARG(0); char nm[260]; u64 sz; int dir; if (h < H_FIND_BASE || !vfs_find_next((int)(h - H_FIND_BASE), nm, sizeof nm, &sz, &dir)) { set_errno(c, 2); RET(~0ull); return; } u64 a = ARG(1); u64 t = unix_time(); wr32(c, a, dir ? 0x10 : 0x80); wr64(c, a + 8, t); wr64(c, a + 16, t); wr64(c, a + 24, t); wr64(c, a + 32, sz); put_a(c, a + 40, nm, 260); RET(0); }
+static void s_findclose(Cpu *c) { u64 h = ARG(0); if (h >= H_FIND_BASE) vfs_find_close((int)(h - H_FIND_BASE)); RET(0); }
+/* console input helpers */
+static void s_ReadConsoleA(Cpu *c) { s64 r = fd_read(c, -1, ARG(1), (u32)ARG(2)); if (r == -2) { retry_and_yield(c, g_cur_slot); return; } if (ARG(3)) wr32(c, ARG(3), r < 0 ? 0 : (u32)r); RET(1); }
+static void s_ReadConsoleW(Cpu *c) { u8 tmp[2048]; u32 want = (u32)ARG(2); if (want > sizeof tmp) want = sizeof tmp; s64 r = vfs_stdin_read(tmp, want); if (r == -2) { retry_and_yield(c, g_cur_slot); return; } if (r < 0) r = 0; for (s64 i = 0; i < r; i++) wr16(c, ARG(1) + i * 2, tmp[i]); if (ARG(3)) wr32(c, ARG(3), (u32)r); RET(1); }
+static void s_GetNumberOfConsoleInputEvents(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), vfs_stdin_available() ? 1 : 0); RET(1); }
+static void s_kbhit(Cpu *c) { RET(vfs_stdin_available() ? 1 : 0); }
+static void s_getch(Cpu *c) { u8 ch; s64 r = vfs_stdin_read(&ch, 1); if (r == -2) { retry_and_yield(c, g_cur_slot); return; } RET(r == 1 ? ch : ~0ull); }
+static void s_gets_s(Cpu *c) { c->r[R8] = c->r[RCX]; c->r[RCX] = ARG(0); /* reuse fgets: (buf, n, stdin) */ u64 buf = ARG(0); int n = (int)ARG(1); u8 tmp[4096]; s64 r = vfs_stdin_read(tmp, (u64)(n - 1) < sizeof tmp ? (u64)(n - 1) : sizeof tmp); if (r == -2) { retry_and_yield(c, g_cur_slot); return; } if (r <= 0) { RET(0); return; } while (r > 0 && (tmp[r - 1] == '\n' || tmp[r - 1] == '\r')) r--; u8 *p = mem_ptr(c->mem, buf, (u64)r + 1, 1); if (p) { e_memcpy(p, tmp, (size_t)r); p[r] = 0; } RET(buf); }
+
+
+/* console input records (INPUT_RECORD = 20 bytes): one KEY_EVENT (key down) per stdin byte; '\n' → VK_RETURN '\r' */
+static void put_key_record(Cpu *c, u64 a, u8 ch) {
+  u16 vk = ch == '\n' ? 0x0D : ch == '\t' ? 0x09 : ch == 8 ? 0x08 : ch == 27 ? 0x1B : (ch >= 'a' && ch <= 'z') ? (u16)(ch - 32) : (ch >= 'A' && ch <= 'Z') ? ch : (ch >= '0' && ch <= '9') ? ch : 0;
+  if (ch == '\n') ch = '\r';
+  wr16(c, a, 1); wr16(c, a + 2, 0); wr32(c, a + 4, 1); wr16(c, a + 8, 1); wr16(c, a + 10, vk); wr16(c, a + 12, 0); wr16(c, a + 14, ch); wr32(c, a + 16, 0);
+}
+static void s_ReadConsoleInputW(Cpu *c) {
+  u32 cap = (u32)ARG(2); if (!cap) { if (ARG(3)) wr32(c, ARG(3), 0); RET(1); return; }
+  u8 tmp[256]; s64 r = vfs_stdin_read(tmp, cap < sizeof tmp ? cap : sizeof tmp);
+  if (r == -2) { retry_and_yield(c, g_cur_slot); return; }
+  if (r <= 0) { /* EOF: deliver Ctrl-Z Enter so line readers terminate */ put_key_record(c, ARG(1), 26); if (ARG(3)) wr32(c, ARG(3), 1); RET(1); return; }
+  for (s64 i = 0; i < r; i++) put_key_record(c, ARG(1) + (u64)i * 20, tmp[i]);
+  if (ARG(3)) wr32(c, ARG(3), (u32)r); RET(1);
+}
+static void s_PeekConsoleInputW(Cpu *c) { if (ARG(3)) wr32(c, ARG(3), vfs_stdin_available() ? 1 : 0); if (vfs_stdin_available() && ARG(2)) put_key_record(c, ARG(1), '\n'); RET(1); }
+static void s_FlushConsoleInputBuffer(Cpu *c) { RET(1); }
+static void s_PeekConsoleInputA(Cpu *c) { s_PeekConsoleInputW(c); }
+
+/* ---- process environment (dynamic): host table, mirrored into guest memory on demand ---- */
+#define ENV_MAX 256
+static char *g_env[ENV_MAX]; static int g_nenv; static int g_env_dirty = 1;
+static int env_find(const char *name, size_t nl) { for (int i = 0; i < g_nenv; i++) { const char *e = g_env[i]; size_t k = 0; while (k < nl && e[k] && lc_(e[k]) == lc_(name[k])) k++; if (k == nl && e[k] == '=') return i; } return -1; }
+static const char *env_get(const char *name) { int i = env_find(name, e_strlen(name)); return i < 0 ? 0 : g_env[i] + e_strlen(name) + 1; }
+static void env_put(const char *kv) {   /* "NAME=value" sets, "NAME=" removes (msvcrt semantics) */
+  const char *eq = e_strchr(kv, '='); if (!eq || eq == kv) return; size_t nl = (size_t)(eq - kv); int i = env_find(kv, nl);
+  if (!eq[1]) { if (i >= 0) { g_env[i] = g_env[--g_nenv]; g_env_dirty = 1; } return; }
+  size_t l = e_strlen(kv) + 1; char *copy = emu_alloc(l); e_memcpy(copy, kv, l);
+  if (i >= 0) g_env[i] = copy; else if (g_nenv < ENV_MAX) g_env[g_nenv++] = copy; g_env_dirty = 1;
+}
+static void env_set(const char *name, const char *val) { char kv[4096]; e_snprintf(kv, sizeof kv, "%s=%s", name, val ? val : ""); env_put(kv); }
+void w32_env_init(const char **envs) { g_nenv = 0; g_env_dirty = 1; for (int i = 0; envs[i]; i++) env_put(envs[i]); }
+static void env_sync(Cpu *c) {   /* rebuild guest envp[], narrow block and wide block */
+  if (!g_env_dirty) return; g_env_dirty = 0; Win32 *w = W;
+  size_t total = 1; for (int i = 0; i < g_nenv; i++) total += e_strlen(g_env[i]) + 1;
+  u64 envp = w32_heap_alloc(w, 8 * (size_t)(g_nenv + 1), 1), blk = w32_heap_alloc(w, total, 1), wblk = w32_heap_alloc(w, total * 2, 1); u64 o = 0;
+  for (int i = 0; i < g_nenv; i++) { size_t l = e_strlen(g_env[i]) + 1; put_a(c, blk + o, g_env[i], 0); for (size_t k = 0; k < l; k++) wr16(c, wblk + (o + k) * 2, (u8)g_env[i][k]); wr64(c, envp + i * 8, blk + o); o += l; }
+  wr8(c, blk + o, 0); wr16(c, wblk + o * 2, 0); wr64(c, envp + g_nenv * 8, 0);
+  w->env_a = blk; w->env_w = wblk; wr64(c, w->ubuf + 0x228, envp);
+}
+static void s_getenv(Cpu *c) { const char *v = env_get(gstr(c, ARG(0))); if (!v) { RET(0); return; } env_sync(c); /* return pointer inside the guest block so it stays valid */ u64 blk = W->env_a; const char *n = gstr(c, ARG(0)); size_t nl = e_strlen(n); u64 p = blk; for (int i = 0; i < g_nenv; i++) { size_t l = e_strlen(g_env[i]) + 1; if (env_find(n, nl) == i) { RET(p + nl + 1); return; } p += l; } RET(0); }
+static void s_wgetenv(Cpu *c) { const char *v = env_get(name_w(c, ARG(0))); if (!v) { RET(0); return; } u64 p = w32_heap_alloc(W, (e_strlen(v) + 1) * 2, 0); put_w(c, p, v, 0); RET(p); }
+static void s_getenv_s(Cpu *c) { const char *v = env_get(gstr(c, ARG(3))); size_t l = v ? e_strlen(v) + 1 : 0; if (ARG(0)) wr64(c, ARG(0), l); if (!v) { RET(0); return; } if (ARG(2) < l) { RET(34); return; } put_a(c, ARG(1), v, 0); RET(0); }
+static void s_dupenv_s(Cpu *c) { const char *v = env_get(gstr(c, ARG(2))); if (!v) { wr64(c, ARG(0), 0); if (ARG(1)) wr64(c, ARG(1), 0); RET(0); return; } wr64(c, ARG(0), w32_guest_strdup(W, v)); if (ARG(1)) wr64(c, ARG(1), e_strlen(v) + 1); RET(0); }
+static void s_putenv(Cpu *c) { env_put(gstr(c, ARG(0))); RET(0); }
+static void s_wputenv(Cpu *c) { env_put(name_w(c, ARG(0))); RET(0); }
+static void s_putenv_s(Cpu *c) { char n[1024]; e_snprintf(n, sizeof n, "%s", gstr(c, ARG(0))); env_set(n, gstr(c, ARG(1))); RET(0); }
+static void s_GetEnvironmentVariableA(Cpu *c) { const char *v = env_get(gstr(c, ARG(0))); if (!v) { W->last_error = 203; RET(0); return; } size_t l = e_strlen(v); if ((u32)ARG(2) <= l) { RET(l + 1); return; } put_a(c, ARG(1), v, 0); RET(l); }
+static void s_GetEnvironmentVariableW(Cpu *c) { const char *v = env_get(name_w(c, ARG(0))); if (!v) { W->last_error = 203; RET(0); return; } size_t l = e_strlen(v); if ((u32)ARG(2) <= l) { RET(l + 1); return; } put_w(c, ARG(1), v, 0); RET(l); }
+static void s_SetEnvironmentVariableA(Cpu *c) { char n[1024]; e_snprintf(n, sizeof n, "%s", gstr(c, ARG(0))); if (ARG(1)) env_set(n, gstr(c, ARG(1))); else env_set(n, ""); RET(1); }
+static void s_SetEnvironmentVariableW(Cpu *c) { char n[1024]; e_snprintf(n, sizeof n, "%s", name_w(c, ARG(0))); if (ARG(1)) env_set(n, name_w(c, ARG(1))); else env_set(n, ""); RET(1); }
+static size_t expand_env(const char *s, char *out, size_t cap) { size_t o = 0; while (*s) { if (*s == '%') { const char *e = e_strchr(s + 1, '%'); if (e) { char n[256]; size_t nl = (size_t)(e - s - 1); if (nl < sizeof n) { e_memcpy(n, s + 1, nl); n[nl] = 0; const char *v = env_get(n); if (v) { size_t vl = e_strlen(v); if (o + vl < cap) e_memcpy(out + o, v, vl); o += vl; s = e + 1; continue; } } } } if (o + 1 < cap) out[o] = *s; o++; s++; } if (o < cap) out[o] = 0; else out[cap - 1] = 0; return o + 1; }
+static void s_ExpandEnvironmentStringsA(Cpu *c) { char out[4096]; size_t n = expand_env(gstr(c, ARG(0)), out, sizeof out); if (ARG(1) && (u32)ARG(2) >= n) put_a(c, ARG(1), out, 0); RET(n); }
+static void s_ExpandEnvironmentStringsW(Cpu *c) { char out[4096]; size_t n = expand_env(name_w(c, ARG(0)), out, sizeof out); if (ARG(1) && (u32)ARG(2) >= n) put_w(c, ARG(1), out, 0); RET(n); }
+static void s_GetEnvironmentStrings(Cpu *c) { env_sync(c); RET(W->env_a); }
+static void s_GetEnvironmentStringsW(Cpu *c) { env_sync(c); RET(W->env_w); }
+static void s_p__environ(Cpu *c) { env_sync(c); RET(W->ubuf + 0x228); }
+static void s_get_initial_narrow_environment(Cpu *c) { env_sync(c); RET(rd64(c, W->ubuf + 0x228)); }
+static void s_getmainargs(Cpu *c) { env_sync(c); wr32(c, ARG(0), rd32(c, W->ubuf + 0x200)); wr64(c, ARG(1), rd64(c, W->ubuf + 0x208)); wr64(c, ARG(2), rd64(c, W->ubuf + 0x228)); RET(0); }
+/* ---- string helpers that were ret0 stubs ---- */
+static int in_set(const char *set, char ch) { for (; *set; set++) if (*set == ch) return 1; return 0; }
+static void s_strspn(Cpu *c) { const char *s = gstr(c, ARG(0)); const char *set = gstr(c, ARG(1)); u64 n = 0; while (s[n] && in_set(set, s[n])) n++; RET(n); }
+static void s_strcspn(Cpu *c) { const char *s = gstr(c, ARG(0)); const char *set = gstr(c, ARG(1)); u64 n = 0; while (s[n] && !in_set(set, s[n])) n++; RET(n); }
+static void s_strpbrk(Cpu *c) { const char *s = gstr(c, ARG(0)); const char *set = gstr(c, ARG(1)); for (u64 n = 0; s[n]; n++) if (in_set(set, s[n])) { RET(ARG(0) + n); return; } RET(0); }
+static u64 g_strtok_next;
+static void strtok_impl(Cpu *c, u64 str, u64 delim, u64 *state) {
+  if (!str) str = *state; if (!str) { RET(0); return; }
+  const char *d = gstr(c, delim); const char *s = gstr(c, str); u64 i = 0; while (s[i] && in_set(d, s[i])) i++;
+  if (!s[i]) { *state = 0; RET(0); return; }
+  u64 start = i; while (s[i] && !in_set(d, s[i])) i++;
+  if (s[i]) { wr8(c, str + i, 0); *state = str + i + 1; } else *state = 0;
+  RET(str + start);
+}
+static void s_strtok(Cpu *c) { strtok_impl(c, ARG(0), ARG(1), &g_strtok_next); }
+static void s_strtok_s(Cpu *c) { u64 st = rd64(c, ARG(2)); strtok_impl(c, ARG(0), ARG(1), &st); wr64(c, ARG(2), st); }
+static void s_strlwr(Cpu *c) { u64 a = ARG(0); for (u64 i = 0;; i++) { u8 ch = rd8(c, a + i); if (!ch) break; if (ch >= 'A' && ch <= 'Z') wr8(c, a + i, ch + 32); } RET(a); }
+static void s_strupr(Cpu *c) { u64 a = ARG(0); for (u64 i = 0;; i++) { u8 ch = rd8(c, a + i); if (!ch) break; if (ch >= 'a' && ch <= 'z') wr8(c, a + i, ch - 32); } RET(a); }
+static void s_strrev(Cpu *c) { u64 a = ARG(0); u64 l = e_strlen(gstr(c, a)); for (u64 i = 0; i + 1 < l - i && l; i++) { u8 x = rd8(c, a + i), y = rd8(c, a + l - 1 - i); wr8(c, a + i, y); wr8(c, a + l - 1 - i, x); } RET(a); }
+static void itoa_impl(Cpu *c, s64 v, int is_signed, u64 dst, int radix) {
+  char buf[72]; int n = 0; u64 u = (u64)v; int neg = 0; if (radix < 2 || radix > 36) radix = 10;
+  if (is_signed && radix == 10 && v < 0) { neg = 1; u = (u64)(-v); }
+  do { int d = (int)(u % (u64)radix); buf[n++] = (char)(d < 10 ? '0' + d : 'a' + d - 10); u /= (u64)radix; } while (u);
+  if (neg) buf[n++] = '-';
+  for (int i = 0; i < n; i++) wr8(c, dst + i, (u8)buf[n - 1 - i]); wr8(c, dst + n, 0); RET(dst);
+}
+static void s_itoa(Cpu *c) { itoa_impl(c, (s32)(u32)ARG(0), 1, ARG(1), (int)ARG(2)); }
+static void s_ultoa(Cpu *c) { itoa_impl(c, (s64)(u32)ARG(0), 0, ARG(1), (int)ARG(2)); }
+static void s_i64toa(Cpu *c) { itoa_impl(c, (s64)ARG(0), 1, ARG(1), (int)ARG(2)); }
+static void s_ui64toa(Cpu *c) { itoa_impl(c, (s64)ARG(0), 0, ARG(1), (int)ARG(2)); }
+static const char *errstr(int e) {
+  switch (e) { case 0: return "No error"; case 1: return "Operation not permitted"; case 2: return "No such file or directory"; case 5: return "Input/output error"; case 9: return "Bad file descriptor"; case 12: return "Not enough memory"; case 13: return "Permission denied"; case 17: return "File exists"; case 21: return "Is a directory"; case 22: return "Invalid argument"; case 24: return "Too many open files"; case 28: return "No space left on device"; case 34: return "Result too large"; case 39: return "Directory not empty"; case 41: return "Not a directory"; default: return "Unknown error"; }
+}
+static void s_strerror(Cpu *c) { u64 a = W->ubuf + 0x7d0; put_a(c, a, errstr((int)ARG(0)), 0x30); RET(a); }
+static void s_strerror_s(Cpu *c) { put_a(c, ARG(0), errstr((int)ARG(2)), (u32)ARG(1)); RET(0); }
+static void s_strcpy_s(Cpu *c) { const char *s = gstr(c, ARG(2)); size_t l = e_strlen(s); if (l + 1 > ARG(1)) { if (ARG(1)) wr8(c, ARG(0), 0); RET(34); return; } put_a(c, ARG(0), s, 0); RET(0); }
+static void s_strcat_s(Cpu *c) { const char *d = gstr(c, ARG(0)); size_t dl = e_strlen(d); const char *s = gstr(c, ARG(2)); size_t l = e_strlen(s); if (dl + l + 1 > ARG(1)) { RET(34); return; } char tmp[4096]; if (l >= sizeof tmp) { RET(34); return; } e_memcpy(tmp, s, l + 1); put_a(c, ARG(0) + dl, tmp, 0); RET(0); }
+static void s_strncpy_s(Cpu *c) { const char *s = gstr(c, ARG(2)); size_t l = e_strlen(s); u64 n = ARG(3); if (n == ~0ull) n = l; if (l > n) l = n; if (l + 1 > ARG(1)) { if (ARG(1)) wr8(c, ARG(0), 0); RET(34); return; } char tmp[4096]; if (l >= sizeof tmp) { RET(34); return; } e_memcpy(tmp, s, l); tmp[l] = 0; put_a(c, ARG(0), tmp, 0); RET(0); }
+static void s_memcpy_s(Cpu *c) { u64 n = ARG(3); if (n > ARG(1)) { RET(34); return; } u8 *d = mem_ptr(c->mem, ARG(0), n, 1); const u8 *s = mem_ptr(c->mem, ARG(2), n, 0); if (d && s && n) e_memmove(d, s, (size_t)n); RET(0); }
+static void s_mktemp(Cpu *c) { u64 a = ARG(0); u64 l = e_strlen(gstr(c, a)); u32 u = ++g_tmp_seq; for (u64 i = l; i > 0 && rd8(c, a + i - 1) == 'X'; i--) { wr8(c, a + i - 1, (u8)('a' + u % 26)); u /= 26; u += 7; } RET(a); }
+
+#define FS_SHIMS \
+  S(CreateFileA), S(CreateFileW), SA("CreateFile2", CreateFileW), S(ReadFile), S(WriteFile), S(CloseHandle), S(GetFileType), S(GetFileSize), S(GetFileSizeEx), S(SetFilePointer), S(SetFilePointerEx), S(SetEndOfFile), \
+  S(GetFileAttributesA), S(GetFileAttributesW), S(GetFileAttributesExA), S(GetFileAttributesExW), S(GetFileInformationByHandle), S(GetFileTime), \
+  S(FindFirstFileA), S(FindFirstFileW), S(FindFirstFileExA), S(FindFirstFileExW), S(FindNextFileA), S(FindNextFileW), S(FindClose), \
+  S(DeleteFileA), S(DeleteFileW), S(CreateDirectoryA), S(CreateDirectoryW), S(RemoveDirectoryA), S(RemoveDirectoryW), S(MoveFileA), S(MoveFileW), SA("MoveFileExA", MoveFileA), SA("MoveFileExW", MoveFileW), S(CopyFileA), S(CopyFileW), \
+  S(GetCurrentDirectoryA), S(GetCurrentDirectoryW), S(SetCurrentDirectoryA), S(SetCurrentDirectoryW), S(GetFullPathNameA), S(GetFullPathNameW), S(GetTempPathA), S(GetTempPathW), SA("GetTempPath2A", GetTempPathA), SA("GetTempPath2W", GetTempPathW), S(GetTempFileNameA), S(GetTempFileNameW), \
+  S(CreateFileMappingA), S(CreateFileMappingW), S(MapViewOfFile), S(MapViewOfFileEx), S(UnmapViewOfFile), \
+  S(ReadConsoleA), S(ReadConsoleW), S(ReadConsoleInputW), SA("ReadConsoleInputA", ReadConsoleInputW), S(PeekConsoleInputW), S(PeekConsoleInputA), S(FlushConsoleInputBuffer), S(GetNumberOfConsoleInputEvents), \
+  SA("_filbuf", filbuf), SA("_flsbuf", flsbuf), SA("_fdopen", fdopen), SA("fdopen", fdopen), S(setvbuf), S(fopen), SA("_wfopen", wfopen), S(fopen_s), SA("_wfopen_s", wfopen_s), SA("_fsopen", fsopen), SA("_wfsopen", wfopen), S(freopen), S(fclose), S(fread), SA("fread_s", fread), S(fwrite), S(fgets), S(fgetc), SA("getc", fgetc), S(getchar), S(ungetc), \
+  S(fseek), SA("_fseeki64", fseeki64), S(ftell), SA("_ftelli64", ftell), S(rewind), S(feof), S(ferror), S(clearerr), SA("_fileno", fileno), SA("fileno", fileno), SA("_filelengthi64", filelengthi64), SA("_filelength", filelengthi64), SA("_isatty", isatty), SA("isatty", isatty), SA("_get_osfhandle", get_osfhandle), SA("_open_osfhandle", open_osfhandle), \
+  SA("_open", open), SA("open", open), SA("_wopen", wopen), SA("_sopen_s", sopen_s), SA("_wsopen_s", wsopen_s), SA("_sopen", sopen), SA("_close", close), SA("close", close), SA("_read", read), SA("read", read), SA("_write", write), SA("write", write), \
+  SA("_lseek", lseek), SA("lseek", lseek), SA("_lseeki64", lseeki64), SA("_tell", tell), SA("_telli64", tell), SA("_eof", eof), SA("_chsize", chsize), SA("_chsize_s", chsize), SA("_dup", dup), SA("dup", dup), SA("_dup2", dup2), S(setbuf), S(CreateToolhelp32Snapshot), S(Process32First), S(Process32Next), S(Process32FirstW), SA("Process32NextW", Process32Next), SA("_commit", commit), \
+  SA("_stat64", stat64), SA("_stat64i32", stat64i32), SA("_stat32", stat64i32), SA("_stat", stat64i32), SA("stat", stat64i32), SA("_wstat64", wstat64), SA("_wstat64i32", wstat64i32), SA("_fstat64", fstat64), SA("_fstat64i32", fstat64i32), SA("_fstat32", fstat64i32), SA("_fstat", fstat64i32), SA("fstat", fstat64i32), \
+  SA("_access", access), SA("access", access), SA("_waccess", waccess), SA("_access_s", access_s), SA("_unlink", unlink), SA("unlink", unlink), SA("remove", unlink), SA("_wunlink", wunlink), SA("_wremove", wunlink), SA("_mkdir", mkdir), SA("mkdir", mkdir), SA("_wmkdir", wmkdir), SA("_rmdir", rmdir), SA("rmdir", rmdir), SA("_wrmdir", rmdir), \
+  S(rename), SA("_wrename", wrename), SA("_getcwd", getcwd), SA("getcwd", getcwd), SA("_wgetcwd", wgetcwd), SA("_chdir", chdir), SA("chdir", chdir), SA("_wchdir", wchdir), SA("_fullpath", fullpath), SA("_wfullpath", wfullpath), \
+  SA("_findfirst64", findfirst64), SA("_findfirst64i32", findfirst64), SA("_findnext64", findnext64), SA("_findnext64i32", findnext64), SA("_findclose", findclose), SA("_kbhit", kbhit), SA("_getch", getch), SA("_getche", getch), SA("gets_s", gets_s), \
+  S(getenv), SA("_wgetenv", wgetenv), S(getenv_s), SA("_dupenv_s", dupenv_s), SA("_putenv", putenv), SA("putenv", putenv), SA("_wputenv", wputenv), SA("_putenv_s", putenv_s), S(GetEnvironmentVariableA), S(GetEnvironmentVariableW), S(SetEnvironmentVariableA), S(SetEnvironmentVariableW), S(ExpandEnvironmentStringsA), S(ExpandEnvironmentStringsW), S(GetEnvironmentStrings), SA("GetEnvironmentStringsA", GetEnvironmentStrings), S(GetEnvironmentStringsW), SA("__p__environ", p__environ), SA("_get_initial_narrow_environment", get_initial_narrow_environment), SA("__getmainargs", getmainargs), \
+  S(strspn), S(strcspn), S(strpbrk), S(strtok), S(strtok_s), SA("_strlwr", strlwr), SA("strlwr", strlwr), SA("_strupr", strupr), SA("strupr", strupr), SA("_strrev", strrev), SA("_itoa", itoa), SA("itoa", itoa), SA("_ltoa", itoa), SA("_ultoa", ultoa), SA("_i64toa", i64toa), SA("_ui64toa", ui64toa), S(strerror), SA("_strerror", strerror), S(strerror_s), S(strcpy_s), S(strcat_s), S(strncpy_s), S(memcpy_s), SA("memmove_s", memcpy_s), SA("_mktemp", mktemp),

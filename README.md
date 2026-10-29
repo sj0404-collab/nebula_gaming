@@ -14,8 +14,8 @@ browser, in the PWA and in the Android APK (any Chromium ≥ 133 / WebView ≥ 1
 |---|---|---|
 | CPU | x86‑64 integer ISA, SSE/SSE2 (+ the SSE4.1/AVX‑free subset compilers emit at `-O2`), x87 control only | interpreter, ~20–35 MIPS (wasm64 ≈ 60 % of native C) |
 | Loader | PE32+ (relocations, imports by name/ordinal, TLS callbacks, data imports such as `_environ`/`_iob`), command line, environment, TEB/PEB | 32‑bit PE, DLLs, .NET are rejected with an honest verdict |
-| KERNEL32 | heap, virtual memory, critical sections, TLS/FLS, time/QPC, console I/O, module/proc lookups, locale stubs | **no real file system, no threads, no processes** (they fail cleanly) |
-| UCRT / msvcrt | printf family (ANSI + wide), string/memory/ctype, math (via host), malloc, qsort/bsearch, time/strftime, env, atexit, setjmp | FILE* only for stdin/stdout/stderr |
+| KERNEL32 | heap, virtual memory, critical sections, TLS/FLS, time/QPC, console I/O **+ stdin**, **in‑memory file system** (`CreateFile/ReadFile/WriteFile/SetFilePointer/FindFirstFile/GetFileAttributes/Create‑Delete‑Move/Current directory/file mappings`), dynamic environment block, module/proc lookups, locale stubs | **no threads, no child processes/pipes** (they fail cleanly); the disk lives in RAM — mount a folder, download what the program wrote |
+| UCRT / msvcrt | printf family (ANSI + wide), string/memory/ctype, math (via host), malloc, qsort/bsearch, time/strftime, getenv/putenv, atexit, setjmp, **stdio on real files** (`fopen/fread/fgets/getc(_filbuf)/fseek/ftell/_open/_read/_write/_lseek/_stat/_access/_unlink/rename/_mkdir/_getcwd/dup/dup2`) | redirections `>`/`<` work in busybox `sh`; pipes/`$(…)` need child processes |
 | USER32 / GDI32 | windows, message loop, timers, keyboard/mouse, DCs, DIBs, BitBlt/StretchBlt, pens/brushes, text (bitmap font) | **no Direct3D/OpenGL/Vulkan, no audio, no dialog resources** |
 | WS2_32 / ADVAPI32 / COMCTL32 | stubs that fail cleanly | no network |
 
@@ -30,7 +30,7 @@ At runtime the first unimplemented call stops the program with the API name, RIP
 | `hello.exe` (UCRT console) | this repo | all output correct, exit code 7, 4.4 M instr |
 | `bench.exe` (sieve/mandelbrot/memcpy) | this repo | correct; 36 MIPS native, 22 MIPS wasm64 (V8) |
 | `NebulaStrike.exe` (Win32 GDI game, PE32+) | this repo | plays at 60 fps in the browser, ~245 fps headless |
-| `busybox64.exe` (busybox‑w32, mingw64‑gcc 16) | frippery.org | `echo awk sha256sum md5sum date factor seq printf uname env expr basename dirname --help --list` work; applets needing files/pipes/sockets stop at the first missing API |
+| `busybox64.exe` (busybox‑w32, mingw64‑gcc 16) | frippery.org | file applets now work on the virtual disk: `ls -l cat wc sort head tail grep sed awk cut find diff cmp cp tee xxd base64 md5sum sha256sum stat du mkdir` + stdin (`sort -r`, `read x`); `sh -c` runs builtins, variables, loops, `[ ]`, `>`/`>>`/`<` redirections; pipes `\|`, `$(…)` and non‑builtin applets inside `sh` need child processes (planned) — sockets stop at Winsock |
 | `plink.exe` (PuTTY 0.85, MSVC/clang‑cl) | putty.org | `-V` runs to completion; real sessions need Winsock |
 | `putty.exe` (GUI) | putty.org | runs up to `CreateDialogParamA` (dialog resources not implemented) |
 | `curl.exe` (8.23, mingw) | curl.se | stops at `Secur32!InitSecurityInterfaceA` (TLS stack) |
@@ -75,7 +75,7 @@ Scripts
 | `npm run opencode` | `bun run opencode/bridge.ts` — real agent bridge |
 | `npm run opencode:compile` | `bun build --compile` → single `opencode-bridge` binary (serves `dist/` + API) |
 | `npm run test:opencode` | `bun test` — end‑to‑end test of the bridge + real model answer |
-| `npm run test:e2e` | Playwright desktop e2e (24 scenarios incl. the x64 emulator: windows, terminal, game autotest, opencode demo/live, phone viewport) |
+| `npm run test:e2e` | Playwright desktop e2e (25 scenarios incl. the x64 emulator, virtual disk + stdin: windows, terminal, game autotest, opencode demo/live, phone viewport) |
 | `node e2e/with-bridge.mjs` | starts the real bridge, runs e2e with the LIVE opencode window, stops it |
 | `npm test` / `npm run test:all` | lint + typecheck + e2e (+ bridge test) |
 | `npm run opencode:compile:all` | binaries for linux‑x64/arm64, macOS arm64/x64, windows‑x64 → `release/` |

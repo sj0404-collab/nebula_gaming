@@ -18,8 +18,30 @@ EXPORT(x64_load) int x64_load(const u8 *bytes, size_t len, const char *name, con
   int rc = pe_load(&g_w32, bytes, len, name ? name : "app.exe");
   if (rc) return rc;
   w32_start(&g_w32, cmdline ? cmdline : name ? name : "app.exe");
+  vfs_close_all(); vfs_mkdir("C:\\tmp"); vfs_mkdir("C:\\nebula");
+  { char p[600]; e_snprintf(p, sizeof p, "C:\\nebula\\%s", name ? name : "app.exe"); if (vfs_find_node(p) < 0) vfs_add(p, bytes, len); }
   g_loaded = 1; return 0;
 }
+/* ---- virtual file system / stdin (host side) ---- */
+EXPORT(x64_vfs_add) int x64_vfs_add(const char *path, const u8 *data, size_t n) { return vfs_add(path, data, n) >= 0; }
+EXPORT(x64_vfs_mkdir) int x64_vfs_mkdir(const char *path) { return vfs_mkdir(path); }
+EXPORT(x64_vfs_remove) int x64_vfs_remove(const char *path) { return vfs_remove(path); }
+EXPORT(x64_vfs_size) s64 x64_vfs_size(const char *path) { u64 sz; int k = vfs_stat(path, &sz); return k == 1 ? (s64)sz : -1; }
+EXPORT(x64_vfs_data) const u8 *x64_vfs_data(const char *path) { int i = vfs_find_node(path); VNodeInfo in; if (i < 0 || !vfs_node_info(i, &in) || in.is_dir) return 0; return in.data; }
+static char g_vfs_json[65536];
+EXPORT(x64_vfs_list) const char *x64_vfs_list(void) {
+  size_t o = 0; g_vfs_json[o++] = '['; int first = 1; VNodeInfo in;
+  for (int i = 0; i < vfs_node_count(); i++) {
+    if (!vfs_node_info(i, &in)) continue;
+    char esc[1100]; size_t e = 0; for (const char *p = in.path; *p && e + 3 < sizeof esc; p++) { if (*p == '\\' || *p == '"') esc[e++] = '\\'; esc[e++] = *p; } esc[e] = 0;
+    int n = e_snprintf(g_vfs_json + o, sizeof g_vfs_json - o, "%s{\"path\":\"%s\",\"size\":%llu,\"dir\":%d,\"written\":%d}", first ? "" : ",", esc, (unsigned long long)in.size, in.is_dir, in.written);
+    if (n < 0 || o + (size_t)n + 2 >= sizeof g_vfs_json) break; o += (size_t)n; first = 0;
+  }
+  g_vfs_json[o++] = ']'; g_vfs_json[o] = 0; return g_vfs_json;
+}
+EXPORT(x64_stdin_write) void x64_stdin_write(const u8 *data, size_t n) { vfs_stdin_push(data, n); }
+EXPORT(x64_stdin_eof) void x64_stdin_eof(void) { vfs_stdin_eof(); }
+EXPORT(x64_wants_stdin) int x64_wants_stdin(void) { return vfs_stdin_waiting(); }
 EXPORT(x64_run) int x64_run(u64 budget) { if (!g_loaded) return RUN_FAULT; int r = cpu_run(&g_cpu, budget); if (g_w32.dirty && g_w32.screen) { host_present(g_w32.screen, g_w32.screen_w, g_w32.screen_h); g_w32.dirty = 0; g_w32.frames_presented++; } return r; }
 EXPORT(x64_key) void x64_key(int vk, int down) { w32_key(&g_w32, vk, down); }
 EXPORT(x64_mouse) void x64_mouse(int x, int y, int ev) { w32_mouse(&g_w32, x, y, ev); }
