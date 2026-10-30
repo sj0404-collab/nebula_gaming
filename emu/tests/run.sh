@@ -138,6 +138,44 @@ check "exit code"             "rc=3"                                 "rc=$rc"
 check "subprocess pipes"      "returncode=3, stdout='42" "$($PYR $PY/python.exe -c "import subprocess, sys; print(subprocess.run(['python.exe', '-c', 'import sys; print(42); print(\"err\", file=sys.stderr); sys.exit(3)'], capture_output=True, text=True))" 2>&1 || true)"
 check "REPL over stdin"       "55 привет"                            "$(printf 'x = [n * n for n in range(6)]\nprint(sum(x), %s)\n' "'привет'" | $PYR $PY/python.exe -i -q 2>&1 || true)"
 check "demo.py"               "sqlite: (3, 84.92, 'carol')"          "$(cp $A/demo.py $PY/demo.py; $PYR $PY/python.exe demo.py 2>&1 || true; rm -f $PY/demo.py)"
+echo "[16] cmd.exe (emu/cmd/cmd.c, embedded at C:\\Windows\\System32: shell for system()/_popen/subprocess(shell=True), batch files, pipelines)"
+CMD="$X --quiet --max-ms 60000 --mount $PWD/$A $A/cmd.exe"
+check "echo + variables"      "hello
+Windows_NT C:\\nebula"                 "$($CMD /c "echo hello & echo %OS% %CD%" 2>&1 | tr -d '\r' || true)"
+check "pipeline of builtins"  "demo.sql
+demo.lua"                                "$($CMD /c "dir /b *.lua *.sql | sort /r" 2>&1 | tr -d '\r' || true)"
+check "redirection + find /c" "2"                                    "$($CMD /c "echo one line> t_out.txt & echo two line>> t_out.txt & type t_out.txt | find /c line & del t_out.txt" 2>&1 | tr -d '\r' || true)"
+printf '@echo off\r\nset /a R=6*7 >nul\r\nif %%R%% EQU 42 (set W=yes) else (set W=no)\r\necho %%R%% %%W%%\r\nfor /l %%%%i in (1,1,3) do @echo %%%%i\r\n' > $A/t_arith.bat
+check "set /a, if, for /l"    "42 yes 1 2 3 "                        "$($CMD /c t_arith.bat 2>&1 | tr -d '\r' | tr '\n' ' ' || true)"
+rm -f $A/t_arith.bat
+check "external programs"     "ok3"                                    "$($CMD /c "jq.exe -c -M .users[1].name demo.json | findstr bob && echo ok3" 2>&1 | tr -d '\r' || true)"
+rc=0; $CMD /c "exit 7" >/dev/null 2>&1 || rc=$?
+check "exit code"             "rc=7"                                 "rc=$rc"
+check "unknown command"       "'nosuch' is not recognized as an internal or external command"  "$($CMD /c "nosuch --flag" 2>&1 || true)"
+check "batch file"            "count=3
+lua present
+at least three files"                    "$($CMD /c demo.bat 2>&1 | tr -d '\r' || true)"
+check "batch: call :sub / exit /b" "sub got hello world (from demo)
+errorlevel after sub: 7"               "$($CMD /c demo.bat 2>&1 | tr -d '\r' || true)"
+check "system()/_popen (C)"   "system rc=5
+popen: [demo.lua]
+popen: [done]
+popen lines=2 rc=0
+apple
+mango
+pear
+popen-w rc=0"                            "$($X --quiet --max-ms 60000 --mount $PWD/$A tests/shelltest.exe 2>&1 | tr -d '\r' || true)"
+check "python os.system/popen/shell=True" "rc 3
+'python.exe'
+0 'shell=Windows_NT
+1024
+PIPED'"                                  "$(cp $A/py/python.exe /tmp/_py_probe.exe 2>/dev/null; $PYR $PY/python.exe -c "import os, subprocess; print('rc', os.system('echo from-system & exit 3')); print(repr(os.popen('dir /b *.exe').read().strip())); r = subprocess.run('echo shell=%OS% && python.exe -c \"print(2**10)\" | findstr 1024 && python.exe -c \"import sys; print(sys.stdin.read().upper())\"', shell=True, input='piped', capture_output=True, text=True); print(r.returncode, repr(r.stdout.strip()))" 2>&1 | tr -d '\r' || true)"
+printf '@echo off\r\ntype %%1\r\necho extra line with the word the\r\n' > $A/pre.cmd
+check "rg --pre (Rust pipes: CreateNamedPipeW + ReadFileEx/APC)" "demo.lua
+8:extra line with the word the"      "$($X --quiet --max-ms 60000 --mount $PWD/$A $A/rg.exe --color never --pre C:\\nebula\\pre.cmd -n "extra line" demo.lua 2>&1 | tr -d '\r' || true)"
+rm -f $A/pre.cmd
+check "fd -x cmd /c"          "found ./demo.lua"                     "$($X --quiet --max-ms 60000 --mount $PWD/$A $A/fd.exe --color never -e lua -x cmd /c echo found {} 2>&1 | tr -d '\r' || true)"
+rm -f $A/out.txt
 echo "[6] honest rejections"
 check "32-bit PE"   '"verdict":"unsupported"' "$(printf 'MZ' | head -c 2 > /tmp/pe32.bin; python3 - <<'PY'
 import struct

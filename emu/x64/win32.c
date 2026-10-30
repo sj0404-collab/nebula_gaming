@@ -318,6 +318,13 @@ static int fd_of_handle(u64 h) { if (h == 0x11 || h == 0x12) return (int)(h - 0x
 /* ---------- misc helpers ---------- */
 static u64 now_100ns(void) { return (u64)(host_wall_ms() * 10000.0) + 116444736000000000ull; }   /* FILETIME: 100 ns since 1601 */
 static u64 unix_time(void) { return (u64)(host_wall_ms() / 1000.0); }
+static void queue_apc(Win32 *w, u64 fn, u64 a0, u64 a1, u64 a2);
+static void s_RtlNtStatusToDosError(Cpu *c) { u32 st = (u32)ARG(0); u32 e;
+  switch (st) { case 0: e = 0; break; case 0x103: e = 997; break; case 0xC0000008: e = 6; break; case 0xC000000D: e = 87; break; case 0xC000000F: case 0xC0000034: e = 2; break; case 0xC000003A: e = 3; break;
+    case 0xC0000022: case 0xC00000BA: e = 5; break; case 0xC0000011: e = 38; break; case 0xC0000035: e = 183; break; case 0xC000014B: e = 109; break; case 0xC00000B1: e = 232; break; case 0xC00000AD: case 0xC00000AE: e = 231; break;
+    case 0xC0000120: e = 995; break; case 0xC0000103: e = 267; break; case 0xC0000005: e = 998; break; case 0xC0000017: e = 8; break; case 0xC0000023: e = 122; break; case 0xC0000004: e = 24; break; case 0xC00000BB: e = 50; break; case 0xC0000043: e = 32; break; case 0xC0000101: e = 145; break; case 0xC0000033: e = 123; break; case 0xC0000039: e = 161; break;
+    default: e = (st & 0xC0000000u) == 0xC0000000u ? 31 : 0; }
+  RET(e); }
 #include "win32_fs.inc"
 #include "win32_threads.inc"
 static void s_ret0(Cpu *c); static void s_atexit(Cpu *c); static void s_setjmp(Cpu *c);
@@ -349,7 +356,10 @@ static void s_Sleep(Cpu *c) {
   w->block = BLOCK_SLEEP; retry_and_yield(c, g_cur_slot);
 }
 double w32_sleep_remaining_ms(Win32 *w) { if (!w->sleeping) return 0; double r = w->sleep_until_ms - host_now_ms(); return r > 0 ? r : 0; }
-static void s_SleepEx(Cpu *c) { s_Sleep(c); }
+/* alertable wait: deliver one queued user APC (Rust std's pipe reads use ReadFileEx + SleepEx(INFINITE, TRUE)) → WAIT_IO_COMPLETION */
+static int deliver_apc(Cpu *c, u64 ret) { Win32 *w = W; if (!w->napc) return 0; u64 fn = w->apc[0].fn, a0 = w->apc[0].a0, a1 = w->apc[0].a1, a2 = w->apc[0].a2; for (int i = 1; i < w->napc; i++) w->apc[i - 1] = w->apc[i]; w->napc--; w32_push_cont(c, CONT_RET_VAL, ret); guest_call(c, fn, a0, a1, a2, 0); return 1; }
+static void s_SleepEx(Cpu *c) { if ((u32)ARG(1) && !W->sleeping && deliver_apc(c, 0xC0)) return; s_Sleep(c); }
+static void queue_apc(Win32 *w, u64 fn, u64 a0, u64 a1, u64 a2) { if (w->napc < 8) { w->apc[w->napc].fn = fn; w->apc[w->napc].a0 = a0; w->apc[w->napc].a1 = a1; w->apc[w->napc].a2 = a2; w->napc++; } }
 static void s_GetStdHandle(Cpu *c) { u32 n = (u32)ARG(0); RET(n == 0xfffffff6u ? 0x10 : n == 0xfffffff5u ? 0x11 : n == 0xfffffff4u ? 0x12 : ~0ull); }
 static void s_WriteConsoleA(Cpu *c) { s_WriteFile(c); }
 static void s_WriteConsoleW(Cpu *c) { int fd = fd_of_handle(ARG(0)); u32 n = (u32)ARG(2); if (fd <= 0) { RET(0); return; } char buf[4096]; int m = wstr_to_utf8(c, ARG(1), buf, sizeof buf, (int)n); int wr = out_write(c, fd, (const u8 *)buf, m); if (!wr) return; if (ARG(3)) wr32(c, ARG(3), n); RET(wr > 0); }
@@ -640,7 +650,7 @@ static void s_InterlockedExchange(Cpu *c) { u32 old = rd32(c, ARG(0)); wr32(c, A
 static void s_InterlockedIncrement(Cpu *c) { u32 v = rd32(c, ARG(0)) + 1; wr32(c, ARG(0), v); RET(v); }
 static void s_InterlockedDecrement(Cpu *c) { u32 v = rd32(c, ARG(0)) - 1; wr32(c, ARG(0), v); RET(v); }
 static void s_InterlockedExchangeAdd(Cpu *c) { u32 v = rd32(c, ARG(0)); wr32(c, ARG(0), v + (u32)ARG(1)); RET(v); }
-static void s_QueueUserAPC(Cpu *c) { RET(0); }
+static void s_QueueUserAPC(Cpu *c) { if (ARG(1) != ~1ull) { W->last_error = 87; RET(0); return; } queue_apc(W, ARG(0), ARG(2), 0, 0); RET(1); }   /* only the current thread */
 static void s_GetTimeZoneInformation(Cpu *c) { u8 *p = mem_ptr(c->mem, ARG(0), 172, 1); if (p) e_memset(p, 0, 172); RET(0); }
 static void s_FileTimeToSystemTime(Cpu *c) { fill_systemtime(c, ARG(1)); RET(1); }
 static void s_SystemTimeToFileTime(Cpu *c) { wr64(c, ARG(1), now_100ns()); RET(1); }
@@ -840,7 +850,6 @@ static void s_tzset(Cpu *c) { }
 static void s_timezone(Cpu *c) { RET(W->ubuf + 0x260); }
 static void s_daylight(Cpu *c) { RET(W->ubuf + 0x264); }
 static void s_tzname(Cpu *c) { RET(W->ubuf + 0x268); }
-static void s_system(Cpu *c) { RET(ARG(0) ? ~0ull : 0); }
 static void s_rand(Cpu *c) { Win32 *w = W; w->rand_state = w->rand_state * 214013u + 2531011u; RET((w->rand_state >> 16) & 0x7fff); }
 static void s_srand(Cpu *c) { W->rand_state = (u32)ARG(0); }
 static void s_strlen(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 30); if (!s) { cpu_fault(c, "strlen on bad pointer"); return; } RET(e_strlen(s)); }
@@ -1011,6 +1020,7 @@ static const ShimDef shims[] = {
   S(CreateTimerQueue),
   S(GetThreadLocale), S(GetUserDefaultLCID), S(GetUserDefaultLangID), S(GetSystemDefaultLangID), S(GetUserDefaultUILanguage), S(GetLocaleInfoA), S(GetLocaleInfoW), S(GetLocaleInfoEx), S(IsValidLocale), S(IsValidCodePage), S(EnumSystemLocalesW), S(GetUserDefaultLocaleName), S(LCMapStringW), S(LCMapStringEx), S(LCMapStringA), S(CompareStringW), S(CompareStringA), S(CompareStringEx), S(CompareStringOrdinal), S(GetStringTypeW), S(GetStringTypeA), S(MultiByteToWideChar), S(WideCharToMultiByte), S(CharUpperA),
   S(lstrlenA), S(lstrlenW), S(lstrcpyA), S(lstrcmpiA), S(lstrcmpA), S(InterlockedCompareExchange), S(InterlockedExchange), S(InterlockedIncrement), S(InterlockedDecrement), S(InterlockedExchangeAdd), S(QueueUserAPC),
+  S(CreateNamedPipeW), S(CreateNamedPipeA), S(ConnectNamedPipe), S(ReadFileEx), S(WriteFileEx), S(RtlNtStatusToDosError), SA("CancelIo", ret1), SA("CancelIoEx", ret1),
   S(GetTimeZoneInformation), S(FileTimeToSystemTime), S(SystemTimeToFileTime), S(FileTimeToLocalFileTime), S(GetDateFormatA), S(GetTimeFormatA), S(SystemFunction036), SA("ProcessPrng", SystemFunction036), SA("BCryptGenRandom", BCryptGenRandom), S(GetComputerNameA), S(GetUserNameA), S(GetDriveTypeA), S(GetLogicalDrives), S(GetDiskFreeSpaceExA), S(SetHandleCount), S(GetHandleInformation), S(SetHandleInformation), S(DuplicateHandle), S(CreatePipe), S(PeekNamedPipe), S(GetOverlappedResult), S(CreateIoCompletionPort), S(Beep), S(DebugBreak), S(GetProcessId), S(K32GetProcessMemoryInfo),
   /* file system stubs — no VFS yet: everything "does not exist" */
   SA("GetFileAttributesExA", GetFileAttributesA), SA("GetFileAttributesExW", GetFileAttributesA), SA("FindFirstFileExA", FindFirstFileA), SA("FindFirstFileExW", FindFirstFileA), SA("FindNextFileA", ret0), SA("FindNextFileW", ret0), SA("FindClose", ret1),
@@ -1018,7 +1028,7 @@ static const ShimDef shims[] = {
   SA("SetFileAttributesA", ret1), SA("SetFileAttributesW", ret1), SA("SetCurrentDirectoryA", ret0), SA("SetCurrentDirectoryW", ret0), SA("GetFileSizeEx", ret0), SA("GetFileSize", ret0), SA("SetFilePointer", ret0), SA("SetFilePointerEx", ret0), SA("SetEndOfFile", ret0), SA("FlushFileBuffers", ret1), SA("GetFileInformationByHandle", ret0), S(GetFileInformationByHandleEx), SA("GetFileTime", ret0), SA("SetFileTime", ret0),
   SA("CreateFileMappingA", ret0), SA("CreateFileMappingW", ret0), SA("MapViewOfFile", ret0), SA("UnmapViewOfFile", ret1), SA("LockFileEx", ret1), SA("UnlockFileEx", ret1), SA("LockFile", ret1), SA("UnlockFile", ret1), SA("GetTempPathA", ret0), SA("GetTempPathW", ret0), SA("GetTempFileNameA", ret0), SA("GetTempFileNameW", ret0),
   SA("CreateProcessA", ret0), SA("CreateProcessW", ret0), SA("GetExitCodeProcess", ret0), SA("OpenProcess", ret0), SA("CreatePipe", ret0), SA("CreateNamedPipeA", ret0), SA("ConnectNamedPipe", ret0), SA("PeekNamedPipe", ret0), SA("CreateToolhelp32Snapshot", ret0), SA("WaitForInputIdle", ret0), SA("SetConsoleCtrlHandler", ret1), SA("GenerateConsoleCtrlEvent", ret0),
-  SA("_fullpath", fullpath), SA("_umask", umask), SA("_getpid", getpid), SA("_chdir", retm1e), SA("_spawnvp", retm1e), SA("_execve", retm1e), SA("_filbuf", retm1e), SA("_getch", retm1e), SA("_getche", retm1e), SA("_telli64", telli64), SA("_open_osfhandle", retm1e), SA("_creat", retm1e), SA("_chmod", retm1e), SA("_rmdir", retm1e), SA("_mktemp", ret0), SA("_wcsnicmp", wcsnicmp), SA("_ctime64", ctime64), S(asctime), SA("_ctime64_s", ret0), SA("_wmkdir", retm1e), SA("_wchdir", retm1e), SA("_wunlink", retm1e), SA("_wrmdir", retm1e), SA("_popen", ret0), SA("_pclose", retm1e), SA("system", retm1e), SA("_wsystem", retm1e),
+  SA("_fullpath", fullpath), SA("_umask", umask), SA("_getpid", getpid), SA("_chdir", retm1e), SA("_spawnvp", retm1e), SA("_execve", retm1e), SA("_filbuf", retm1e), SA("_getch", retm1e), SA("_getche", retm1e), SA("_telli64", telli64), SA("_open_osfhandle", retm1e), SA("_creat", retm1e), SA("_chmod", retm1e), SA("_rmdir", retm1e), SA("_mktemp", ret0), SA("_wcsnicmp", wcsnicmp), SA("_ctime64", ctime64), S(asctime), SA("_ctime64_s", ret0), SA("_wmkdir", retm1e), SA("_wchdir", retm1e), SA("_wunlink", retm1e), SA("_wrmdir", retm1e), SA("_popen", popen), SA("_wpopen", wpopen), SA("_pclose", pclose), SA("system", system), SA("_wsystem", wsystem),
   SA("AreFileApisANSI", ret1), SA("SetFileApisToANSI", ret0), SA("SetFileApisToOEM", ret0),
   /* WS2_32 */
   S(WSAStartup), SA("WSACleanup", ret0), S(WSAGetLastError), SA("WSASetLastError", ret0), S(gethostname), S(htons), SA("ntohs", htons), S(htonl), SA("ntohl", htonl), SA("socket", sock_err), SA("WSASocketW", sock_err), SA("WSASocketA", sock_err), SA("connect", sock_err), SA("bind", sock_err), SA("listen", sock_err), SA("accept", sock_err), SA("send", sock_err), SA("recv", sock_err), SA("sendto", sock_err), SA("recvfrom", sock_err), SA("select", sock_err), SA("closesocket", ret0), SA("shutdown", sock_err), SA("ioctlsocket", sock_err), SA("setsockopt", sock_err), SA("getsockopt", sock_err), SA("getsockname", sock_err), SA("getpeername", sock_err), SA("gethostbyname", ret0), SA("gethostbyaddr", ret0), SA("getaddrinfo", sock_err), SA("freeaddrinfo", ret0), SA("getnameinfo", sock_err), SA("inet_addr", ret0), SA("inet_ntoa", ret0), SA("inet_pton", ret0), SA("inet_ntop", ret0), SA("__WSAFDIsSet", ret0), SA("WSAIoctl", sock_err), SA("WSAEventSelect", sock_err), SA("WSAWaitForMultipleEvents", sock_err), SA("WSAEnumNetworkEvents", sock_err), SA("WSACreateEvent", ret0), SA("WSACloseEvent", ret1), SA("WSAResetEvent", ret1), SA("WSASend", sock_err), SA("WSARecv", sock_err), SA("WSAPoll", sock_err), SA("getservbyname", ret0), SA("getprotobyname", ret0), SA("WSADuplicateSocketW", sock_err), SA("WSAAddressToStringW", sock_err), SA("WSAStringToAddressW", sock_err),

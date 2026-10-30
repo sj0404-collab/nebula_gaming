@@ -1,5 +1,6 @@
 /* Entry points shared by the wasm64 build (exported to JS) and the native test runner. */
 #include "emu.h"
+#include "cmd_exe.h"
 
 /* ---------- process table ---------- */
 #define PROC_MAX 32
@@ -78,6 +79,7 @@ EXPORT(x64_load) int x64_load(const u8 *bytes, size_t len, const char *name, con
   /* tear down a previous session: every process dies, kernel objects are dropped, the VFS files stay */
   for (int i = 0; i < PROC_MAX; i++) if (g_procs[i] && g_procs[i]->used) { proc_exit(g_procs[i], 0); g_procs[i]->used = 0; }
   g_loaded = 0; g_want_stdin = 0; vfs_close_all(); vfs_mkdir("C:\\tmp"); vfs_mkdir("C:\\nebula");
+  vfs_mkdir("C:\\Windows"); vfs_mkdir("C:\\Windows\\System32"); vfs_add("C:\\Windows\\System32\\cmd.exe", cmd_exe_bytes, sizeof cmd_exe_bytes);   /* the embedded shell (emu/cmd/cmd.c) */
   Proc *p = proc_alloc(); if (!p) return 8; g_root = p; g_cur = 0; g_root_w32 = &p->w32;
   p->pid = 4242; p->ppid = HOST_PID; p->state = 1; p->exit_code = 0; p->handles = 0; g_next_pid = 4242;
   e_snprintf(p->name, sizeof p->name, "%s", name ? basename_of(name) : "app.exe");

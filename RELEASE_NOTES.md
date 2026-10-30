@@ -1,3 +1,51 @@
+# v1.11.0 — Nebula x64: a real `cmd.exe` (shell for `system()`, `_popen`, `subprocess`, batch files) + alertable I/O
+
+**Why.** Many programs do not spawn children directly — they call `system()`, `_popen()`, `os.system`, `subprocess(shell=True)`,
+`rg --pre`, `fd -x`. All of those run `cmd.exe /c …`, which the emulator did not have; so far they failed with “shell not
+available”. Taking Microsoft's `cmd.exe` is impossible (not redistributable, and it needs half of the NT console subsystem), so
+this release ships **our own `cmd.exe`**: `emu/cmd/cmd.c`, a freestanding Windows x86‑64 program (53 KB, imports only
+`kernel32`, built with `zig cc -target x86_64-windows-gnu -nostdlib`). It is a *real guest executable* — it runs inside the
+emulator like any other PE32+, and the same bytes are embedded in the emulator (`emu/x64/cmd_exe.h`) and mounted at
+`C:\Windows\System32\cmd.exe`, so `%COMSPEC%`, `GetSystemDirectory()\cmd.exe` and the CRT's `system()` find it.
+
+**What works** (test suite section `[16]`, 14 checks; e2e scenario `x64: cmd.exe`):
+
+| | |
+|---|---|
+| `cmd /c "…"`, `cmd /k`, batch files, the interactive prompt (console `ReadFile`, `^Z` ends it) | works |
+| builtins: `echo set set /a set /p if (EQU/NEQ/LSS/… , exist, defined, errorlevel, /i) for (plain, /l, /d, /r, /f tokens= delims= skip= eol=) call :label goto exit [/b] n dir [/b /s /a-d] type copy move del ren md rd cd pushd popd find [/c /i /v] findstr [/i /v /c:] sort [/r] more cls ver date time pause rem title color prompt path vol where shift setlocal/endlocal` | works |
+| operators `& && \|\| \|`, groups `(…)`, redirections `> >> < 2>&1 2>nul`, multi‑line `if … ( … ) else ( … )` in batch files | works |
+| `%VAR%`, `%1…%9 %*`, `%~n1 %~x1 %~dp1 %~f1`, `%VAR:~2,3%`, `%ERRORLEVEL% %CD% %RANDOM% %DATE% %TIME%` | works |
+| external programs: `.exe` lookup in cwd, `%PATH%`, `C:\Windows\System32`; `%ERRORLEVEL%` from the child; a pipeline of externals and builtins (`type f \| find /c x`, `dir /b \| sort /r`, `echo … \| jq`) | works |
+| **CRT `system()` / `_popen("r")` / `_popen("w")` / `_pclose`** (UCRT and mingw CRTs — both call `cmd.exe /c` via `CreateProcess`) | works |
+| **Python** `os.system`, `os.popen`, `subprocess.run(…, shell=True)` chains with `&&` and `\|` | works |
+| **ripgrep `--pre C:\nebula\pre.cmd`** (a batch preprocessor per file), **fd `-x cmd /c echo found {}`** / `-X jq.exe` | works |
+| `demo.bat` in the x64 Runner: `for /f` + `set /a` counting, `dir \| sort`, `find /c`, `jq.exe` and `lua54.exe` as children, `call :sub`, `exit /b 7` | works |
+
+**Honest limits of this `cmd.exe`:** no delayed expansion (`setlocal EnableDelayedExpansion` / `!VAR!`), no `usebackq` in `for /f`, no `attrib`, `mklink`, `choice`, `timeout`, `where`, `xcopy`, `robocopy`, `tasklist`,
+`start` (start a program directly instead), `%%` in `/c` mode stays literal (as in the real interactive cmd), `echo` trims trailing
+spaces, no command history/editing in the interactive prompt (the console line input does that), no Unicode (UTF‑16) batch files,
+no `cmd /u`. Error messages copy the real ones (`'x' is not recognized as an internal or external command…`, exit code 9009).
+
+**Emulator changes that this needed** (`win32.c`, `win32_fs.inc`, `emu.h`):
+
+* `system`/`_wsystem`/`_popen`/`_wpopen`/`_pclose` shims that spawn `C:\Windows\System32\cmd.exe /c …` and wait; the child's
+  pipe end is marked non‑inheritable before the spawn (a `_popen("…", "w")` deadlock: the child inherited the parent's write end,
+  so writers never reached zero and the child never saw EOF);
+* `ReadFileEx` / `WriteFileEx` with **completion routines**, a per‑thread **APC queue** (`QueueUserAPC`, delivered by alertable
+  `SleepEx`, which returns `WAIT_IO_COMPLETION`), `CreateNamedPipeW/A` + `ConnectNamedPipe` + `\\.\pipe\` names in `CreateFile`,
+  `RtlNtStatusToDosError` (`0xC000014B` → `ERROR_BROKEN_PIPE`), `CancelIo(Ex)` — this is how Rust's `std::process` reads a
+  child's stdout/stderr (`--pre` in ripgrep, `-x` in fd), see `library/std/src/sys/pal/windows/pipe.rs`;
+* `fgets` on a pipe now blocks (used to return EOF when the child had not written yet);
+* `resolve_exe` understands `cmd`, `cmd.exe`, `%COMSPEC%`, bare names via `%PATH%` and `.exe`/`.bat`/`.cmd` extensions
+  (`.bat`/`.cmd` → `cmd.exe /c file`);
+* `GetStdHandle` values `0x10/0x11/0x12` are resolved through the current process's inherited descriptors (so a child's child
+  inherits redirected pipes correctly).
+
+**Desktop:** the Command Prompt window gained a `real` command (and a *real cmd.exe* button) that opens the x64 Runner with
+`cmd.exe` already running; the x64 Runner has `cmd.exe` in its sample list (`/k demo.bat`). CI now builds `cmd.exe` from source
+(`BUILD_CMD=1 ./emu/x64/build.sh`) and checks it matches the committed binary. Test suite: 96 native checks; e2e 32/32.
+
 # v1.10.0 — Nebula x64: CPython 3.12.10 runs in the browser
 
 **A real Python.** The official python.org *embeddable* build of CPython 3.12.10 (`python.exe` + `python312.dll` 4.3 MB + the

@@ -67,9 +67,27 @@ static s64 raw_write(int fd, const u8 *p, u64 n) { fd = vfs_resolve(fd == -1 ? 0
 /* stdio-style write: 1 done, 0 blocked (process parked, shim will be retried), -1 error (errno set) */
 static int out_write(Cpu *c, int fd, const u8 *p, u64 n) { s64 r = raw_write(fd, p, n); if (r == -2) { blocked_io(c, 1); return 0; } if (r == -3) { set_errno(c, 32); return -1; } if (r < 0) { set_errno(c, 9); return -1; } return 1; }
 /* ---- KERNEL32 ---- */
+/* Rust std's anonymous pipes are named pipes: CreateNamedPipeW("\\\\.\\pipe\\__rust_anonymous_pipe1__…") for "ours" + CreateFileW(same name) for "theirs" */
+#define NPIPE_MAX 16
+static struct { char name[160]; int fd; int used; } g_npipes[NPIPE_MAX];
+static int npipe_prefix(const char *n) { static const char pre[] = "\\\\.\\pipe\\"; for (int i = 0; pre[i]; i++) if (!n[i] || (n[i] != pre[i] && !(pre[i] == '\\' && n[i] == '/'))) return 0; return 1; }
+static void s_CreateNamedPipeW(Cpu *c) {
+  const char *n = name_w(c, ARG(0)); u32 mode = (u32)ARG(1);
+  if (!npipe_prefix(n)) { W->last_error = 123; RET(~0ull); return; }
+  for (int k = 0; k < NPIPE_MAX; k++) if (g_npipes[k].used && !e_stricmp(g_npipes[k].name, n)) { W->last_error = 5; RET(~0ull); return; }   /* FILE_FLAG_FIRST_PIPE_INSTANCE: name in use */
+  int r, wfd; if (vfs_pipe(&r, &wfd)) { W->last_error = 8; RET(~0ull); return; }
+  int ours = (mode & 3) == 2 ? wfd : r, theirs = ours == r ? wfd : r;   /* PIPE_ACCESS_INBOUND (1): the server reads; OUTBOUND (2): it writes */
+  vfs_set_inherit(ours, sa_inherit(c, ARG(7))); vfs_set_inherit(theirs, 0);
+  int k; for (k = 0; k < NPIPE_MAX && g_npipes[k].used; k++) { } if (k == NPIPE_MAX) { vfs_close(r); vfs_close(wfd); W->last_error = 8; RET(~0ull); return; }
+  g_npipes[k].used = 1; g_npipes[k].fd = theirs; e_snprintf(g_npipes[k].name, sizeof g_npipes[k].name, "%s", n);
+  RET(H_OF(ours));
+}
+static void s_CreateNamedPipeA(Cpu *c) { s_CreateNamedPipeW(c); }   /* name_w vs name_a differ only in decoding; Rust uses the W form */
+static void s_ConnectNamedPipe(Cpu *c) { RET(1); }
 static void create_file(Cpu *c, const char *n) {
   u32 access = (u32)ARG(1), disp = (u32)ARG(4);
   if (!e_stricmp(n, "CONOUT$")) { RET(0x11); return; } if (!e_stricmp(n, "CONIN$")) { RET(0x10); return; }
+  if (npipe_prefix(n)) { for (int k = 0; k < NPIPE_MAX; k++) if (g_npipes[k].used && !e_stricmp(g_npipes[k].name, n)) { int fd = g_npipes[k].fd; g_npipes[k].used = 0; vfs_set_inherit(fd, sa_inherit(c, ARG(3))); RET(H_OF(fd)); return; } W->last_error = 2; RET(~0ull); return; }
   int acc = ((access & 0x80000000u) ? 1 : 0) | ((access & 0x40000004u) ? 2 : 0); if (!acc) acc = 1;
   int fd = vfs_open(n, acc, (int)disp, (access & 4) && !(access & 0x40000000u));
   if (fd < 0) { W->last_error = lasterr_of(fd); RET(~0ull); return; }
@@ -88,6 +106,20 @@ static void s_ReadFile(Cpu *c) {
   if (r < 0) { W->last_error = 5; RET(0); return; }
   if (ARG(3)) wr32(c, ARG(3), (u32)r); if (r == 0 && vfs_kind(g_last_io_fd) == FD_PIPE) { W->last_error = 109; RET(0); return; } RET(1);
 }
+/* ReadFileEx/WriteFileEx(handle, buf, len, OVERLAPPED*, completion): the I/O completes synchronously here; the completion routine
+   (dwErrorCode, dwBytes, lpOverlapped) is queued as a user APC and runs at the next alertable SleepEx — exactly Rust std's AnonPipe::read */
+static void rw_ex(Cpu *c, int write) {
+  int fd = handle_fd(ARG(0)); u64 ov = ARG(3), cb = ARG(4); if (!fd || (!write && (fd == 1 || fd == 2))) { W->last_error = 6; RET(0); return; }
+  overlapped_seek(c, fd, ov);
+  s64 r = write ? fd_write(c, fd, ARG(1), (u32)ARG(2)) : fd_read(c, fd, ARG(1), (u32)ARG(2));
+  if (r == -2) { blocked_io(c, write); return; }
+  u32 err = 0; if (r == -3) { err = 109; r = 0; } else if (r < 0) { err = 5; r = 0; } else if (!write && r == 0 && (u32)ARG(2) && vfs_kind(g_last_io_fd) == FD_PIPE) err = 109;
+  if (ov) { wr64(c, ov, err ? (err == 109 ? 0xC000014Bu : 0xC0000022u) : 0); wr64(c, ov + 8, (u64)r); }
+  if (cb) queue_apc(W, cb, err, (u64)r, ov);
+  RET(1);
+}
+static void s_ReadFileEx(Cpu *c) { rw_ex(c, 0); }
+static void s_WriteFileEx(Cpu *c) { rw_ex(c, 1); }
 /* ntdll!Nt{Read,Write}File(handle, event, apc, apcctx, IOSB*, buf, len, ByteOffset*, key) — Rust std uses them for File::read/write(_at) */
 static void nt_rw(Cpu *c, int write) {
   int fd = handle_fd(ARG(0)); u64 iosb = ARG(4), buf = ARG(5), off = ARG(7); u32 len = (u32)ARG(6);
@@ -290,7 +322,7 @@ static void s_fgets(Cpu *c) {
   int fd = file_fd(c, ARG(2)); u64 buf = ARG(0); int n = (int)ARG(1); if (!fd || n <= 1) { RET(0); return; }
   { u64 pre = file_take(c, ARG(2), buf, (u64)(n - 1), 1); if (pre) { if (rd8(c, buf + pre - 1) != '\n' && (int)pre < n - 1 && fd >= 3) { int i = (int)pre; u8 ch; while (i < n - 1) { s64 r = vfs_read(fd, &ch, 1); if (r <= 0) break; wr8(c, buf + i, ch); i++; if (ch == '\n') break; } pre = (u64)i; } wr8(c, buf + pre, 0); RET(buf); return; } }
   if (fd == -1 && vfs_resolve(0) == -1) { u8 tmp[4096]; g_last_io_fd = -1; s64 r = vfs_stdin_read(tmp, (u64)(n - 1) < sizeof tmp ? (u64)(n - 1) : sizeof tmp); if (r == -2) { blocked_io(c, 0); return; } if (r <= 0) { file_set_eof(c, ARG(2)); RET(0); return; } u8 *p = mem_ptr(c->mem, buf, (u64)r + 1, 1); if (p) { e_memcpy(p, tmp, (size_t)r); p[r] = 0; } RET(buf); return; }
-  int i = 0; u8 ch; while (i < n - 1) { s64 r = raw_read(fd, &ch, 1); if (r <= 0) break; wr8(c, buf + i, ch); i++; if (ch == '\n') break; }
+  int i = 0; u8 ch; while (i < n - 1) { s64 r = raw_read(fd, &ch, 1); if (r == -2) { if (!i) { blocked_io(c, 0); return; } break; }   /* pipe: wait for the writer, or hand back a partial line */ if (r <= 0) break; wr8(c, buf + i, ch); i++; if (ch == '\n') break; }
   if (!i) { file_set_eof(c, ARG(2)); RET(0); return; } wr8(c, buf + i, 0); RET(buf);
 }
 static void s_fgetc(Cpu *c) { int fd = file_fd(c, ARG(0)); u8 ch; if (!fd) { RET(~0ull); return; } if (file_take(c, ARG(0), W->ubuf + 0x7f0, 1, 0)) { RET(rd8(c, W->ubuf + 0x7f0)); return; } s64 r = raw_read(fd, &ch, 1); if (r == -2) { blocked_io(c, 0); return; } if (r != 1) file_set_eof(c, ARG(0)); RET(r == 1 ? ch : ~0ull); }
@@ -339,20 +371,30 @@ static void s_Process32FirstW(Cpu *c) { proc_entry(c, 0, 1); }
 static void s_Process32NextW(Cpu *c) { proc_entry(c, snap_cursor, 1); }
 /* ---- processes ---- */
 /* STARTUPINFOA/W: cb +0, dwFlags +60, hStdInput +80, hStdOutput +88, hStdError +96 */
-static int std_from_handle(u64 h) { if (h == 0x10) return -1; if (h == 0x11) return 1; if (h == 0x12) return 2; int fd = handle_fd(h); return fd >= 3 ? fd : -1; }
+static int std_from_handle(u64 h) { if (h == 0x10 || h == 0x11 || h == 0x12) return -2;   /* the parent's own standard handle (possibly redirected) → inherit it */ int fd = handle_fd(h); return fd >= 3 ? fd : -1; }
+static const char *env_get(const char *name);
+#define CMD_EXE_PATH "C:\\Windows\\System32\\cmd.exe"
+/* find a program the way CreateProcess/cmd do: as given, +.exe, then (bare names) the app dir, System32 and every %PATH% entry; finally our own image */
+static int resolve_exe(Cpu *c, const char *exe, char *cand, size_t cap) {
+  u64 sz; int has_sep = 0; for (const char *q = exe; *q; q++) if (*q == '\\' || *q == '/' || *q == ':') has_sep = 1;
+  const char *bn = exe; for (const char *q = exe; *q; q++) if (*q == '\\' || *q == '/') bn = q + 1; int has_ext = e_strchr(bn, '.') != 0;
+  for (int i = 0; i < 2; i++) { if (i == 1 && has_ext && e_strlen(bn) > 4 && !e_stricmp(bn + e_strlen(bn) - 4, ".exe")) break; e_snprintf(cand, cap, i ? "%s.exe" : "%s", exe); if (vfs_stat(cand, &sz) == 1) return 1; }
+  if (!has_sep) {
+    char path[8192]; const char *pv = env_get("PATH"); e_snprintf(path, sizeof path, "C:\\nebula;C:\\Windows\\System32;%s", pv ? pv : "");
+    for (char *p = path; *p;) { char *e = p; while (*e && *e != ';') e++; char save = *e; *e = 0; if (*p) for (int i = 0; i < 2; i++) { e_snprintf(cand, cap, i ? "%s\\%s.exe" : "%s\\%s", p, exe); if (vfs_stat(cand, &sz) == 1) return 1; } if (!save) break; p = e + 1; }
+  }
+  if (!e_stricmp(bn, W->exe_name)) { e_snprintf(cand, cap, "C:\\nebula\\%s", W->exe_name); return vfs_stat(cand, &sz) == 1; }
+  return 0;
+}
 static void create_process(Cpu *c, const char *app, const char *cmd) {
   char exe[1024]; exe[0] = 0;
   if (app && app[0]) e_snprintf(exe, sizeof exe, "%s", app);
   else { /* first token of the command line */ const char *p = cmd; size_t o = 0; if (*p == '"') { p++; while (*p && *p != '"' && o + 1 < sizeof exe) exe[o++] = *p++; } else while (*p && *p != ' ' && o + 1 < sizeof exe) exe[o++] = *p++; exe[o] = 0; }
   if (!exe[0]) { W->last_error = 2; RET(0); return; }
-  /* resolve: as given, +.exe, in C:\nebula, our own image */
-  char cand[1100]; u64 sz; int found = 0;
-  const char *tries[4] = { "%s", "%s.exe", "C:\\nebula\\%s", "C:\\nebula\\%s.exe" };
-  for (int i = 0; i < 4 && !found; i++) { e_snprintf(cand, sizeof cand, tries[i], exe); if (vfs_stat(cand, &sz) == 1) found = 1; }
-  if (!found) { const char *b = exe; for (const char *q = exe; *q; q++) if (*q == '\\' || *q == '/') b = q + 1; if (!e_stricmp(b, W->exe_name)) { e_snprintf(cand, sizeof cand, "C:\\nebula\\%s", W->exe_name); found = vfs_stat(cand, &sz) == 1; } }
-  if (!found) { W->last_error = 2; RET(0); return; }
+  char cand[1100];
+  if (!resolve_exe(c, exe, cand, sizeof cand)) { W->last_error = 2; RET(0); return; }
   u64 si = ARG(8); int std[3] = { -2, -2, -2 };   /* -2 = inherit */
-  if (si && (rd32(c, si + 60) & 0x100)) { std[0] = std_from_handle(rd64(c, si + 80)); std[1] = std_from_handle(rd64(c, si + 88)); std[2] = std_from_handle(rd64(c, si + 96)); if (std[0] == -1) std[0] = -1; }
+  if (si && (rd32(c, si + 60) & 0x100)) { std[0] = std_from_handle(rd64(c, si + 80)); std[1] = std_from_handle(rd64(c, si + 88)); std[2] = std_from_handle(rd64(c, si + 96)); }
   views_flush_all(c);   /* the child must see what the parent wrote into shared mappings */
   int pid = proc_spawn(W, cand, cmd && cmd[0] ? cmd : exe, std);
   if (pid < 0) { W->last_error = pid == -8 ? 8 : 2; RET(0); return; }
@@ -388,10 +430,7 @@ static void spawn_common(Cpu *c, int mode, u64 path, u64 argv, u64 envp) {
   }
   const char *p = path ? name_a(c, path) : 0; if (!p || !p[0]) { set_errno(c, 2); RET(~0ull); return; }
   char exe[1024]; e_snprintf(exe, sizeof exe, "%s", p);
-  char cand[1100]; u64 sz; int found = 0; const char *tries[4] = { "%s", "%s.exe", "C:\\nebula\\%s", "C:\\nebula\\%s.exe" };
-  for (int i = 0; i < 4 && !found; i++) { e_snprintf(cand, sizeof cand, tries[i], exe); if (vfs_stat(cand, &sz) == 1) found = 1; }
-  if (!found) { const char *b = exe; for (const char *q = exe; *q; q++) if (*q == '\\' || *q == '/') b = q + 1; if (!e_stricmp(b, W->exe_name)) { e_snprintf(cand, sizeof cand, "C:\\nebula\\%s", W->exe_name); found = vfs_stat(cand, &sz) == 1; } }
-  if (!found) { set_errno(c, 2); RET(~0ull); return; }
+  char cand[1100]; if (!resolve_exe(c, exe, cand, sizeof cand)) { set_errno(c, 2); RET(~0ull); return; }
   static char cmd[8192]; argv_to_cmdline(c, argv, cmd, sizeof cmd);
   int std[3] = { -2, -2, -2 }; views_flush_all(c);
   int pid = proc_spawn(W, cand, cmd[0] ? cmd : cand, std);
@@ -403,6 +442,43 @@ static void spawn_common(Cpu *c, int mode, u64 path, u64 argv, u64 envp) {
   RET(h >= 0 ? H_OF(h) : ~0ull);
 }
 static void s_spawnve(Cpu *c) { spawn_common(c, (int)ARG(0), ARG(1), ARG(2), ARG(3)); }
+/* system()/_popen(): run `cmd.exe /c command` through the embedded C:\Windows\System32\cmd.exe */
+static int wait_child_resume(Cpu *c, u64 *code_out) {   /* 1 = still blocked (call returned), 0 = finished (code in *code_out) */
+  int code; int st = proc_state(W->spawn_wait_pid, &code); if (st == 1) { block_on(c, BLOCK_PROC, W->spawn_wait_pid); return 1; }
+  int pid = W->spawn_wait_pid; W->spawn_wait_pid = 0; proc_handle_ref(pid, -1); *code_out = st == 2 ? (u64)(u32)code : 0; return 0;
+}
+static void run_shell(Cpu *c, const char *cmd) {
+  if (W->spawn_wait_pid) { u64 code; if (wait_child_resume(c, &code)) return; RET(code); return; }
+  if (!cmd) { u64 sz; RET(vfs_stat(CMD_EXE_PATH, &sz) == 1); return; }   /* system(NULL): is a shell available? */
+  static char cl[8192]; e_snprintf(cl, sizeof cl, "cmd.exe /c %s", cmd);
+  int std[3] = { -2, -2, -2 }; views_flush_all(c);
+  int pid = proc_spawn(W, CMD_EXE_PATH, cl, std);
+  if (pid < 0) { set_errno(c, pid == -8 ? 12 : 2); RET(~0ull); return; }
+  W->spawn_wait_pid = pid; W->spawn_wait_mode = 0; proc_handle_ref(pid, 1); block_on(c, BLOCK_PROC, pid);
+}
+static void s_system(Cpu *c) { run_shell(c, ARG(0) ? name_a(c, ARG(0)) : 0); }
+static void s_wsystem(Cpu *c) { run_shell(c, ARG(0) ? name_w(c, ARG(0)) : 0); }
+static void popen_common(Cpu *c, const char *cmd, const char *mode) {
+  int r, wfd; if (vfs_pipe(&r, &wfd)) { set_errno(c, 24); RET(0); return; }
+  int reading = !(mode && mode[0] == 'w');
+  int std[3] = { -2, -2, -2 }; if (reading) std[1] = wfd; else std[0] = r;
+  int mine = reading ? r : wfd; vfs_set_inherit(mine, 0);   /* our end must not leak into the child, or it would never see EOF */
+  static char cl[8192]; e_snprintf(cl, sizeof cl, "cmd.exe /c %s", cmd); views_flush_all(c);
+  int pid = proc_spawn(W, CMD_EXE_PATH, cl, std);
+  vfs_close(reading ? wfd : r);   /* the child's end stays open only in the child */
+  if (pid < 0) { vfs_close(reading ? r : wfd); set_errno(c, 2); RET(0); return; }
+  u64 f = make_file(c, mine); wr32(c, f + 40, (u32)pid); proc_handle_ref(pid, 1);   /* FILE +40: child pid for _pclose */
+  RET(f);
+}
+static void s_popen(Cpu *c) { popen_common(c, name_a(c, ARG(0)), name_a(c, ARG(1))); }
+static void s_wpopen(Cpu *c) { char cmd[8192]; wstr_to_utf8(c, ARG(0), cmd, sizeof cmd, -1); popen_common(c, cmd, name_w(c, ARG(1))); }
+static void s_pclose(Cpu *c) {
+  if (W->spawn_wait_pid) { u64 code; if (wait_child_resume(c, &code)) return; RET(code); return; }
+  int fd = file_fd(c, ARG(0)); if (!fd) { set_errno(c, 9); RET(~0ull); return; }
+  int pid = (int)rd32(c, ARG(0) + 40); if (fd >= 3) vfs_close(fd); w32_heap_free(W, ARG(0));
+  if (pid <= 0) { RET(~0ull); return; }
+  W->spawn_wait_pid = pid; W->spawn_wait_mode = 0; block_on(c, BLOCK_PROC, pid);
+}
 static void s_spawnv(Cpu *c) { spawn_common(c, (int)ARG(0), ARG(1), ARG(2), 0); }
 static void s_execve(Cpu *c) { spawn_common(c, 2, ARG(0), ARG(1), ARG(2)); }
 static void s_execv(Cpu *c) { spawn_common(c, 2, ARG(0), ARG(1), 0); }

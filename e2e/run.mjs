@@ -434,6 +434,45 @@ await test('x64: CPython 3.12 (official python.org build) runs in the browser �
   await closeAll();
 });
 
+await test('x64: cmd.exe — batch file (demo.bat: for, if, pipes, redirection, call :sub, jq/lua children), then the interactive prompt; `real` in the Command Prompt opens it', async () => {
+  const w = await x64Open();
+  await w.locator('[data-x64-exe="cmd.exe"]').waitFor({ timeout: 30_000 });
+  const waitStatus = (st, timeout = 120_000) => page.waitForFunction((s) => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === s, st, { timeout });
+  const consoleText = () => w.locator('[data-x64-console]').innerText();
+  // 1. /k demo.bat: the batch runs (children: jq.exe, lua54.exe, nested cmd pipelines), then cmd stays at its prompt waiting for input
+  await w.locator('[data-x64-exe="cmd.exe"]').click();
+  await w.getByPlaceholder('arguments').fill('/k demo.bat');
+  await w.locator('[data-x64-run]').click();
+  await waitStatus('waiting-stdin');
+  let con = await consoleText();
+  expect(/batch file running under C:\\Windows\\System32\\cmd\.exe/.test(con), 'demo.bat banner missing: ' + con.slice(0, 300));
+  expect(/count=3/.test(con), 'for /f + set /a count missing: ' + con.slice(-500));
+  expect(/lua says\s+42/.test(con), 'lua54.exe child output missing: ' + con.slice(-500));
+  expect(/errorlevel after sub: 7/.test(con), 'call :sub / exit /b 7 missing: ' + con.slice(-500));
+  // 2. interactive: builtins, a pipeline into an external program, environment, exit code
+  for (const line of ['set /a 6*7', 'dir /b *.lua | findstr /i LUA', 'echo %OS% & ver', 'exit 5']) { await w.locator('[data-x64-stdin]').fill(line); await w.locator('[data-x64-stdin-send]').click(); await sleep(150); }
+  await waitStatus('exited');
+  con = await consoleText();
+  expect(/^42\s*$/m.test(con), 'set /a 6*7 → 42 missing: ' + con.slice(-400));
+  expect(/demo\.lua/.test(con.slice(con.indexOf('findstr'))), 'dir | findstr output missing: ' + con.slice(-400));
+  expect(/Windows_NT/.test(con) && /Nebula x64 cmd/.test(con), 'echo %OS% / ver output missing: ' + con.slice(-400));
+  await w.locator('[data-x64-tab="report"]').click();
+  expect(/exit(ed| code)[^\n]*\b5\b/.test(await w.locator('[data-x64-report]').innerText()), 'exit code 5 not reported');
+  await page.screenshot({ path: resolve(SHOTS, 'x64-cmd.png') });
+  await closeAll();
+  // 3. the desktop Command Prompt hands over to the real shell: `real` opens the x64 Runner with cmd.exe already running
+  await openFromDesktop('Command Prompt');
+  const term = page.locator('[data-window="terminal"]');
+  const input = term.locator('input').first();
+  await input.fill('real'); await input.press('Enter');
+  const w2 = page.locator('[data-window][aria-label*="x64 Runner"]');
+  await w2.locator('[data-x64-status="waiting-stdin"]').waitFor({ timeout: 60_000 });
+  await w2.locator('[data-x64-stdin]').fill('echo real-shell-ok'); await w2.locator('[data-x64-stdin-send]').click();
+  await page.waitForFunction(() => /real-shell-ok/.test(document.querySelector('[data-x64-console]')?.textContent || ''), null, { timeout: 30_000 });
+  await page.screenshot({ path: resolve(SHOTS, 'x64-cmd-real.png') });
+  await closeAll();
+});
+
 await test('x64: virtual disk + stdin — files mounted from the host, read/written by busybox, console input feeds blocking reads', async () => {
   const w = await x64Open();
   await w.locator('[data-x64-exe="busybox64.exe"]').waitFor({ timeout: 30_000 });

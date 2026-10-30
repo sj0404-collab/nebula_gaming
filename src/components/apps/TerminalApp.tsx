@@ -1,7 +1,8 @@
 import { useEffect, useReducer, useRef, useState } from 'react';
 import { useOS } from '../../lib/os';
 import { terminalReducer, runJavaScript, runPython, type TerminalState } from '../../lib/terminal';
-import { Terminal as TerminalIcon, ChevronRight } from 'lucide-react';
+import { Terminal as TerminalIcon, ChevronRight, Cpu } from 'lucide-react';
+import { requestX64Launch } from '../../lib/x64/launch';
 
 const BANNER = [
   'Microsoft Windows [Version 10.0.19045.6466]',
@@ -13,6 +14,7 @@ const BANNER = [
   '  wasm64           (memory64 modules — Nebula Strike autotest host)',
   '',
   'Type `help` for commands. `opencode` launches the Big Pickle TUI.',
+  'Type `real` for the real cmd.exe — a Windows x86-64 shell running inside the wasm64 emulator (x64 Runner).',
   '',
 ];
 
@@ -67,6 +69,7 @@ export default function TerminalApp() {
         out([
           'Commands:',
           '  help                    this help',
+          '  real [args]             open the real cmd.exe (x86-64 emulator, wasm64) in the x64 Runner',
           '  ver                     Windows version',
           '  cls / clear             clear screen',
           '  dir [path]              list directory',
@@ -186,6 +189,11 @@ export default function TerminalApp() {
         setBusy(false);
         return;
       }
+      case 'real': case 'x64': case 'cmd.exe':
+        requestX64Launch('cmd.exe', rest || '');
+        openApp('x64');
+        out('Starting the real cmd.exe in the x64 Runner (x86-64 emulator, wasm64)…', 'ok');
+        return;
       case 'opencode':
         openApp('opencode');
         out('Launching opencode TUI (Big Pickle)…', 'ok');
@@ -220,7 +228,8 @@ export default function TerminalApp() {
       <div className="flex h-8 shrink-0 items-center gap-2 border-b border-white/5 bg-[#181818] px-2 text-[11px] text-slate-400">
         <TerminalIcon size={13} />
         <span className="truncate">C:\\Windows\\system32\\cmd.exe</span>
-        <span className="ml-auto text-[10px] text-emerald-500/80">{state.pyodideStatus === 'loading' ? 'python: loading WASM…' : state.pyodideStatus === 'ready' ? 'python: ready (Pyodide)' : 'node v24.19.0 ready'}</span>
+        <button type="button" data-terminal-real onClick={() => { requestX64Launch('cmd.exe', ''); openApp('x64'); }} className="ml-auto flex items-center gap-1 rounded border border-white/10 px-1.5 py-0.5 text-[10px] text-sky-300 hover:bg-white/10" title="Open the real cmd.exe (x86-64 emulator)"><Cpu size={11} /> real cmd.exe</button>
+        <span className="text-[10px] text-emerald-500/80">{state.pyodideStatus === 'loading' ? 'python: loading WASM…' : state.pyodideStatus === 'ready' ? 'python: ready (Pyodide)' : 'node v24.19.0 ready'}</span>
       </div>
       {/* output */}
       <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto px-3 py-2 leading-[1.45]">

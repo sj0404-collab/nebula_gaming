@@ -192,7 +192,8 @@ int  proc_enum(int idx, int *pid, int *ppid, const char **name);   /* 1 if idx v
   int wobj_kind[64], wobj_idx[64]; int nwobj, wait_all, wait_granted;              /* BLOCK_OBJ: 1 = process pid, 2 = kobj index; wait_granted: index+1 handed over by SetEvent */ \
   int wait_active; u64 wait_rip; double wait_deadline; int wake_snap;              /* timed wait in progress (deadline < 0: infinite) */ \
   int spawn_wait_pid, spawn_wait_mode;                                             /* _spawn*(P_WAIT/P_OVERLAY) in progress */ \
-  int pw_active, pw_fd; u64 pw_rip, pw_total, pw_done;                             /* partially completed pipe write, resumed on shim retry */
+  int pw_active, pw_fd; u64 pw_rip, pw_total, pw_done;                             /* partially completed pipe write, resumed on shim retry */ \
+  struct { u64 fn, a0, a1, a2; } apc[8]; int napc;                                  /* user APCs queued by ReadFileEx/WriteFileEx/QueueUserAPC, delivered by alertable SleepEx */
 typedef struct { THREAD_CTX_FIELDS } ThreadCtx;
 #define MAX_TLS_IMAGES 8
 typedef struct {

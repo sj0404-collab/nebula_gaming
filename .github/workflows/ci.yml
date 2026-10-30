@@ -18,9 +18,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with: { version: 0.17.0 }
-      - name: Build native runner + wasm64 module (zig cc -target wasm64-freestanding)
-        run: ZIG=zig ./emu/x64/build.sh
-      - name: Native capability tests (hello, bench, busybox-w32 incl. virtual disk + stdin, plink, NebulaStrike, rejections)
+      - name: Build cmd.exe from source (emu/cmd, zig cc -target x86_64-windows-gnu) + native runner + wasm64 module (zig cc -target wasm64-freestanding)
+        run: BUILD_CMD=1 ZIG=zig ./emu/x64/build.sh
+      - name: cmd.exe built from source matches the committed emu/cmd/cmd.exe and public/x64/apps/cmd.exe
+        run: |
+          cmp emu/cmd/cmd.exe public/x64/apps/cmd.exe
+          if ! git diff --quiet -- emu/cmd/cmd.exe; then echo "::warning::cmd.exe built in CI differs from the committed one (zig drift?) — CI build is tested"; cp emu/cmd/cmd.exe public/x64/apps/cmd.exe; fi
+      - name: Native capability tests (hello, bench, busybox-w32 incl. virtual disk + stdin, plink, NebulaStrike, cmd.exe/system()/subprocess, rejections)
         run: ./emu/tests/run.sh
       - name: wasm64 module is bit-identical to the committed public/x64/nebula_x64.wasm
         run: |

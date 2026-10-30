@@ -44,11 +44,13 @@ At runtime the first unimplemented call stops the program with the API name, RIP
 | **`7z.exe` + `7z.dll` (7‑Zip 25.01)** and `7za.exe` | 7‑zip.org | `7z.dll` loaded via `LoadLibrary` + `GetProcAddress("CreateObject")`; `a`/`x`/`l`/`i`/`b` work, 7z/zip round trips bit‑exact; `b -mmt1` ≈ 34 MIPS |
 | **`zstd.exe` (Zstandard 1.5.7, MSVC)** | github.com/facebook/zstd | compress/decompress round trips, built‑in benchmark (`-b1 -e3`) runs |
 | **`rg.exe` (ripgrep 14.1.1, Rust, x86_64-pc-windows-msvc)** | github.com/BurntSushi/ripgrep | single files and directory trees, regex, `-c`/`-n`/`--stats`, `-j4` worker threads — identical counts to GNU grep; Rust std's Win32 layer (`NtReadFile`, SRW locks, `WaitOnAddress`, waitable timers, `GetFinalPathNameByHandleW`, `ProcessPrng`) |
-| **`fd.exe` (fd 10.2.0, Rust)** | github.com/sharkdp/fd | file finder: `-e`, `-t f`, `-S`, coloured output (`-x` needs a `cmd`-style child, not available) |
+| **`fd.exe` (fd 10.2.0, Rust)** | github.com/sharkdp/fd | file finder: `-e`, `-t f`, `-S`, coloured output; `-x cmd /c echo found {}` and `-X jq.exe` spawn children through the built‑in `cmd.exe` |
+| **`cmd.exe` (the emulator's own Command Prompt, 53 KB, kernel32 only)** | this repo (`emu/cmd/cmd.c`) | embedded at `C:\Windows\System32\cmd.exe`, so `system()`, `_popen`, `os.system`, `os.popen`, `subprocess(shell=True)` and `rg --pre` work; batch files (`demo.bat`), `/c` `/k` and the interactive prompt; builtins `echo set set /a if for (/l /f) call goto exit /b dir type copy del ren md rd cd pushd popd find findstr sort more ver date time pause rem`, `& && \|\| \|`, `> >> < 2>&1`, `(…)` groups, `%VAR%` `%~n1` `%ERRORLEVEL%` `%RANDOM%`; **not** implemented: delayed expansion `!V!`, `usebackq`, `attrib`, `mklink`, `choice`, `%%` stays literal in `/c` mode |
 | **`python.exe` (CPython 3.12.10, official python.org embeddable build, MSVC v.1943)** | python.org | the whole interpreter: `python312.dll` (4.3 MB), stdlib from `python312.zip` (zipimport), C extensions `_sqlite3`/`_decimal`/`_ctypes`/`_bz2`/`_lzma`/`pyexpat`/`unicodedata`/`_asyncio`/… as `.pyd`; `-c`, scripts, the **interactive REPL over console stdin** (`ReadConsoleW`), `threading`, `subprocess` with pipes (`python.exe` spawning `python.exe`), `ctypes.windll.kernel32`, file I/O, tracebacks, exit codes; `math` within 1 ulp of the host. Not available: `_ssl`/sockets (no network), `tkinter`, `_wmi`. Start‑up ≈ 60 M instr (2 s native, ~4 s wasm64); the bundle (15 MB) is downloaded lazily on first run |
 | `hwexc.exe` (hardware exceptions) | this repo | AV / div0 / `ud2` caught by `__except` with correct `ExceptionInformation`, `__finally` during the unwind, vectored handler patches `Rip`/`Rax` and continues, 2000 faults in a loop, top-level filter → `ExitProcess(77)` |
 | `cxxexc.exe` / `sehtest.c` (zig c++ / `-fms-extensions`) | this repo | `throw`/`catch std::exception`, destructors during unwinding, nested rethrow, `vector::at`, 1000 throws in a loop; `__try/__except/__finally` incl. nested — native and in Chromium |
 | **7‑Zip error paths** (`x missing.7z`, `-tbogus`, wrong password) | 7‑zip.org | the MSVC `throw` → `__CxxFrameHandler` → catch chain inside `7z.exe`/`7z.dll` works: `System ERROR: The system cannot find the file specified.`, exit code 2 (used to stop the emulator) |
+| `shelltest.exe` (C: `system`, `_popen` r/w) and Python `os.system` / `os.popen` / `subprocess(shell=True)` | this repo | exit codes propagate, pipes both ways, `sort` fed through `_popen("w")`, `SleepEx` alertable + `ReadFileEx`/APC path used by Rust `std::process` |
 | `plink.exe` (PuTTY 0.85, MSVC/clang‑cl) | putty.org | `-V` runs to completion; real sessions need Winsock |
 | `putty.exe` (GUI) | putty.org | runs up to `CreateDialogParamA` (dialog resources not implemented) |
 | `curl.exe` (8.23, mingw) | curl.se | stops at `Secur32!InitSecurityInterfaceA` (TLS stack) |
@@ -57,7 +59,8 @@ At runtime the first unimplemented call stops the program with the API name, RIP
 ```bash
 # native build + capability tests (needs zig 0.17 for the wasm step)
 ZIG=zig ./emu/x64/build.sh      # → emu/x64/x64run + public/x64/nebula_x64.wasm (≈210 KB)
-./emu/tests/run.sh              # hello/bench/busybox (files, stdin, processes+pipes)/plink/NebulaStrike/threads/heap/DLLs/real apps/x87/SEH+C++ exceptions/hardware exceptions/Rust apps/CPython/rejections — 70 checks
+./emu/tests/run.sh              # hello/bench/busybox (files, stdin, processes+pipes)/plink/NebulaStrike/threads/heap/DLLs/real apps/x87/SEH+C++ exceptions/hardware exceptions/Rust apps/CPython/cmd.exe+system()/rejections — 96 checks
+BUILD_CMD=1 ZIG=zig ./emu/x64/build.sh   # also rebuilds emu/cmd/cmd.exe + the embedded emu/x64/cmd_exe.h from emu/cmd/cmd.c
 ./emu/x64/x64run --inspect some.exe         # JSON compatibility report
 ./emu/x64/x64run --max-ms 5000 some.exe a b # run headless (frames to .ppm with --frames N)
 ```
@@ -163,7 +166,7 @@ TEST_REPORT.md       test report (Russian): fixes, benchmarks, opencode integrat
 
 ## In‑desktop tips
 
-* Command Prompt: `help`, `dir`, `nebula`, `opencode` (opens the AI TUI).
+* Command Prompt: `help`, `dir`, `nebula`, `opencode` (opens the AI TUI), **`real`** — hands over to the real `cmd.exe` running in the x86‑64 emulator (x64 Runner).
 * opencode window: green badge **live** = real agent working inside this repository
   (it can read/edit files and run commands there); yellow **demo** = bridge not running.
 * Nebula Strike: wasm64 needs Chrome ≥ 133 / Node ≥ 22; wasm32 works everywhere.

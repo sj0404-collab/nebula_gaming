@@ -3,14 +3,16 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Cpu, FolderOpen, FolderInput, Play, Square, Terminal as TerminalIcon, Monitor, FileSearch, AlertTriangle, CheckCircle2, HelpCircle, XCircle, Gamepad2, HardDrive, Download, Trash2, SendHorizontal, Keyboard } from 'lucide-react';
 import { X64Runtime, vkFromEvent, wasm64Supported, type PeInfo, type RunStats, type VfsEntry } from '../../lib/x64/runtime';
 import { FramePresenter } from '../../lib/x64/present';
+import { takeX64Launch, onX64Launch, type X64Launch } from '../../lib/x64/launch';
 
 interface ExeEntry { id: number; name: string; bytes: Uint8Array; info: PeInfo; source: 'sample' | 'file'; pending?: string[] }   // pending: companion files fetched on first Run (big runtimes)
 
-const SAMPLE_DATA = ['demo.sql', 'demo.json', 'demo.lua', 'demo.txt', 'demo.py'];   // small inputs for the real apps, placed in C:\nebula
+const SAMPLE_DATA = ['demo.sql', 'demo.json', 'demo.lua', 'demo.txt', 'demo.py', 'demo.bat'];   // small inputs for the real apps, placed in C:\nebula
 const PY_FILES = ['python312.dll', 'python312.zip', 'python312._pth', '_sqlite3.pyd', 'sqlite3.dll', '_decimal.pyd', '_ctypes.pyd', 'libffi-8.dll', '_bz2.pyd', '_lzma.pyd', 'pyexpat.pyd', '_elementtree.pyd', 'unicodedata.pyd', '_queue.pyd', '_socket.pyd', 'select.pyd', '_asyncio.pyd', '_zoneinfo.pyd', '_uuid.pyd', '_multiprocessing.pyd'];
 const SAMPLES: { name: string; href: string; desc: string; args?: string; files?: string[]; lazy?: boolean }[] = [
   { name: 'NebulaStrike.exe', href: '/downloads/NebulaStrike.exe', desc: 'Win32 GDI game, PE32+ x64 (light GUI exe)' },
   { name: 'hello.exe', href: '/x64/samples/hello.exe', desc: 'UCRT console: printf/qsort/malloc/math (light console exe)' },
+  { name: 'cmd.exe', href: '/x64/apps/cmd.exe', desc: 'Command Prompt: the emulator\'s own cmd.exe (52 KB, kernel32 only; the same binary is embedded at C:\\Windows\\System32\\cmd.exe so system(), _popen and subprocess(shell=True) work). Default args run demo.bat and then stay interactive — type dir, echo, set, if, for, pipes and redirections into the console, or start any program on the virtual disk (jq.exe, python.exe …). Try: /c "dir /b | sort /r" · /c "python.exe -c print(42) | findstr 42"', args: '/k demo.bat' },
   { name: 'bench.exe', href: '/x64/samples/bench.exe', desc: 'CPU benchmark: sieve, mandelbrot, memcpy (heavy compute)' },
   { name: 'busybox64.exe', href: '/x64/samples/busybox64.exe', desc: 'Real third-party binary: busybox-w32 (mingw64). Try args: ls -l · cat readme.txt · wc · sort · grep · sed · awk · sha256sum · gzip -f · date -u · factor 1234567891; type into the console line when it reads stdin' },
   { name: 'plink.exe', href: '/x64/samples/plink.exe', desc: 'Real third-party binary: PuTTY plink 0.85 (MSVC/clang-cl). Try args: -V' },
@@ -67,6 +69,15 @@ export default function X64App() {
   const nextId = useRef(1);
   const consoleBuf = useRef('');
 
+  const launchByName = useCallback((rt: X64Runtime, list: ExeEntry[], want: X64Launch) => {
+    const e = list.find(x => x.name.toLowerCase() === want.exe.toLowerCase()); if (!e || e.pending) return;
+    if (rt.status === 'running' || rt.status === 'waiting-stdin') rt.stop();
+    setSelected(e.id); setArgs(want.args); consoleBuf.current = ''; setConsoleText(''); setLog([]);
+    const err = rt.start(e.bytes, e.name, want.args.trim() ? `${e.name} ${want.args.trim()}` : e.name);
+    if (err) setLog(l => [...l, 'LOADER: ' + err]);
+    setStats(rt.stats()); setFiles(rt.vfsList()); setTab('console');
+  }, []);
+
   // init runtime once
   useEffect(() => {
     let alive = true;
@@ -97,9 +108,14 @@ export default function X64App() {
       setModuleKB(rt.moduleBytes / 1024);
       setExes(loaded); if (loaded.length) setSelected(loaded[0].id);
       setReady('ready');
+      const want = takeX64Launch();   // another app (the Command Prompt's `real` command) asked us to start a program right away
+      if (want) launchByName(rt, loaded, want);
     }).catch(e => { if (alive) { setInitError(String(e)); setReady('error'); } });
     return () => { alive = false; rt.stop(); };
-  }, []);
+  }, [launchByName]);
+
+  // launch requests from other apps while we are open (Command Prompt → `real`)
+  useEffect(() => onX64Launch(want => { const rt = rtRef.current; if (rt && ready === 'ready') launchByName(rt, exes, want); }), [ready, exes, launchByName]);
 
   // presenter bound to the canvas
   useEffect(() => {
