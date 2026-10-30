@@ -1,3 +1,45 @@
+# v1.8.0 — Nebula x64: structured exception handling and C++ exceptions
+
+Before this release any Windows program that **threw a C++ exception** (or used `__try/__except`) stopped the emulator —
+7‑Zip's error paths (`7z x missing.7z`), every `std::vector::at` out of range, every `throw` in an MSVC program were a dead end.
+The emulator now implements the x64 exception machinery of ntdll **and** the two C++ runtimes that sit on top of it.
+
+What was built (`emu/x64/seh.inc`, `emu/x64/cxx.inc`, `pe.c` keeps `.pdata` of every module):
+
+* **Table‑based unwinding**: `RUNTIME_FUNCTION`/`UNWIND_INFO` interpretation (all `UWOP_*` codes, chained info, frame registers,
+  epilogue detection), `RtlLookupFunctionEntry`, `RtlVirtualUnwind`, `RtlCaptureContext`, `RtlPcToFileHeader`.
+* **Two‑phase dispatch**: `RaiseException` → walk the frames calling every exception handler (phase 1) → `RtlUnwindEx` (phase 2,
+  `EXCEPTION_UNWINDING`/`TARGET_UNWIND`/`EXIT_UNWIND` flags) → `RtlRestoreContext`, including `STATUS_UNWIND_CONSOLIDATE`
+  callbacks (run on the deep dispatcher stack, like Windows, so the exception object in the thrower's frame survives the catch) and
+  **collided unwinds** (libunwind's `_Unwind_Resume`/`STATUS_GCC_UNWIND` re‑entering `RtlUnwindEx` from a handler).
+  Handlers, filters and funclets are guest calls driven by the emulator's continuation stack; walks that reach a continuation
+  boundary continue in the logical parent frame (the same effect as `KiUserExceptionDispatcher`'s machine frame).
+* **`__C_specific_handler`**: scope tables, filters with `EXCEPTION_POINTERS`, `EXCEPTION_CONTINUE_EXECUTION`, `__finally` during
+  unwinding, targeted unwinds (`__try/__except/__finally` from MSVC, clang `-fms-extensions`, mingw).
+* **MSVC `__CxxFrameHandler` / `__CxxFrameHandler3`** (msvcrt.dll and vcruntime140.dll ABI), modelled on Wine's `cxx_frame_handler`:
+  `FuncInfo` (magic 0x19930520..22) with unwind map, try blocks, IP‑to‑state map, `unwindHelp` slot; cleanup funclets in state order;
+  catch matching through `ThrowInfo`/`CatchableTypeArray` (type names, const/volatile, `catch(...)`), copying the exception object
+  by value (memcpy or copy constructor, virtual bases), by reference or as a pointer with `this` adjustment; the catch funclet run as a
+  consolidate callback, its return value is the continuation address; destructor of the exception object (shared objects of nested
+  catches are kept alive); **`throw;` rethrow** (re‑uses the record of the innermost active catch); exceptions thrown **inside a catch
+  block** (nested, `unwindHelp[1]` bookkeeping, funclet frame → parent frame via the handler's `dispFrame`).
+* **gcc/libunwind path**: `_CxxThrowException`, `STATUS_GCC_THROW` records, `_GCC_specific_handler`'s phase‑1/phase‑2 protocol.
+* `FormatMessageA/W` for the common Win32/HRESULT codes (7‑Zip prints `The system cannot find the file specified.` instead of `Error #80070002`).
+
+Verified (`emu/tests/run.sh` section [12] — 6 new checks, 60 total; e2e scenario in Chromium wasm64, screenshot `docs/x64-exceptions.png`):
+
+| test | result |
+|---|---|
+| `cxxexc.exe` (zig c++ ‑O1, libunwind): catch `std::exception`/`what()`, custom struct, nested rethrow as `int`, `vector::at`, `stoi`, destructors during unwinding in order, **1000 throws in a loop** | all correct, exit 0, 2.96 M instr |
+| `sehtest.exe` (`-fms-extensions`): filter called, inner `__finally` during unwind, `__except` body, normal `__finally`, nested `__except` | all correct |
+| **7‑Zip 25.01** `x nonexistent.7z` / `a -tbogus` / corrupt archive / wrong password (AES header) — MSVC throws inside `7z.dll`, caught in `7z.exe` | `System ERROR: The system cannot find the file specified.` exit 2 · `Unsupported archive type` · `Cannot open the file as archive` · `Wrong password?` — the same output as on Windows |
+| the 54 earlier checks and 28 earlier e2e scenarios | unchanged, green |
+
+Limits (honest): `__CxxFrameHandler4` (the compressed tables of VS2019+/`vcruntime140_1.dll`) is recognised but skipped — such
+frames are treated as "no catch here"; hardware faults (access violation, divide by zero) still stop the emulator with a report
+instead of becoming SEH exceptions; `std::current_exception`/`exception_ptr`, `_set_se_translator` and `UnhandledExceptionFilter`
+callbacks are stubs. Nothing changed for the GPU/JIT verdict: Unity/D3D11 games remain out of reach for an interpreter.
+
 # v1.7.0 — Nebula x64: real third‑party applications, DLL loader, x87
 
 **Five unmodified, officially distributed Windows programs now run inside Nebula OS** (wasm64 + WebGL, also on Android) and ship as

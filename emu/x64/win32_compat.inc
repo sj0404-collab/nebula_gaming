@@ -117,7 +117,6 @@ static void s_PathIsRelativeW(Cpu *c) { u16 a = rd16(c, ARG(0)), b = a ? rd16(c,
 /* ---------- CRT ---------- */
 static void s_XcptFilter(Cpu *c) { RET(0); }
 static void s_dllonexit(Cpu *c) { s_atexit(c); RET(ARG(0)); }
-static void s_cxx_frame_handler(Cpu *c) { cpu_fault(c, "C++ exception thrown by the program (SEH unwinding through __CxxFrameHandler is not emulated)"); }
 static void s_cxx_terminate(Cpu *c) { con_out(W, 2, "terminate() called\n", 19); do_exit(c, 3); }
 static void s_wcsstr(Cpu *c) { u64 h = ARG(0), n = ARG(1); u16 n0 = rd16(c, n); if (!n0) { RET(h); return; }
   for (u64 i = 0;; i++) { u16 ch = rd16(c, h + i * 2); if (!ch || c->status) { RET(0); return; } if (ch != n0) continue; u64 j = 1; for (;; j++) { u16 x = rd16(c, n + j * 2); if (!x) { RET(h + i * 2); return; } if (rd16(c, h + (i + j) * 2) != x) break; } } }
@@ -199,7 +198,7 @@ static void s_yn(Cpu *c) { F0 = m_yn((int)ARG(0), F1); }
   S(GetLargePageMinimum), S(OpenFileMappingW), S(GetLogicalDriveStringsW), S(GetLogicalDriveStringsA), S(GetDriveTypeW), S(GetDiskFreeSpaceExW), S(GetDiskFreeSpaceW), S(GetDiskFreeSpaceA), \
   S(CreateHardLinkW), S(FindFirstStreamW), S(FindNextStreamW), S(DeviceIoControl), S(GetLogicalProcessorInformation), S(GetLogicalProcessorInformationEx), \
   S(CharUpperW), S(CharLowerW), S(CharPrevExA), S(CharPrevA), S(CharNextA), S(PathIsRelativeA), S(PathIsRelativeW), \
-  SA("_XcptFilter", XcptFilter), SA("__dllonexit", dllonexit), SA("__CxxFrameHandler", cxx_frame_handler), SA("?terminate@@YAXXZ", cxx_terminate), SA("??1type_info@@UEAA@XZ", ret0), \
+  SA("_XcptFilter", XcptFilter), SA("__dllonexit", dllonexit), SA("?terminate@@YAXXZ", cxx_terminate), SA("??1type_info@@UEAA@XZ", ret0), \
   S(wcsstr), S(wcsnlen), SA("_lock_file", lock_file), SA("_unlock_file", unlock_file), SA("_utime64", utime64), SA("_utime", utime64), S(perror), SA("_assert", assert_fail), SA("_wassert", wassert_fail), S(mbrtowc), S(wcrtomb), \
   SA("__intrinsic_setjmpex", setjmp), \
   S(erf), S(erfc), S(tgamma), S(lgamma), S(expm1), S(log1p), S(acosh), S(asinh), S(atanh), S(fdim), S(fma), S(logb), S(remainder), S(nextafter), \

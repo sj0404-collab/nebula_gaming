@@ -160,7 +160,7 @@ static int pe_map(Win32 *w, const u8 *bytes, size_t len, const char *name, int w
     if (w->nmods >= MAX_MODULES) { w32_report(w, "%s: too many DLLs (max %d)", name, MAX_MODULES); return -7; }
     GuestModule *m = &w->mods[w->nmods++]; e_memset(m, 0, sizeof *m);
     const char *bn = name; for (const char *p = name; *p; p++) if (*p == '\\' || *p == '/') bn = p + 1;
-    e_snprintf(m->name, sizeof m->name, "%s", bn); m->base = base; m->size = size; m->entry = h.entry ? base + h.entry : 0; m->exp_rva = h.dd[0][0]; m->exp_size = h.dd[0][1];
+    e_snprintf(m->name, sizeof m->name, "%s", bn); m->base = base; m->size = size; m->entry = h.entry ? base + h.entry : 0; m->exp_rva = h.dd[0][0]; m->exp_size = h.dd[0][1]; m->pdata_rva = h.dd[3][0]; m->pdata_size = h.dd[3][1];
   }
   /* imports → shim slots or exports of other loaded DLLs */
   LoadCtx lc = { w, img, base, 0 };
@@ -179,7 +179,7 @@ int pe_load_dll(Win32 *w, const u8 *bytes, size_t len, const char *name) {
 int pe_load(Win32 *w, const u8 *bytes, size_t len, const char *name) {
   PeHdr h; u64 base, size; int rc = pe_map(w, bytes, len, name, 0, &h, &base, &size); if (rc) return rc;
   u8 *img = mem_ptr(w->mem, base, size, 1); if (!img) return -6;
-  w->image_base = base; w->image_size = size; w->entry = base + h.entry; w->subsystem = h.subsystem;
+  w->image_base = base; w->image_size = size; w->entry = base + h.entry; w->subsystem = h.subsystem; w->exe_pdata_rva = h.dd[3][0]; w->exe_pdata_size = h.dd[3][1];
   e_snprintf(w->exe_name, sizeof w->exe_name, "%s", name);
   /* TLS: register the template (slot 0 for the exe), build the main thread's block */
   Cpu *c = w->cpu;

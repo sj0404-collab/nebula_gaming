@@ -120,7 +120,8 @@ static void guest_call(Cpu *c, u64 fn, u64 a0, u64 a1, u64 a2, u64 a3) {
   c->rip = fn;
 }
 static int cont_push(Cpu *c, int kind) {
-  Win32 *w = W; if (w->ncont >= 64) { cpu_fault(c, "guest callback nesting too deep"); return -1; }
+  Win32 *w = W; while (w->ncont && w->cont[w->ncont - 1].rsp < c->r[RSP]) w->ncont--;   /* continuations abandoned by a non-local exit (exception caught above them) */
+  if (w->ncont >= 64) { cpu_fault(c, "guest callback nesting too deep"); return -1; }
   int i = w->ncont++; w->cont[i].kind = kind; w->cont[i].ret_addr = c->rip; w->cont[i].rsp = c->r[RSP]; w->cont[i].idx = 0;
   w->cont[i].data[0] = w->cont[i].data[1] = w->cont[i].data[2] = w->cont[i].data[3] = 0; return i;
 }
@@ -132,6 +133,8 @@ static void do_exit(Cpu *c, int code) { W->exited = 1; c->exit_code = code; c->s
 static void retry_and_yield(Cpu *c, u64 slot) { cpu_push(c, c->rip); c->rip = slot; c->status = RUN_YIELD; }
 static u64 g_cur_slot;
 static int thread_cont_resume(Cpu *c, int kind, u64 rax);
+static int seh_cont_resume(Cpu *c, int kind, u64 rax);
+static int cxx_cont_resume(Cpu *c, int kind, u64 rax);
 static void thread_startup(Cpu *c);
 static void s_Sleep(Cpu *c);
 
@@ -163,7 +166,8 @@ static void qsort_step(Cpu *c, int have_result, u64 rax) {
   }
 }
 void w32_cont_resume(Cpu *c) {
-  Win32 *w = W; if (!w->ncont) { cpu_fault(c, "stray continuation"); return; }
+  Win32 *w = W; while (w->ncont && w->cont[w->ncont - 1].rsp < c->r[RSP]) w->ncont--;
+  if (!w->ncont) { cpu_fault(c, "stray continuation"); return; }
   int i = w->ncont - 1; u64 rax = c->r[RAX];
   c->r[RSP] = w->cont[i].rsp;   /* every callback of one continuation starts from the same stack pointer (qsort with 10^6 comparisons must not drift) */
   switch (w->cont[i].kind) {
@@ -201,6 +205,8 @@ void w32_cont_resume(Cpu *c) {
       w->cont[i].data[2] = hi; w->cont[i].data[5] = lo; mid = lo + (hi - lo) / 2;
       guest_call(c, cmp, key, base + mid * sz, 0, 0); return; }
   }
+  if (seh_cont_resume(c, w->cont[i].kind, rax)) return;
+  if (cxx_cont_resume(c, w->cont[i].kind, rax)) return;
   if (thread_cont_resume(c, w->cont[i].kind, rax)) return;
   extern void gdi_cont_resume(Cpu *c, int kind, u64 rax);
   gdi_cont_resume(c, w->cont[i].kind, rax);
@@ -314,6 +320,9 @@ static u64 unix_time(void) { return 1793000000ull + (u64)(host_now_ms() / 1000.0
 #include "win32_threads.inc"
 static void s_ret0(Cpu *c); static void s_atexit(Cpu *c); static void s_setjmp(Cpu *c);
 #include "win32_compat.inc"
+#include "seh.inc"
+#include "cxx.inc"
+static void s_CxxFrameHandler4(Cpu *c) { seh_log("[x64] __CxxFrameHandler4 (VS2019 compressed EH tables) is not implemented: frame skipped\n"); RET(1); }
 
 /* ================= kernel32 ================= */
 static void s_GetLastError(Cpu *c) { RET(W->last_error); }
@@ -469,18 +478,54 @@ static void s_AddVectoredExceptionHandler(Cpu *c) { RET(0x1234); }
 static void s_RemoveVectoredExceptionHandler(Cpu *c) { RET(1); }
 static void s_RtlAddFunctionTable(Cpu *c) { RET(1); }
 static void s_RtlDeleteFunctionTable(Cpu *c) { RET(1); }
-static void s_RtlLookupFunctionEntry(Cpu *c) { RET(0); }
-static void s_RtlCaptureContext(Cpu *c) { u64 a = ARG(0); u8 *p = mem_ptr(c->mem, a, 1232, 1); if (p) e_memset(p, 0, 1232); wr64(c, a + 0x98, c->r[RSP]); wr64(c, a + 0xf8, c->rip); }
-static void s_RtlVirtualUnwind(Cpu *c) { RET(0); }
-static void s_RtlPcToFileHeader(Cpu *c) { wr64(c, ARG(1), W->image_base); RET(W->image_base); }
-static void s_RtlUnwindEx(Cpu *c) { cpu_fault(c, "SEH unwind (RtlUnwindEx) is not supported"); }
-static void s_RaiseException(Cpu *c) { cpu_fault(c, "RaiseException(0x%08x) — exceptions are not supported", (u32)ARG(0)); }
 static void s_EncodePointer(Cpu *c) { RET(ARG(0) ^ 0xA5A5A5A5ull); }
 static void s_DecodePointer(Cpu *c) { RET(ARG(0) ^ 0xA5A5A5A5ull); }
 static void s_OutputDebugStringA(Cpu *c) { const char *s = rd_str(c, ARG(0), 4096); if (s) e_log("[dbg] %s", s); }
 static void s_OutputDebugStringW(Cpu *c) { char b[1024]; wstr_to_utf8(c, ARG(0), b, sizeof b, -1); e_log("[dbg] %s", b); }
-static void s_FormatMessageA(Cpu *c) { RET(0); }
-static void s_FormatMessageW(Cpu *c) { RET(0); }
+/* FormatMessage(flags, source, msgid, langid, buffer, size, args): FROM_SYSTEM texts for the common Win32 / HRESULT codes, FROM_STRING copies the source (inserts not expanded) */
+static const char *win32_error_text(u32 code) {
+  if ((code & 0xFFFF0000u) == 0x80070000u) code &= 0xFFFF;
+  switch (code) {
+    case 0: return "The operation completed successfully.";
+    case 1: return "Incorrect function."; case 2: return "The system cannot find the file specified."; case 3: return "The system cannot find the path specified.";
+    case 4: return "The system cannot open the file."; case 5: return "Access is denied."; case 6: return "The handle is invalid."; case 8: return "Not enough memory resources are available to process this command.";
+    case 13: return "The data is invalid."; case 14: return "Not enough storage is available to complete this operation."; case 17: return "The system cannot move the file to a different disk drive.";
+    case 18: return "There are no more files."; case 19: return "The media is write protected."; case 23: return "Data error (cyclic redundancy check)."; case 32: return "The process cannot access the file because it is being used by another process.";
+    case 33: return "The process cannot access the file because another process has locked a portion of the file."; case 38: return "Reached the end of the file."; case 50: return "The request is not supported.";
+    case 80: return "The file exists."; case 82: return "The directory or file cannot be created."; case 87: return "The parameter is incorrect."; case 109: return "The pipe has been ended."; case 110: return "The system cannot open the device or file specified.";
+    case 111: return "The file name is too long."; case 112: return "There is not enough space on the disk."; case 120: return "This function is not supported on this system."; case 122: return "The data area passed to a system call is too small.";
+    case 123: return "The filename, directory name, or volume label syntax is incorrect."; case 126: return "The specified module could not be found."; case 127: return "The specified procedure could not be found."; case 145: return "The directory is not empty.";
+    case 183: return "Cannot create a file when that file already exists."; case 193: return "%1 is not a valid Win32 application."; case 206: return "The filename or extension is too long."; case 232: return "The pipe is being closed.";
+    case 233: return "No process is on the other end of the pipe."; case 234: return "More data is available."; case 258: return "The wait operation timed out."; case 259: return "No more data is available."; case 267: return "The directory name is invalid.";
+    case 998: return "Invalid access to memory location."; case 1008: return "An attempt was made to reference a token that does not exist."; case 1113: return "No mapping for the Unicode character exists in the target multi-byte code page.";
+    case 1114: return "A dynamic link library (DLL) initialization routine failed."; case 1168: return "Element not found."; case 1223: return "The operation was canceled by the user."; case 1235: return "The request was aborted.";
+    case 1314: return "A required privilege is not held by the client."; case 1392: return "The file or directory is corrupted and unreadable."; case 1450: return "Insufficient system resources exist to complete the requested service.";
+    case 0x80004001: return "Not implemented"; case 0x80004002: return "No such interface supported"; case 0x80004003: return "Invalid pointer"; case 0x80004004: return "Operation aborted"; case 0x80004005: return "Unspecified error";
+    case 0x8000FFFF: return "Catastrophic failure"; case 0x80070057: return "The parameter is incorrect."; case 0x8007000E: return "Not enough memory resources are available to complete this operation.";
+    default: return 0;
+  }
+}
+static void format_message(Cpu *c, int wide) {
+  Win32 *w = W; u32 flags = (u32)ARG(0); u64 src = ARG(1); u32 id = (u32)ARG(2); u64 buf = ARG(4); u32 size = (u32)ARG(5);
+  char tmp[512]; const char *text = 0;
+  if (flags & 0x1000) text = win32_error_text(id);
+  else if ((flags & 0x400) && src) { if (wide) { u32 i = 0; for (; i + 1 < sizeof tmp; i++) { u16 ch = rd16(c, src + 2 * i); if (!ch) break; tmp[i] = ch < 128 ? (char)ch : '?'; } tmp[i] = 0; } else { u32 i = 0; for (; i + 1 < sizeof tmp; i++) { u8 ch = rd8(c, src + i); if (!ch) break; tmp[i] = (char)ch; } tmp[i] = 0; } text = tmp; }
+  if (!text) { if (flags & 0x1000) { e_snprintf(tmp, sizeof tmp, "Unknown error 0x%08x", id); text = tmp; } else { w->last_error = 317; RET(0); return; } }
+  char msg[600]; e_snprintf(msg, sizeof msg, "%s%s", text, (flags & 0xFF) == 0 && (flags & 0x1000) ? "\r\n" : "");   /* FORMAT_MESSAGE_MAX_WIDTH_MASK 0 keeps the trailing CRLF */
+  u32 n = (u32)e_strlen(msg);
+  if (flags & 0x100) {   /* ALLOCATE_BUFFER: *buffer = LocalAlloc'd string */
+    u64 a = w32_heap_alloc(w, (u64)(n + 1) * (wide ? 2 : 1), 1); if (!a) { RET(0); return; }
+    for (u32 i = 0; i <= n; i++) { if (wide) wr16(c, a + 2 * i, (u8)msg[i]); else wr8(c, a + i, (u8)msg[i]); }
+    wr64(c, buf, a); RET(n); return;
+  }
+  if (!buf || !size) { w->last_error = 122; RET(0); return; }
+  if (n >= size) n = size - 1;
+  for (u32 i = 0; i < n; i++) { if (wide) wr16(c, buf + 2 * i, (u8)msg[i]); else wr8(c, buf + i, (u8)msg[i]); }
+  if (wide) wr16(c, buf + 2 * n, 0); else wr8(c, buf + n, 0);
+  RET(n);
+}
+static void s_FormatMessageA(Cpu *c) { format_message(c, 0); }
+static void s_FormatMessageW(Cpu *c) { format_message(c, 1); }
 static void s_SetErrorMode(Cpu *c) { RET(0); }
 static void s_GetErrorMode(Cpu *c) { RET(0); }
 static void s_SetThreadErrorMode(Cpu *c) { RET(1); }
@@ -926,6 +971,8 @@ static void s_dsign(Cpu *c) { RET(c->x[0].f64[0] < 0 ? 1 : 0); }
 #define SA(api, fn) { "", api, s_##fn }
 static const ShimDef shims[] = {
   COMPAT_SHIMS
+  SEH_SHIMS
+  CXX_SHIMS
   THREAD_SHIMS
   FS_SHIMS
   S(GetLastError), S(SetLastError), S(GetCurrentProcess), S(GetCurrentProcessId), S(ExitProcess), S(TerminateProcess),
@@ -935,7 +982,7 @@ static const ShimDef shims[] = {
   S(GetCommandLineA), S(GetCommandLineW), S(GetEnvironmentStrings), S(GetEnvironmentStringsW), S(FreeEnvironmentStringsW), S(FreeEnvironmentStringsA), S(GetEnvironmentVariableA), S(GetEnvironmentVariableW), S(SetEnvironmentVariableA), S(ExpandEnvironmentStringsA), S(GetStartupInfoA), S(GetStartupInfoW),
   S(GetModuleHandleA), S(GetModuleHandleW), S(GetModuleHandleExW), S(GetModuleHandleExA), S(LoadLibraryA), S(LoadLibraryW), S(LoadLibraryExA), S(LoadLibraryExW), S(FreeLibrary), S(GetProcAddress), S(GetModuleFileNameA), S(GetModuleFileNameW), S(GetSystemDirectoryA), S(GetWindowsDirectoryA),
   S(GetVersion), S(GetVersionExA), S(GetVersionExW), S(IsProcessorFeaturePresent), S(IsDebuggerPresent), S(IsDBCSLeadByte), S(IsDBCSLeadByteEx), S(GetACP), S(GetOEMCP), S(GetCPInfo), S(GetSystemInfo), S(GetNativeSystemInfo), S(GlobalMemoryStatusEx),
-  S(SetUnhandledExceptionFilter), S(UnhandledExceptionFilter), S(AddVectoredExceptionHandler), S(RemoveVectoredExceptionHandler), S(RtlAddFunctionTable), S(RtlDeleteFunctionTable), S(RtlLookupFunctionEntry), S(RtlCaptureContext), S(RtlVirtualUnwind), S(RtlPcToFileHeader), S(RtlUnwindEx), S(RaiseException), S(EncodePointer), S(DecodePointer),
+  S(SetUnhandledExceptionFilter), S(UnhandledExceptionFilter), S(AddVectoredExceptionHandler), S(RemoveVectoredExceptionHandler), S(RtlAddFunctionTable), S(RtlDeleteFunctionTable), S(EncodePointer), S(DecodePointer),
   S(OutputDebugStringA), S(OutputDebugStringW), S(FormatMessageA), S(FormatMessageW), S(SetErrorMode), S(GetErrorMode), S(SetThreadErrorMode), S(GetLogicalProcessorInformation), S(GetProcessAffinityMask), S(SetThreadAffinityMask), S(SetProcessAffinityMask), S(GetSystemTimeAdjustment), S(SetSystemTime), S(GetThreadPriority), S(SetThreadPriority), S(SetPriorityClass), S(GetPriorityClass), S(GetThreadTimes),
   S(GetProcessHeap), S(HeapCreate), S(HeapDestroy), S(HeapAlloc), S(HeapFree), S(HeapReAlloc), S(HeapSize), S(HeapValidate), S(HeapSetInformation), S(HeapQueryInformation), S(HeapCompact), S(HeapLock), S(HeapUnlock), S(HeapWalk), S(GlobalAlloc), S(GlobalFree), S(GlobalLock), S(GlobalUnlock), S(LocalAlloc), S(LocalFree),
   S(VirtualAlloc), S(VirtualAllocEx), S(VirtualFree), S(VirtualProtect), S(VirtualLock), S(VirtualUnlock), S(VirtualQuery), S(FlushInstructionCache),
@@ -953,7 +1000,7 @@ static const ShimDef shims[] = {
   SA("AreFileApisANSI", ret1), SA("SetFileApisToANSI", ret0), SA("SetFileApisToOEM", ret0),
   /* WS2_32 */
   S(WSAStartup), SA("WSACleanup", ret0), S(WSAGetLastError), SA("WSASetLastError", ret0), S(gethostname), S(htons), SA("ntohs", htons), S(htonl), SA("ntohl", htonl), SA("socket", sock_err), SA("WSASocketW", sock_err), SA("WSASocketA", sock_err), SA("connect", sock_err), SA("bind", sock_err), SA("listen", sock_err), SA("accept", sock_err), SA("send", sock_err), SA("recv", sock_err), SA("sendto", sock_err), SA("recvfrom", sock_err), SA("select", sock_err), SA("closesocket", ret0), SA("shutdown", sock_err), SA("ioctlsocket", sock_err), SA("setsockopt", sock_err), SA("getsockopt", sock_err), SA("getsockname", sock_err), SA("getpeername", sock_err), SA("gethostbyname", ret0), SA("gethostbyaddr", ret0), SA("getaddrinfo", sock_err), SA("freeaddrinfo", ret0), SA("getnameinfo", sock_err), SA("inet_addr", ret0), SA("inet_ntoa", ret0), SA("inet_pton", ret0), SA("inet_ntop", ret0), SA("__WSAFDIsSet", ret0), SA("WSAIoctl", sock_err), SA("WSAEventSelect", sock_err), SA("WSAWaitForMultipleEvents", sock_err), SA("WSAEnumNetworkEvents", sock_err), SA("WSACreateEvent", ret0), SA("WSACloseEvent", ret1), SA("WSAResetEvent", ret1), SA("WSASend", sock_err), SA("WSARecv", sock_err), SA("WSAPoll", sock_err), SA("getservbyname", ret0), SA("getprotobyname", ret0), SA("WSADuplicateSocketW", sock_err), SA("WSAAddressToStringW", sock_err), SA("WSAStringToAddressW", sock_err),
-  SA("InitializeSListHead", ret0), S(VerSetConditionMask), SA("VerifyVersionInfoW", ret1), SA("VerifyVersionInfoA", ret1), SA("RtlUnwind", ret0), SA("SetStdHandle", ret1), S(GlobalMemoryStatus), S(ReadConsoleW), SA("ReadConsoleA", ReadConsoleW), SA("GetDateFormatW", ret0), SA("GetTimeFormatW", ret0), SA("GetDateFormatEx", ret0), S(LocalFileTimeToFileTime), S(InterlockedPushEntrySList), S(InterlockedPopEntrySList), S(InterlockedFlushSList), SA("QueryDepthSList", ret0), S(GetSystemDirectoryW), SA("GetWindowsDirectoryW", GetSystemDirectoryW), SA("GetWindowsDirectoryA", GetSystemDirectoryA), SA("SearchPathW", ret0), SA("SearchPathA", ret0), S(GetUserNameW), S(GetComputerNameW), S(GetComputerNameExW), SA("GetComputerNameExA", GetComputerNameA), SA("GetCompressedFileSizeA", retm1), SA("GetCompressedFileSizeW", retm1),
+  SA("InitializeSListHead", ret0), S(VerSetConditionMask), SA("VerifyVersionInfoW", ret1), SA("VerifyVersionInfoA", ret1), SA("SetStdHandle", ret1), S(GlobalMemoryStatus), S(ReadConsoleW), SA("ReadConsoleA", ReadConsoleW), SA("GetDateFormatW", ret0), SA("GetTimeFormatW", ret0), SA("GetDateFormatEx", ret0), S(LocalFileTimeToFileTime), S(InterlockedPushEntrySList), S(InterlockedPopEntrySList), S(InterlockedFlushSList), SA("QueryDepthSList", ret0), S(GetSystemDirectoryW), SA("GetWindowsDirectoryW", GetSystemDirectoryW), SA("GetWindowsDirectoryA", GetSystemDirectoryA), SA("SearchPathW", ret0), SA("SearchPathA", ret0), S(GetUserNameW), S(GetComputerNameW), S(GetComputerNameExW), SA("GetComputerNameExA", GetComputerNameA), SA("GetCompressedFileSizeA", retm1), SA("GetCompressedFileSizeW", retm1),
   /* COMCTL32 */
   SA("InitCommonControls", ret0), SA("InitCommonControlsEx", ret1), SA("MakeDragList", ret1), SA("LBItemFromPt", retm1), SA("DrawInsert", ret0),
   /* ADVAPI32 (minimal) */
@@ -973,7 +1020,7 @@ static const ShimDef shims[] = {
   S(sscanf), S(strlen), S(wcslen), S(strnlen), S(strcmp), SA("_stricmp", stricmp), SA("_strcmpi", stricmp), SA("stricmp", stricmp), S(strncmp), SA("_strnicmp", strnicmp), S(wcscmp), S(strcpy), S(strncpy), S(strcat), S(strchr), S(strrchr), S(strstr), SA("_strdup", strdup), S(strdup), S(strtol), S(strtoul), S(strtoll), SA("_strtoi64", strtoll), SA("_strtoui64", strtoll), SA("strtoull", strtoll), S(atoi), S(atol), S(atoll), SA("_atoi64", atoll), S(strtod), S(atof), S(toupper), S(tolower), S(isdigit), S(isalpha), S(isalnum), S(isspace), S(isupper), S(islower), S(isprint), S(isxdigit), S(ispunct), SA("iscntrl", ret0), SA("isgraph", isprint), SA("iswspace", isspace), SA("iswdigit", isdigit), SA("iswalpha", isalpha), SA("towupper", toupper), SA("towlower", tolower), SA("_isctype", ret0), SA("strerror", ret0), SA("_strerror", ret0), SA("strerror_s", ret0), SA("strcpy_s", ret0), SA("strcat_s", ret0), SA("strncpy_s", ret0), SA("memcpy_s", ret0), SA("memmove_s", ret0), SA("strtok", ret0), SA("strtok_s", ret0), SA("strspn", ret0), SA("strcspn", ret0), SA("strpbrk", ret0), SA("_strlwr", ret0), SA("_strupr", ret0), SA("_strrev", ret0), SA("strcoll", strcmp), SA("_itoa", ret0), SA("_ltoa", ret0), SA("_ultoa", ret0), SA("_i64toa", ret0), SA("_ui64toa", ret0),
   S(memcpy), SA("memmove", memcpy), S(memset), S(memcmp), S(memchr), S(qsort), SA("qsort_s", qsort), S(bsearch), SA("_setjmp", setjmp), SA("_setjmpex", setjmp), S(longjmp), S(div), SA("ldiv", div), S(abs), S(labs), SA("_abs64", llabs), S(llabs),
   S(sin), S(cos), S(tan), S(exp), S(log), S(pow), S(atan2), S(asin), S(acos), S(atan), S(sinh), S(cosh), S(tanh), S(log10), S(log2), S(cbrt), S(sqrt), S(floor), S(ceil), S(fabs), S(fmod), S(round), S(trunc), S(ldexp), S(frexp), S(modf), S(hypot), SA("_hypot", hypot), S(sinf), S(cosf), S(tanf), S(expf), S(logf), S(powf), S(atan2f), S(sqrtf), S(floorf), S(ceilf), S(fabsf), S(fmodf), S(roundf), SA("_dclass", dclass), SA("_fdclass", fdclass), SA("_dsign", dsign), SA("_fdsign", dsign), SA("_dtest", dclass), SA("_fdtest", fdclass), SA("_finite", ret1), SA("_isnan", ret0), SA("_copysign", copysign), S(copysign), S(exp2), SA("nearbyint", round), SA("rint", round), S(lround), SA("llround", lround), S(fmin), S(fmax),
-  SA("__C_specific_handler", ret1), SA("__CxxFrameHandler3", ret1), SA("__CxxFrameHandler4", ret1), SA("_CxxThrowException", raise), SA("__std_exception_copy", ret0), SA("__std_exception_destroy", ret0), SA("__std_type_info_destroy_list", ret0), SA("__current_exception", ret0), SA("__current_exception_context", ret0), SA("_except_handler4_common", ret1), SA("__intrinsic_setjmp", setjmp), SA("__report_gsfailure", abort), SA("_purecall", abort), SA("terminate", abort), SA("__p__mbctype", pctype_func), SA("_ismbblead", ret0), SA("__mb_cur_max", ret1),
+  SA("__CxxFrameHandler4", CxxFrameHandler4), SA("__std_exception_copy", ret0), SA("__std_exception_destroy", ret0), SA("__std_type_info_destroy_list", ret0), SA("__current_exception", ret0), SA("__current_exception_context", ret0), SA("_except_handler4_common", ret1), SA("__intrinsic_setjmp", setjmp), SA("__report_gsfailure", abort), SA("_purecall", abort), SA("terminate", abort), SA("__p__mbctype", pctype_func), SA("_ismbblead", ret0), SA("__mb_cur_max", ret1),
 };
 /* OLEAUT32 exports most of its API by ordinal only */
 static int oleaut_dll(const char *d) { const char *k = "oleaut32"; for (int i = 0; k[i]; i++) { char ch = d[i]; if (ch >= 'A' && ch <= 'Z') ch += 32; if (ch != k[i]) return 0; } return 1; }

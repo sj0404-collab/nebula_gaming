@@ -100,6 +100,13 @@ sqrtl: 1.414213562
 fistp: 1909090
 fmodl: 1.5000 sinl: 0.841471
 strtold: 2.718282" "$($X --quiet tests/x87.exe 2>&1 | grep -v 'via mingw\|cmp:' || true)"
+echo "[12] structured exception handling: x64 SEH tables, libunwind C++ (zig c++), MSVC __CxxFrameHandler (7-Zip error paths)"
+check "C++ throw/catch (gcc ABI)" "caught std::exception: value too large: 7" "$($X --quiet --max-ms 30000 tests/cxxexc.exe 2>&1 || true)"
+check "1000 throws + dtors"       "1000 throws in a loop, total=503"        "$($X --quiet --max-ms 30000 tests/cxxexc.exe 2>&1 || true)"
+check "__try/__finally unwinding" "inner __finally"                         "$($X --quiet --max-ms 30000 tests/sehtest.exe 2>&1 || true)"
+check "nested __except"           "nested except: 1"                        "$($X --quiet --max-ms 30000 tests/sehtest.exe 2>&1 || true)"
+check "7z: missing archive (MSVC C++ throw)" "System ERROR:" "$($X --quiet --max-ms 30000 --mount "$PWD/$A" $A/7z.exe x nonexistent.7z 2>&1 || true)"
+check "7z: unsupported type"      "Unsupported archive type"               "$($X --quiet --max-ms 30000 --mount "$PWD/$A" $A/7z.exe a -tbogus x.7z demo.txt 2>&1 || true)"
 echo "[6] honest rejections"
 check "32-bit PE"   '"verdict":"unsupported"' "$(printf 'MZ' | head -c 2 > /tmp/pe32.bin; python3 - <<'PY'
 import struct

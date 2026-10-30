@@ -331,6 +331,27 @@ await test('x64: threads & synchronisation — Win32 threads (CreateThread/CS/SR
   await closeAll();
 });
 
+await test('x64: structured exception handling — C++ throw/catch (gcc ABI) and the MSVC __CxxFrameHandler error path of 7-Zip work in the browser', async () => {
+  const w = await x64Open();
+  await w.locator('[data-x64-exe="cxxexc.exe"]').waitFor({ timeout: 30_000 });
+  await w.locator('[data-x64-exe="cxxexc.exe"]').click();
+  await w.getByPlaceholder('arguments').fill('');
+  await w.locator('[data-x64-run]').click();
+  await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout: 60_000 });
+  let con = await w.locator('[data-x64-console]').innerText();
+  expect(/caught std::exception: value too large: 7/.test(con), 'std::exception was not caught: ' + con.slice(-400));
+  expect(/outer caught int 5/.test(con), 'nested rethrow as int failed: ' + con.slice(-400));
+  expect(/1000 throws in a loop, total=503/.test(con), '1000 throws loop failed: ' + con.slice(-400));
+  await w.locator('[data-x64-exe="7z.exe"]').click();
+  await w.getByPlaceholder('arguments').fill('x nonexistent.7z');
+  await w.locator('[data-x64-run]').click();
+  await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout: 90_000 });
+  con = await w.locator('[data-x64-console]').innerText();
+  expect(/System ERROR:[\s\S]*The system cannot find the file specified/.test(con), '7z MSVC C++ exception path failed: ' + con.slice(-400));
+  await page.screenshot({ path: resolve(SHOTS, 'x64-exceptions.png') });
+  await closeAll();
+});
+
 await test('x64: real applications — SQLite 3.50.4 (file db), jq 1.8.1, Lua 5.4 + lua54.dll, 7-Zip 25.01 + 7z.dll, zstd 1.5.7 run in the browser with correct output', async () => {
   const w = await x64Open();
   await w.locator('[data-x64-exe="zstd.exe"]').waitFor({ timeout: 60_000 });

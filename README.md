@@ -9,6 +9,7 @@ browser, in the PWA and in the Android APK (any Chromium ≥ 133 / WebView ≥ 1
 ![PuTTY plink.exe (official MSVC build) running inside the emulator](docs/x64-plink.png)
 ![SQLite 3.50.4 shell (official MSVC build) building a file database inside the emulator, in Chromium](docs/x64-sqlite.png)
 ![7-Zip 25.01 — 7z.exe loads 7z.dll through LoadLibrary/GetProcAddress inside the emulator](docs/x64-7zip.png)
+![C++ exceptions and 7-Zip's MSVC error path (System ERROR via __CxxFrameHandler) inside the emulator](docs/x64-exceptions.png)
 
 ## What the emulator is (and is not)
 
@@ -18,6 +19,7 @@ browser, in the PWA and in the Android APK (any Chromium ≥ 133 / WebView ≥ 1
 | Loader | PE32+ exe **and the program's own DLLs** (relocations, imports by name/ordinal, exports + forwarders, `DllMain`, static TLS per image and per thread, TLS callbacks, data imports such as `_environ`/`_iob`), `LoadLibrary`/`GetProcAddress`/`GetModuleHandle` on real modules, command line, environment, TEB/PEB | 32‑bit PE and .NET are rejected with an honest verdict; system DLLs are always the emulator's shims |
 | KERNEL32 | heap, virtual memory, **threads + synchronisation** (`CreateThread`, critical sections, SRW locks, condition variables, events, mutexes, semaphores, `WaitFor{Single,Multiple}Objects(Ex)`, `WaitOnAddress`, `InitOnce`, `QueueUserAPC`, thread TLS/static TLS, winpthreads), TLS/FLS, time/QPC, console I/O **+ stdin**, **in‑memory file system** (`CreateFile/ReadFile/WriteFile/SetFilePointer/FindFirstFile/GetFileAttributes/Create‑Delete‑Move/Current directory/file mappings`), dynamic environment block, **processes** (`CreateProcessA/W`, `WaitForSingleObject/WaitForMultipleObjects`, `GetExitCodeProcess`, `TerminateProcess`, `OpenProcess`, Toolhelp snapshot, `ReadProcessMemory`, psapi names), **anonymous pipes** (`CreatePipe`, `PeekNamedPipe`, handle inheritance via `SECURITY_ATTRIBUTES`/`SetHandleInformation`/`STARTF_USESTDHANDLES`), locale stubs | **no threads** (fail cleanly); up to 32 processes share one cooperative scheduler inside the wasm module; the disk lives in RAM — mount a folder, download what the program wrote |
 | UCRT / msvcrt | printf family (ANSI + wide), string/memory/ctype, math (via host), malloc, qsort/bsearch, time/strftime, getenv/putenv, atexit, setjmp, **stdio on real files** (`fopen/fread/fgets/getc(_filbuf)/fseek/ftell/_open/_read/_write/_lseek/_stat/_access/_unlink/rename/_mkdir/_getcwd/dup/dup2`) | redirections `>`/`<` work in busybox `sh`; pipes/`$(…)` need child processes |
+| **SEH / C++ exceptions** | x64 table‑based unwinding (`.pdata`/`UNWIND_INFO`, chained info, epilogue detection): `RaiseException`, two‑phase dispatch, `RtlUnwindEx`/`RtlRestoreContext` incl. `STATUS_UNWIND_CONSOLIDATE` and collided unwinds, `RtlVirtualUnwind`/`RtlLookupFunctionEntry`/`RtlCaptureContext`, `__C_specific_handler` (`__try/__except/__finally`), **MSVC `__CxxFrameHandler`/`__CxxFrameHandler3`** (FuncInfo tables, cleanup funclets, catch by value/reference/`...`, nested catches, rethrow) and the gcc/libunwind path (`_CxxThrowException`, `STATUS_GCC_THROW`) | `__CxxFrameHandler4` (VS2019 compressed tables) not yet; hardware faults (AV, div0) still stop the program instead of being dispatched |
 | USER32 / GDI32 | windows, message loop, timers, keyboard/mouse, DCs, DIBs, BitBlt/StretchBlt, pens/brushes, text (bitmap font) | **no Direct3D/OpenGL/Vulkan, no audio, no dialog resources** |
 | WS2_32 / ADVAPI32 / COMCTL32 | stubs that fail cleanly | no network |
 
@@ -39,6 +41,8 @@ At runtime the first unimplemented call stops the program with the API name, RIP
 | **`lua54.exe` + `lua54.dll` (Lua 5.4.2)** | luabinaries | the exe imports the interpreter DLL → loaded from the virtual disk at its preferred base; scripts, `io.open`, `os.date` work (31 M instr / 2 s wasm64) |
 | **`7z.exe` + `7z.dll` (7‑Zip 25.01)** and `7za.exe` | 7‑zip.org | `7z.dll` loaded via `LoadLibrary` + `GetProcAddress("CreateObject")`; `a`/`x`/`l`/`i`/`b` work, 7z/zip round trips bit‑exact; `b -mmt1` ≈ 34 MIPS |
 | **`zstd.exe` (Zstandard 1.5.7, MSVC)** | github.com/facebook/zstd | compress/decompress round trips, built‑in benchmark (`-b1 -e3`) runs |
+| `cxxexc.exe` / `sehtest.c` (zig c++ / `-fms-extensions`) | this repo | `throw`/`catch std::exception`, destructors during unwinding, nested rethrow, `vector::at`, 1000 throws in a loop; `__try/__except/__finally` incl. nested — native and in Chromium |
+| **7‑Zip error paths** (`x missing.7z`, `-tbogus`, wrong password) | 7‑zip.org | the MSVC `throw` → `__CxxFrameHandler` → catch chain inside `7z.exe`/`7z.dll` works: `System ERROR: The system cannot find the file specified.`, exit code 2 (used to stop the emulator) |
 | `plink.exe` (PuTTY 0.85, MSVC/clang‑cl) | putty.org | `-V` runs to completion; real sessions need Winsock |
 | `putty.exe` (GUI) | putty.org | runs up to `CreateDialogParamA` (dialog resources not implemented) |
 | `curl.exe` (8.23, mingw) | curl.se | stops at `Secur32!InitSecurityInterfaceA` (TLS stack) |
@@ -47,7 +51,7 @@ At runtime the first unimplemented call stops the program with the API name, RIP
 ```bash
 # native build + capability tests (needs zig 0.17 for the wasm step)
 ZIG=zig ./emu/x64/build.sh      # → emu/x64/x64run + public/x64/nebula_x64.wasm (≈210 KB)
-./emu/tests/run.sh              # hello/bench/busybox (files, stdin, processes+pipes)/plink/NebulaStrike/threads/heap/DLLs/real apps/x87/rejections — 54 checks
+./emu/tests/run.sh              # hello/bench/busybox (files, stdin, processes+pipes)/plink/NebulaStrike/threads/heap/DLLs/real apps/x87/SEH+C++ exceptions/rejections — 60 checks
 ./emu/x64/x64run --inspect some.exe         # JSON compatibility report
 ./emu/x64/x64run --max-ms 5000 some.exe a b # run headless (frames to .ppm with --frames N)
 ```

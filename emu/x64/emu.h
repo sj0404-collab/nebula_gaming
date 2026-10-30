@@ -182,7 +182,7 @@ int  proc_enum(int idx, int *pid, int *ppid, const char **name);   /* 1 if idx v
 #define THREAD_MAX 64
 #define THREAD_CTX_FIELDS \
   u64 last_error; \
-  struct { int kind; u64 ret_addr, rsp, data[8]; int idx; } cont[64]; int ncont;   /* continuation stack for guest callbacks */ \
+  struct { int kind; u64 ret_addr, rsp, data[16]; int idx; } cont[64]; int ncont;   /* continuation stack for guest callbacks */ \
   int sleeping; double sleep_until_ms; \
   int block; int block_pids[8]; int nblock_pids; int block_pipe; \
   u64 block_addr, block_val; int block_flag;                                       /* CS / SRW / CV / WaitOnAddress waits */ \
@@ -199,7 +199,7 @@ typedef struct {
 } Thread;
 
 #define MAX_MODULES 24
-typedef struct { char name[64]; u64 base, size, entry; u32 exp_rva, exp_size; int attached; } GuestModule;   /* a DLL loaded from the virtual disk */
+typedef struct { char name[64]; u64 base, size, entry; u32 exp_rva, exp_size, pdata_rva, pdata_size; int attached; } GuestModule;   /* a DLL loaded from the virtual disk */
 struct Win32 {
   Cpu *cpu;                              /* the CURRENT thread's cpu */
   Mem *mem;
@@ -210,7 +210,8 @@ struct Win32 {
   union { ThreadCtx tctx; struct { THREAD_CTX_FIELDS }; };    /* current thread's state (see Thread.ctx) */
   Thread th[THREAD_MAX]; int nth, cur_th; Cpu tcpu[THREAD_MAX]; int next_tid;
   struct { u64 tmpl, tmpl_size, blk_size; } tls[MAX_TLS_IMAGES]; int ntls;   /* static TLS templates (exe + DLLs), index = slot in the TEB+0x58 array */
-  GuestModule mods[MAX_MODULES]; int nmods; u64 dll_next;     /* private DLLs (LoadLibrary / static imports) */
+  GuestModule mods[MAX_MODULES]; int nmods; u64 dll_next;
+  u32 exe_pdata_rva, exe_pdata_size;                          /* .pdata of the exe (RUNTIME_FUNCTION table) for SEH / C++ unwinding */     /* private DLLs (LoadLibrary / static imports) */
   int wake_gen;                                               /* bumped by WakeByAddress / InitOnceComplete */
   /* heap */
 #define HEAP_BINS 128
