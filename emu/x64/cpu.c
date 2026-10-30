@@ -503,7 +503,7 @@ static void exec_0f(Ins *i, Cpu *c) {
     case 0xC6: { decode_modrm(i); fix_rip_rel(i, 1); Xmm s, *d = &c->x[i->reg], r; xmm_load(i, &s, 16); u8 im = fetch8(i);
       if (i->p66) { r.q[0] = d->q[im & 1]; r.q[1] = s.q[(im >> 1) & 1]; } else { r.d[0] = d->d[im & 3]; r.d[1] = d->d[(im >> 2) & 3]; r.d[2] = s.d[(im >> 4) & 3]; r.d[3] = s.d[(im >> 6) & 3]; }
       *d = r; return; }
-    case 0x60: case 0x61: case 0x62: case 0x68: case 0x69: case 0x6A: case 0x6C: case 0x6D: { decode_modrm(i); Xmm s, *d = &c->x[i->reg], r; xmm_load(i, &s, 16); int hi = op >= 0x68;
+    case 0x60: case 0x61: case 0x62: case 0x68: case 0x69: case 0x6A: case 0x6C: case 0x6D: { decode_modrm(i); Xmm s, *d = &c->x[i->reg], r; xmm_load(i, &s, 16); int hi = op == 0x6C ? 0 : op == 0x6D ? 1 : op >= 0x68;   /* punpckl* 60-62/6C, punpckh* 68-6A/6D */
       switch (op & 7) { case 0: for (int k = 0; k < 8; k++) { r.b[2 * k] = d->b[k + hi * 8]; r.b[2 * k + 1] = s.b[k + hi * 8]; } break;   /* punpck bw */
         case 1: for (int k = 0; k < 4; k++) { r.w[2 * k] = d->w[k + hi * 4]; r.w[2 * k + 1] = s.w[k + hi * 4]; } break;                      /* wd */
         case 2: for (int k = 0; k < 2; k++) { r.d[2 * k] = d->d[k + hi * 2]; r.d[2 * k + 1] = s.d[k + hi * 2]; } break;                      /* dq */
@@ -586,6 +586,9 @@ int cpu_run(Cpu *c, u64 max_insns) {
       if (c->status != RUN_OK) return c->status;
       continue;
     }
+#ifdef X64_WATCH
+    if (c->rip == X64_WATCH || c->rip == X64_WATCH2) e_log("[watch] rip=%llx tid=%d r12=%llx r13=%llx r14=%llx r15=%llx rbx=%llx\n", (unsigned long long)c->rip, c->w->th[c->w->cur_th].tid, (unsigned long long)c->r[12], (unsigned long long)c->r[13], (unsigned long long)c->r[14], (unsigned long long)c->r[15], (unsigned long long)c->r[3]);
+#endif
     Ins in; in.c = c; in.start = c->rip; in.ip = c->rip;
     in.rex = in.rexw = in.rexr = in.rexx = in.rexb = in.p66 = in.p67 = in.rep = in.seg = in.lock = 0; in.modrm = 0; in.ea_valid = 0; in.mod = in.reg = in.rm = 0; in.ea = 0;
     in.code = mem_ptr(c->mem, c->rip, 16, 0);

@@ -111,7 +111,6 @@ typedef struct { const char *dll; const char *name; ShimFn fn; int calls; } Shim
 #define G_HEAP_BASE   0x0000000020000000ull    /* guest heap; VirtualAlloc/HeapAlloc carve from here */
 #define G_FB_BASE     0x0000000070000000ull    /* DIB sections (framebuffers) */
 
-typedef struct { u64 base, size; int free; } HeapBlock;
 
 typedef struct {
   u64 hwnd; int w, h; char title[128];
@@ -133,7 +132,7 @@ typedef struct { u64 hwnd; u32 msg; u64 wparam, lparam; u32 time; } GuestMsg;
 
 /* ---- per-process file-descriptor / environment state (vfs.c) ---- */
 #define FD_MAX 128
-enum { FD_FILE = 1, FD_CONSOLE, FD_PIPE, FD_MAP, FD_PROC, FD_NULL };
+enum { FD_FILE = 1, FD_CONSOLE, FD_PIPE, FD_MAP, FD_PROC, FD_NULL, FD_KOBJ };   /* FD_KOBJ: event / mutex / semaphore / thread (kobj table) */
 typedef struct { int kind; int node; u64 pos; int append, eof, err, unget, alias, obj, wend; int noinherit; } FdEnt;   /* noinherit: not copied into children */
 typedef struct { int used; char dir[512]; char pat[128]; int cursor; int dots; } VFind;
 typedef struct { u64 addr, size; int fd; } MapView;
@@ -148,8 +147,25 @@ int  vfs_kind(int fd); int vfs_fd_obj(int fd);
 int  vfs_pipe(int *rfd, int *wfd); int vfs_pipe_avail(int fd); int vfs_pipe_id(int fd); int vfs_pipe_would_block(int pi, int for_write);
 int  vfs_map_create(int file_fd, u64 size); u8 *vfs_map_data(int fd, u64 *size); int vfs_map_write_back(int fd, const u8 *src, u64 n);
 int  vfs_proc_handle(int pid); int vfs_fd_pid(int fd);
+/* ---- kernel objects (vfs.c): global, refcounted, referenced from fd tables as FD_KOBJ so inheritance/dup/close are uniform ---- */
+enum { KO_EVENT = 1, KO_MUTEX, KO_SEM, KO_THREAD };
+#define KOBJ_MAX 512
+typedef struct {
+  int used, kind, refs; char name[64];
+  int manual, signaled;                 /* event */
+  int count, max;                       /* semaphore */
+  int owner_pid, owner_tid, recursion, abandoned;   /* mutex */
+  int pid, tid, state; u32 exit_code;   /* thread: state 1 running, 2 exited */
+} KObj;
+int   kobj_new(int kind, const char *name, int *existed);   /* returns index or -1; named objects are shared */
+KObj *kobj_get(int idx);
+void  kobj_ref(int idx, int delta);
+int   vfs_kobj_handle(int idx);        /* new fd referencing the object (+1 ref) */
+int   vfs_fd_kobj(int fd);             /* idx or -1 */
 /* ---- process table (api.c) ---- */
-enum { BLOCK_NONE = 0, BLOCK_STDIN, BLOCK_PROC, BLOCK_PIPE_R, BLOCK_PIPE_W, BLOCK_SLEEP };
+enum { BLOCK_NONE = 0, BLOCK_STDIN, BLOCK_PROC, BLOCK_PIPE_R, BLOCK_PIPE_W, BLOCK_SLEEP, BLOCK_OBJ, BLOCK_CS, BLOCK_SRW, BLOCK_CV, BLOCK_ADDR };
+int  proc_main_thread_kobj(int pid);
+Win32 *proc_w32_at(int i);                          /* iterate live processes (NULL when i is past the table) */
 int  proc_spawn(Win32 *parent, const char *exe_path, const char *cmdline, const int std_fd[3]);   /* returns pid or -errno */
 int  proc_state(int pid, int *exit_code);           /* 0 unknown, 1 running, 2 exited */
 void proc_handle_ref(int pid, int delta);
@@ -160,22 +176,42 @@ double proc_start_ms(int pid);
 void proc_kill(int pid, int code);
 int  proc_enum(int idx, int *pid, int *ppid, const char **name);   /* 1 if idx valid */
 
+/* ---- per-thread Win32 state: lives in Win32 as the *current* thread's copy and is swapped on thread switch ---- */
+#define THREAD_MAX 64
+#define THREAD_CTX_FIELDS \
+  u64 last_error; \
+  struct { int kind; u64 ret_addr, rsp, data[8]; int idx; } cont[64]; int ncont;   /* continuation stack for guest callbacks */ \
+  int sleeping; double sleep_until_ms; \
+  int block; int block_pids[8]; int nblock_pids; int block_pipe; \
+  u64 block_addr, block_val; int block_flag;                                       /* CS / SRW / CV / WaitOnAddress waits */ \
+  int wobj_kind[64], wobj_idx[64]; int nwobj, wait_all, wait_granted;              /* BLOCK_OBJ: 1 = process pid, 2 = kobj index; wait_granted: index+1 handed over by SetEvent */ \
+  int wait_active; u64 wait_rip; double wait_deadline; int wake_snap;              /* timed wait in progress (deadline < 0: infinite) */ \
+  int spawn_wait_pid, spawn_wait_mode;                                             /* _spawn*(P_WAIT/P_OVERLAY) in progress */ \
+  int pw_active, pw_fd; u64 pw_rip, pw_total, pw_done;                             /* partially completed pipe write, resumed on shim retry */
+typedef struct { THREAD_CTX_FIELDS } ThreadCtx;
+typedef struct {
+  int used, state, tid, suspend, kobj;   /* state 1 running, 2 exited */
+  Cpu *cpu; u64 teb, stack, stack_size, tls_blk, tls_arr, start, param; u32 exit_code;
+  ThreadCtx ctx;                         /* saved while not current */
+} Thread;
+
 struct Win32 {
-  Cpu *cpu;
+  Cpu *cpu;                              /* the CURRENT thread's cpu */
   Mem *mem;
   ShimSlot slots[MAX_SHIMS]; int nslots;
   u64 image_base; u64 image_size; u64 entry; int subsystem;   /* 2 GUI, 3 console */
   char exe_name[260]; char cmdline[1024];
-  u64 teb, peb, cmdline_a, cmdline_w, env_w, env_a;
-  u64 last_error;
+  u64 teb, peb, cmdline_a, cmdline_w, env_w, env_a;           /* teb: main thread's TEB */
+  union { ThreadCtx tctx; struct { THREAD_CTX_FIELDS }; };    /* current thread's state (see Thread.ctx) */
+  Thread th[THREAD_MAX]; int nth, cur_th; Cpu tcpu[THREAD_MAX]; int next_tid;
+  u64 tls_tmpl, tls_tmpl_size, tls_blk_size;                  /* static TLS template from the PE TLS directory */
+  int wake_gen;                                               /* bumped by WakeByAddress / InitOnceComplete */
   /* heap */
-  u64 heap_cur, heap_end; HeapBlock blocks[65536]; int nblocks;
+#define HEAP_BINS 128
+  u64 heap_cur, heap_end; u64 bins[HEAP_BINS];              /* free-list heads per size class (guest addresses) */
   u64 fb_cur;                           /* bump pointer for DIB sections */
-  u32 tls_slots[64]; u64 tls_values[64];
+  u32 tls_slots[64];
   u64 tls_callbacks[16]; int n_tls_cb;
-  /* continuation stack for guest callbacks (wndproc, TLS callbacks, _initterm, atexit) */
-  struct { int kind; u64 ret_addr, rsp, data[6]; int idx; } cont[64]; int ncont;
-  int sleeping;
   int yield_frames; int dirty;
   /* window + GDI */
   GuestWindow win; GdiObj gdi[MAX_GDI]; int ngdi; u64 next_handle;
@@ -183,7 +219,7 @@ struct Win32 {
   u32 *screen; int screen_w, screen_h;  /* host-side composed window contents (BGRA) */
   int frames_presented; int blits_since_yield;
   int key_state[256]; int key_prev[256];
-  double start_ms, sleep_until_ms; u64 fake_time_ms;
+  double start_ms; u64 fake_time_ms;
   int unknown_import_calls;
   char report[4096]; int report_len;     /* capability report text */
   /* console */
@@ -197,9 +233,6 @@ struct Win32 {
   u32 rand_state;
   /* process */
   ProcFs *fs; int pid, ppid; u64 str_cur;
-  int block; int block_pids[8]; int nblock_pids; int block_pipe;
-  int spawn_wait_pid, spawn_wait_mode;
-  int pw_active, pw_fd; u64 pw_rip, pw_total, pw_done;         /* partially completed pipe write, resumed on shim retry */                        /* _spawn*(P_WAIT/P_OVERLAY) in progress */
 };
 
 void   w32_init(Win32 *w, Cpu *c, Mem *m);
@@ -218,6 +251,13 @@ void   w32_start(Win32 *w, const char *cmdline);
 void   w32_cont_resume(Cpu *c);
 u64    w32_arg(Cpu *c, int n);
 double w32_sleep_remaining_ms(Win32 *w);
+/* threads (win32.c): the scheduler in api.c picks (process, thread) pairs */
+void   w32_thread_sync(Win32 *w);                 /* save the live ctx into th[cur_th] */
+int    w32_thread_pick(Win32 *w);                 /* switch to the next runnable thread after cur_th; 1 if one was found */
+void   w32_threads_summary(Win32 *w, int *stdin_wait, int *sleeping, double *best_ms);   /* why nothing runs */
+void   w32_proc_teardown(Win32 *w);               /* process exit: release thread objects */
+int    w32_thread_count(Win32 *w);
+int    w32_thread_alive(Win32 *w);               /* current thread still runnable (not exited / suspended)? */
 
 /* ---------- loader ---------- */
 int  pe_load(Win32 *w, const u8 *bytes, size_t len, const char *name);

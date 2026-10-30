@@ -24,6 +24,7 @@ static Proc *proc_alloc(void) {
 static void proc_exit(Proc *p, int code) {
   if (p->state == 2) return;
   p->state = 2; p->exit_code = code;
+  p->w32.cpu->exit_code = code; w32_proc_teardown(&p->w32);   /* every thread dies with the process; thread objects become signalled */
   vfs_release_proc(p->w32.fs);
   if (p != g_root) mem_release(&p->mem);
 }
@@ -34,6 +35,8 @@ int proc_read_mem(int pid, u64 addr, u8 *buf, u64 n) { Proc *p = proc_find(pid);
 u64 proc_image_base(int pid, const char **name) { Proc *p = proc_find(pid); if (!p) return 0; if (name) *name = p->name; return p->w32.image_base; }
 double proc_start_ms(int pid) { Proc *p = proc_find(pid); return p ? p->w32.start_ms : 0; }
 void proc_kill(int pid, int code) { Proc *p = proc_find(pid); if (p) proc_exit(p, code); }
+Win32 *proc_w32_at(int i) { if (i < 0 || i >= PROC_MAX) return 0; Proc *p = g_procs[i]; return p && p->used && p->state == 1 ? &p->w32 : (Win32 *)1; }
+int proc_main_thread_kobj(int pid) { Proc *p = proc_find(pid); return p ? p->w32.th[0].kobj : -1; }
 /* idx 0 is a synthetic parent for the root process ("explorer.exe", pid 1000): busybox treats getppid()==1 as "orphan, do not wait" */
 #define HOST_PID 1000
 int proc_enum(int idx, int *pid, int *ppid, const char **name) { if (idx == 0) { *pid = HOST_PID; *ppid = 4; *name = "explorer.exe"; return 1; } idx--; int k = 0; for (int i = 0; i < PROC_MAX; i++) { Proc *p = g_procs[i]; if (!p || !p->used || p->state == 2) continue; if (k++ == idx) { *pid = p->pid; *ppid = p->ppid; *name = p->name; return 1; } } return 0; }
@@ -55,18 +58,10 @@ int proc_spawn(Win32 *parent, const char *exe_path, const char *cmdline, const i
   vfs_use(save); w32_set_current(parent);
   return p->pid;
 }
-/* is this process ready to run? (clears the block when the condition is satisfied) */
+/* does this process have a runnable thread? (switches the process to it) */
 static int proc_runnable(Proc *p) {
-  if (p->state != 1) return 0; Win32 *w = &p->w32;
-  switch (w->block) {
-    case BLOCK_NONE: return 1;
-    case BLOCK_STDIN: if (!vfs_stdin_available()) return 0; break;
-    case BLOCK_PROC: { int all_running = 1; for (int i = 0; i < w->nblock_pids; i++) { Proc *q = proc_find(w->block_pids[i]); if (!q || q->state == 2) { all_running = 0; break; } } if (all_running && w->nblock_pids) return 0; break; }
-    case BLOCK_PIPE_R: if (vfs_pipe_would_block(w->block_pipe, 0)) return 0; break;
-    case BLOCK_PIPE_W: if (vfs_pipe_would_block(w->block_pipe, 1)) return 0; break;
-    case BLOCK_SLEEP: if (w->sleeping && w->sleep_until_ms > host_now_ms()) return 0; break;
-  }
-  w->block = BLOCK_NONE; return 1;
+  if (p->state != 1) return 0;
+  return w32_thread_pick(&p->w32);
 }
 static void switch_to(Proc *p) { vfs_use(p->w32.fs); w32_set_current(&p->w32); }
 static int g_want_stdin; static int g_trace;
@@ -97,10 +92,12 @@ EXPORT(x64_load) int x64_load(const u8 *bytes, size_t len, const char *name, con
 }
 /* scheduler: run runnable processes round-robin; the host sees the root process' lifecycle */
 static int run_one(Proc *p, u64 budget) {
-  switch_to(p); u64 ic0 = p->cpu.icount; int r = cpu_run(&p->cpu, budget);
-  if (g_trace) { char msg[256]; e_snprintf(msg, sizeof msg, "[sched] pid %d %.40s ran %llu insns -> r=%d block=%d rip=0x%llx\n", p->pid, p->w32.cmdline, (unsigned long long)(p->cpu.icount - ic0), r, p->w32.block, (unsigned long long)p->cpu.rip); host_write(3, msg, e_strlen(msg));
+  switch_to(p); Cpu *tc = p->w32.cpu; u64 ic0 = tc->icount; int r = cpu_run(tc, budget);
+  if (g_trace) { char msg[256]; e_snprintf(msg, sizeof msg, "[sched] pid %d tid %d %.40s ran %llu insns -> r=%d block=%d rip=0x%llx\n", p->pid, p->w32.th[p->w32.cur_th].tid, p->w32.cmdline, (unsigned long long)(tc->icount - ic0), r, p->w32.block, (unsigned long long)tc->rip); host_write(3, msg, e_strlen(msg));
     if (g_trace > 1) { int *lastc = p->lastc; for (int i = 2; i < p->w32.nslots; i++) if (p->w32.slots[i].calls != lastc[i]) { e_snprintf(msg, sizeof msg, "   %s!%s +%d\n", p->w32.slots[i].dll, p->w32.slots[i].name, p->w32.slots[i].calls - lastc[i]); host_write(3, msg, e_strlen(msg)); lastc[i] = p->w32.slots[i].calls; } } }
   if (p->w32.dirty && p->w32.screen) { host_present(p->w32.screen, p->w32.screen_w, p->w32.screen_h); p->w32.dirty = 0; }
+  /* a fault/exit in a worker thread is reported through the main thread's cpu (what the host inspects) */
+  if ((r == RUN_FAULT || r == RUN_BREAK || r == RUN_EXIT) && tc != &p->cpu) { Cpu *m = &p->cpu; Cpu saved = *m; *m = *tc; m->mem = saved.mem; m->w = saved.w; p->w32.th[0].cpu = m; }
   return r;
 }
 EXPORT(x64_run) int x64_run(u64 budget) {
@@ -112,12 +109,12 @@ EXPORT(x64_run) int x64_run(u64 budget) {
     for (int k = 0; k < g_nprocs; k++) { int i = (start + 1 + k) % g_nprocs; Proc *q = g_procs[i]; if (q && q->used && proc_runnable(q)) { p = q; g_cur = i; break; } }
     if (!p) {
       /* nothing runnable: waiting on the host (stdin / time) or deadlocked */
-      int stdin_wait = 0, sleeping = 0;
-      for (int i = 0; i < g_nprocs; i++) { Proc *q = g_procs[i]; if (!q || !q->used || q->state != 1) continue; if (q->w32.block == BLOCK_STDIN) stdin_wait = 1; if (q->w32.block == BLOCK_SLEEP) sleeping = 1; }
+      int stdin_wait = 0, sleeping = 0; double best = -1;
+      for (int i = 0; i < g_nprocs; i++) { Proc *q = g_procs[i]; if (!q || !q->used || q->state != 1) continue; w32_threads_summary(&q->w32, &stdin_wait, &sleeping, &best); }
       if (g_root->state == 2) return RUN_EXIT;
       if (stdin_wait) { g_want_stdin = 1; return RUN_YIELD; }
       if (sleeping) return RUN_YIELD;
-      cpu_fault(&g_root->cpu, "deadlock: every process is blocked on another process or pipe"); return RUN_FAULT;
+      cpu_fault(&g_root->cpu, "deadlock: every thread of every process is blocked (wait on an object, lock, pipe or process that nobody will signal)"); return RUN_FAULT;
     }
     int r = run_one(p, budget);
     if (r == RUN_EXIT) {
@@ -130,7 +127,7 @@ EXPORT(x64_run) int x64_run(u64 budget) {
       { char msg[512]; e_snprintf(msg, sizeof msg, "[x64] child %s (pid %d) %s at rip=0x%llx: %s\n", p->name, p->pid, r == RUN_FAULT ? "faulted" : "hit a breakpoint", (unsigned long long)p->cpu.err_rip, p->cpu.err); host_write(3, msg, e_strlen(msg)); }
       proc_exit(p, 0xC0000005); continue;
     }
-    if (r == RUN_YIELD) { if (p->w32.block != BLOCK_NONE) continue; return RUN_YIELD; }
+    if (r == RUN_YIELD) { if (p->w32.block != BLOCK_NONE || !w32_thread_alive(&p->w32)) continue; return RUN_YIELD; }
     return RUN_OK;   /* budget used up; next call continues with the following process */
   }
   return RUN_YIELD;
@@ -158,7 +155,7 @@ EXPORT(x64_trace) void x64_trace(int on) { g_trace = on; }
 EXPORT(x64_wants_stdin) int x64_wants_stdin(void) { return g_want_stdin; }
 EXPORT(x64_key) void x64_key(int vk, int down) { w32_key(&g_w32, vk, down); }
 EXPORT(x64_mouse) void x64_mouse(int x, int y, int ev) { w32_mouse(&g_w32, x, y, ev); }
-EXPORT(x64_icount) u64 x64_icount(void) { u64 n = 0; for (int i = 0; i < g_nprocs; i++) if (g_procs[i]) n += g_procs[i]->cpu.icount; return n; }
+EXPORT(x64_icount) u64 x64_icount(void) { u64 n = 0; for (int i = 0; i < g_nprocs; i++) if (g_procs[i]) { n += g_procs[i]->cpu.icount; for (int t = 1; t < THREAD_MAX; t++) n += g_procs[i]->w32.tcpu[t].icount; } return n; }
 EXPORT(x64_exit_code) int x64_exit_code(void) { return g_cpu.exit_code; }
 EXPORT(x64_error) const char *x64_error(void) { return g_cpu.err; }
 EXPORT(x64_error_rip) u64 x64_error_rip(void) { return g_cpu.err_rip; }
@@ -172,7 +169,8 @@ EXPORT(x64_screen_h) int x64_screen_h(void) { return g_w32.screen ? g_w32.screen
 EXPORT(x64_screen) const u32 *x64_screen(void) { return g_w32.screen; }
 EXPORT(x64_title) const char *x64_title(void) { return g_w32.win.title; }
 EXPORT(x64_subsystem) int x64_subsystem(void) { return g_w32.subsystem; }
-EXPORT(x64_sleep_ms) double x64_sleep_ms(void) { double best = -1; for (int i = 0; i < g_nprocs; i++) { Proc *q = g_procs[i]; if (!q || !q->used || q->state != 1) continue; if (q->w32.block == BLOCK_NONE) return 0; double s = w32_sleep_remaining_ms(&q->w32); if (q->w32.block == BLOCK_SLEEP && (best < 0 || s < best)) best = s; } return best < 0 ? 0 : best; }
+EXPORT(x64_sleep_ms) double x64_sleep_ms(void) { double best = -1; int si = 0, sl = 0; for (int i = 0; i < g_nprocs; i++) { Proc *q = g_procs[i]; if (!q || !q->used || q->state != 1) continue; w32_threads_summary(&q->w32, &si, &sl, &best); } return best < 0 ? 0 : best; }
+EXPORT(x64_thread_count) int x64_thread_count(void) { int n = 0; for (int i = 0; i < g_nprocs; i++) if (g_procs[i] && g_procs[i]->used && g_procs[i]->state == 1) n += w32_thread_count(&g_procs[i]->w32); return n; }
 EXPORT(x64_proc_count) int x64_proc_count(void) { int n = 0; for (int i = 0; i < g_nprocs; i++) if (g_procs[i] && g_procs[i]->used && g_procs[i]->state == 1) n++; return n; }
 EXPORT(x64_mem_used) u64 x64_mem_used(void) { return emu_alloc_used(); }
 EXPORT(x64_has_window) int x64_has_window(void) { return g_w32.win.created; }

@@ -69,6 +69,13 @@ out=$($X --max-ms 2000 --key 0x25@300:400 --key 0x20@500:1200 ../public/download
 frames=$(printf '%s' "$out" | sed -n 's/.* = \([0-9.]*\) MIPS, \([0-9]*\) frames.*/\2/p')
 echo "  frames presented: ${frames:-0}"
 [ "${frames:-0}" -ge 60 ] && echo "  ok   >= 60 frames in 2 s" || { echo "  FAIL frames: $out"; fail=1; }
+echo "[7] threads & synchronisation (real Win32 threads scheduled by the emulator)"
+check "threads.exe"   "39 checks, 0 failed"          "$($X --quiet --max-ms 30000 tests/threads.exe 2>&1 | tail -1 || true)"
+check "pthreads.exe"  "9 checks, 0 failed"           "$($X --quiet --max-ms 30000 tests/pthreads.exe 2>&1 | tail -1 || true)"
+check "threads in child + pipe" "39 checks, 0 failed" "$($X --quiet --no-stdin --max-ms 30000 --mount "$PWD/tests" $S/busybox64.exe sh -c './threads.exe | tail -1' 2>&1 || true)"
+echo "[8] heap: 10^5 live blocks, blocks spanning heap regions, sort of 100000 lines"
+check "sort -n 20000"  "20000"                       "$($BB sh -c 'seq 1 20000 | sort -n | tail -1' 2>&1 || true)"
+check "sort -rn 1e5"   "100000"                      "$($BB sh -c 'seq 1 100000 | sort -rn | head -1' 2>&1 || true)"
 echo "[6] honest rejections"
 check "32-bit PE"   '"verdict":"unsupported"' "$(printf 'MZ' | head -c 2 > /tmp/pe32.bin; python3 - <<'PY'
 import struct

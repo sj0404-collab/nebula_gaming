@@ -136,6 +136,7 @@ int pe_load(Win32 *w, const u8 *bytes, size_t len, const char *name) {
     if (raw_end > raw_start) { u8 *src = mem_ptr(w->mem, raw_start, raw_end - raw_start, 0); u8 *dst = mem_ptr(w->mem, blk, raw_end - raw_start, 1); if (src && dst) e_memcpy(dst, src, (size_t)(raw_end - raw_start)); }
     u64 arr = w32_heap_alloc(w, 64, 1); wr64(c, arr, blk);
     wr64(c, w->teb + 0x58, arr);
+    w->tls_tmpl = raw_start; w->tls_tmpl_size = raw_end > raw_start ? raw_end - raw_start : 0; w->tls_blk_size = blk_sz; w->th[0].tls_blk = blk; w->th[0].tls_arr = arr;
     if (idx_addr) wr32(c, idx_addr, 0);
     /* callbacks: stored for the start-up sequence */
     if (cb_addr) { for (int k = 0; k < 16; k++) { u64 fn = rd64(c, cb_addr + k * 8); if (!fn) break; w->tls_callbacks[w->n_tls_cb++] = fn; } }
@@ -185,7 +186,7 @@ int pe_inspect(const u8 *bytes, size_t len, char *out, size_t out_sz) {
       if (!e_strncmp(d, "d3d", 3) || !e_strncmp(d, "D3D", 3) || !e_stricmp(d, "opengl32.dll") || !e_stricmp(d, "dxgi.dll") || !e_stricmp(d, "vulkan-1.dll") || !e_stricmp(d, "xinput1_4.dll") || !e_stricmp(d, "dsound.dll") || !e_stricmp(d, "xaudio2_9.dll") || !e_stricmp(d, "mono-2.0-bdwgc.dll") || !e_stricmp(d, "UnityPlayer.dll") || !e_stricmp(d, "GameAssembly.dll")) heavy = 1; }
     if (heavy) { verdict = "unsupported"; why = "needs GPU/audio subsystems (Direct3D, OpenGL, Vulkan, XAudio, Unity/Mono) that have no wasm64 implementation here"; }
     else if (x.unknown == 0) { verdict = "likely"; why = "all imports have shims"; }
-    else if (x.unknown * 5 <= x.n * 2) { verdict = "partial"; why = "most imports have shims (no network/threads/real files); the program runs until the first unimplemented call"; }
+    else if (x.unknown * 5 <= x.n * 2) { verdict = "partial"; why = "most imports have shims (no network/GPU/audio); the program runs until the first unimplemented call"; }
     else { verdict = "unlikely"; why = "most imports are not implemented"; }
   }
   ins_put(&x, "],\"verdict\":\"%s\",\"why\":\"%s\"}", verdict, why);

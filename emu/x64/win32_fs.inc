@@ -271,34 +271,19 @@ static void create_process(Cpu *c, const char *app, const char *cmd) {
   views_flush_all(c);   /* the child must see what the parent wrote into shared mappings */
   int pid = proc_spawn(W, cand, cmd && cmd[0] ? cmd : exe, std);
   if (pid < 0) { W->last_error = pid == -8 ? 8 : 2; RET(0); return; }
-  u64 pi = ARG(9); if (pi) { int h = vfs_proc_handle(pid); wr64(c, pi, h >= 0 ? H_OF(h) : 0); wr64(c, pi + 8, 0x7000 + (u64)pid); wr32(c, pi + 16, (u32)pid); wr32(c, pi + 20, (u32)pid + 1); }
+  u64 pi = ARG(9); if (pi) { int h = vfs_proc_handle(pid); wr64(c, pi, h >= 0 ? H_OF(h) : 0); { int tk = proc_main_thread_kobj(pid); int tf = tk >= 0 ? vfs_kobj_handle(tk) : -1; wr64(c, pi + 8, tf >= 0 ? H_OF(tf) : 0); } wr32(c, pi + 16, (u32)pid); wr32(c, pi + 20, (u32)pid + 1); }
   RET(1);
 }
 static void s_CreateProcessA(Cpu *c) { char app[1024]; e_snprintf(app, sizeof app, "%s", ARG(0) ? name_a(c, ARG(0)) : ""); char cmd[4096]; e_snprintf(cmd, sizeof cmd, "%s", ARG(1) ? name_a(c, ARG(1)) : ""); create_process(c, app, cmd); }
 static void s_CreateProcessW(Cpu *c) { char app[1024]; e_snprintf(app, sizeof app, "%s", ARG(0) ? name_w(c, ARG(0)) : ""); char cmd[4096]; if (ARG(1)) wstr_to_utf8(c, ARG(1), cmd, sizeof cmd, -1); else cmd[0] = 0; create_process(c, app, cmd); }
 static int wait_proc_handle(u64 h, int *pid_out) { int fd = handle_fd(h); if (fd < 3) return 0; int pid = vfs_fd_pid(fd); if (pid < 0) return 0; *pid_out = pid; return 1; }
-static void s_WaitForSingleObject(Cpu *c) {
-  int pid; if (!wait_proc_handle(ARG(0), &pid)) { RET(0); return; }
-  int code; if (proc_state(pid, &code) != 1) { RET(0); return; }
-  if ((u32)ARG(1) == 0) { RET(0x102); return; }
-  block_on(c, BLOCK_PROC, pid);
-}
-static void s_WaitForSingleObjectEx(Cpu *c) { s_WaitForSingleObject(c); }
-static void s_WaitForMultipleObjects(Cpu *c) {
-  u32 n = (u32)ARG(0); if (n > 64) n = 64; u64 arr = ARG(1); int all = (int)ARG(2); u32 ms = (u32)ARG(3);
-  int pids[8]; int np = 0; int done = 0, first_done = -1;
-  for (u32 i = 0; i < n; i++) { int pid; if (!wait_proc_handle(rd64(c, arr + i * 8), &pid)) { done++; if (first_done < 0) first_done = (int)i; continue; } int code; if (proc_state(pid, &code) != 1) { done++; if (first_done < 0) first_done = (int)i; } else if (np < 8) pids[np++] = pid; }
-  if ((!all && done) || (all && done == (int)n)) { RET(all ? 0 : (u64)first_done); return; }
-  if (ms == 0) { RET(0x102); return; }
-  W->block = BLOCK_PROC; W->nblock_pids = np; for (int i = 0; i < np; i++) W->block_pids[i] = pids[i]; W->block_pipe = -1; retry_and_yield(c, g_cur_slot);
-}
 static void s_GetExitCodeProcess(Cpu *c) { int pid; if (!wait_proc_handle(ARG(0), &pid)) { if (ARG(0) == ~0ull) { wr32(c, ARG(1), 259); RET(1); return; } W->last_error = 6; RET(0); return; } int code; int st = proc_state(pid, &code); wr32(c, ARG(1), st == 2 ? (u32)code : 259); RET(1); }
 static void s_GetProcessId(Cpu *c) { int pid; if (ARG(0) == ~0ull) { RET((u64)W->pid); return; } RET(wait_proc_handle(ARG(0), &pid) ? (u64)pid : 0); }
 static void s_TerminateProcess(Cpu *c) { int pid; if (ARG(0) == ~0ull || !wait_proc_handle(ARG(0), &pid)) { do_exit(c, (int)ARG(1)); return; } proc_kill(pid, (int)ARG(1)); RET(1); }
 static void s_OpenProcess(Cpu *c) { int pid = (int)ARG(2); int code; if (!proc_state(pid, &code)) { W->last_error = 87; RET(0); return; } int h = vfs_proc_handle(pid); RET(h >= 0 ? H_OF(h) : 0); }
 static void s_CreatePipe(Cpu *c) { int r, wfd; if (vfs_pipe(&r, &wfd)) { W->last_error = 8; RET(0); return; } int inh = sa_inherit(c, ARG(2)); vfs_set_inherit(r, inh); vfs_set_inherit(wfd, inh); wr64(c, ARG(0), H_OF(r)); wr64(c, ARG(1), H_OF(wfd)); RET(1); }
 static void s_PeekNamedPipe(Cpu *c) { int fd = handle_fd(ARG(0)); int avail = fd >= 3 ? vfs_pipe_avail(fd) : -1; if (avail < 0) { W->last_error = 6; RET(0); return; } if (ARG(3)) wr32(c, ARG(3), 0); if (ARG(4)) wr32(c, ARG(4), (u32)avail); if (ARG(5)) wr32(c, ARG(5), (u32)avail); RET(1); }
-static void s_DuplicateHandle(Cpu *c) { u64 h = ARG(1); int fd = handle_fd(h); u64 out; if (h == ~0ull || h == 0x10 || h == 0x11 || h == 0x12 || fd < 3) out = h; else { int d = vfs_dup(fd); if (d >= 0) vfs_set_inherit(d, (u32)ARG(4) != 0); out = d >= 0 ? H_OF(d) : 0; } if (ARG(3)) wr64(c, ARG(3), out); if (ARG(6) & 1) vfs_close(fd); RET(out != 0); }
+static void s_DuplicateHandle(Cpu *c) { u64 h = ARG(1); int fd = handle_fd(h); u64 out; if (h == ~1ull) { int tf = vfs_kobj_handle(W->th[W->cur_th].kobj); out = tf >= 0 ? H_OF(tf) : 0; } else if (h == ~0ull || h == 0x10 || h == 0x11 || h == 0x12 || fd < 3) out = h; else { int d = vfs_dup(fd); if (d >= 0) vfs_set_inherit(d, (u32)ARG(4) != 0); out = d >= 0 ? H_OF(d) : 0; } if (ARG(3)) wr64(c, ARG(3), out); if (ARG(6) & 1) vfs_close(fd); RET(out != 0); }
 static void s_GetCurrentProcessId(Cpu *c) { RET((u64)W->pid); }
 static void s_getpid(Cpu *c) { RET((u64)W->pid); }
 static void env_put(const char *kv);
@@ -363,6 +348,7 @@ static void s_CreateRemoteThread(Cpu *c) {
   int pid = pid_of_handle(c, ARG(0)); u64 start = ARG(3); if (pid < 0) { W->last_error = 6; RET(0); return; }
   const char *fn = 0; if (start >= G_SHIM_BASE && start < G_SHIM_BASE + (u64)MAX_SHIMS * SHIM_SLOT_SIZE) fn = W->slots[(start - G_SHIM_BASE) / SHIM_SLOT_SIZE].name;
   if (fn && (!e_strcmp(fn, "ExitProcess") || !e_strcmp(fn, "TerminateProcess"))) { if (pid == W->pid) { do_exit(c, (int)ARG(4)); return; } proc_kill(pid, (int)ARG(4)); if (ARG(6)) wr32(c, ARG(6), (u32)pid + 1); RET(0x7100 + (u64)pid); return; }
+  if (pid == W->pid) { extern u64 w32_thread_create_api(Cpu *c, u64 start, u64 param, u64 stack, int suspended, u32 *tid); u32 tid = 0; u64 h = w32_thread_create_api(c, start, ARG(4), ARG(2), (u32)ARG(5) & 4, &tid); if (h && ARG(6)) wr32(c, ARG(6), tid); RET(h); return; }
   W->last_error = 5; RET(0);
 }
 static void s_GetProcessTimes(Cpu *c) { int pid = pid_of_handle(c, ARG(0)); if (pid < 0) { W->last_error = 6; RET(0); return; } double now = host_now_ms(); u64 t = now_100ns(); u64 created = t - (u64)((now - proc_start_ms(pid)) * 10000.0); wr64(c, ARG(1), created); wr64(c, ARG(2), 0); wr64(c, ARG(3), 0); wr64(c, ARG(4), (u64)((now - proc_start_ms(pid)) * 10000)); RET(1); }

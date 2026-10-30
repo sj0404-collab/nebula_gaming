@@ -312,6 +312,25 @@ await test('x64: processes & pipes — busybox sh spawns real child processes (C
   await closeAll();
 });
 
+await test('x64: threads & synchronisation — Win32 threads (CreateThread/CS/SRW/CV/events/mutex/semaphore/TLS) and winpthreads run in the browser', async () => {
+  const w = await x64Open();
+  await w.locator('[data-x64-exe="threads.exe"]').waitFor({ timeout: 30_000 });
+  const run = async (exe, expectRe, what) => {
+    await w.locator(`[data-x64-exe="${exe}"]`).click();
+    await w.getByPlaceholder('arguments').fill('');
+    await w.locator('[data-x64-run]').click();
+    await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout: 60_000 });
+    const con = await w.locator('[data-x64-console]').innerText();
+    expect(expectRe.test(con), `${exe}: ${what}: ` + con.slice(-400));
+  };
+  await run('threads.exe', /39 checks, 0 failed/, 'Win32 thread self-test must pass all 39 checks');
+  await run('pthreads.exe', /9 checks, 0 failed/, 'winpthreads self-test must pass all 9 checks');
+  const vt = await w.locator('[data-x64-exe="threads.exe"] [data-x64-verdict]').getAttribute('data-x64-verdict');
+  expect(vt === 'likely', 'threads.exe verdict should be "likely" (all imports shimmed): ' + vt);
+  await page.screenshot({ path: resolve(SHOTS, 'x64-threads.png') });
+  await closeAll();
+});
+
 await test('x64: virtual disk + stdin — files mounted from the host, read/written by busybox, console input feeds blocking reads', async () => {
   const w = await x64Open();
   await w.locator('[data-x64-exe="busybox64.exe"]').waitFor({ timeout: 30_000 });

@@ -28,35 +28,58 @@ void w32_report(Win32 *w, const char *fmt, ...) {
   w->report[w->report_len++] = '\n'; w->report[w->report_len] = 0;
 }
 
-/* ---------- heap ---------- */
+/* ---------- heap ----------
+   Every block carries a 16-byte header in guest memory (payload size, magic, free flag); freed blocks are kept on
+   size-class free lists (exact 16-byte classes up to 1 KB, power-of-two classes above), so malloc/free/realloc are
+   O(1) however many blocks a program keeps alive (busybox sort of 10^5 lines allocates 2·10^5 blocks). */
+#define HB_MAGIC 0x4E424C4Bu
+#define HB_FREE  0x46524545u
 static int heap_grow(Win32 *w, u64 need) {
   u64 sz = need > (16ull << 20) ? ((need + 0xffff) & ~0xffffull) : (16ull << 20);
   if (!mem_map(w->mem, w->heap_end, sz, "heap")) return 0;
   w->heap_end += sz; return 1;
 }
+#define HEAP_HUGE (16ull << 20)
+/* size class: exact 16-byte classes up to 1 KB; power-of-two classes (blocks are rounded to exactly 2^k) up to 16 MB; one "huge" list above */
+static int heap_bin(u64 size) { if (size <= 1024) return (int)(size / 16); if (size > HEAP_HUGE) return HEAP_BINS - 1; return 64 + (64 - __builtin_clzll(size - 1)); }
+static u64 *heap_hdr(Win32 *w, u64 addr) { if (addr < G_HEAP_BASE + 16 || addr >= w->heap_end || (addr & 15)) return 0; u8 *p = mem_ptr(w->mem, addr - 16, 16, 1); if (!p) return 0; u64 *h = (u64 *)p; if ((u32)h[1] != HB_MAGIC) return 0; return h; }
+static u64 heap_next(Win32 *w, u64 a) { u8 *p = mem_ptr(w->mem, a, 8, 0); u64 n = 0; if (p) e_memcpy(&n, p, 8); return n; }
+static void heap_set_next(Win32 *w, u64 a, u64 n) { u8 *p = mem_ptr(w->mem, a, 8, 1); if (p) e_memcpy(p, &n, 8); }
 u64 w32_heap_alloc(Win32 *w, u64 size, int zero) {
   if (!size) size = 1; size = (size + 15) & ~15ull;
-  /* first fit among freed blocks */
-  for (int i = 0; i < w->nblocks; i++) if (w->blocks[i].free && w->blocks[i].size >= size) {
-    HeapBlock *b = &w->blocks[i];
-    if (b->size >= size + 64 && w->nblocks < 65536) { HeapBlock nb = { b->base + size, b->size - size, 1 }; b->size = size; w->blocks[w->nblocks++] = nb; }
-    b->free = 0; if (zero) { u8 *p = mem_ptr(w->mem, b->base, b->size, 1); if (p) e_memset(p, 0, (size_t)b->size); } return b->base;
+  if (size > 1024 && size <= HEAP_HUGE) size = 1ull << (64 - __builtin_clzll(size - 1));
+  int bin = heap_bin(size);
+  /* reuse a freed block of the same class (huge list: first fit) */
+  for (u64 prev = 0, a = w->bins[bin]; a; prev = a, a = heap_next(w, a)) {
+    u64 *h = heap_hdr(w, a); if (!h) { if (prev) heap_set_next(w, prev, 0); else w->bins[bin] = 0; break; }
+    if (h[0] < size) continue;
+    u64 next = heap_next(w, a); if (prev) heap_set_next(w, prev, next); else w->bins[bin] = next;
+    h[1] = HB_MAGIC; if (zero) { u8 *q = mem_ptr(w->mem, a, h[0], 1); if (q) e_memset(q, 0, (size_t)h[0]); } return a;
   }
-  if (w->heap_cur + size > w->heap_end) { if (!heap_grow(w, w->heap_cur + size - w->heap_end)) return 0; }
-  u64 a = w->heap_cur; w->heap_cur += size;
-  if (w->nblocks < 65536) { HeapBlock nb = { a, size, 0 }; w->blocks[w->nblocks++] = nb; }
+  if (w->heap_cur + 16 + size > w->heap_end) {
+    /* a block must live inside ONE region (host memory is per region): skip the tail of the old region */
+    u64 old_end = w->heap_end;
+    if (!heap_grow(w, size + 16)) return 0;
+    w->heap_cur = old_end;
+  }
+  u64 a = w->heap_cur + 16; w->heap_cur += 16 + size;
+  u8 *p = mem_ptr(w->mem, a - 16, 16 + size, 1); if (!p) return 0;
+  u64 hdr[2] = { size, HB_MAGIC }; e_memcpy(p, hdr, 16); if (zero) e_memset(p + 16, 0, (size_t)size);
   return a;
 }
-static HeapBlock *heap_find(Win32 *w, u64 addr) { for (int i = w->nblocks - 1; i >= 0; i--) if (w->blocks[i].base == addr) return &w->blocks[i]; return 0; }
-int w32_heap_free(Win32 *w, u64 addr) { HeapBlock *b = heap_find(w, addr); if (!b || b->free) return 0; b->free = 1; return 1; }
-u64 w32_heap_size(Win32 *w, u64 addr) { HeapBlock *b = heap_find(w, addr); return b ? b->size : 0; }
+int w32_heap_free(Win32 *w, u64 addr) {
+  u64 *h = heap_hdr(w, addr); if (!h || (h[1] >> 32) == HB_FREE) return 0;
+  int bin = heap_bin(h[0]);
+  heap_set_next(w, addr, w->bins[bin]); w->bins[bin] = addr; h[1] = HB_MAGIC | ((u64)HB_FREE << 32); return 1;
+}
+u64 w32_heap_size(Win32 *w, u64 addr) { u64 *h = heap_hdr(w, addr); return h && (h[1] >> 32) != HB_FREE ? h[0] : 0; }
 static u64 heap_realloc(Win32 *w, u64 addr, u64 size, int zero) {
   if (!addr) return w32_heap_alloc(w, size, zero);
-  HeapBlock *b = heap_find(w, addr); if (!b) return 0;
-  if (b->size >= size) return addr;
+  u64 old = w32_heap_size(w, addr); if (!old) return 0;
+  if (old >= size) return addr;
   u64 n = w32_heap_alloc(w, size, zero); if (!n) return 0;
-  u8 *s = mem_ptr(w->mem, addr, b->size, 0), *d = mem_ptr(w->mem, n, b->size, 1); if (s && d) e_memcpy(d, s, (size_t)b->size);
-  b->free = 1; return n;
+  u8 *s = mem_ptr(w->mem, addr, old, 0), *d = mem_ptr(w->mem, n, old, 1); if (s && d) e_memcpy(d, s, (size_t)old);
+  w32_heap_free(w, addr); return n;
 }
 
 /* ---------- slots ---------- */
@@ -102,10 +125,41 @@ static void cont_finish(Cpu *c, u64 rax) {
 static void do_exit(Cpu *c, int code) { W->exited = 1; c->exit_code = code; c->status = RUN_EXIT; }
 static void retry_and_yield(Cpu *c, u64 slot) { cpu_push(c, c->rip); c->rip = slot; c->status = RUN_YIELD; }
 static u64 g_cur_slot;
+static int thread_cont_resume(Cpu *c, int kind, u64 rax);
+static void thread_startup(Cpu *c);
+static void s_Sleep(Cpu *c);
 
+/* qsort as a bottom-up merge sort driven by the guest comparator, one comparison per continuation round trip (n log n calls,
+   constant guest stack). data: 0 base, 1 n, 2 size, 3 cmp, 4 width, 5 lo, 6 i<<32|j, 7 tmp buffer; idx = parity (0: base→tmp, 1: tmp→base) */
+static void qsort_step(Cpu *c, int have_result, u64 rax) {
+  Win32 *w = W; int ci = w->ncont - 1; u64 *d = w->cont[ci].data;
+  u64 base = d[0], n = d[1], sz = d[2], cmp = d[3], tmp = d[7];
+  for (;;) {
+    u64 width = d[4], lo = d[5], i = d[6] >> 32, j = d[6] & 0xffffffffu; int par = w->cont[ci].idx;
+    u64 src = par ? tmp : base, dst = par ? base : tmp;
+    if (width >= n) {   /* done: result sits in src */
+      if (src != base) { u8 *s = mem_ptr(w->mem, tmp, n * sz, 0), *t = mem_ptr(w->mem, base, n * sz, 1); if (s && t) e_memcpy(t, s, (size_t)(n * sz)); }
+      w32_heap_free(w, tmp); cont_finish(c, 0); return;
+    }
+    u64 mid = lo + width < n ? lo + width : n, hi = lo + 2 * width < n ? lo + 2 * width : n, k = i + j - mid;
+    if (have_result) {   /* take the smaller head (stable: left on ties) */
+      have_result = 0; u64 from = (s32)(u32)rax <= 0 ? i : j;
+      u8 *s = mem_ptr(w->mem, src + from * sz, sz, 0), *t = mem_ptr(w->mem, dst + k * sz, sz, 1); if (s && t) e_memcpy(t, s, (size_t)sz);
+      if (from == i) i++; else j++; k++;
+    }
+    if (i < mid && j < hi) { d[6] = (i << 32) | j; guest_call(c, cmp, src + i * sz, src + j * sz, 0, 0); return; }
+    /* drain the remaining run and advance to the next pair of runs */
+    if (i < mid) { u8 *s = mem_ptr(w->mem, src + i * sz, (mid - i) * sz, 0), *t = mem_ptr(w->mem, dst + k * sz, (mid - i) * sz, 1); if (s && t) e_memcpy(t, s, (size_t)((mid - i) * sz)); }
+    if (j < hi) { u8 *s = mem_ptr(w->mem, src + j * sz, (hi - j) * sz, 0), *t = mem_ptr(w->mem, dst + k * sz, (hi - j) * sz, 1); if (s && t) e_memcpy(t, s, (size_t)((hi - j) * sz)); }
+    lo += 2 * width;
+    if (lo >= n) { width *= 2; lo = 0; w->cont[ci].idx ^= 1; }
+    d[4] = width; d[5] = lo; u64 nmid = lo + width < n ? lo + width : n; d[6] = (lo << 32) | nmid;
+  }
+}
 void w32_cont_resume(Cpu *c) {
   Win32 *w = W; if (!w->ncont) { cpu_fault(c, "stray continuation"); return; }
   int i = w->ncont - 1; u64 rax = c->r[RAX];
+  c->r[RSP] = w->cont[i].rsp;   /* every callback of one continuation starts from the same stack pointer (qsort with 10^6 comparisons must not drift) */
   switch (w->cont[i].kind) {
     case CONT_STARTUP:
       if (w->cont[i].idx < w->n_tls_cb) { u64 fn = w->tls_callbacks[w->cont[i].idx++]; guest_call(c, fn, w->image_base, 1, 0, 0); return; }
@@ -128,17 +182,7 @@ void w32_cont_resume(Cpu *c) {
       if (step == 1) { guest_call(c, w->win.wndproc, w->win.hwnd, 0x0003 /* WM_MOVE */, 0, (64 << 16) | 64); return; }
       if (step == 2 && (w->win.style & 0x10000000)) { w->win.shown = 1; guest_call(c, w->win.wndproc, w->win.hwnd, 0x0018 /* WM_SHOWWINDOW */, 1, 0); return; }
       cont_finish(c, w->win.hwnd); return; }
-    case CONT_QSORT: {
-      /* insertion sort driven by the guest comparator: data0=base data1=n data2=size data3=cmp data4=ii data5=jj */
-      u64 base = w->cont[i].data[0], n = w->cont[i].data[1], sz = w->cont[i].data[2], cmp = w->cont[i].data[3];
-      u64 ii = w->cont[i].data[4], jj = w->cont[i].data[5];
-      if ((int)rax > 0) { u8 *a = mem_ptr(w->mem, base + (jj - 1) * sz, sz, 1), *b = mem_ptr(w->mem, base + jj * sz, sz, 1); if (a && b) for (u64 k = 0; k < sz; k++) { u8 t = a[k]; a[k] = b[k]; b[k] = t; } jj--; }
-      else jj = 0;
-      if (jj == 0) { ii++; jj = ii; }
-      if (ii >= n) { cont_finish(c, 0); return; }
-      w->cont[i].data[4] = ii; w->cont[i].data[5] = jj;
-      guest_call(c, cmp, base + (jj - 1) * sz, base + jj * sz, 0, 0);
-      return; }
+    case CONT_QSORT: qsort_step(c, 1, rax); return;
     case CONT_BSEARCH: {
       /* data0=key data1=base data2=hi data3=size data4=cmp data5=lo; the last probe was mid=(lo+hi)/2 */
       u64 key = w->cont[i].data[0], base = w->cont[i].data[1], hi = w->cont[i].data[2], sz = w->cont[i].data[3], cmp = w->cont[i].data[4], lo = w->cont[i].data[5];
@@ -149,6 +193,7 @@ void w32_cont_resume(Cpu *c) {
       w->cont[i].data[2] = hi; w->cont[i].data[5] = lo; mid = lo + (hi - lo) / 2;
       guest_call(c, cmp, key, base + mid * sz, 0, 0); return; }
   }
+  if (thread_cont_resume(c, w->cont[i].kind, rax)) return;
   extern void gdi_cont_resume(Cpu *c, int kind, u64 rax);
   gdi_cont_resume(c, w->cont[i].kind, rax);
 }
@@ -165,7 +210,7 @@ int w32_dispatch(Cpu *c, u64 addr) {
   if (idx == SLOT_CONT) { w32_cont_resume(c); return c->status; }
   u64 ret = cpu_pop(c); c->rip = ret; g_cur_slot = addr;
   ShimSlot *s = &w->slots[idx]; s->calls++;
-  if (idx == SLOT_STARTUP) { cont_push(c, CONT_STARTUP); w32_cont_resume(c); return c->status; }
+  if (idx == SLOT_STARTUP) { if (w->cur_th) thread_startup(c); else { cont_push(c, CONT_STARTUP); w32_cont_resume(c); } return c->status; }
   if (!s->fn) {
     w->unknown_import_calls++;
     cpu_fault(c, "unimplemented API %s!%s (called from 0x%llx)", s->dll, s->name, (unsigned long long)ret);
@@ -258,13 +303,12 @@ static int fd_of_handle(u64 h) { if (h == 0x11 || h == 0x12) return (int)(h - 0x
 static u64 now_100ns(void) { return (u64)(host_now_ms() * 10000.0) + 116444736000000000ull + 0x1d0000000000000ull / 0x1d; }
 static u64 unix_time(void) { return 1793000000ull + (u64)(host_now_ms() / 1000.0); }   /* ~2026-10-26 + run time (host clock has no calendar in freestanding wasm) */
 #include "win32_fs.inc"
+#include "win32_threads.inc"
 
 /* ================= kernel32 ================= */
 static void s_GetLastError(Cpu *c) { RET(W->last_error); }
 static void s_SetLastError(Cpu *c) { W->last_error = (u32)ARG(0); }
 static void s_GetCurrentProcess(Cpu *c) { RET(~0ull); }
-static void s_GetCurrentThread(Cpu *c) { RET(~1ull); }
-static void s_GetCurrentThreadId(Cpu *c) { RET(4243); }
 static void s_ExitProcess(Cpu *c) { do_exit(c, (int)ARG(0)); }
 static void s_GetTickCount(Cpu *c) { RET((u32)(host_now_ms() - W->start_ms + 100000.0)); }
 static void s_GetTickCount64(Cpu *c) { RET((u64)(host_now_ms() - W->start_ms + 100000.0)); }
@@ -359,6 +403,9 @@ static void s_SetThreadErrorMode(Cpu *c) { RET(1); }
 static void s_GetLogicalProcessorInformation(Cpu *c) { W->last_error = 122; RET(0); }
 static void s_GetProcessAffinityMask(Cpu *c) { wr64(c, ARG(1), 1); wr64(c, ARG(2), 1); RET(1); }
 static void s_SetThreadAffinityMask(Cpu *c) { RET(1); }
+static void s_SetProcessAffinityMask(Cpu *c) { RET(1); }
+static void s_GetSystemTimeAdjustment(Cpu *c) { wr32(c, ARG(0), 156250); wr32(c, ARG(1), 156250); wr32(c, ARG(2), 1); RET(1); }
+static void s_SetSystemTime(Cpu *c) { W->last_error = 1314; RET(0); }   /* ERROR_PRIVILEGE_NOT_HELD */
 static void s_GetThreadPriority(Cpu *c) { RET(0); }
 static void s_SetThreadPriority(Cpu *c) { RET(1); }
 static void s_SetPriorityClass(Cpu *c) { RET(1); }
@@ -397,48 +444,6 @@ static void s_VirtualQuery(Cpu *c) { u64 addr = ARG(0), mbi = ARG(1); Region *r 
   if (!r) { wr64(c, mbi, addr & ~0xfffull); wr64(c, mbi + 24, 0x1000); wr32(c, mbi + 32, 0x10000); wr32(c, mbi + 36, 1); RET(48); return; }
   wr64(c, mbi, addr & ~0xfffull); wr64(c, mbi + 8, r->base); wr32(c, mbi + 16, 0x40); wr64(c, mbi + 24, r->base + r->size - (addr & ~0xfffull)); wr32(c, mbi + 32, 0x1000); wr32(c, mbi + 36, 0x40); wr32(c, mbi + 40, r->base == W->image_base ? 0x1000000 : 0x20000); RET(48); }
 static void s_FlushInstructionCache(Cpu *c) { RET(1); }
-static void s_TlsAlloc(Cpu *c) { Win32 *w = W; for (u32 i = 1; i < 64; i++) if (!w->tls_slots[i]) { w->tls_slots[i] = 1; w->tls_values[i] = 0; RET(i); return; } RET(0xffffffffu); }
-static void s_TlsFree(Cpu *c) { u32 i = (u32)ARG(0); if (i < 64) W->tls_slots[i] = 0; RET(1); }
-static void s_TlsGetValue(Cpu *c) { u32 i = (u32)ARG(0); W->last_error = 0; RET(i < 64 ? rd64(c, W->teb + 0x1480 + i * 8) : 0); }
-static void s_TlsSetValue(Cpu *c) { u32 i = (u32)ARG(0); if (i < 64) { W->tls_values[i] = ARG(1); wr64(c, W->teb + 0x1480 + i * 8, ARG(1)); } RET(1); }
-static void s_FlsAlloc(Cpu *c) { s_TlsAlloc(c); }
-static void s_FlsFree(Cpu *c) { s_TlsFree(c); }
-static void s_FlsGetValue(Cpu *c) { s_TlsGetValue(c); }
-static void s_FlsSetValue(Cpu *c) { s_TlsSetValue(c); }
-static void s_InitializeCriticalSection(Cpu *c) { u8 *p = mem_ptr(c->mem, ARG(0), 40, 1); if (p) { e_memset(p, 0, 40); wr32(c, ARG(0) + 4, (u32)-1); } }
-static void s_InitializeCriticalSectionAndSpinCount(Cpu *c) { s_InitializeCriticalSection(c); RET(1); }
-static void s_InitializeCriticalSectionEx(Cpu *c) { s_InitializeCriticalSection(c); RET(1); }
-static void s_DeleteCriticalSection(Cpu *c) { }
-static void s_EnterCriticalSection(Cpu *c) { u64 a = ARG(0); wr32(c, a + 4, rd32(c, a + 4) + 1); wr64(c, a + 16, 4243); }
-static void s_LeaveCriticalSection(Cpu *c) { u64 a = ARG(0); wr32(c, a + 4, rd32(c, a + 4) - 1); }
-static void s_TryEnterCriticalSection(Cpu *c) { s_EnterCriticalSection(c); RET(1); }
-static void s_InitializeSRWLock(Cpu *c) { wr64(c, ARG(0), 0); }
-static void s_AcquireSRWLockExclusive(Cpu *c) { }
-static void s_ReleaseSRWLockExclusive(Cpu *c) { }
-static void s_AcquireSRWLockShared(Cpu *c) { }
-static void s_ReleaseSRWLockShared(Cpu *c) { }
-static void s_TryAcquireSRWLockExclusive(Cpu *c) { RET(1); }
-static void s_InitializeConditionVariable(Cpu *c) { wr64(c, ARG(0), 0); }
-static void s_WakeAllConditionVariable(Cpu *c) { }
-static void s_WakeConditionVariable(Cpu *c) { }
-static void s_SleepConditionVariableSRW(Cpu *c) { RET(1); }
-static void s_SleepConditionVariableCS(Cpu *c) { RET(1); }
-static void s_InitOnceExecuteOnce(Cpu *c) { u64 once = ARG(0); if (rd64(c, once) == 0) { wr64(c, once, 1); cont_push(c, CONT_RET_VAL); W->cont[W->ncont - 1].data[0] = 1; guest_call(c, ARG(1), once, ARG(2), ARG(3), 0); return; } RET(1); }
-static void s_InitOnceBeginInitialize(Cpu *c) { u64 once = ARG(0); if (rd64(c, once) == 0) { wr32(c, ARG(2), 1); } else wr32(c, ARG(2), 0); RET(1); }
-static void s_InitOnceComplete(Cpu *c) { wr64(c, ARG(0), 1); RET(1); }
-static void s_CreateEventA(Cpu *c) { RET(0xE000 + ++W->next_handle); }
-static void s_CreateEventW(Cpu *c) { s_CreateEventA(c); }
-static void s_CreateEventExW(Cpu *c) { s_CreateEventA(c); }
-static void s_SetEvent(Cpu *c) { RET(1); }
-static void s_ResetEvent(Cpu *c) { RET(1); }
-static void s_CreateMutexA(Cpu *c) { s_CreateEventA(c); }
-static void s_CreateMutexW(Cpu *c) { s_CreateEventA(c); }
-static void s_ReleaseMutex(Cpu *c) { RET(1); }
-static void s_CreateSemaphoreA(Cpu *c) { s_CreateEventA(c); }
-static void s_CreateSemaphoreW(Cpu *c) { s_CreateEventA(c); }
-static void s_ReleaseSemaphore(Cpu *c) { RET(1); }
-static void s_SignalObjectAndWait(Cpu *c) { RET(0); }
-static void s_CreateThread(Cpu *c) { w32_report(W, "CreateThread: threads are not supported (single-threaded emulator)"); W->last_error = 8; RET(0); }
 static void s_CreateTimerQueue(Cpu *c) { RET(0); }
 static void s_GetThreadLocale(Cpu *c) { RET(0x409); }
 static void s_GetUserDefaultLCID(Cpu *c) { RET(0x409); }
@@ -579,6 +584,17 @@ static void s_p__commode(Cpu *c) { RET(W->ubuf + 0x248); }
 static void s_p__pgmptr(Cpu *c) { RET(W->ubuf + 0x250); }
 static void s_get_initial_wide_environment(Cpu *c) { RET(rd64(c, W->ubuf + 0x230)); }
 static void s_errno(Cpu *c) { RET(W->ubuf + 0x258); }
+static void s_set_errno(Cpu *c) { wr32(c, W->ubuf + 0x258, (u32)ARG(0)); RET(0); }
+static void s_get_errno(Cpu *c) { if (ARG(0)) wr32(c, ARG(0), rd32(c, W->ubuf + 0x258)); RET(0); }
+/* mbstowcs / mbsrtowcs: the guest locale is "C" (single-byte), so every byte becomes one wchar */
+static u64 mbs_to_wcs(Cpu *c, u64 dst, u64 src, u64 n) {
+  u64 i = 0; if (!dst) { while (rd8(c, src + i)) i++; return i; }
+  for (; i < n; i++) { u8 ch = rd8(c, src + i); wr16(c, dst + i * 2, ch); if (!ch) break; }
+  return i;
+}
+static void s_mbstowcs(Cpu *c) { RET(mbs_to_wcs(c, ARG(0), ARG(1), ARG(2))); }
+static void s_mbsrtowcs(Cpu *c) { u64 pp = ARG(1), src = pp ? rd64(c, pp) : 0; if (!src) { RET(0); return; }
+  u64 n = mbs_to_wcs(c, ARG(0), src, ARG(2)); if (ARG(0) && pp) wr64(c, pp, n < ARG(2) ? 0 : src + n); RET(n); }
 static void s_doserrno(Cpu *c) { RET(W->ubuf + 0x25c); }
 static void s_acrt_iob_func(Cpu *c) { RET(W->ubuf + (u64)(u32)ARG(0) * 0x30); }
 static void s_iob_func(Cpu *c) { RET(W->ubuf); }
@@ -772,8 +788,10 @@ static void s_memcpy(Cpu *c) { u64 n = ARG(2); if (n) { u8 *d = mem_ptr(c->mem, 
 static void s_memset(Cpu *c) { u64 n = ARG(2); if (n) { u8 *d = mem_ptr(c->mem, ARG(0), n, 1); if (!d) { cpu_fault(c, "memset fault"); return; } e_memset(d, (int)ARG(1), (size_t)n); } RET(ARG(0)); }
 static void s_memcmp(Cpu *c) { u64 n = ARG(2); if (!n) { RET(0); return; } const u8 *a = mem_ptr(c->mem, ARG(0), n, 0), *b = mem_ptr(c->mem, ARG(1), n, 0); if (!a || !b) { cpu_fault(c, "memcmp fault"); return; } RET((u64)(s64)e_memcmp(a, b, (size_t)n)); }
 static void s_memchr(Cpu *c) { u64 n = ARG(2); const u8 *a = mem_ptr(c->mem, ARG(0), n, 0); if (!a) { RET(0); return; } for (u64 i = 0; i < n; i++) if (a[i] == (u8)ARG(1)) { RET(ARG(0) + i); return; } RET(0); }
-static void s_qsort(Cpu *c) { u64 n = ARG(1); if (n < 2) return; cont_push(c, CONT_QSORT); Win32 *w = W; int i = w->ncont - 1; w->cont[i].data[0] = ARG(0); w->cont[i].data[1] = n; w->cont[i].data[2] = ARG(2); w->cont[i].data[3] = ARG(3); w->cont[i].data[4] = 1; w->cont[i].data[5] = 1;
-  guest_call(c, ARG(3), ARG(0), ARG(0) + ARG(2), 0, 0); }
+static void s_qsort(Cpu *c) { u64 n = ARG(1), sz = ARG(2); if (n < 2 || !sz) return; Win32 *w = W; u64 tmp = w32_heap_alloc(w, n * sz, 0); if (!tmp) return;
+  int i = cont_push(c, CONT_QSORT); if (i < 0) return; w->cont[i].data[0] = ARG(0); w->cont[i].data[1] = n; w->cont[i].data[2] = sz; w->cont[i].data[3] = ARG(3);
+  w->cont[i].data[4] = 1; w->cont[i].data[5] = 0; w->cont[i].data[6] = (0ull << 32) | (1 < n ? 1 : n); w->cont[i].data[7] = tmp; w->cont[i].idx = 0;
+  qsort_step(c, 0, 0); }
 static void s_bsearch(Cpu *c) { u64 n = ARG(2); if (!n) { RET(0); return; } cont_push(c, CONT_BSEARCH); Win32 *w = W; int i = w->ncont - 1; w->cont[i].data[0] = ARG(0); w->cont[i].data[1] = ARG(1); w->cont[i].data[2] = n; w->cont[i].data[3] = ARG(3); w->cont[i].data[4] = ARG(4); w->cont[i].data[5] = 0;
   guest_call(c, ARG(4), ARG(0), ARG(1) + (n / 2) * ARG(3), 0, 0); }
 static void s_setjmp(Cpu *c) { u64 a = ARG(0); wr64(c, a, 0); wr64(c, a + 8, c->r[RBX]); wr64(c, a + 16, c->r[RSP]); wr64(c, a + 24, c->r[RBP]); wr64(c, a + 32, c->r[RSI]); wr64(c, a + 40, c->r[RDI]); wr64(c, a + 48, c->r[R12]); wr64(c, a + 56, c->r[R13]); wr64(c, a + 64, c->r[R14]); wr64(c, a + 72, c->r[R15]); wr64(c, a + 80, c->rip); for (int k = 6; k < 16; k++) { wr64(c, a + 96 + (k - 6) * 16, c->x[k].q[0]); wr64(c, a + 104 + (k - 6) * 16, c->x[k].q[1]); } RET(0); }
@@ -824,8 +842,9 @@ static void s_dsign(Cpu *c) { RET(c->x[0].f64[0] < 0 ? 1 : 0); }
 #define S(n) { "", #n, s_##n }
 #define SA(api, fn) { "", api, s_##fn }
 static const ShimDef shims[] = {
+  THREAD_SHIMS
   FS_SHIMS
-  S(GetLastError), S(SetLastError), S(GetCurrentProcess), S(GetCurrentThread), S(GetCurrentProcessId), S(GetCurrentThreadId), S(ExitProcess), S(TerminateProcess),
+  S(GetLastError), S(SetLastError), S(GetCurrentProcess), S(GetCurrentProcessId), S(ExitProcess), S(TerminateProcess),
   S(GetTickCount), S(GetTickCount64), S(QueryPerformanceCounter), S(QueryPerformanceFrequency), S(GetSystemTimeAsFileTime), S(GetSystemTimePreciseAsFileTime), S(GetSystemTime), S(GetLocalTime), S(Sleep), S(SleepEx),
   S(GetStdHandle), S(WriteFile), S(WriteConsoleA), S(WriteConsoleW), S(ReadFile), S(ReadConsoleA), S(GetConsoleMode), S(SetConsoleMode), S(GetConsoleOutputCP), S(GetConsoleCP), S(SetConsoleOutputCP), S(SetConsoleCP), S(GetConsoleScreenBufferInfo), S(SetConsoleTextAttribute), S(SetConsoleTitleA), S(GetConsoleWindow), S(AllocConsole), S(SetConsoleCtrlHandler), S(FlushFileBuffers), S(GetFileType), S(CloseHandle),
   S(CreateFileA), S(CreateFileW), S(GetFileAttributesA), S(GetFileAttributesW), S(GetFileAttributesExW), S(FindFirstFileA), S(FindFirstFileW), S(FindClose), S(DeleteFileA), S(GetFullPathNameA), S(GetCurrentDirectoryA), S(GetCurrentDirectoryW), S(GetTempPathA), S(SetFilePointer), S(GetFileSize),
@@ -833,13 +852,10 @@ static const ShimDef shims[] = {
   S(GetModuleHandleA), S(GetModuleHandleW), S(GetModuleHandleExW), S(GetModuleHandleExA), S(LoadLibraryA), S(LoadLibraryW), S(LoadLibraryExA), S(LoadLibraryExW), S(FreeLibrary), S(GetProcAddress), S(GetModuleFileNameA), S(GetModuleFileNameW), S(GetSystemDirectoryA), S(GetWindowsDirectoryA),
   S(GetVersion), S(GetVersionExA), S(GetVersionExW), S(IsProcessorFeaturePresent), S(IsDebuggerPresent), S(IsDBCSLeadByte), S(IsDBCSLeadByteEx), S(GetACP), S(GetOEMCP), S(GetCPInfo), S(GetSystemInfo), S(GetNativeSystemInfo), S(GlobalMemoryStatusEx),
   S(SetUnhandledExceptionFilter), S(UnhandledExceptionFilter), S(AddVectoredExceptionHandler), S(RemoveVectoredExceptionHandler), S(RtlAddFunctionTable), S(RtlDeleteFunctionTable), S(RtlLookupFunctionEntry), S(RtlCaptureContext), S(RtlVirtualUnwind), S(RtlPcToFileHeader), S(RtlUnwindEx), S(RaiseException), S(EncodePointer), S(DecodePointer),
-  S(OutputDebugStringA), S(OutputDebugStringW), S(FormatMessageA), S(FormatMessageW), S(SetErrorMode), S(GetErrorMode), S(SetThreadErrorMode), S(GetLogicalProcessorInformation), S(GetProcessAffinityMask), S(SetThreadAffinityMask), S(GetThreadPriority), S(SetThreadPriority), S(SetPriorityClass), S(GetPriorityClass), S(GetThreadTimes),
+  S(OutputDebugStringA), S(OutputDebugStringW), S(FormatMessageA), S(FormatMessageW), S(SetErrorMode), S(GetErrorMode), S(SetThreadErrorMode), S(GetLogicalProcessorInformation), S(GetProcessAffinityMask), S(SetThreadAffinityMask), S(SetProcessAffinityMask), S(GetSystemTimeAdjustment), S(SetSystemTime), S(GetThreadPriority), S(SetThreadPriority), S(SetPriorityClass), S(GetPriorityClass), S(GetThreadTimes),
   S(GetProcessHeap), S(HeapCreate), S(HeapDestroy), S(HeapAlloc), S(HeapFree), S(HeapReAlloc), S(HeapSize), S(HeapValidate), S(HeapSetInformation), S(HeapQueryInformation), S(HeapCompact), S(HeapLock), S(HeapUnlock), S(HeapWalk), S(GlobalAlloc), S(GlobalFree), S(GlobalLock), S(GlobalUnlock), S(LocalAlloc), S(LocalFree),
   S(VirtualAlloc), S(VirtualAllocEx), S(VirtualFree), S(VirtualProtect), S(VirtualLock), S(VirtualUnlock), S(VirtualQuery), S(FlushInstructionCache),
-  S(TlsAlloc), S(TlsFree), S(TlsGetValue), S(TlsSetValue), S(FlsAlloc), S(FlsFree), S(FlsGetValue), S(FlsSetValue),
-  S(InitializeCriticalSection), S(InitializeCriticalSectionAndSpinCount), S(InitializeCriticalSectionEx), S(DeleteCriticalSection), S(EnterCriticalSection), S(LeaveCriticalSection), S(TryEnterCriticalSection),
-  S(InitializeSRWLock), S(AcquireSRWLockExclusive), S(ReleaseSRWLockExclusive), S(AcquireSRWLockShared), S(ReleaseSRWLockShared), S(TryAcquireSRWLockExclusive), S(InitializeConditionVariable), S(WakeAllConditionVariable), S(WakeConditionVariable), S(SleepConditionVariableSRW), S(SleepConditionVariableCS), S(InitOnceExecuteOnce), S(InitOnceBeginInitialize), S(InitOnceComplete),
-  S(CreateEventA), S(CreateEventW), S(CreateEventExW), S(SetEvent), S(ResetEvent), S(CreateMutexA), S(CreateMutexW), S(ReleaseMutex), S(CreateSemaphoreA), S(CreateSemaphoreW), S(ReleaseSemaphore), S(WaitForSingleObject), S(WaitForSingleObjectEx), S(WaitForMultipleObjects), S(SignalObjectAndWait), S(CreateThread), S(CreateTimerQueue),
+  S(CreateTimerQueue),
   S(GetThreadLocale), S(GetUserDefaultLCID), S(GetUserDefaultLangID), S(GetSystemDefaultLangID), S(GetUserDefaultUILanguage), S(GetLocaleInfoA), S(GetLocaleInfoW), S(GetLocaleInfoEx), S(IsValidLocale), S(IsValidCodePage), S(EnumSystemLocalesW), S(GetUserDefaultLocaleName), S(LCMapStringW), S(LCMapStringEx), S(LCMapStringA), S(CompareStringW), S(CompareStringA), S(CompareStringEx), S(GetStringTypeW), S(GetStringTypeA), S(MultiByteToWideChar), S(WideCharToMultiByte), S(CharUpperA),
   S(lstrlenA), S(lstrlenW), S(lstrcpyA), S(lstrcmpiA), S(lstrcmpA), S(InterlockedCompareExchange), S(InterlockedExchange), S(InterlockedIncrement), S(InterlockedDecrement), S(InterlockedExchangeAdd), S(QueueUserAPC),
   S(GetTimeZoneInformation), S(FileTimeToSystemTime), S(SystemTimeToFileTime), S(FileTimeToLocalFileTime), S(GetDateFormatA), S(GetTimeFormatA), S(SystemFunction036), S(GetComputerNameA), S(GetUserNameA), S(GetDriveTypeA), S(GetLogicalDrives), S(GetDiskFreeSpaceExA), S(SetHandleCount), S(GetHandleInformation), S(SetHandleInformation), S(DuplicateHandle), S(CreatePipe), S(PeekNamedPipe), S(GetOverlappedResult), S(CreateIoCompletionPort), S(Beep), S(DebugBreak), S(GetProcessId), S(K32GetProcessMemoryInfo),
@@ -848,12 +864,12 @@ static const ShimDef shims[] = {
   SA("DeleteFileA", ret0), SA("DeleteFileW", ret0), SA("RemoveDirectoryA", ret0), SA("RemoveDirectoryW", ret0), SA("CreateDirectoryA", ret0), SA("CreateDirectoryW", ret0), SA("MoveFileA", ret0), SA("MoveFileW", ret0), SA("MoveFileExA", ret0), SA("MoveFileExW", ret0), SA("CopyFileA", ret0), SA("CopyFileW", ret0),
   SA("SetFileAttributesA", ret0), SA("SetFileAttributesW", ret0), SA("SetCurrentDirectoryA", ret0), SA("SetCurrentDirectoryW", ret0), SA("GetFileSizeEx", ret0), SA("GetFileSize", ret0), SA("SetFilePointer", ret0), SA("SetFilePointerEx", ret0), SA("SetEndOfFile", ret0), SA("FlushFileBuffers", ret1), SA("GetFileInformationByHandle", ret0), SA("GetFileInformationByHandleEx", ret0), SA("GetFileTime", ret0), SA("SetFileTime", ret0),
   SA("CreateFileMappingA", ret0), SA("CreateFileMappingW", ret0), SA("MapViewOfFile", ret0), SA("UnmapViewOfFile", ret1), SA("LockFileEx", ret1), SA("UnlockFileEx", ret1), SA("LockFile", ret1), SA("UnlockFile", ret1), SA("GetTempPathA", ret0), SA("GetTempPathW", ret0), SA("GetTempFileNameA", ret0), SA("GetTempFileNameW", ret0),
-  SA("CreateProcessA", ret0), SA("CreateProcessW", ret0), SA("GetExitCodeProcess", ret0), SA("OpenProcess", ret0), SA("TerminateThread", ret0), SA("CreatePipe", ret0), SA("CreateNamedPipeA", ret0), SA("ConnectNamedPipe", ret0), SA("PeekNamedPipe", ret0), SA("CreateRemoteThread", ret0), SA("CreateToolhelp32Snapshot", ret0), SA("WaitForInputIdle", ret0), SA("SetConsoleCtrlHandler", ret1), SA("GenerateConsoleCtrlEvent", ret0),
+  SA("CreateProcessA", ret0), SA("CreateProcessW", ret0), SA("GetExitCodeProcess", ret0), SA("OpenProcess", ret0), SA("CreatePipe", ret0), SA("CreateNamedPipeA", ret0), SA("ConnectNamedPipe", ret0), SA("PeekNamedPipe", ret0), SA("CreateToolhelp32Snapshot", ret0), SA("WaitForInputIdle", ret0), SA("SetConsoleCtrlHandler", ret1), SA("GenerateConsoleCtrlEvent", ret0),
   SA("_fullpath", fullpath), SA("_umask", umask), SA("_getpid", getpid), SA("_chdir", retm1e), SA("_spawnvp", retm1e), SA("_execve", retm1e), SA("_filbuf", retm1e), SA("_getch", retm1e), SA("_getche", retm1e), SA("_telli64", telli64), SA("_open_osfhandle", retm1e), SA("_creat", retm1e), SA("_chmod", retm1e), SA("_rmdir", retm1e), SA("_mktemp", ret0), SA("_wcsnicmp", wcsnicmp), SA("_ctime64", ctime64), S(asctime), SA("_ctime64_s", ret0), SA("_wmkdir", retm1e), SA("_wchdir", retm1e), SA("_wunlink", retm1e), SA("_wrmdir", retm1e), SA("_popen", ret0), SA("_pclose", retm1e), SA("system", retm1e), SA("_wsystem", retm1e),
   SA("AreFileApisANSI", ret1), SA("SetFileApisToANSI", ret0), SA("SetFileApisToOEM", ret0),
   /* WS2_32 */
   S(WSAStartup), SA("WSACleanup", ret0), S(WSAGetLastError), SA("WSASetLastError", ret0), S(gethostname), S(htons), SA("ntohs", htons), S(htonl), SA("ntohl", htonl), SA("socket", sock_err), SA("WSASocketW", sock_err), SA("WSASocketA", sock_err), SA("connect", sock_err), SA("bind", sock_err), SA("listen", sock_err), SA("accept", sock_err), SA("send", sock_err), SA("recv", sock_err), SA("sendto", sock_err), SA("recvfrom", sock_err), SA("select", sock_err), SA("closesocket", ret0), SA("shutdown", sock_err), SA("ioctlsocket", sock_err), SA("setsockopt", sock_err), SA("getsockopt", sock_err), SA("getsockname", sock_err), SA("getpeername", sock_err), SA("gethostbyname", ret0), SA("gethostbyaddr", ret0), SA("getaddrinfo", sock_err), SA("freeaddrinfo", ret0), SA("getnameinfo", sock_err), SA("inet_addr", ret0), SA("inet_ntoa", ret0), SA("inet_pton", ret0), SA("inet_ntop", ret0), SA("__WSAFDIsSet", ret0), SA("WSAIoctl", sock_err), SA("WSAEventSelect", sock_err), SA("WSAWaitForMultipleEvents", sock_err), SA("WSAEnumNetworkEvents", sock_err), SA("WSACreateEvent", ret0), SA("WSACloseEvent", ret1), SA("WSAResetEvent", ret1), SA("WSASend", sock_err), SA("WSARecv", sock_err), SA("WSAPoll", sock_err), SA("getservbyname", ret0), SA("getprotobyname", ret0), SA("WSADuplicateSocketW", sock_err), SA("WSAAddressToStringW", sock_err), SA("WSAStringToAddressW", sock_err),
-  SA("InitializeSListHead", ret0), S(VerSetConditionMask), SA("VerifyVersionInfoW", ret1), SA("VerifyVersionInfoA", ret1), SA("RtlUnwind", ret0), SA("SetStdHandle", ret1), SA("ExitThread", ret0), S(GlobalMemoryStatus), S(ReadConsoleW), SA("ReadConsoleA", ReadConsoleW), SA("GetDateFormatW", ret0), SA("GetTimeFormatW", ret0), SA("GetDateFormatEx", ret0), S(LocalFileTimeToFileTime), S(InterlockedPushEntrySList), S(InterlockedPopEntrySList), S(InterlockedFlushSList), SA("QueryDepthSList", ret0), S(GetSystemDirectoryW), SA("GetWindowsDirectoryW", GetSystemDirectoryW), SA("GetWindowsDirectoryA", GetSystemDirectoryA), SA("SearchPathW", ret0), SA("SearchPathA", ret0), S(GetUserNameW), S(GetComputerNameW), S(GetComputerNameExW), SA("GetComputerNameExA", GetComputerNameA), SA("SwitchToThread", ret0), SA("GetCompressedFileSizeA", retm1), SA("GetCompressedFileSizeW", retm1),
+  SA("InitializeSListHead", ret0), S(VerSetConditionMask), SA("VerifyVersionInfoW", ret1), SA("VerifyVersionInfoA", ret1), SA("RtlUnwind", ret0), SA("SetStdHandle", ret1), S(GlobalMemoryStatus), S(ReadConsoleW), SA("ReadConsoleA", ReadConsoleW), SA("GetDateFormatW", ret0), SA("GetTimeFormatW", ret0), SA("GetDateFormatEx", ret0), S(LocalFileTimeToFileTime), S(InterlockedPushEntrySList), S(InterlockedPopEntrySList), S(InterlockedFlushSList), SA("QueryDepthSList", ret0), S(GetSystemDirectoryW), SA("GetWindowsDirectoryW", GetSystemDirectoryW), SA("GetWindowsDirectoryA", GetSystemDirectoryA), SA("SearchPathW", ret0), SA("SearchPathA", ret0), S(GetUserNameW), S(GetComputerNameW), S(GetComputerNameExW), SA("GetComputerNameExA", GetComputerNameA), SA("GetCompressedFileSizeA", retm1), SA("GetCompressedFileSizeW", retm1),
   /* COMCTL32 */
   SA("InitCommonControls", ret0), SA("InitCommonControlsEx", ret1), SA("MakeDragList", ret1), SA("LBItemFromPt", retm1), SA("DrawInsert", ret0),
   /* ADVAPI32 (minimal) */
@@ -862,7 +878,7 @@ static const ShimDef shims[] = {
   S(malloc), S(calloc), S(realloc), S(free), SA("_msize", msize), SA("_aligned_malloc", aligned_malloc), SA("_aligned_free", aligned_free), SA("_set_new_mode", set_new_mode), SA("_callnewh", ret0), SA("_query_new_handler", ret0), SA("_set_new_handler", ret0),
   SA("_initterm", initterm), SA("_initterm_e", initterm_e), S(atexit), SA("_onexit", onexit), SA("_crt_atexit", atexit), SA("_crt_at_quick_exit", atexit), SA("_register_onexit_function", register_onexit_function), SA("_initialize_onexit_table", ret0), SA("_execute_onexit_table", ret0),
   S(exit), SA("_Exit", _exit), SA("_exit", _exit), SA("_cexit", cexit), SA("_c_exit", ret0), S(abort), SA("quick_exit", _exit),
-  SA("__p___argc", p___argc), SA("__p___argv", p___argv), SA("__p___wargv", p___wargv), SA("__p__acmdln", p__acmdln), SA("__p__wcmdln", p__wcmdln), SA("__p__environ", p__environ), SA("__p__wenviron", p__wenviron), SA("__p__fmode", p__fmode), SA("__p__commode", p__commode), SA("__p__pgmptr", p__pgmptr), SA("_get_initial_narrow_environment", get_initial_narrow_environment), SA("_get_initial_wide_environment", get_initial_wide_environment), SA("_errno", errno), SA("__doserrno", doserrno), SA("_get_errno", ret0),
+  SA("__p___argc", p___argc), SA("__p___argv", p___argv), SA("__p___wargv", p___wargv), SA("__p__acmdln", p__acmdln), SA("__p__wcmdln", p__wcmdln), SA("__p__environ", p__environ), SA("__p__wenviron", p__wenviron), SA("__p__fmode", p__fmode), SA("__p__commode", p__commode), SA("__p__pgmptr", p__pgmptr), SA("_get_initial_narrow_environment", get_initial_narrow_environment), SA("_get_initial_wide_environment", get_initial_wide_environment), SA("_errno", errno), SA("__doserrno", doserrno), SA("_get_errno", get_errno), SA("_set_errno", set_errno), S(mbstowcs), S(mbsrtowcs),
   SA("__acrt_iob_func", acrt_iob_func), SA("__iob_func", iob_func), SA("__getmainargs", getmainargs), SA("__wgetmainargs", wgetmainargs), SA("__set_app_type", set_app_type), SA("_set_app_type", set_app_type), SA("__setusermatherr", setusermatherr), SA("_controlfp", controlfp), SA("_controlfp_s", controlfp_s), SA("_fpreset", fpreset), SA("_set_fmode", set_fmode), S(signal), S(raise), SA("_amsg_exit", abort),
   SA("_configure_narrow_argv", ret0), SA("_configure_wide_argv", ret0), SA("_initialize_narrow_environment", ret0), SA("_initialize_wide_environment", ret0), SA("_set_invalid_parameter_handler", ret0), SA("_set_thread_local_invalid_parameter_handler", ret0), SA("_seh_filter_exe", ret0), SA("_seh_filter_dll", ret0), SA("_configthreadlocale", ret0), SA("__lconv_init", ret0), SA("_setmode", ret0), SA("_set_abort_behavior", ret0), SA("_set_error_mode", ret0), SA("_set_printf_count_output", ret0), SA("_get_osfhandle", retm1), SA("_crt_debugger_hook", ret0), SA("_invalid_parameter_noinfo", invalid_parameter_noinfo), SA("_invalid_parameter_noinfo_noreturn", invalid_parameter_noinfo), SA("_beginthreadex", ret0), SA("_beginthread", retm1), SA("_endthreadex", _exit), SA("__threadid", ret0), SA("_lock", ret0), SA("_unlock", ret0), SA("__pctype_func", pctype_func), SA("___mb_cur_max_func", ret1), SA("___lc_codepage_func", ret0), SA("___lc_handle_func", ret0), SA("___lc_collate_cp_func", ret0), SA("_create_locale", ret0), SA("_free_locale", ret0), SA("_get_current_locale", ret0), SA("setlocale", ret0), S(localeconv), SA("_setlocale", ret0),
   SA("__stdio_common_vfprintf", stdio_common_vfprintf), SA("__stdio_common_vfprintf_s", stdio_common_vfprintf), SA("__stdio_common_vfwprintf", stdio_common_vfwprintf), SA("__stdio_common_vsprintf", stdio_common_vsprintf), SA("__stdio_common_vsprintf_s", stdio_common_vsprintf_s), SA("__stdio_common_vsnprintf_s", stdio_common_vsnprintf_s), SA("__stdio_common_vswprintf", stdio_common_vswprintf), SA("__stdio_common_vswprintf_s", stdio_common_vswprintf_s), SA("__stdio_common_vsprintf_p", stdio_common_vsprintf),
@@ -889,6 +905,7 @@ void w32_init(Win32 *w, Cpu *c, Mem *m) { g_fs_w = w; ProcFs *fs = w->fs ? w->fs
   w->str_cur = G_SHIM_BASE + STR_OFF;
   w->teb = G_SHIM_BASE + TEB_OFF; w->peb = G_SHIM_BASE + PEB_OFF;
   c->gs_base = w->teb; c->fs_base = w->teb;
+  w->th[0].used = 1; w->th[0].state = 1; w->th[0].cpu = c; w->th[0].teb = w->teb; w->th[0].kobj = -1; w->th[0].exit_code = 259; w->cur_th = 0; w->nth = 1; w->wait_deadline = -1;
   wr64(c, w->teb + 0x08, G_STACK_BASE + G_STACK_SIZE); wr64(c, w->teb + 0x10, G_STACK_BASE); wr64(c, w->teb + 0x30, w->teb); wr64(c, w->teb + 0x40, 4242); wr64(c, w->teb + 0x48, 4243); wr64(c, w->teb + 0x60, w->peb);
   wr64(c, w->teb + 0x58, w32_heap_alloc(w, 64, 1));
   u64 params = G_SHIM_BASE + PARAMS_OFF; wr64(c, w->peb + 0x20, params); wr32(c, w->peb + 0x118, 10); wr32(c, w->peb + 0x11c, 0); wr16(c, w->peb + 0x120, 19045); wr64(c, w->peb + 0x18, shim_bump(w, 0x100));
@@ -908,6 +925,8 @@ void w32_init(Win32 *w, Cpu *c, Mem *m) { g_fs_w = w; ProcFs *fs = w->fs ? w->fs
 /* set up command line, argv, environment, stack and the start-up continuation (called by api.c after pe_load) */
 void w32_start(Win32 *w, const char *cmdline) {
   Cpu *c = w->cpu;
+  w->th[0].tid = w->pid + 1; wr64(c, w->teb + 0x40, (u64)w->pid); wr64(c, w->teb + 0x48, (u64)w->th[0].tid);
+  { int idx = kobj_new(KO_THREAD, 0, 0); if (idx >= 0) { KObj *ko = kobj_get(idx); ko->pid = w->pid; ko->tid = w->th[0].tid; ko->state = 1; ko->exit_code = 259; ko->refs = 1; w->th[0].kobj = idx; } }
   e_snprintf(w->cmdline, sizeof w->cmdline, "%s", cmdline);
   w->cmdline_a = w32_guest_strdup(w, w->cmdline); w->cmdline_w = guest_wstrdup(w, w->cmdline);
   /* argv split (quotes aware) */

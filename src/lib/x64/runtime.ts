@@ -15,6 +15,7 @@ export interface RunStats {
   error: string; errorRip: string; errorBytes: string; report: string; title: string; subsystem: number; hasWindow: boolean; memMB: number;
   /** live guest processes (root + children spawned through CreateProcess/_spawn) */
   procs: number;
+  threads: number;
 }
 
 type Exports = {
@@ -22,7 +23,7 @@ type Exports = {
   x64_alloc(n: bigint): bigint; x64_inspect(p: bigint, n: bigint): bigint; x64_load(p: bigint, n: bigint, name: bigint, cmd: bigint): number;
   x64_run(budget: bigint): number; x64_key(vk: number, down: number): void; x64_mouse(x: number, y: number, ev: number): void;
   x64_icount(): bigint; x64_exit_code(): number; x64_error(): bigint; x64_error_rip(): bigint; x64_rip(): bigint; x64_report(): bigint; x64_console(): bigint;
-  x64_screen_w(): number; x64_screen_h(): number; x64_screen(): bigint; x64_title(): bigint; x64_subsystem(): number; x64_sleep_ms(): number; x64_mem_used(): bigint; x64_has_window(): number; x64_proc_count(): number;
+  x64_screen_w(): number; x64_screen_h(): number; x64_screen(): bigint; x64_title(): bigint; x64_subsystem(): number; x64_sleep_ms(): number; x64_mem_used(): bigint; x64_has_window(): number; x64_proc_count(): number; x64_thread_count(): number;
   x64_api_stats(): bigint; x64_error_bytes(): bigint;
   x64_vfs_add(path: bigint, data: bigint, n: bigint): number; x64_vfs_mkdir(path: bigint): number; x64_vfs_remove(path: bigint): number;
   x64_vfs_size(path: bigint): bigint; x64_vfs_data(path: bigint): bigint; x64_vfs_list(): bigint;
@@ -149,12 +150,12 @@ export class X64Runtime {
   mouse(x: number, y: number, ev: number) { if (this.running) this.ex!.x64_mouse(x | 0, y | 0, ev); }
 
   stats(): RunStats {
-    const ex = this.ex; if (!ex) return { status: this.status, icount: 0, mips: 0, frames: 0, elapsedMs: 0, exitCode: 0, error: '', errorRip: '', errorBytes: '', report: '', title: '', subsystem: 0, hasWindow: false, memMB: 0, procs: 0 };
+    const ex = this.ex; if (!ex) return { status: this.status, icount: 0, mips: 0, frames: 0, elapsedMs: 0, exitCode: 0, error: '', errorRip: '', errorBytes: '', report: '', title: '', subsystem: 0, hasWindow: false, memMB: 0, procs: 0, threads: 0 };
     const el = Math.max(1, performance.now() - this.t0); const ic = Number(ex.x64_icount());
     return {
       status: this.status, icount: ic, mips: ic / el / 1000, frames: this.frames, elapsedMs: el, exitCode: ex.x64_exit_code(),
       error: this.cstr(ex.x64_error()), errorRip: '0x' + ex.x64_error_rip().toString(16), errorBytes: this.cstr(ex.x64_error_bytes()), report: this.cstr(ex.x64_report()),
-      title: this.cstr(ex.x64_title()), subsystem: ex.x64_subsystem(), hasWindow: !!ex.x64_has_window(), memMB: Number(ex.x64_mem_used()) / 1048576, procs: ex.x64_proc_count(),
+      title: this.cstr(ex.x64_title()), subsystem: ex.x64_subsystem(), hasWindow: !!ex.x64_has_window(), memMB: Number(ex.x64_mem_used()) / 1048576, procs: ex.x64_proc_count(), threads: ex.x64_thread_count ? ex.x64_thread_count() : 0,
     };
   }
   apiStats(): string { return this.ex ? this.cstr(this.ex.x64_api_stats()) : ''; }

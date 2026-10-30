@@ -12,6 +12,8 @@ const SAMPLES = [
   { name: 'bench.exe', href: '/x64/samples/bench.exe', desc: 'CPU benchmark: sieve, mandelbrot, memcpy (heavy compute)' },
   { name: 'busybox64.exe', href: '/x64/samples/busybox64.exe', desc: 'Real third-party binary: busybox-w32 (mingw64). Try args: ls -l · cat readme.txt · wc · sort · grep · sed · awk · sha256sum · gzip -f · date -u · factor 1234567891; type into the console line when it reads stdin' },
   { name: 'plink.exe', href: '/x64/samples/plink.exe', desc: 'Real third-party binary: PuTTY plink 0.85 (MSVC/clang-cl). Try args: -V' },
+  { name: 'threads.exe', href: '/x64/samples/threads.exe', desc: 'Win32 threads & sync self-test: CreateThread, critical sections, SRW locks, condition variables, events, mutexes, semaphores, WaitForMultipleObjects, TLS, Interlocked (39 checks)' },
+  { name: 'pthreads.exe', href: '/x64/samples/pthreads.exe', desc: 'winpthreads (mingw64 libpthread) self-test: pthread_create/join, mutex, cond, rwlock, barrier, once, TLS keys, 4-thread parallel sum (9 checks)' },
 ];
 
 const VERDICT: Record<string, { label: string; cls: string; Icon: typeof CheckCircle2 }> = {
@@ -282,7 +284,7 @@ export default function X64App() {
           {/* status bar */}
           <div className="flex h-7 shrink-0 items-center gap-3 border-t border-slate-200 bg-white px-3 text-[10px] text-slate-600">
             <span className={`font-semibold ${stats?.status === 'fault' ? 'text-rose-700' : stats?.status === 'running' ? 'text-emerald-700' : stats?.status === 'waiting-stdin' ? 'text-amber-700' : ''}`}>{(stats?.status ?? 'idle').toUpperCase()}{stats?.status === 'exited' ? ` (code ${stats.exitCode})` : ''}</span>
-            {stats && <span>{(stats.icount / 1e6).toFixed(1)} M insns · {stats.mips.toFixed(1)} MIPS · {stats.frames} frames · {stats.memMB.toFixed(0)} MB guest{stats.procs > 1 ? <span data-x64-procs={stats.procs}> · {stats.procs} processes</span> : null}</span>}
+            {stats && <span>{(stats.icount / 1e6).toFixed(1)} M insns · {stats.mips.toFixed(1)} MIPS · {stats.frames} frames · {stats.memMB.toFixed(0)} MB guest{stats.procs > 1 ? <span data-x64-procs={stats.procs}> · {stats.procs} processes</span> : null}{stats.threads > 1 ? <span data-x64-threads={stats.threads}> · {stats.threads} threads</span> : null}</span>}
             <span className="ml-auto truncate">{glInfo}</span>
             <span className="shrink-0">wasm64 {moduleKB ? moduleKB.toFixed(0) + ' KB' : ''}</span>
           </div>
@@ -328,7 +330,7 @@ function PeReport({ e, stats, log, apiStats }: { e: ExeEntry; stats: RunStats | 
         </div>
       )}
       <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-[10px] leading-relaxed text-slate-600">
-        <b>What this is:</b> a user-mode x86-64 interpreter (integer ISA + SSE2, PE32+ loader, kernel32/UCRT/user32/gdi32 shims) compiled to wasm64 and drawing through WebGL. Programs get an in-memory C:\ drive (Files tab), stdin from the console input line, and a real environment block. It is honest about its limits: 32-bit, .NET, Direct3D/OpenGL/Vulkan, audio, networking, threads and child processes/pipes are not emulated — such programs stop at the first missing API, and the report above tells you which one.
+        <b>What this is:</b> a user-mode x86-64 interpreter (integer ISA + SSE2, PE32+ loader, kernel32/UCRT/user32/gdi32 shims) compiled to wasm64 and drawing through WebGL. Programs get an in-memory C:\ drive (Files tab), stdin from the console input line, and a real environment block. It is honest about its limits: 32-bit, .NET, Direct3D/OpenGL/Vulkan, audio and networking are not emulated (threads, child processes and pipes are) — such programs stop at the first missing API, and the report above tells you which one.
       </div>
     </div>
   );

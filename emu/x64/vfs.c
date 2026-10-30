@@ -116,11 +116,13 @@ static void ent_addref(FdEnt *e) {
   if (e->kind == FD_PIPE) { if (e->wend) g_pipes[e->obj].writers++; else g_pipes[e->obj].readers++; }
   else if (e->kind == FD_MAP) g_maps[e->obj].refs++;
   else if (e->kind == FD_PROC) proc_handle_ref(e->obj, 1);
+  else if (e->kind == FD_KOBJ) kobj_ref(e->obj, 1);
 }
 static void ent_release(FdEnt *e) {
   if (e->kind == FD_PIPE) { Pipe *p = &g_pipes[e->obj]; if (e->wend) p->writers--; else p->readers--; if (p->readers <= 0 && p->writers <= 0) p->used = 0; }
   else if (e->kind == FD_MAP) { if (--g_maps[e->obj].refs <= 0) g_maps[e->obj].used = 0; }
   else if (e->kind == FD_PROC) proc_handle_ref(e->obj, -1);
+  else if (e->kind == FD_KOBJ) kobj_ref(e->obj, -1);
   e->kind = 0;
 }
 static int ent_new(int kind) { int k = slot_alloc(); if (k < 0) return -1; FdEnt *e = &vfs_P->fd[k]; e_memset(e, 0, sizeof *e); e->kind = kind; e->node = -1; e->unget = -1; return k + 3; }
@@ -224,6 +226,18 @@ int vfs_map_write_back(int fd, const u8 *src, u64 n) { u64 sz; u8 *d = vfs_map_d
 /* process handles */
 int vfs_proc_handle(int pid) { int fd = ent_new(FD_PROC); if (fd < 0) return -1; vf(fd)->obj = pid; proc_handle_ref(pid, 1); return fd; }
 int vfs_fd_pid(int fd) { FdEnt *f = vf(fd); return f && f->kind == FD_PROC ? f->obj : -1; }
+/* kernel objects: events, mutexes, semaphores, threads */
+static KObj g_kobjs[KOBJ_MAX];
+int kobj_new(int kind, const char *name, int *existed) {
+  if (existed) *existed = 0;
+  if (name && name[0]) for (int i = 0; i < KOBJ_MAX; i++) if (g_kobjs[i].used && g_kobjs[i].kind == kind && !e_strcmp(g_kobjs[i].name, name)) { if (existed) *existed = 1; return i; }
+  for (int i = 0; i < KOBJ_MAX; i++) if (!g_kobjs[i].used) { KObj *k = &g_kobjs[i]; e_memset(k, 0, sizeof *k); k->used = 1; k->kind = kind; if (name) e_snprintf(k->name, sizeof k->name, "%s", name); return i; }
+  return -1;
+}
+KObj *kobj_get(int idx) { return idx >= 0 && idx < KOBJ_MAX && g_kobjs[idx].used ? &g_kobjs[idx] : 0; }
+void kobj_ref(int idx, int delta) { KObj *k = kobj_get(idx); if (!k) return; k->refs += delta; if (k->refs <= 0) k->used = 0; }
+int vfs_kobj_handle(int idx) { if (!kobj_get(idx)) return -1; int fd = ent_new(FD_KOBJ); if (fd < 0) return -1; vf(fd)->obj = idx; kobj_ref(idx, 1); return fd; }
+int vfs_fd_kobj(int fd) { FdEnt *f = vf(fd); return f && f->kind == FD_KOBJ ? f->obj : -1; }
 
 s64 vfs_read(int fd, u8 *buf, u64 n) {
   FdEnt *f = vf(fd); if (!f) return -1;
@@ -269,7 +283,7 @@ void vfs_init_proc(ProcFs *p, const ProcFs *parent) {
 }
 /* release every handle of a process (exit) */
 void vfs_release_proc(ProcFs *p) { ProcFs *save = vfs_P; vfs_P = p; for (int k = 0; k < 3; k++) if (p->redir[k] >= 3) { vfs_close(p->redir[k]); p->redir[k] = -1; } for (int k = 0; k < FD_MAX; k++) if (p->fd[k].kind) ent_release(&p->fd[k]); for (int k = 0; k < VFS_MAX_FIND; k++) p->find[k].used = 0; vfs_P = save; }
-void vfs_close_all(void) { vfs_release_proc(&g_root_fs); e_snprintf(g_root_fs.cwd, sizeof g_root_fs.cwd, "C:\\nebula"); g_root_fs.nenv = 0; g_root_fs.env_dirty = 1; for (int i = 0; i < PIPE_MAX; i++) g_pipes[i].used = 0; for (int i = 0; i < MAP_MAX; i++) g_maps[i].used = 0; g_in_pos = 0; g_in_len = 0; g_in_eof = 0; g_in_wait = 0; vfs_P = &g_root_fs; }
+void vfs_close_all(void) { vfs_release_proc(&g_root_fs); e_snprintf(g_root_fs.cwd, sizeof g_root_fs.cwd, "C:\\nebula"); g_root_fs.nenv = 0; g_root_fs.env_dirty = 1; for (int i = 0; i < PIPE_MAX; i++) g_pipes[i].used = 0; for (int i = 0; i < KOBJ_MAX; i++) g_kobjs[i].used = 0; for (int i = 0; i < MAP_MAX; i++) g_maps[i].used = 0; g_in_pos = 0; g_in_len = 0; g_in_eof = 0; g_in_wait = 0; vfs_P = &g_root_fs; }
 
 /* ---------- directory enumeration (FindFirstFile semantics) ---------- */
 static int glob_match(const char *pat, const char *s) {
