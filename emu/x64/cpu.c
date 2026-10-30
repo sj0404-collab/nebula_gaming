@@ -14,8 +14,8 @@ static void fault_av(Cpu *c, u64 a, int write) { cpu_fault(c, "%s fault at 0x%ll
 static void fault_code(Cpu *c, u32 code, const char *what) { cpu_fault(c, "%s", what); c->exc_code = code; c->exc_addr = 0; c->exc_info = 0; }
 
 /* ---------- memory ---------- */
-#define RD(T, name) T name(Cpu *c, u64 a) { u8 *p = mem_ptr(c->mem, a, sizeof(T), 0); if (!p) { fault_av(c, a, 0); return 0; } T v; e_memcpy(&v, p, sizeof v); return v; }
-#define WR(T, name) void name(Cpu *c, u64 a, T v) { u8 *p = mem_ptr(c->mem, a, sizeof(T), 1); if (!p) { fault_av(c, a, 1); return; } e_memcpy(p, &v, sizeof v); }
+#define RD(T, name) T name(Cpu *c, u64 a) { u8 *p = mem_ptr_fast(c->mem, a, sizeof(T), 0); if (!p) { fault_av(c, a, 0); return 0; } T v; __builtin_memcpy(&v, p, sizeof v); return v; }
+#define WR(T, name) void name(Cpu *c, u64 a, T v) { u8 *p = mem_ptr_fast(c->mem, a, sizeof(T), 1); if (!p) { fault_av(c, a, 1); return; } __builtin_memcpy(p, &v, sizeof v); }
 RD(u8, rd8) RD(u16, rd16) RD(u32, rd32) RD(u64, rd64)
 WR(u8, wr8) WR(u16, wr16) WR(u32, wr32) WR(u64, wr64)
 const char *rd_str(Cpu *c, u64 a, size_t max) {
@@ -45,7 +45,7 @@ typedef struct {
 
 static inline u8 fetch8(Ins *i) { if (i->code) { u64 off = i->ip - i->start; if (off < 16) { i->ip++; return i->code[off]; } } return rd8(i->c, i->ip++); }
 static inline u16 fetch16(Ins *i) { u16 v = rd16(i->c, i->ip); i->ip += 2; return v; }
-static inline u32 fetch32(Ins *i) { if (i->code) { u64 off = i->ip - i->start; if (off + 4 <= 16) { u32 v; e_memcpy(&v, i->code + off, 4); i->ip += 4; return v; } } u32 v = rd32(i->c, i->ip); i->ip += 4; return v; }
+static inline u32 fetch32(Ins *i) { if (i->code) { u64 off = i->ip - i->start; if (off + 4 <= 16) { u32 v; __builtin_memcpy(&v, i->code + off, 4); i->ip += 4; return v; } } u32 v = rd32(i->c, i->ip); i->ip += 4; return v; }
 static inline u64 fetch64(Ins *i) { u64 v = rd64(i->c, i->ip); i->ip += 8; return v; }
 static inline s64 fetch_s8(Ins *i) { return (s8)fetch8(i); }
 static inline s64 fetch_s32(Ins *i) { return (s32)fetch32(i); }
@@ -388,6 +388,7 @@ static void exec_one(Ins *i) {
   }
 }
 
+#include "sse4.inc"
 static void exec_0f(Ins *i, Cpu *c) {
   u8 op = fetch8(i);
   int osz = i->rexw ? 8 : i->p66 ? 2 : 4;
@@ -403,7 +404,7 @@ static void exec_0f(Ins *i, Cpu *c) {
     case 0xA2: { /* cpuid */ u32 leaf = (u32)c->r[RAX];
       switch (leaf) {
         case 0: c->r[RAX] = 7; c->r[RBX] = 0x756e6547; c->r[RDX] = 0x49656e69; c->r[RCX] = 0x6c65746e; break;
-        case 1: c->r[RAX] = 0x000306a9; c->r[RBX] = 0x00100800; c->r[RCX] = 0; c->r[RDX] = 0x078bfbff; break; /* fpu..sse2, no SSE3+ */
+        case 1: c->r[RAX] = 0x000306a9; c->r[RBX] = 0x00100800; c->r[RCX] = (1u << 0) | (1u << 1) | (1u << 9) | (1u << 13) | (1u << 19) | (1u << 20) | (1u << 23); c->r[RDX] = 0x078bfbff; break; /* fpu..sse2 + SSE3/PCLMULQDQ/SSSE3/CX16/SSE4.1/SSE4.2/POPCNT; no AES, no AVX/OSXSAVE */
         case 7: c->r[RAX] = c->r[RBX] = c->r[RCX] = c->r[RDX] = 0; break;
         case 0x80000000: c->r[RAX] = 0x80000004; c->r[RBX] = c->r[RCX] = c->r[RDX] = 0; break;
         case 0x80000001: c->r[RAX] = c->r[RBX] = c->r[RCX] = 0; c->r[RDX] = 1u << 29; break;   /* LM */
@@ -575,7 +576,10 @@ static void exec_0f(Ins *i, Cpu *c) {
       else if (op == 0xE1) for (int k = 0; k < 8; k++) d->w[k] = (u16)((s16)d->w[k] >> (cnt > 15 ? 15 : cnt)); else if (op == 0xE2) for (int k = 0; k < 4; k++) d->d[k] = (u32)((s32)d->d[k] >> (cnt > 31 ? 31 : cnt));
       else if (op == 0xF1) for (int k = 0; k < 8; k++) d->w[k] = cnt > 15 ? 0 : (u16)(d->w[k] << cnt); else if (op == 0xF2) for (int k = 0; k < 4; k++) d->d[k] = cnt > 31 ? 0 : d->d[k] << cnt; else for (int k = 0; k < 2; k++) d->q[k] = cnt > 63 ? 0 : d->q[k] << cnt;
       return; }
-    case 0x38: case 0x3A: { u8 op2 = fetch8(i); c->unknown_op[0] = 0x0F; c->unknown_op[1] = op; c->unknown_op[2] = op2; UNSUP("unsupported SSSE3/SSE4 opcode 0F %02X %02X", op, op2); }
+    case 0x38: op_0f38(i); return;
+    case 0x3A: op_0f3a(i); return;
+    case 0x7C: case 0x7D: case 0xD0: if (!i->p66 && i->rep != 0xF2) UNSUP("0F %02X without SSE3 prefix", op); op_sse3_h(i, op); return;   /* haddp*, hsubp*, addsubp* */
+    case 0xF0: { if (i->rep != 0xF2) UNSUP("0F F0 (not lddqu)"); decode_modrm(i); Xmm v; xmm_load(i, &v, 16); c->x[i->reg] = v; return; }   /* lddqu */
     default: c->unknown_op[0] = 0x0F; c->unknown_op[1] = op; UNSUP("unsupported opcode 0F %02X", op);
   }
 }
@@ -597,7 +601,7 @@ int cpu_run(Cpu *c, u64 max_insns) {
     c->hist[c->hist_i++ & 4095] = c->rip;
     Ins in; in.c = c; in.start = c->rip; in.ip = c->rip;
     in.rex = in.rexw = in.rexr = in.rexx = in.rexb = in.p66 = in.p67 = in.rep = in.seg = in.lock = 0; in.modrm = 0; in.ea_valid = 0; in.mod = in.reg = in.rm = 0; in.ea = 0;
-    in.code = mem_ptr(c->mem, c->rip, 16, 0);
+    in.code = mem_ptr_fast(c->mem, c->rip, 16, 0);
     exec_one(&in);
     if (c->status != RUN_OK) {
       if (c->status == RUN_FAULT) { c->err_rip = in.start; if (c->exc_code) { c->rip = in.start; if (w32_hw_exception(c)) continue; } }

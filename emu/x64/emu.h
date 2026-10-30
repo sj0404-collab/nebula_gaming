@@ -54,6 +54,8 @@ int mem_unmap(Mem *m, u64 base);       /* drop a mem_map region (large VirtualAl
 
 u8  *mem_map(Mem *m, u64 base, u64 size, const char *name);   /* add region (host memory allocated) */
 u8  *mem_ptr(Mem *m, u64 addr, u64 size, int write);          /* NULL on fault */
+/* inline fast path: hit in the last-used region (the common case inside a loop), otherwise the full lookup */
+static inline u8 *mem_ptr_fast(Mem *m, u64 addr, u64 size, int write) { Region *r = &m->r[m->last]; u64 off = addr - r->base; if (off < r->size && off + size <= r->size) return r->host + off; return mem_ptr(m, addr, size, write); }
 Region *mem_region(Mem *m, u64 addr);
 void mem_release(Mem *m);                                     /* give all regions back to the pool */
 void *emu_alloc(size_t n);                                    /* zeroed host memory, never freed (bump) */

@@ -333,6 +333,7 @@ static void iocp_handle_closed(int pid, int fd); static void iocp_kobj_closed(in
 #include "win32_iocp.inc"
 #include "win32_net.inc"
 #include "win32_node.inc"
+#include "win32_bun.inc"
 static void s_CancelIo(Cpu *c) { sock_cancel_io(c, ARG(0)); RET(1); }   /* pipes: parked ReadFile/WriteFile stay (libuv cancels those only on close) */
 static void s_ret0(Cpu *c); static void s_atexit(Cpu *c); static void s_setjmp(Cpu *c);
 #include "win32_compat.inc"
@@ -476,7 +477,22 @@ static int attach_next_module(Cpu *c) {
   Win32 *w = W; for (int i = 0; i < w->nmods; i++) if (!w->mods[i].attached) { w->mods[i].attached = 1; if (w->mods[i].entry) { guest_call(c, w->mods[i].entry, w->mods[i].base, 1, 0, 0); return 1; } }
   return 0;
 }
-static u64 fake_module(const char *n) { return 0x7ff00000000ull + ((u64)(n && n[0] ? (u8)n[0] : 1) << 12); }
+/* pseudo handles for system DLLs served by shims: 0x7ff00000000 + slot<<12; the name is kept so GetProcAddress can resolve ordinals */
+static char g_fake_names[64][40]; static int g_nfake;
+static void fake_key(const char *n, char *out, size_t cap) { const char *b = n; for (const char *p = n; *p; p++) if (*p == '\\' || *p == '/') b = p + 1; size_t o = 0; for (; b[o] && o + 1 < cap; o++) out[o] = (b[o] >= 'A' && b[o] <= 'Z') ? (char)(b[o] + 32) : b[o]; out[o] = 0; if (o > 4 && !e_stricmp(out + o - 4, ".dll")) out[o - 4] = 0; }
+static u64 fake_module(const char *n) { char k[40]; fake_key(n && n[0] ? n : "?", k, sizeof k);
+  for (int i = 0; i < g_nfake; i++) if (!e_stricmp(g_fake_names[i], k)) return 0x7ff00000000ull + ((u64)(i + 1) << 12);
+  if (g_nfake < 64) { e_snprintf(g_fake_names[g_nfake], sizeof g_fake_names[0], "%s", k); g_nfake++; return 0x7ff00000000ull + ((u64)g_nfake << 12); }
+  return 0x7ff00000000ull + (1ull << 12); }
+static const char *fake_module_name(u64 h) { if ((h >> 32) != 0x7ff || (h & 0xfff)) return 0; u64 i = (h >> 12) & 0xfffff; return i >= 1 && i <= (u64)g_nfake ? g_fake_names[i - 1] : 0; }
+/* export ordinals of the DLLs that are still imported by number (delay-loaded WSOCK32 in Bun, OLEAUT32 everywhere) */
+static const char *ordinal_name(const char *dll, u32 ord) {
+  if (!dll) return 0;
+  if (!e_stricmp(dll, "ws2_32") || !e_stricmp(dll, "wsock32")) { static const char *const t[] = { 0, "accept", "bind", "closesocket", "connect", "getpeername", "getsockname", "getsockopt", "htonl", "htons", "ioctlsocket", "inet_addr", "inet_ntoa", "listen", "ntohl", "ntohs", "recv", "recvfrom", "select", "send", "sendto", "setsockopt", "shutdown", "socket" };
+    if (ord < 24) return t[ord]; switch (ord) { case 51: return "gethostbyaddr"; case 52: return "gethostbyname"; case 53: return "getprotobyname"; case 54: return "getprotobynumber"; case 55: return "getservbyname"; case 56: return "getservbyport"; case 57: return "gethostname";
+      case 111: return "WSAGetLastError"; case 112: return "WSASetLastError"; case 115: return "WSAStartup"; case 116: return "WSACleanup"; case 151: return "__WSAFDIsSet"; default: return 0; } }
+  if (!e_stricmp(dll, "oleaut32")) { switch (ord) { case 2: return "SysAllocString"; case 3: return "SysReAllocString"; case 4: return "SysAllocStringLen"; case 5: return "SysReAllocStringLen"; case 6: return "SysFreeString"; case 7: return "SysStringLen"; case 8: return "VariantInit"; case 9: return "VariantClear"; case 149: return "SysStringByteLen"; case 150: return "SysAllocStringByteLen"; default: return 0; } }
+  return 0; }
 static void load_library(Cpu *c, const char *n) {
   if (!n || !n[0]) { W->last_error = 87; RET(0); return; }
   if (!pe_is_system_dll(n)) {
@@ -505,7 +521,8 @@ static void s_FreeLibrary(Cpu *c) { RET(1); }
 static void s_GetProcAddress(Cpu *c) {
   int m = mod_by_base(W, ARG(0));
   if (m >= 0) { u64 a = ARG(1) < 0x10000 ? mod_export(W, m, 0, (u32)ARG(1), 0) : mod_export(W, m, rd_str(c, ARG(1), 256), 0, 0); if (!a) W->last_error = 127; RET(a); return; }
-  const char *n = rd_str(c, ARG(1), 256); if (!n || ARG(1) < 0x10000) { W->last_error = 127; RET(0); return; }
+  const char *n = ARG(1) < 0x10000 ? ordinal_name(fake_module_name(ARG(0)), (u32)ARG(1)) : rd_str(c, ARG(1), 256);
+  if (!n) { if (ARG(1) < 0x10000) { char msg[160]; e_snprintf(msg, sizeof msg, "[x64] GetProcAddress miss: %s!#%u\n", fake_module_name(ARG(0)) ? fake_module_name(ARG(0)) : "?", (u32)ARG(1)); host_write(3, msg, e_strlen(msg)); } W->last_error = 127; RET(0); return; }
   if (!w32_have_shim("", n)) { char msg[320]; e_snprintf(msg, sizeof msg, "[x64] GetProcAddress miss: %s\n", n); host_write(3, msg, e_strlen(msg)); W->last_error = 127; RET(0); return; }
   RET(w32_shim_slot(W, "dynamic", n)); }
 static const char *mod_file_name(Win32 *w, u64 h) { int m = h ? mod_by_base(w, h) : -1; return m >= 0 ? w->mods[m].name : w->exe_name; }
@@ -1110,6 +1127,7 @@ static const ShimDef shims[] = {
   FS_SHIMS
   NT_SHIMS
   IOCP_SHIMS
+  BUN_SHIMS
   S(GetLastError), S(SetLastError), S(GetCurrentProcess), S(GetCurrentProcessId), S(ExitProcess), S(TerminateProcess),
   S(GetTickCount), S(GetTickCount64), S(QueryPerformanceCounter), S(QueryPerformanceFrequency), S(GetSystemTimeAsFileTime), S(GetSystemTimePreciseAsFileTime), S(GetSystemTime), S(GetLocalTime), S(Sleep), S(SleepEx),
   S(GetStdHandle), S(WriteFile), S(WriteConsoleA), S(WriteConsoleW), S(ReadFile), S(ReadConsoleA), S(GetConsoleMode), S(SetConsoleMode), S(GetConsoleOutputCP), S(GetConsoleCP), S(SetConsoleOutputCP), S(SetConsoleCP), S(GetConsoleScreenBufferInfo), S(SetConsoleTextAttribute), S(SetConsoleTitleA), S(SetConsoleTitleW), S(GetConsoleTitleW), S(GetConsoleTitleA), S(GetConsoleCursorInfo), S(SetConsoleCursorInfo), S(SetConsoleCursorPosition), S(FillConsoleOutputCharacterW), S(FillConsoleOutputCharacterA), S(FillConsoleOutputAttribute), S(ScrollConsoleScreenBufferW), S(ScrollConsoleScreenBufferA), S(SetConsoleScreenBufferSize), S(SetConsoleWindowInfo), S(WriteConsoleOutputW), S(WriteConsoleOutputA), S(WriteConsoleOutputCharacterW), S(WriteConsoleOutputAttribute), S(ReadConsoleOutputW), S(ReadConsoleOutputCharacterW), S(ReadConsoleOutputAttribute), S(GetLargestConsoleWindowSize), S(WriteConsoleInputW), S(GetConsoleProcessList), S(GetConsoleDisplayMode), S(GetConsoleOriginalTitleW), S(GetConsoleAliasesLengthW), S(GetConsoleScreenBufferInfoEx), S(SetConsoleScreenBufferInfoEx), S(GetCurrentConsoleFontEx), S(GetCurrentConsoleFont), S(SetCurrentConsoleFontEx), S(GetConsoleFontSize), S(GetConsoleWindow), S(AllocConsole), S(SetConsoleCtrlHandler), S(FlushFileBuffers), S(GetFileType), S(CloseHandle),

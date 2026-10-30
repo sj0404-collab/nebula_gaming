@@ -27,6 +27,12 @@ static int mount_dir(const char *host, const char *guest, int depth) {   /* copi
   }
   closedir(d); return n;
 }
+/* X64_PROF=1: sample rip every 20 K instructions, report the hottest 64-byte code blocks (poor man's profiler for spin loops) */
+static int g_prof; static struct { u64 key; u64 n; } g_pf[65536]; static u64 g_pf_total;
+static void prof_sample(u64 rip) { u64 k = rip >> 6; u32 h = (u32)(k * 0x9E3779B97F4A7C15ull >> 48); for (int i = 0; i < 65536; i++) { u32 j = (h + i) & 65535; if (!g_pf[j].n || g_pf[j].key == k) { g_pf[j].key = k; g_pf[j].n++; g_pf_total++; return; } } }
+static void prof_dump(void) { fprintf(stderr, "[x64run] profile: %llu samples, hottest 64-byte blocks:\n", (unsigned long long)g_pf_total);
+  for (int t = 0; t < 30; t++) { int bi = -1; for (int j = 0; j < 65536; j++) if (g_pf[j].n && (bi < 0 || g_pf[j].n > g_pf[bi].n)) bi = j; if (bi < 0) break;
+    fprintf(stderr, "  %5.1f%%  0x%llx\n", 100.0 * (double)g_pf[bi].n / (double)g_pf_total, (unsigned long long)(g_pf[bi].key << 6)); g_pf[bi].n = 0; } }
 int main(int argc, char **argv) {
   int inspect = 0, dump_every = 0; double max_ms = 60000; const char *prefix = "frame"; int quiet = 0;
   const char *mounts[16][2]; int nmounts = 0; int no_stdin = 0;
@@ -61,17 +67,19 @@ int main(int argc, char **argv) {
   int rc = x64_load(bytes, len, base, cmdline);
   if (g_apitrace) { extern void w32_api_trace(int); w32_api_trace(1); }
   if (rc) { fprintf(stderr, "load failed (%d): %s", rc, x64_report()); return 3; }
+  g_prof = getenv("X64_PROF") != 0;
   double t0 = host_now_ms(); int r; int ki = 0; u64 yields = 0;
   for (;;) {
     double el = host_now_ms() - t0;
     if (el > max_ms) { if (!quiet) { fprintf(stderr, "[x64run] time limit reached\n"); if (getenv("X64_HIST")) { extern u64 x64_rip(void); fprintf(stderr, "[x64run] rip=%llx regs: %s\n[x64run] last blocks: %s\n", (unsigned long long)x64_rip(), x64_regs(), x64_history()); unsigned char b[512]; u64 a = (x64_rip() & ~0xfull) - 256; if (x64_mem_copy(a, b, 512)) { FILE *f = fopen("/tmp/rip_tl.bin", "wb"); if (f) { fwrite(b, 1, 512, f); fclose(f); fprintf(stderr, "[x64run] dumped 512 bytes from 0x%llx to /tmp/rip_tl.bin\n", (unsigned long long)a); } } } } r = -1; break; }
     while (ki < nkeys && keys[ki].at <= el) { x64_key(keys[ki].vk, keys[ki].down); ki++; }
-    r = x64_run(2000000);
+    if (g_prof) { extern u64 x64_rip(void); r = x64_run(20000); prof_sample(x64_rip()); } else r = x64_run(2000000);
     if (r == RUN_YIELD && x64_wants_stdin()) { char line[4096]; if (!no_stdin && fgets(line, sizeof line, stdin)) x64_stdin_write((const u8 *)line, strlen(line)); else x64_stdin_eof(); continue; }
     if (r == RUN_YIELD) { yields++; double s = x64_sleep_ms(); if (s > 0) { if (s > 16) s = 16; usleep((useconds_t)(s * 1000)); } else if (x64_has_window()) usleep(1000); continue; }
     if (r != RUN_OK) break;
   }
   double dt = (host_now_ms() - t0) / 1000.0; u64 ic = x64_icount();
+  if (g_prof) prof_dump();
   if (!quiet) {
     fflush(stdout);
     if (r == RUN_EXIT) fprintf(stderr, "[x64run] exit code %d\n", x64_exit_code());
