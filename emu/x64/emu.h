@@ -78,6 +78,7 @@ struct Cpu {
   int  exit_code;
   char err[256];
   u64  err_rip;
+  u32  exc_code; u64 exc_addr; u64 exc_info;   /* hardware exception behind the last fault (0 = not dispatchable) */
   Mem *mem;
   Win32 *w;
   /* tracing / stats */
@@ -88,6 +89,7 @@ struct Cpu {
 void cpu_reset(Cpu *c);
 int  cpu_run(Cpu *c, u64 max_insns);  /* returns RUN_* */
 void cpu_fault(Cpu *c, const char *fmt, ...);
+int w32_hw_exception(Cpu *c);   /* dispatch c->exc_code as an SEH exception at c->rip; 1 = dispatched (keep running) */
 /* stack helpers (used by the loader and shims) */
 void cpu_push(Cpu *c, u64 v);
 u64  cpu_pop(Cpu *c);
@@ -150,7 +152,7 @@ int  vfs_pipe(int *rfd, int *wfd); int vfs_pipe_avail(int fd); int vfs_pipe_id(i
 int  vfs_map_create(int file_fd, u64 size); u8 *vfs_map_data(int fd, u64 *size); int vfs_map_write_back(int fd, const u8 *src, u64 n);
 int  vfs_proc_handle(int pid); int vfs_fd_pid(int fd);
 /* ---- kernel objects (vfs.c): global, refcounted, referenced from fd tables as FD_KOBJ so inheritance/dup/close are uniform ---- */
-enum { KO_EVENT = 1, KO_MUTEX, KO_SEM, KO_THREAD };
+enum { KO_EVENT = 1, KO_MUTEX, KO_SEM, KO_THREAD, KO_TIMER };
 #define KOBJ_MAX 512
 typedef struct {
   int used, kind, refs; char name[64];
@@ -158,6 +160,7 @@ typedef struct {
   int count, max;                       /* semaphore */
   int owner_pid, owner_tid, recursion, abandoned;   /* mutex */
   int pid, tid, state; u32 exit_code;   /* thread: state 1 running, 2 exited */
+  double due_ms; int period_ms;         /* waitable timer: due_ms < 0 = not set */
 } KObj;
 int   kobj_new(int kind, const char *name, int *existed);   /* returns index or -1; named objects are shared */
 KObj *kobj_get(int idx);
@@ -233,6 +236,7 @@ struct Win32 {
   char con[65536]; int con_len;
   u64 at_exit[64]; int n_at_exit;
   int exited;
+  u64 veh[16]; int nveh; u64 uef; char hw_msg[160]; u32 hw_code;   /* vectored exception handlers, top-level filter, text of the last hardware fault */
   int wndclass_registered; u64 wndclass_proc; char wndclass_name[64];
   u64 ubuf;                              /* small scratch buffer in guest memory */
   int quit_posted;

@@ -36,6 +36,7 @@ static int obj_signaled(int pid, int tid, int kind, int idx, int consume) {
     case KO_EVENT: if (!k->signaled) return 0; if (consume && !k->manual) k->signaled = 0; return 1;
     case KO_MUTEX: if (k->owner_tid && !(k->owner_pid == pid && k->owner_tid == tid)) return 0; if (consume) { k->owner_pid = pid; k->owner_tid = tid; k->recursion++; k->abandoned = 0; } return 1;
     case KO_SEM: if (k->count <= 0) return 0; if (consume) k->count--; return 1;
+    case KO_TIMER: if (k->due_ms < 0 || host_now_ms() < k->due_ms) return 0; if (consume && !k->manual) { if (k->period_ms > 0) k->due_ms += k->period_ms; else k->due_ms = -1; } return 1;
   }
   return 1;
 }
@@ -100,7 +101,10 @@ void w32_threads_summary(Win32 *w, int *stdin_wait, int *sleeping, double *best_
     if (x->block == BLOCK_NONE) rem = 0;
     else if (x->block == BLOCK_STDIN) *stdin_wait = 1;
     else if (x->block == BLOCK_SLEEP) { if (x->sleeping) { rem = x->sleep_until_ms - now; *sleeping = 1; } else rem = 0; }
-    else if (x->block >= BLOCK_OBJ && x->wait_deadline >= 0) { rem = x->wait_deadline - now; *sleeping = 1; }
+    else if (x->block >= BLOCK_OBJ) {
+      if (x->wait_deadline >= 0) { rem = x->wait_deadline - now; *sleeping = 1; }
+      if (x->block == BLOCK_OBJ) for (int j = 0; j < x->nwobj; j++) { if (x->wobj_kind[j] != 2) continue; KObj *k = kobj_get(x->wobj_idx[j]); if (k && k->kind == KO_TIMER && k->due_ms >= 0) { double r2 = k->due_ms - now; if (r2 < 0) r2 = 0; if (rem < 0 || r2 < rem) rem = r2; *sleeping = 1; } }
+    }
     if (rem >= 0) { if (rem < 0) rem = 0; if (*best_ms < 0 || rem < *best_ms) *best_ms = rem; }
   }
 }
@@ -301,6 +305,19 @@ static void s_CreateEventA(Cpu *c) { KObj *k = 0; int ex = 0; u64 h = new_kobj_h
 static void s_CreateEventW(Cpu *c) { KObj *k = 0; int ex = 0; u64 h = new_kobj_handle(c, KO_EVENT, ARG(3) ? name_w(c, ARG(3)) : 0, ARG(0), &ex, &k); if (h && k && !ex) { k->manual = (u32)ARG(1) != 0; k->signaled = (u32)ARG(2) != 0; } RET(h); }
 static void s_CreateEventExW(Cpu *c) { KObj *k = 0; int ex = 0; u64 h = new_kobj_handle(c, KO_EVENT, ARG(1) ? name_w(c, ARG(1)) : 0, ARG(0), &ex, &k); if (h && k && !ex) { k->manual = ((u32)ARG(2) & 1) != 0; k->signaled = ((u32)ARG(2) & 2) != 0; } RET(h); }
 static void s_CreateEventExA(Cpu *c) { KObj *k = 0; int ex = 0; u64 h = new_kobj_handle(c, KO_EVENT, ARG(1) ? name_a(c, ARG(1)) : 0, ARG(0), &ex, &k); if (h && k && !ex) { k->manual = ((u32)ARG(2) & 1) != 0; k->signaled = ((u32)ARG(2) & 2) != 0; } RET(h); }
+/* waitable timers: CreateWaitableTimer(Ex)(sa, name, flags/manual, access); SetWaitableTimer(h, due(100ns, <0 relative), period ms, apc, ctx, resume) */
+static void s_CreateWaitableTimerW(Cpu *c) { KObj *k = 0; int ex = 0; u64 h = new_kobj_handle(c, KO_TIMER, ARG(2) ? name_w(c, ARG(2)) : 0, ARG(0), &ex, &k); if (h && k && !ex) { k->manual = (u32)ARG(1) != 0; k->due_ms = -1; k->period_ms = 0; } RET(h); }
+static void s_CreateWaitableTimerA(Cpu *c) { KObj *k = 0; int ex = 0; u64 h = new_kobj_handle(c, KO_TIMER, ARG(2) ? name_a(c, ARG(2)) : 0, ARG(0), &ex, &k); if (h && k && !ex) { k->manual = (u32)ARG(1) != 0; k->due_ms = -1; k->period_ms = 0; } RET(h); }
+static void s_CreateWaitableTimerExW(Cpu *c) { KObj *k = 0; int ex = 0; u64 h = new_kobj_handle(c, KO_TIMER, ARG(1) ? name_w(c, ARG(1)) : 0, ARG(0), &ex, &k); if (h && k && !ex) { k->manual = ((u32)ARG(2) & 1) != 0; k->due_ms = -1; k->period_ms = 0; } RET(h); }
+static void s_CreateWaitableTimerExA(Cpu *c) { KObj *k = 0; int ex = 0; u64 h = new_kobj_handle(c, KO_TIMER, ARG(1) ? name_a(c, ARG(1)) : 0, ARG(0), &ex, &k); if (h && k && !ex) { k->manual = ((u32)ARG(2) & 1) != 0; k->due_ms = -1; k->period_ms = 0; } RET(h); }
+static void s_SetWaitableTimer(Cpu *c) {
+  KObj *k = kobj_of_handle(c, ARG(0), KO_TIMER); if (!k) { W->last_error = 6; RET(0); return; }
+  s64 due = (s64)rd64(c, ARG(1)); double now = host_now_ms();
+  if (due <= 0) k->due_ms = now + (double)(-due) / 10000.0; else { double ft_now = (double)(u64)vfs_filetime(); k->due_ms = now + (((double)due - ft_now) / 10000.0 > 0 ? ((double)due - ft_now) / 10000.0 : 0); }
+  k->period_ms = (int)(u32)ARG(2); RET(1);
+}
+static void s_SetWaitableTimerEx(Cpu *c) { s_SetWaitableTimer(c); }
+static void s_CancelWaitableTimer(Cpu *c) { KObj *k = kobj_of_handle(c, ARG(0), KO_TIMER); if (!k) { W->last_error = 6; RET(0); return; } k->due_ms = -1; RET(1); }
 static void s_OpenEventA(Cpu *c) { RET(open_kobj_handle(c, KO_EVENT, name_a(c, ARG(2)), (u32)ARG(1) != 0)); }
 static void s_OpenEventW(Cpu *c) { RET(open_kobj_handle(c, KO_EVENT, name_w(c, ARG(2)), (u32)ARG(1) != 0)); }
 /* auto-reset event with waiters: hand the signal straight to one wait-any waiter (Windows wakes synchronously, so two

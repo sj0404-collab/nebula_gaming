@@ -2,3 +2,4 @@ public/x64/apps/** -text
 emu/tests/dll/** binary
 emu/tests/*.exe binary
 public/x64/samples/*.exe binary
+public/x64/apps/*.exe binary

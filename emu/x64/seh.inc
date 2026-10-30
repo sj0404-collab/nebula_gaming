@@ -157,13 +157,20 @@ static void dispatch_step(Cpu *c, int ci) {
     u64 stack_top = w->cur_th ? w->th[w->cur_th].stack + w->th[w->cur_th].stack_size : G_STACK_BASE + G_STACK_SIZE;
     if ((seh_is_cont_addr(x.rip) && !seh_cross_cont(c, ci, &x)) || x.rsp > stack_top) {
       u32 code = rd32(c, rec); u64 addr = rd64(c, rec + 16);
-      w32_report(w, "unhandled exception 0x%08x (%s) raised at 0x%llx", code, exc_name(code), (unsigned long long)addr);
-      cpu_fault(c, "unhandled exception 0x%08x (%s) at 0x%llx — no frame caught it", code, exc_name(code), (unsigned long long)addr); return;
+      if (w->uef && w->cont[ci].data[7] != 2) {   /* SetUnhandledExceptionFilter callback: EXCEPTION_CONTINUE_EXECUTION (-1) resumes, anything else terminates */
+        w->cont[ci].data[7] = 2; u64 ptrs = w->cont[ci].data[6]; wr64(c, ptrs, rec); wr64(c, ptrs + 8, octx);
+        seh_log("[x64] unhandled exception 0x%08x -> top-level filter 0x%llx\n", code, (unsigned long long)w->uef);
+        guest_call(c, w->uef, ptrs, 0, 0, 0); return;
+      }
+      const char *hw = (w->hw_msg[0] && code == w->hw_code) ? w->hw_msg : "";
+      w32_report(w, "unhandled exception 0x%08x (%s) raised at 0x%llx%s%s%s", code, exc_name(code), (unsigned long long)addr, hw[0] ? " (" : "", hw, hw[0] ? ")" : "");
+      cpu_fault(c, "unhandled exception 0x%08x (%s) at 0x%llx — no frame caught it%s%s%s", code, exc_name(code), (unsigned long long)addr, hw[0] ? " (" : "", hw, hw[0] ? ")" : ""); c->err_rip = addr; return;
     }
     u64 base, fe = seh_lookup(c, x.rip, &base);
     if (!fe) { x.rip = rd64(c, x.rsp); x.rsp += 8; if (c->status != RUN_OK) return; continue; }   /* leaf function */
     UCtx prev = x; u64 hd, est; u64 handler = seh_virtual_unwind(c, 1, base, x.rip, fe, &x, &hd, &est);
     if (c->status != RUN_OK) return;
+    seh_log("[x64]   frame pc 0x%llx fn 0x%llx est 0x%llx handler 0x%llx -> caller 0x%llx\n", (unsigned long long)prev.rip, (unsigned long long)(base + rd32(c, fe)), (unsigned long long)est, (unsigned long long)handler, (unsigned long long)x.rip);
     if (handler) {
       uctx_write(c, uctx, &x); uctx_write(c, pctx, &prev);
       dc_write(c, dc, prev.rip, base, fe, est, 0, octx, handler, hd);
@@ -180,17 +187,29 @@ static void raise_exception(Cpu *c, u32 code, u32 flags, u32 nargs, const u64 *a
   if (nargs > 15) nargs = 15;
   /* the exception context is the caller's (rip = return address of RaiseException) */
   u64 octx_rip = c->rip, octx_rsp = c->r[RSP];
-  u64 sc = seh_scratch(c, EXREC_SIZE + 3 * CTX_SIZE + DC_SIZE);
-  u64 rec = sc, octx = (sc + EXREC_SIZE + 63) & ~63ull, uctx = octx + CTX_SIZE, pctx = uctx + CTX_SIZE, dc = pctx + CTX_SIZE;
+  u64 sc = seh_scratch(c, EXREC_SIZE + 3 * CTX_SIZE + DC_SIZE + 64);
+  u64 rec = sc, octx = (sc + EXREC_SIZE + 63) & ~63ull, uctx = octx + CTX_SIZE, pctx = uctx + CTX_SIZE, dc = pctx + CTX_SIZE, ptrs = dc + DC_SIZE;
   u8 *rp = mem_ptr(c->mem, rec, EXREC_SIZE, 1); if (!rp) { cpu_fault(c, "RaiseException: no stack"); return; }
   e_memset(rp, 0, EXREC_SIZE); wr32(c, rec, code); wr32(c, rec + 4, flags & 1); wr64(c, rec + 16, address); wr32(c, rec + 24, nargs);
   for (u32 i = 0; i < nargs; i++) wr64(c, rec + 32 + 8 * i, args[i]);
   { u64 srip = c->rip, srsp = c->r[RSP]; c->rip = octx_rip; c->r[RSP] = octx_rsp; ctx_capture(c, octx); c->rip = srip; c->r[RSP] = srsp; }
   u8 *s = mem_ptr(c->mem, octx, CTX_SIZE, 0); u8 *d = mem_ptr(c->mem, uctx, CTX_SIZE, 1); if (s && d) e_memcpy(d, s, CTX_SIZE);
   int ci = cont_push(c, CONT_DISPATCH); if (ci < 0) return;
-  w->cont[ci].data[0] = rec; w->cont[ci].data[1] = octx; w->cont[ci].data[2] = uctx; w->cont[ci].data[3] = pctx; w->cont[ci].data[4] = dc;
+  w->cont[ci].data[0] = rec; w->cont[ci].data[1] = octx; w->cont[ci].data[2] = uctx; w->cont[ci].data[3] = pctx; w->cont[ci].data[4] = dc; w->cont[ci].data[6] = ptrs; w->cont[ci].data[7] = 0;
   seh_log("[x64] RaiseException 0x%08x (%s) at 0x%llx\n", code, exc_name(code), (unsigned long long)address);
+  if (w->nveh) { w->cont[ci].data[7] = 1; w->cont[ci].idx = 1; wr64(c, ptrs, rec); wr64(c, ptrs + 8, octx); guest_call(c, w->veh[0], ptrs, 0, 0, 0); return; }   /* vectored handlers run first */
   dispatch_step(c, ci);
+}
+/* a hardware fault of the interpreter (AV, divide by zero, ud2) becomes an SEH exception at the faulting instruction */
+int w32_hw_exception(Cpu *c) {
+  Win32 *w = W; u32 code = c->exc_code; if (!code || !w) return 0;
+  int nested = 0; for (int k = 0; k < w->ncont; k++) if (w->cont[k].kind == CONT_DISPATCH) nested++;
+  if (nested >= 16) { c->exc_code = 0; return 0; }   /* faults inside the handlers of faults inside … : give up with the plain report */
+  e_snprintf(w->hw_msg, sizeof w->hw_msg, "%s", c->err); w->hw_code = code;
+  c->exc_code = 0; c->status = RUN_OK; c->err[0] = 0;
+  u64 args[2] = { c->exc_info, c->exc_addr };
+  raise_exception(c, code, 0, code == 0xC0000005u ? 2 : 0, args, c->rip);
+  return c->status == RUN_OK;
 }
 static void s_RaiseException(Cpu *c) {
   u32 nargs = (u32)ARG(2); u64 args[15]; u64 pa = ARG(3); for (u32 i = 0; i < nargs && i < 15; i++) args[i] = pa ? rd64(c, pa + 8 * i) : 0;
@@ -261,6 +280,10 @@ static void restore_context(Cpu *c, u64 ctx, u64 rec) {
 static void s_RtlRestoreContext(Cpu *c) { restore_context(c, ARG(0), ARG(1)); }
 
 /* ---- guest-visible table helpers ---- */
+static void s_AddVectoredExceptionHandler(Cpu *c) { Win32 *w = W; u64 h = ARG(1); if (!h || w->nveh >= 16) { RET(0); return; } if (ARG(0)) { for (int i = w->nveh; i > 0; i--) w->veh[i] = w->veh[i - 1]; w->veh[0] = h; } else w->veh[w->nveh] = h; w->nveh++; RET(h); }
+static void s_RemoveVectoredExceptionHandler(Cpu *c) { Win32 *w = W; u64 h = ARG(0); for (int i = 0; i < w->nveh; i++) if (w->veh[i] == h) { for (int j = i; j + 1 < w->nveh; j++) w->veh[j] = w->veh[j + 1]; w->nveh--; RET(1); return; } RET(0); }
+static void s_SetUnhandledExceptionFilter(Cpu *c) { Win32 *w = W; u64 prev = w->uef; w->uef = ARG(0); RET(prev); }
+static void s_UnhandledExceptionFilter(Cpu *c) { RET(0); }   /* EXCEPTION_CONTINUE_SEARCH: the CRT's own handler lets the exception reach our report */
 static void s_RtlLookupFunctionEntry(Cpu *c) { u64 base = 0; u64 fe = seh_lookup(c, ARG(0), &base); if (ARG(1)) wr64(c, ARG(1), base); RET(fe); }
 static void s_RtlPcToFileHeader(Cpu *c) { u64 base = 0; u32 pd, ps; if (!seh_module(W, ARG(0), &base, &pd, &ps)) base = 0; if (ARG(1)) wr64(c, ARG(1), base); RET(base); }
 static void s_RtlCaptureContext(Cpu *c) { ctx_capture(c, ARG(0)); }
@@ -311,6 +334,15 @@ static int seh_cont_resume(Cpu *c, int kind, u64 rax) {
   switch (kind) {
     case CONT_DISPATCH: {
       u32 disp = (u32)rax;
+      if (w->cont[ci].data[7] == 1) {   /* a vectored handler returned */
+        if ((s32)rax == -1) { u64 octx = w->cont[ci].data[1]; w->ncont = ci; restore_context(c, octx, 0); return 1; }
+        if (w->cont[ci].idx < w->nveh) { u64 h = w->veh[w->cont[ci].idx++]; guest_call(c, h, w->cont[ci].data[6], 0, 0, 0); return 1; }
+        w->cont[ci].data[7] = 0; dispatch_step(c, ci); return 1;
+      }
+      if (w->cont[ci].data[7] == 2) {   /* the top-level filter returned */
+        if ((s32)rax == -1) { u64 octx = w->cont[ci].data[1]; w->ncont = ci; restore_context(c, octx, 0); return 1; }
+        dispatch_step(c, ci); return 1;   /* reports the unhandled exception */
+      }
       if (disp == 0) { u64 octx = w->cont[ci].data[1]; w->ncont = ci; restore_context(c, octx, 0); return 1; }   /* ExceptionContinueExecution */
       if (disp == 1) { dispatch_step(c, ci); return 1; }
       cpu_fault(c, "exception handler returned disposition %u (nested exception / collided unwind are not supported)", disp); return 1; }
@@ -324,5 +356,5 @@ static int seh_cont_resume(Cpu *c, int kind, u64 rax) {
   return 0;
 }
 #define SEH_SHIMS \
-  S(RaiseException), S(RtlUnwindEx), S(RtlUnwind), S(RtlRestoreContext), S(RtlLookupFunctionEntry), S(RtlPcToFileHeader), S(RtlCaptureContext), S(RtlVirtualUnwind), \
+  S(RaiseException), S(AddVectoredExceptionHandler), S(RemoveVectoredExceptionHandler), S(SetUnhandledExceptionFilter), S(UnhandledExceptionFilter), S(RtlUnwindEx), S(RtlUnwind), S(RtlRestoreContext), S(RtlLookupFunctionEntry), S(RtlPcToFileHeader), S(RtlCaptureContext), S(RtlVirtualUnwind), \
   SA("__C_specific_handler", __C_specific_handler), SA("_CxxThrowException", _CxxThrowException), SA("RtlCaptureStackBackTrace", ret0),

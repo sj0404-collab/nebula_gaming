@@ -1,3 +1,43 @@
+# v1.9.0 — Nebula x64: hardware exceptions as SEH, Rust programs (ripgrep, fd)
+
+**Hardware faults are now Windows exceptions.** Until v1.8 an access violation, an integer division by zero or a `ud2` inside the
+guest stopped the emulator with a report. Now (`cpu.c`, `seh.inc`):
+
+* the interpreter records the fault (`c->exc_code/exc_addr/exc_info`), rewinds `rip` to the faulting instruction and
+  `w32_hw_exception` raises it through the same two‑phase dispatcher as `RaiseException`: `EXCEPTION_ACCESS_VIOLATION` (0xC0000005,
+  `ExceptionInformation = {read/write, address}`), `EXCEPTION_INT_DIVIDE_BY_ZERO` (0xC0000094), `EXCEPTION_INT_OVERFLOW` (0xC0000095),
+  `EXCEPTION_ILLEGAL_INSTRUCTION` (0xC000001D); `ExceptionAddress == ContextRecord->Rip`; the exceptions are continuable;
+* **vectored exception handlers** (`AddVectoredExceptionHandler` first/last, `RemoveVectoredExceptionHandler`) run before the frame
+  handlers; `EXCEPTION_CONTINUE_EXECUTION` resumes with the (possibly patched) `CONTEXT` — a handler can skip the faulting instruction
+  and set registers;
+* `SetUnhandledExceptionFilter`: the top‑level filter is called with `EXCEPTION_POINTERS` when no frame handles the exception
+  (mingw's CRT installs one at start‑up; a program's own filter can log and `ExitProcess`); otherwise the run stops with the
+  familiar report, now including the original fault text (`… (write fault at 0x10)`);
+* nested faults inside handlers are bounded (16 levels) so a crashing handler still produces a report.
+
+**Rust programs run.** Two popular Rust tools, official `x86_64-pc-windows-msvc` builds with the static CRT, join the bundled apps
+(`public/x64/apps/`, licences in `public/x64/samples/README.md`):
+
+| app | verified |
+|---|---|
+| **ripgrep 14.1.1 `rg.exe`** (5.4 MB) | `--version`, single‑file and directory‑tree searches, `-n`, `-c`, `-w`, `-i`, alternations, `--stats`, `-j4` worker threads; counts identical to GNU grep; bad regex → proper error, exit 2 |
+| **fd 10.2.0 `fd.exe`** | `-e ext`, `-t f`, `-S +1m`, coloured output, `--version` |
+
+What Rust's std needed from the Win32 layer: `bcryptprimitives!ProcessPrng` (and `BCryptGenRandom`) for HashMap seeds,
+`GetFinalPathNameByHandleA/W` (symlink‑loop detection in the directory walker), `ntdll!NtReadFile`/`NtWriteFile` with
+`IO_STATUS_BLOCK` and `STATUS_END_OF_FILE`/`STATUS_PIPE_BROKEN` (Rust's `File::read`/`write` go through them), **waitable timers**
+(`CreateWaitableTimerExW` high‑resolution, `SetWaitableTimer` relative/absolute, `CancelWaitableTimer`, waitable in `WaitFor*Objects`
+and honoured by the scheduler's sleep calculation — `thread::sleep` on Rust ≥ 1.75), `CompareStringOrdinal`. Rust's panic machinery
+(`_CxxThrowException` + a statically linked `__CxxFrameHandler3`) sits on the ntdll unwinder from v1.8 (`RtlUnwindEx`,
+`RtlLookupFunctionEntry`, `RtlVirtualUnwind`).
+
+Tests: `emu/tests/hwexc.exe` (section [13], 6 checks) and section [14] (4 checks) — 70 native checks total; new e2e scenario
+(hwexc + rg + fd in Chromium wasm64, screenshot `docs/x64-rust.png`) — 31 scenarios. All previous checks unchanged.
+
+Limits (honest): stack‑overflow guard pages are not emulated (a runaway recursion ends with an unmapped‑stack report, not
+`EXCEPTION_STACK_OVERFLOW`); `_set_se_translator` is a stub; `fd -x`/`rg --pre` need a child interpreter (`cmd.exe`) that does not exist
+on the virtual disk; `__CxxFrameHandler4` still skipped.
+
 # v1.8.0 — Nebula x64: structured exception handling and C++ exceptions
 
 Before this release any Windows program that **threw a C++ exception** (or used `__try/__except`) stopped the emulator —

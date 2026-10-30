@@ -472,10 +472,6 @@ static void s_GetCPInfo(Cpu *c) { u64 a = ARG(1); wr32(c, a, 1); wr8(c, a + 4, '
 static void s_GetSystemInfo(Cpu *c) { u64 a = ARG(0); u8 *p = mem_ptr(c->mem, a, 48, 1); if (!p) return; e_memset(p, 0, 48); wr16(c, a, 9); wr32(c, a + 4, 4096); wr64(c, a + 8, 0x10000); wr64(c, a + 16, 0x7ffffffeffff); wr64(c, a + 24, 1); wr32(c, a + 32, 1); wr32(c, a + 36, 586); wr32(c, a + 40, 0x10000); }
 static void s_GetNativeSystemInfo(Cpu *c) { s_GetSystemInfo(c); }
 static void s_GlobalMemoryStatusEx(Cpu *c) { u64 a = ARG(0); wr32(c, a + 4, 30); wr64(c, a + 8, 4ull << 30); wr64(c, a + 16, 3ull << 30); wr64(c, a + 24, 4ull << 30); wr64(c, a + 32, 3ull << 30); wr64(c, a + 40, 8ull << 40); wr64(c, a + 48, 8ull << 40); RET(1); }
-static void s_SetUnhandledExceptionFilter(Cpu *c) { RET(0); }
-static void s_UnhandledExceptionFilter(Cpu *c) { RET(0); }
-static void s_AddVectoredExceptionHandler(Cpu *c) { RET(0x1234); }
-static void s_RemoveVectoredExceptionHandler(Cpu *c) { RET(1); }
 static void s_RtlAddFunctionTable(Cpu *c) { RET(1); }
 static void s_RtlDeleteFunctionTable(Cpu *c) { RET(1); }
 static void s_EncodePointer(Cpu *c) { RET(ARG(0) ^ 0xA5A5A5A5ull); }
@@ -599,6 +595,9 @@ static void s_CompareStringW(Cpu *c) { u64 a = ARG(2); int an = (int)(s32)ARG(3)
 static void s_CompareStringA(Cpu *c) { u64 a = ARG(2); int an = (int)(s32)ARG(3); u64 b = ARG(4); int bn = (int)(s32)ARG(5); int i = 0;
   for (;; i++) { u8 x = (an < 0 || i < an) ? rd8(c, a + i) : 0, y = (bn < 0 || i < bn) ? rd8(c, b + i) : 0; if (ARG(1) & 1) { if (x >= 'A' && x <= 'Z') x += 32; if (y >= 'A' && y <= 'Z') y += 32; } if (x != y) { RET(x < y ? 1 : 3); return; } if (!x) break; } RET(2); }
 static void s_CompareStringEx(Cpu *c) { s_CompareStringW(c); }
+/* CompareStringOrdinal(a, an, b, bn, ignoreCase) */
+static void s_CompareStringOrdinal(Cpu *c) { u64 a = ARG(0); int an = (int)(s32)ARG(1); u64 b = ARG(2); int bn = (int)(s32)ARG(3); int ic = (int)ARG(4);
+  for (int i = 0;; i++) { u16 x = (an < 0 || i < an) ? rd16(c, a + i * 2) : 0, y = (bn < 0 || i < bn) ? rd16(c, b + i * 2) : 0; if (ic) { if (x >= 'A' && x <= 'Z') x += 32; if (y >= 'A' && y <= 'Z') y += 32; } if (x != y) { RET(x < y ? 1 : 3); return; } if (!x) break; } RET(2); }
 static void s_GetStringTypeW(Cpu *c) { u32 type = (u32)ARG(0); u64 src = ARG(1); int n = (int)(s32)ARG(2); u64 dst = ARG(3);
   if (n < 0) { n = 0; while (rd16(c, src + n * 2)) n++; n++; }
   for (int i = 0; i < n; i++) { u16 ch = rd16(c, src + i * 2); u16 t = 0;
@@ -641,6 +640,7 @@ static void s_SystemTimeToFileTime(Cpu *c) { wr64(c, ARG(1), now_100ns()); RET(1
 static void s_FileTimeToLocalFileTime(Cpu *c) { wr64(c, ARG(1), rd64(c, ARG(0))); RET(1); }
 static void s_GetDateFormatA(Cpu *c) { RET(0); }
 static void s_GetTimeFormatA(Cpu *c) { RET(0); }
+static void s_BCryptGenRandom(Cpu *c) { Win32 *w = W; u64 a = ARG(1); u32 n = (u32)ARG(2); for (u32 i = 0; i < n; i++) { w->rand_state = w->rand_state * 1103515245u + 12345u; wr8(c, a + i, (u8)(w->rand_state >> 16)); } RET(0); }
 static void s_SystemFunction036(Cpu *c) { Win32 *w = W; u64 a = ARG(0); u32 n = (u32)ARG(1); for (u32 i = 0; i < n; i++) { w->rand_state = w->rand_state * 1103515245u + 12345u; wr8(c, a + i, (u8)(w->rand_state >> 16)); } RET(1); }
 static void s_GetComputerNameA(Cpu *c) { const char *n = "NEBULA"; u32 sz = rd32(c, ARG(1)); if (sz > 6) { u8 *p = mem_ptr(c->mem, ARG(0), 7, 1); if (p) e_memcpy(p, n, 7); wr32(c, ARG(1), 6); RET(1); } else RET(0); }
 static void s_GetUserNameA(Cpu *c) { const char *n = "user"; u32 sz = rd32(c, ARG(1)); if (sz > 4) { u8 *p = mem_ptr(c->mem, ARG(0), 5, 1); if (p) e_memcpy(p, n, 5); wr32(c, ARG(1), 5); RET(1); } else RET(0); }
@@ -978,18 +978,18 @@ static const ShimDef shims[] = {
   S(GetLastError), S(SetLastError), S(GetCurrentProcess), S(GetCurrentProcessId), S(ExitProcess), S(TerminateProcess),
   S(GetTickCount), S(GetTickCount64), S(QueryPerformanceCounter), S(QueryPerformanceFrequency), S(GetSystemTimeAsFileTime), S(GetSystemTimePreciseAsFileTime), S(GetSystemTime), S(GetLocalTime), S(Sleep), S(SleepEx),
   S(GetStdHandle), S(WriteFile), S(WriteConsoleA), S(WriteConsoleW), S(ReadFile), S(ReadConsoleA), S(GetConsoleMode), S(SetConsoleMode), S(GetConsoleOutputCP), S(GetConsoleCP), S(SetConsoleOutputCP), S(SetConsoleCP), S(GetConsoleScreenBufferInfo), S(SetConsoleTextAttribute), S(SetConsoleTitleA), S(GetConsoleWindow), S(AllocConsole), S(SetConsoleCtrlHandler), S(FlushFileBuffers), S(GetFileType), S(CloseHandle),
-  S(CreateFileA), S(CreateFileW), S(GetFileAttributesA), S(GetFileAttributesW), S(GetFileAttributesExW), S(FindFirstFileA), S(FindFirstFileW), S(FindClose), S(DeleteFileA), S(GetFullPathNameA), S(GetCurrentDirectoryA), S(GetCurrentDirectoryW), S(GetTempPathA), S(SetFilePointer), S(GetFileSize),
+  S(CreateFileA), S(CreateFileW), S(GetFileAttributesA), S(GetFileAttributesW), S(GetFileAttributesExW), S(FindFirstFileA), S(FindFirstFileW), S(FindClose), S(DeleteFileA), S(GetFullPathNameA), S(GetFinalPathNameByHandleA), S(CreateWaitableTimerW), S(CreateWaitableTimerA), S(CreateWaitableTimerExW), S(CreateWaitableTimerExA), S(SetWaitableTimer), S(SetWaitableTimerEx), S(CancelWaitableTimer), S(NtReadFile), S(NtWriteFile), S(GetFinalPathNameByHandleW), S(GetCurrentDirectoryA), S(GetCurrentDirectoryW), S(GetTempPathA), S(SetFilePointer), S(GetFileSize),
   S(GetCommandLineA), S(GetCommandLineW), S(GetEnvironmentStrings), S(GetEnvironmentStringsW), S(FreeEnvironmentStringsW), S(FreeEnvironmentStringsA), S(GetEnvironmentVariableA), S(GetEnvironmentVariableW), S(SetEnvironmentVariableA), S(ExpandEnvironmentStringsA), S(GetStartupInfoA), S(GetStartupInfoW),
   S(GetModuleHandleA), S(GetModuleHandleW), S(GetModuleHandleExW), S(GetModuleHandleExA), S(LoadLibraryA), S(LoadLibraryW), S(LoadLibraryExA), S(LoadLibraryExW), S(FreeLibrary), S(GetProcAddress), S(GetModuleFileNameA), S(GetModuleFileNameW), S(GetSystemDirectoryA), S(GetWindowsDirectoryA),
   S(GetVersion), S(GetVersionExA), S(GetVersionExW), S(IsProcessorFeaturePresent), S(IsDebuggerPresent), S(IsDBCSLeadByte), S(IsDBCSLeadByteEx), S(GetACP), S(GetOEMCP), S(GetCPInfo), S(GetSystemInfo), S(GetNativeSystemInfo), S(GlobalMemoryStatusEx),
-  S(SetUnhandledExceptionFilter), S(UnhandledExceptionFilter), S(AddVectoredExceptionHandler), S(RemoveVectoredExceptionHandler), S(RtlAddFunctionTable), S(RtlDeleteFunctionTable), S(EncodePointer), S(DecodePointer),
+  S(RtlAddFunctionTable), S(RtlDeleteFunctionTable), S(EncodePointer), S(DecodePointer),
   S(OutputDebugStringA), S(OutputDebugStringW), S(FormatMessageA), S(FormatMessageW), S(SetErrorMode), S(GetErrorMode), S(SetThreadErrorMode), S(GetLogicalProcessorInformation), S(GetProcessAffinityMask), S(SetThreadAffinityMask), S(SetProcessAffinityMask), S(GetSystemTimeAdjustment), S(SetSystemTime), S(GetThreadPriority), S(SetThreadPriority), S(SetPriorityClass), S(GetPriorityClass), S(GetThreadTimes),
   S(GetProcessHeap), S(HeapCreate), S(HeapDestroy), S(HeapAlloc), S(HeapFree), S(HeapReAlloc), S(HeapSize), S(HeapValidate), S(HeapSetInformation), S(HeapQueryInformation), S(HeapCompact), S(HeapLock), S(HeapUnlock), S(HeapWalk), S(GlobalAlloc), S(GlobalFree), S(GlobalLock), S(GlobalUnlock), S(LocalAlloc), S(LocalFree),
   S(VirtualAlloc), S(VirtualAllocEx), S(VirtualFree), S(VirtualProtect), S(VirtualLock), S(VirtualUnlock), S(VirtualQuery), S(FlushInstructionCache),
   S(CreateTimerQueue),
-  S(GetThreadLocale), S(GetUserDefaultLCID), S(GetUserDefaultLangID), S(GetSystemDefaultLangID), S(GetUserDefaultUILanguage), S(GetLocaleInfoA), S(GetLocaleInfoW), S(GetLocaleInfoEx), S(IsValidLocale), S(IsValidCodePage), S(EnumSystemLocalesW), S(GetUserDefaultLocaleName), S(LCMapStringW), S(LCMapStringEx), S(LCMapStringA), S(CompareStringW), S(CompareStringA), S(CompareStringEx), S(GetStringTypeW), S(GetStringTypeA), S(MultiByteToWideChar), S(WideCharToMultiByte), S(CharUpperA),
+  S(GetThreadLocale), S(GetUserDefaultLCID), S(GetUserDefaultLangID), S(GetSystemDefaultLangID), S(GetUserDefaultUILanguage), S(GetLocaleInfoA), S(GetLocaleInfoW), S(GetLocaleInfoEx), S(IsValidLocale), S(IsValidCodePage), S(EnumSystemLocalesW), S(GetUserDefaultLocaleName), S(LCMapStringW), S(LCMapStringEx), S(LCMapStringA), S(CompareStringW), S(CompareStringA), S(CompareStringEx), S(CompareStringOrdinal), S(GetStringTypeW), S(GetStringTypeA), S(MultiByteToWideChar), S(WideCharToMultiByte), S(CharUpperA),
   S(lstrlenA), S(lstrlenW), S(lstrcpyA), S(lstrcmpiA), S(lstrcmpA), S(InterlockedCompareExchange), S(InterlockedExchange), S(InterlockedIncrement), S(InterlockedDecrement), S(InterlockedExchangeAdd), S(QueueUserAPC),
-  S(GetTimeZoneInformation), S(FileTimeToSystemTime), S(SystemTimeToFileTime), S(FileTimeToLocalFileTime), S(GetDateFormatA), S(GetTimeFormatA), S(SystemFunction036), S(GetComputerNameA), S(GetUserNameA), S(GetDriveTypeA), S(GetLogicalDrives), S(GetDiskFreeSpaceExA), S(SetHandleCount), S(GetHandleInformation), S(SetHandleInformation), S(DuplicateHandle), S(CreatePipe), S(PeekNamedPipe), S(GetOverlappedResult), S(CreateIoCompletionPort), S(Beep), S(DebugBreak), S(GetProcessId), S(K32GetProcessMemoryInfo),
+  S(GetTimeZoneInformation), S(FileTimeToSystemTime), S(SystemTimeToFileTime), S(FileTimeToLocalFileTime), S(GetDateFormatA), S(GetTimeFormatA), S(SystemFunction036), SA("ProcessPrng", SystemFunction036), SA("BCryptGenRandom", BCryptGenRandom), S(GetComputerNameA), S(GetUserNameA), S(GetDriveTypeA), S(GetLogicalDrives), S(GetDiskFreeSpaceExA), S(SetHandleCount), S(GetHandleInformation), S(SetHandleInformation), S(DuplicateHandle), S(CreatePipe), S(PeekNamedPipe), S(GetOverlappedResult), S(CreateIoCompletionPort), S(Beep), S(DebugBreak), S(GetProcessId), S(K32GetProcessMemoryInfo),
   /* file system stubs — no VFS yet: everything "does not exist" */
   SA("GetFileAttributesExA", GetFileAttributesA), SA("GetFileAttributesExW", GetFileAttributesA), SA("FindFirstFileExA", FindFirstFileA), SA("FindFirstFileExW", FindFirstFileA), SA("FindNextFileA", ret0), SA("FindNextFileW", ret0), SA("FindClose", ret1),
   SA("DeleteFileA", ret0), SA("DeleteFileW", ret0), SA("RemoveDirectoryA", ret0), SA("RemoveDirectoryW", ret0), SA("CreateDirectoryA", ret0), SA("CreateDirectoryW", ret0), SA("MoveFileA", ret0), SA("MoveFileW", ret0), SA("MoveFileExA", ret0), SA("MoveFileExW", ret0), SA("CopyFileA", ret0), SA("CopyFileW", ret0),

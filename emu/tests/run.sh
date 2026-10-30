@@ -107,6 +107,22 @@ check "__try/__finally unwinding" "inner __finally"                         "$($
 check "nested __except"           "nested except: 1"                        "$($X --quiet --max-ms 30000 tests/sehtest.exe 2>&1 || true)"
 check "7z: missing archive (MSVC C++ throw)" "System ERROR:" "$($X --quiet --max-ms 30000 --mount "$PWD/$A" $A/7z.exe x nonexistent.7z 2>&1 || true)"
 check "7z: unsupported type"      "Unsupported archive type"               "$($X --quiet --max-ms 30000 --mount "$PWD/$A" $A/7z.exe a -tbogus x.7z demo.txt 2>&1 || true)"
+echo "[13] hardware exceptions as SEH (AV / divide by zero / ud2 -> __except, vectored handlers, continue execution, top-level filter)"
+hw="$($X --quiet --max-ms 30000 tests/hwexc.exe 2>&1 || true)"
+check "AV caught with record"  "AV caught=1 addr_ok=3"            "$hw"
+check "div0 + ud2 caught"       "div0 caught=2
+ud2 caught=3"      "$hw"
+check "finally during AV unwind" "nested AV caught=4 finally=1"    "$hw"
+check "VEH fix-up + continue"   "veh calls=1 code=0xc0000094 result=42" "$hw"
+check "2000 faults in a loop"   "loop caught=2000"                 "$hw"
+check "SetUnhandledExceptionFilter" "top-level filter: code 0xc0000005" "$hw"
+echo "[14] Rust programs (ripgrep 14.1.1, fd 10.2.0 — MSVC target, static CRT, Rust std on Win32)"
+check "rg -c across the tree" "demo.txt:1922"            "$($X --quiet --max-ms 60000 --mount "$PWD/$A" $A/rg.exe --color never -c -w the 2>&1 || true)"
+check "rg -n regex"           "fib(25)"                "$($X --quiet --max-ms 60000 --mount "$PWD/$A" $A/rg.exe -n -i --color never "lua|sqlite" demo.lua demo.sql demo.json 2>&1 || true)"
+check "rg -j4 --stats"        "files searched"         "$($X --quiet --max-ms 60000 --mount "$PWD/$A" $A/rg.exe -j4 --stats -c the 2>&1 || true)"
+check "fd by extension"       "demo.json
+demo.lua
+demo.sql" "$($X --quiet --max-ms 60000 --mount "$PWD/$A" $A/fd.exe --color never -e lua -e sql -e json 2>&1 || true)"
 echo "[6] honest rejections"
 check "32-bit PE"   '"verdict":"unsupported"' "$(printf 'MZ' | head -c 2 > /tmp/pe32.bin; python3 - <<'PY'
 import struct

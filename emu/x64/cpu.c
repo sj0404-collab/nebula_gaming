@@ -8,12 +8,14 @@ typedef unsigned __int128 u128; typedef __int128 s128;
 void cpu_fault(Cpu *c, const char *fmt, ...) {
   if (c->status == RUN_FAULT) return;
   va_list ap; va_start(ap, fmt); e_vsnprintf(c->err, sizeof c->err, fmt, ap); va_end(ap);
-  c->status = RUN_FAULT; c->err_rip = c->rip;
+  c->status = RUN_FAULT; c->err_rip = c->rip; c->exc_code = 0;
 }
+static void fault_av(Cpu *c, u64 a, int write) { cpu_fault(c, "%s fault at 0x%llx", write ? "write" : "read", (unsigned long long)a); c->exc_code = 0xC0000005u; c->exc_addr = a; c->exc_info = write ? 1 : 0; }
+static void fault_code(Cpu *c, u32 code, const char *what) { cpu_fault(c, "%s", what); c->exc_code = code; c->exc_addr = 0; c->exc_info = 0; }
 
 /* ---------- memory ---------- */
-#define RD(T, name) T name(Cpu *c, u64 a) { u8 *p = mem_ptr(c->mem, a, sizeof(T), 0); if (!p) { cpu_fault(c, "read fault at 0x%llx", (unsigned long long)a); return 0; } T v; e_memcpy(&v, p, sizeof v); return v; }
-#define WR(T, name) void name(Cpu *c, u64 a, T v) { u8 *p = mem_ptr(c->mem, a, sizeof(T), 1); if (!p) { cpu_fault(c, "write fault at 0x%llx", (unsigned long long)a); return; } e_memcpy(p, &v, sizeof v); }
+#define RD(T, name) T name(Cpu *c, u64 a) { u8 *p = mem_ptr(c->mem, a, sizeof(T), 0); if (!p) { fault_av(c, a, 0); return 0; } T v; e_memcpy(&v, p, sizeof v); return v; }
+#define WR(T, name) void name(Cpu *c, u64 a, T v) { u8 *p = mem_ptr(c->mem, a, sizeof(T), 1); if (!p) { fault_av(c, a, 1); return; } e_memcpy(p, &v, sizeof v); }
 RD(u8, rd8) RD(u16, rd16) RD(u32, rd32) RD(u64, rd64)
 WR(u8, wr8) WR(u16, wr16) WR(u32, wr32) WR(u64, wr64)
 const char *rd_str(Cpu *c, u64 a, size_t max) {
@@ -350,13 +352,13 @@ static void exec_one(Ins *i) {
           if (sz == 8) { s128 p = (s128)a * b; c->r[RAX] = (u64)p; c->r[RDX] = (u64)(p >> 64); c->rflags &= ~(u64)(F_CF | F_OF); if (p != (s128)(s64)p) c->rflags |= F_CF | F_OF; }
           else { s64 p = a * b; if (sz == 1) set_reg(i, RAX, 2, (u64)p); else { set_reg(i, RAX, sz, (u64)p); set_reg(i, RDX, sz, (u64)p >> (sz * 8)); } c->rflags &= ~(u64)(F_CF | F_OF); if (p != (s64)sext((u64)p, sz)) c->rflags |= F_CF | F_OF; }
           return; }
-        case 6: { /* div */ if (!v) UNSUP("divide by zero");
-          if (sz == 8) { u128 n = ((u128)c->r[RDX] << 64) | c->r[RAX]; u128 q = n / v; if (q >> 64) UNSUP("divide overflow"); c->r[RAX] = (u64)q; c->r[RDX] = (u64)(n % v); }
-          else if (sz == 1) { u64 n = c->r[RAX] & 0xffff; u64 q = n / v; if (q > 0xff) UNSUP("divide overflow"); set_reg(i, RAX, 2, (q & 0xff) | ((n % v) << 8)); }
-          else { u64 n = (get_reg(i, RDX, sz) << (sz * 8)) | get_reg(i, RAX, sz); u64 q = n / v; if (q > mask(sz)) UNSUP("divide overflow"); set_reg(i, RAX, sz, q); set_reg(i, RDX, sz, n % v); }
+        case 6: { /* div */ if (!v) { fault_code(c, 0xC0000094u, "integer divide by zero"); return; };
+          if (sz == 8) { u128 n = ((u128)c->r[RDX] << 64) | c->r[RAX]; u128 q = n / v; if (q >> 64) { fault_code(c, 0xC0000095u, "integer overflow (div)"); return; }; c->r[RAX] = (u64)q; c->r[RDX] = (u64)(n % v); }
+          else if (sz == 1) { u64 n = c->r[RAX] & 0xffff; u64 q = n / v; if (q > 0xff) { fault_code(c, 0xC0000095u, "integer overflow (div)"); return; }; set_reg(i, RAX, 2, (q & 0xff) | ((n % v) << 8)); }
+          else { u64 n = (get_reg(i, RDX, sz) << (sz * 8)) | get_reg(i, RAX, sz); u64 q = n / v; if (q > mask(sz)) { fault_code(c, 0xC0000095u, "integer overflow (div)"); return; }; set_reg(i, RAX, sz, q); set_reg(i, RDX, sz, n % v); }
           return; }
-        case 7: { /* idiv */ if (!v) UNSUP("divide by zero"); s64 d = (s64)sext(v, sz);
-          if (sz == 8) { s128 n = ((s128)(s64)c->r[RDX] << 64) | c->r[RAX]; s128 q = n / d; if (q != (s128)(s64)q) UNSUP("divide overflow"); c->r[RAX] = (u64)q; c->r[RDX] = (u64)(n % d); }
+        case 7: { /* idiv */ if (!v) { fault_code(c, 0xC0000094u, "integer divide by zero"); return; }; s64 d = (s64)sext(v, sz);
+          if (sz == 8) { s128 n = ((s128)(s64)c->r[RDX] << 64) | c->r[RAX]; s128 q = n / d; if (q != (s128)(s64)q) { fault_code(c, 0xC0000095u, "integer overflow (div)"); return; }; c->r[RAX] = (u64)q; c->r[RDX] = (u64)(n % d); }
           else if (sz == 1) { s64 n = (s16)(c->r[RAX] & 0xffff); s64 q = n / d; set_reg(i, RAX, 2, ((u64)q & 0xff) | (((u64)(n % d) & 0xff) << 8)); }
           else { s64 n = (s64)((get_reg(i, RDX, sz) << (sz * 8)) | get_reg(i, RAX, sz)); n = sz == 4 ? n : (s32)n; s64 q = n / d; set_reg(i, RAX, sz, (u64)q); set_reg(i, RDX, sz, (u64)(n % d)); }
           return; }
@@ -390,7 +392,7 @@ static void exec_0f(Ins *i, Cpu *c) {
   if (op >= 0x40 && op <= 0x4F) { decode_modrm(i); u64 v = rm_get(i, osz); if (cond(c, op & 15)) set_reg(i, i->reg, osz, v); else if (osz == 4) set_reg(i, i->reg, 4, c->r[i->reg]); return; }
   switch (op) {
     case 0x05: UNSUP("syscall");
-    case 0x0B: UNSUP("ud2");
+    case 0x0B: fault_code(c, 0xC000001Du, "ud2 (illegal instruction)"); return;
     case 0x0D: case 0x18: case 0x19: case 0x1A: case 0x1B: case 0x1C: case 0x1D: case 0x1E: case 0x1F: decode_modrm(i); return;   /* nop / prefetch / endbr */
     case 0x31: { u64 t = (u64)(host_now_ms() * 1000000.0) + c->icount; c->r[RAX] = t & 0xffffffff; c->r[RDX] = t >> 32; return; }     /* rdtsc */
     case 0xA2: { /* cpuid */ u32 leaf = (u32)c->r[RAX];
@@ -590,7 +592,10 @@ int cpu_run(Cpu *c, u64 max_insns) {
     in.rex = in.rexw = in.rexr = in.rexx = in.rexb = in.p66 = in.p67 = in.rep = in.seg = in.lock = 0; in.modrm = 0; in.ea_valid = 0; in.mod = in.reg = in.rm = 0; in.ea = 0;
     in.code = mem_ptr(c->mem, c->rip, 16, 0);
     exec_one(&in);
-    if (c->status != RUN_OK) { if (c->status == RUN_FAULT) c->err_rip = in.start; return c->status; }
+    if (c->status != RUN_OK) {
+      if (c->status == RUN_FAULT) { c->err_rip = in.start; if (c->exc_code) { c->rip = in.start; if (w32_hw_exception(c)) continue; } }
+      return c->status;
+    }
     c->rip = in.ip; c->icount++;
     if (c->trace) e_log("%llx\n", (unsigned long long)c->rip);
   }

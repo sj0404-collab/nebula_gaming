@@ -352,6 +352,29 @@ await test('x64: structured exception handling — C++ throw/catch (gcc ABI) and
   await closeAll();
 });
 
+await test('x64: hardware exceptions become SEH (AV/div0/ud2 → __except, VEH continue) and Rust programs (ripgrep, fd) run in the browser', async () => {
+  const w = await x64Open();
+  await w.locator('[data-x64-exe="hwexc.exe"]').waitFor({ timeout: 30_000 });
+  const run = async (exe, args, timeout = 60_000) => {
+    await w.locator(`[data-x64-exe="${exe}"]`).click();
+    await w.getByPlaceholder('arguments').fill(args);
+    await w.locator('[data-x64-run]').click();
+    await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout });
+    return await w.locator('[data-x64-console]').innerText();
+  };
+  let con = await run('hwexc.exe', '');
+  expect(/AV caught=1 addr_ok=3/.test(con), 'access violation was not caught by __except: ' + con.slice(-400));
+  expect(/veh calls=1 code=0xc0000094 result=42/.test(con), 'vectored handler fix-up failed: ' + con.slice(-400));
+  expect(/loop caught=2000/.test(con), '2000 faults loop failed: ' + con.slice(-400));
+  expect(/top-level filter: code 0xc0000005/.test(con), 'SetUnhandledExceptionFilter callback did not run: ' + con.slice(-400));
+  con = await run('rg.exe', '--color never -n -i "lua|sqlite" demo.lua demo.sql demo.json', 90_000);
+  expect(/demo\.lua[\r\n]+1:-- demo\.lua/.test(con) && /fib\(25\)/.test(con), 'ripgrep output wrong: ' + con.slice(-500));
+  con = await run('fd.exe', '--color never -e lua -e sql -e json', 90_000);
+  expect(/demo\.json[\r\n]+demo\.lua[\r\n]+demo\.sql/.test(con), 'fd output wrong: ' + con.slice(-400));
+  await page.screenshot({ path: resolve(SHOTS, 'x64-rust.png') });
+  await closeAll();
+});
+
 await test('x64: real applications — SQLite 3.50.4 (file db), jq 1.8.1, Lua 5.4 + lua54.dll, 7-Zip 25.01 + 7z.dll, zstd 1.5.7 run in the browser with correct output', async () => {
   const w = await x64Open();
   await w.locator('[data-x64-exe="zstd.exe"]').waitFor({ timeout: 60_000 });

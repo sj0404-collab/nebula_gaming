@@ -88,6 +88,20 @@ static void s_ReadFile(Cpu *c) {
   if (r < 0) { W->last_error = 5; RET(0); return; }
   if (ARG(3)) wr32(c, ARG(3), (u32)r); if (r == 0 && vfs_kind(g_last_io_fd) == FD_PIPE) { W->last_error = 109; RET(0); return; } RET(1);
 }
+/* ntdll!Nt{Read,Write}File(handle, event, apc, apcctx, IOSB*, buf, len, ByteOffset*, key) — Rust std uses them for File::read/write(_at) */
+static void nt_rw(Cpu *c, int write) {
+  int fd = handle_fd(ARG(0)); u64 iosb = ARG(4), buf = ARG(5), off = ARG(7); u32 len = (u32)ARG(6);
+  if (!fd || (!write && (fd == 1 || fd == 2))) { RET(0xC0000008u); return; }   /* STATUS_INVALID_HANDLE */
+  if (off && fd >= 3) { s64 o = (s64)rd64(c, off); if (o >= 0) vfs_seek(fd, o, 0); }
+  s64 r = write ? fd_write(c, fd, buf, len) : fd_read(c, fd, buf, len);
+  if (r == -2) { blocked_io(c, write); return; }
+  if (r == -3) { wr64(c, iosb, 0xC000014Bu); wr64(c, iosb + 8, 0); RET(0xC000014Bu); return; }   /* STATUS_PIPE_BROKEN */
+  if (r < 0) { wr64(c, iosb, 0xC0000022u); wr64(c, iosb + 8, 0); RET(0xC0000022u); return; }     /* STATUS_ACCESS_DENIED */
+  if (!write && r == 0 && len) { u32 st = vfs_kind(g_last_io_fd) == FD_PIPE ? 0xC000014Bu : 0xC0000011u; wr64(c, iosb, st); wr64(c, iosb + 8, 0); RET(st); return; }   /* STATUS_END_OF_FILE */
+  wr64(c, iosb, 0); wr64(c, iosb + 8, (u64)r); RET(0);
+}
+static void s_NtReadFile(Cpu *c) { nt_rw(c, 0); }
+static void s_NtWriteFile(Cpu *c) { nt_rw(c, 1); }
 static void s_WriteFile(Cpu *c) {
   int fd = handle_fd(ARG(0)); if (fd <= 0) { W->last_error = 6; RET(0); return; }
   overlapped_seek(c, fd, ARG(4));
@@ -149,6 +163,15 @@ static void s_GetCurrentDirectoryW(Cpu *c) { const char *d = vfs_cwd(); size_t l
 static void s_SetCurrentDirectoryA(Cpu *c) { if (vfs_chdir(name_a(c, ARG(0)))) RET(1); else { W->last_error = 2; RET(0); } }
 static void s_SetCurrentDirectoryW(Cpu *c) { if (vfs_chdir(name_w(c, ARG(0)))) RET(1); else { W->last_error = 2; RET(0); } }
 static void full_path(Cpu *c, const char *n, int wide) { char out[1024]; vfs_normalize(n, out, sizeof out); size_t l = e_strlen(out); u32 cap = (u32)ARG(1); if (cap <= l) { RET(l + 1); return; } if (wide) put_w(c, ARG(2), out, 0); else put_a(c, ARG(2), out, 0); if (ARG(3)) { size_t b = l; while (b > 0 && out[b - 1] != '\\') b--; wr64(c, ARG(3), ARG(2) + (wide ? b * 2 : b)); } RET(l); }
+/* GetFinalPathNameByHandle(h, buf, cap, flags): the normalised path of the open file; VOLUME_NAME_DOS (0) gets the \\?\ prefix */
+static void final_path(Cpu *c, int wide) {
+  int fd = handle_fd(ARG(0)); if (fd < 3) { W->last_error = 6; RET(0); return; }
+  char out[1100]; u32 fl = (u32)ARG(3) & 0xF; e_snprintf(out, sizeof out, "%s%s", fl == 0 ? "\\\\?\\" : "", vfs_fd_path(fd));
+  size_t l = e_strlen(out); u32 cap = (u32)ARG(2); if (cap <= l) { RET(l + 1); return; }
+  if (wide) put_w(c, ARG(1), out, 0); else put_a(c, ARG(1), out, 0); RET(l);
+}
+static void s_GetFinalPathNameByHandleA(Cpu *c) { final_path(c, 0); }
+static void s_GetFinalPathNameByHandleW(Cpu *c) { final_path(c, 1); }
 static void s_GetFullPathNameA(Cpu *c) { full_path(c, name_a(c, ARG(0)), 0); }
 static void s_GetFullPathNameW(Cpu *c) { full_path(c, name_w(c, ARG(0)), 1); }
 static void s_GetTempPathA(Cpu *c) { const char *d = "C:\\tmp\\"; size_t l = e_strlen(d); if ((u32)ARG(0) > l) put_a(c, ARG(1), d, 0); RET(l); }
