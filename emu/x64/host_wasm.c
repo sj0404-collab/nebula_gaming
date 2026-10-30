@@ -11,6 +11,7 @@ double host_wall_ms(void) { return js_wall_ms(); }
 void host_present(const u32 *bgra, int w, int h) { js_present(bgra, w, h); }
 int host_key(int vk) { (void)vk; return 0; }
 void host_exit(int code) { (void)code; }
+void host_mem_discard(void *p, size_t n) { e_memset(p, 0, n); }   /* linear memory cannot shrink; keep the zero-on-recommit semantics */
 double host_math(int op, double a, double b) { return js_math(op, a, b); }
 /* networking: no raw TCP from a browser page — every call fails cleanly (WSAENETDOWN); a WebSocket relay can plug in here later */
 int host_net_resolve(const char *name, u8 *ip4s, int max) { (void)name; (void)ip4s; (void)max; return -1; }

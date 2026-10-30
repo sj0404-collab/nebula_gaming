@@ -99,6 +99,14 @@ int vfs_add(const char *path, const u8 *data, u64 n) {
   if (i < 0) { i = node_alloc(norm); if (i < 0) return -1; ensure_parents(norm); }
   VNode *v = &g_nodes[i]; v->is_dir = 0; v->size = 0; if (!grow(v, n)) return -1; if (n) e_memcpy(v->data, data, (size_t)n); v->size = n; v->written = 0; return i;
 }
+/* add a file that REFERENCES host-owned bytes (no copy; the host keeps the buffer alive for the whole session).
+   Used for the exe image and for --mount'ed / browser-provided files: a 200 MB Bun executable must not exist three times. */
+int vfs_add_ref(const char *path, u8 *data, u64 n) {
+  char norm[VFS_PATH]; vfs_normalize(path, norm, sizeof norm);
+  int i = vfs_find_node(norm); if (i == -2) return -1;
+  if (i < 0) { i = node_alloc(norm); if (i < 0) return -1; ensure_parents(norm); }
+  VNode *v = &g_nodes[i]; v->is_dir = 0; v->data = data; v->cap = n; v->size = n; v->written = 0; return i;
+}
 int vfs_mkdir(const char *path) {
   char norm[VFS_PATH]; vfs_normalize(path, norm, sizeof norm);
   if (vfs_find_node(norm) != -1) return 0;

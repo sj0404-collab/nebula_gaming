@@ -5,6 +5,9 @@
 #define ARG(n) w32_arg(c, n)
 #define RET(v) (c->r[RAX] = (u64)(v))
 #define W (c->w)
+/* extra guest environment variables ("NAME=value"), added by the host before the exe starts (x64run: X64_GUEST_ENV="A=1;B=2") */
+static char g_extra_env_buf[32][256]; static const char *g_extra_env[32]; static int g_nextra_env;
+void w32_add_env(const char *kv) { if (g_nextra_env < 32 && kv && kv[0]) { e_snprintf(g_extra_env_buf[g_nextra_env], 256, "%s", kv); g_extra_env[g_nextra_env] = g_extra_env_buf[g_nextra_env]; g_nextra_env++; } }
 
 enum { CONT_STARTUP = 1, CONT_INITTERM, CONT_ATEXIT, CONT_RET_RAX, CONT_RET_VAL, CONT_CREATEWND, CONT_QSORT, CONT_BSEARCH, CONT_DLLMAIN };
 static int attach_next_module(Cpu *c);
@@ -232,7 +235,7 @@ int w32_dispatch(Cpu *c, u64 addr) {
     return RUN_FAULT;
   }
   c->r[RAX] = 0;
-  if (w->api_trace) e_log("[api] %s(%llx, %llx, %llx, %llx)\n", s->name, (unsigned long long)c->r[RCX], (unsigned long long)c->r[RDX], (unsigned long long)c->r[R8], (unsigned long long)c->r[R9]);
+  if (w->api_trace) e_log("[api] t%d %s(%llx, %llx, %llx, %llx)\n", w->th[w->cur_th].tid, s->name, (unsigned long long)c->r[RCX], (unsigned long long)c->r[RDX], (unsigned long long)c->r[R8], (unsigned long long)c->r[R9]);
   s->fn(c);
   if (w->api_trace) e_log("[api]   -> %llx\n", (unsigned long long)c->r[RAX]);
   return c->status;
@@ -643,12 +646,12 @@ static struct { u64 base, size, heap; int released, mapped; } g_vm[VM_MAX]; stat
 static u64 g_vm_cursor = 0x600000000ull;   /* where large anonymous reservations are placed */
 static int vm_find(u64 a) { int rel = -1; for (int i = 0; i < g_nvm; i++) if (a - g_vm[i].base < g_vm[i].size) { if (!g_vm[i].released) return i; rel = i; } return rel; }
 static int vm_range_free(Mem *m, u64 a, u64 size) { for (int i = 0; i < m->n; i++) { Region *r = &m->r[i]; if (a < r->base + r->size && r->base < a + size) return 0; } return 1; }
-static void vm_recycle(Win32 *w);
+static void vm_recycle(Win32 *w); static void vm_discard(Cpu *c, u64 addr, u64 size);
 static int vm_add(u64 base, u64 size, u64 heap) { if (g_nvm >= VM_MAX) return -1; g_vm[g_nvm].base = base; g_vm[g_nvm].size = size; g_vm[g_nvm].heap = heap; g_vm[g_nvm].released = 0; g_vm[g_nvm].mapped = 0; return g_nvm++; }
 static void s_VirtualAlloc(Cpu *c) { u64 addr = ARG(0), size = ARG(1);
   if (addr) {
     u64 a0 = addr & ~0xfffull, end = (addr + size + 0xfff) & ~0xfffull; int vi = vm_find(a0);
-    if (vi >= 0 && !g_vm[vi].released) { if (end <= g_vm[vi].base + g_vm[vi].size) { RET(a0); return; } W->last_error = 487; RET(0); return; }
+    if (vi >= 0 && !g_vm[vi].released) { if (end <= g_vm[vi].base + g_vm[vi].size) { if ((u32)ARG(2) & 0x80000) vm_discard(c, a0, end - a0); RET(a0); return; } W->last_error = 487; RET(0); return; }   /* MEM_RESET: contents may be dropped */
     if (vi >= 0) {   /* inside a RELEASED reservation: V8 re-reserves an aligned sub-range of a block it just freed — hand that sub-range out again */
       if (end <= g_vm[vi].base + g_vm[vi].size && vm_add(a0, end - a0, 0) >= 0) { u8 *p = mem_ptr(c->mem, a0, end - a0, 1); if (p) e_memset(p, 0, (size_t)(end - a0)); RET(a0); return; }
       W->last_error = 487; RET(0); return; }
@@ -675,8 +678,13 @@ static void vm_recycle(Win32 *w) {   /* free released heap-backed reservations t
     if (busy) continue;
     u64 b = g_vm[i].base, e = b + g_vm[i].size; if (g_vm[i].heap) w32_heap_free(w, g_vm[i].heap); else mem_unmap(w->mem, b); g_vm[i] = g_vm[--g_nvm]; i = -1;   /* restart: drop released sub-entries inside it too */
     for (int j = 0; j < g_nvm; j++) if (g_vm[j].released && !g_vm[j].heap && !g_vm[j].mapped && g_vm[j].base >= b && g_vm[j].base < e) { g_vm[j] = g_vm[--g_nvm]; j--; } } }
-static void s_VirtualFree(Cpu *c) { u64 addr = ARG(0); u32 type = (u32)ARG(2);
+static void vm_discard(Cpu *c, u64 addr, u64 size) {   /* MEM_DECOMMIT / MEM_RESET: JSC and mimalloc decommit whole heap blocks all the time — without this every page they ever touched stays resident */
+  u64 a = addr & ~0xfffull; int vi = vm_find(a); if (vi < 0) return;
+  u64 end = size ? (addr + size + 0xfff) & ~0xfffull : g_vm[vi].base + g_vm[vi].size; if (end > g_vm[vi].base + g_vm[vi].size) end = g_vm[vi].base + g_vm[vi].size; if (end <= a) return;
+  u8 *p = mem_ptr(c->mem, a, end - a, 1); if (p) host_mem_discard(p, (size_t)(end - a)); }
+static void s_VirtualFree(Cpu *c) { u64 addr = ARG(0), size = ARG(1); u32 type = (u32)ARG(2);
   if (type == 0x8000) { int vi = vm_find(addr); if (vi >= 0 && !g_vm[vi].released && g_vm[vi].base == addr) g_vm[vi].released = 1; }   /* MEM_RELEASE */
+  else if (type & 0x4000) vm_discard(c, addr, size);   /* MEM_DECOMMIT */
   RET(1); }
 static void s_VirtualProtect(Cpu *c) { if (ARG(3)) wr32(c, ARG(3), 0x40); RET(1); }
 static void s_VirtualLock(Cpu *c) { RET(1); }
@@ -769,7 +777,12 @@ static void s_SetHandleCount(Cpu *c) { RET(ARG(0)); }
 static void s_GetOverlappedResult(Cpu *c) { RET(0); }
 static void s_Beep(Cpu *c) { RET(1); }
 static void s_DebugBreak(Cpu *c) { c->status = RUN_BREAK; }
-static void s_K32GetProcessMemoryInfo(Cpu *c) { RET(0); }
+/* PROCESS_MEMORY_COUNTERS(_EX): cb @0, PageFaultCount @4, PeakWorkingSetSize @8, WorkingSetSize @16, QuotaPeakPaged @24, QuotaPaged @32, QuotaPeakNonPaged @40,
+   QuotaNonPaged @48, PagefileUsage @56, PeakPagefileUsage @64, PrivateUsage @72 (EX, 80 B). JSC/bmalloc derive "memory pressure" from this: an unfilled
+   struct made the GC believe the process was critically low on memory and collect after every few KB. */
+static void s_K32GetProcessMemoryInfo(Cpu *c) { u64 a = ARG(1); u32 cb = (u32)ARG(2); if (!a || cb < 72) { W->last_error = 24; RET(0); return; }
+  u64 used = emu_alloc_used(); if (used < (64ull << 20)) used = 64ull << 20;
+  wr32(c, a, cb); wr32(c, a + 4, 1000); wr64(c, a + 8, used); wr64(c, a + 16, used); wr64(c, a + 24, 65536); wr64(c, a + 32, 65536); wr64(c, a + 40, 16384); wr64(c, a + 48, 16384); wr64(c, a + 56, used); wr64(c, a + 64, used); if (cb >= 80) wr64(c, a + 72, used); RET(1); }
 
 /* ================= UCRT / msvcrt ================= */
 static void s_malloc(Cpu *c) { RET(w32_heap_alloc(W, ARG(0), 0)); }
@@ -1150,7 +1163,7 @@ static const ShimDef shims[] = {
   S(GetThreadLocale), S(GetUserDefaultLCID), S(GetUserDefaultLangID), S(GetSystemDefaultLangID), S(GetUserDefaultUILanguage), S(GetLocaleInfoA), S(GetLocaleInfoW), S(GetLocaleInfoEx), S(IsValidLocale), S(IsValidCodePage), S(EnumSystemLocalesW), S(GetUserDefaultLocaleName), S(LCMapStringW), S(LCMapStringEx), S(LCMapStringA), S(CompareStringW), S(CompareStringA), S(CompareStringEx), S(CompareStringOrdinal), S(GetStringTypeW), S(GetStringTypeA), S(MultiByteToWideChar), S(WideCharToMultiByte), S(CharUpperA),
   S(lstrlenA), S(lstrlenW), S(lstrcpyA), S(lstrcmpiA), S(lstrcmpA), S(InterlockedCompareExchange), S(InterlockedExchange), S(InterlockedIncrement), S(InterlockedDecrement), S(InterlockedExchangeAdd), S(QueueUserAPC),
   S(CreateNamedPipeW), S(CreateNamedPipeA), S(ConnectNamedPipe), S(ReadFileEx), S(WriteFileEx), S(RtlNtStatusToDosError), S(CancelIo), SA("CancelIoEx", CancelIo),
-  S(GetTimeZoneInformation), S(FileTimeToSystemTime), S(SystemTimeToFileTime), S(FileTimeToLocalFileTime), S(GetDateFormatA), S(GetTimeFormatA), S(SystemFunction036), SA("ProcessPrng", SystemFunction036), SA("BCryptGenRandom", BCryptGenRandom), S(GetComputerNameA), S(GetUserNameA), S(GetDriveTypeA), S(GetLogicalDrives), S(GetDiskFreeSpaceExA), S(SetHandleCount), S(GetHandleInformation), S(SetHandleInformation), S(DuplicateHandle), S(CreatePipe), S(PeekNamedPipe), S(GetOverlappedResult), S(Beep), S(DebugBreak), S(GetProcessId), S(K32GetProcessMemoryInfo),
+  S(GetTimeZoneInformation), S(FileTimeToSystemTime), S(SystemTimeToFileTime), S(FileTimeToLocalFileTime), S(GetDateFormatA), S(GetTimeFormatA), S(SystemFunction036), SA("ProcessPrng", SystemFunction036), SA("BCryptGenRandom", BCryptGenRandom), S(GetComputerNameA), S(GetUserNameA), S(GetDriveTypeA), S(GetLogicalDrives), S(GetDiskFreeSpaceExA), S(SetHandleCount), S(GetHandleInformation), S(SetHandleInformation), S(DuplicateHandle), S(CreatePipe), S(PeekNamedPipe), S(GetOverlappedResult), S(Beep), S(DebugBreak), S(GetProcessId), S(K32GetProcessMemoryInfo), SA("GetProcessMemoryInfo", K32GetProcessMemoryInfo),
   /* file system stubs — no VFS yet: everything "does not exist" */
   SA("GetFileAttributesExA", GetFileAttributesA), SA("GetFileAttributesExW", GetFileAttributesA), SA("FindFirstFileExA", FindFirstFileA), SA("FindFirstFileExW", FindFirstFileA), SA("FindNextFileA", ret0), SA("FindNextFileW", ret0), SA("FindClose", ret1),
   SA("DeleteFileA", ret0), SA("DeleteFileW", ret0), SA("RemoveDirectoryA", ret0), SA("RemoveDirectoryW", ret0), SA("CreateDirectoryA", ret0), SA("CreateDirectoryW", ret0), SA("MoveFileA", ret0), SA("MoveFileW", ret0), SA("MoveFileExA", ret0), SA("MoveFileExW", ret0), SA("CopyFileA", ret0), SA("CopyFileW", ret0),
@@ -1247,8 +1260,9 @@ void w32_start(Win32 *w, const char *cmdline) {
     wr64(c, argv + argc * 8, w32_guest_strdup(w, tok)); wr64(c, wargv + argc * 8, guest_wstrdup(w, tok)); argc++;
   }
   wr32(c, w->ubuf + 0x200, (u32)argc); wr64(c, w->ubuf + 0x208, argv); wr64(c, w->ubuf + 0x210, w->cmdline_a); wr64(c, w->ubuf + 0x218, wargv); wr64(c, w->ubuf + 0x220, w->cmdline_w);
-  static const char *envs[] = { "PATH=C:\\Windows\\System32", "SYSTEMROOT=C:\\Windows", "TEMP=C:\\tmp", "TMP=C:\\tmp", "USERPROFILE=C:\\Users\\user", "HOMEPATH=\\Users\\user", "USERNAME=user", "COMPUTERNAME=NEBULA", "OS=Windows_NT", "NEBULA_X64=1", "PROCESSOR_ARCHITECTURE=AMD64", "PROCESSOR_IDENTIFIER=Intel64 Family 6 Model 158 Stepping 10, GenuineIntel", "PROCESSOR_LEVEL=6", "PROCESSOR_REVISION=9e0a", "NUMBER_OF_PROCESSORS=1", "PATHEXT=.COM;.EXE;.BAT;.CMD", "HOMEDRIVE=C:", "WINDIR=C:\\Windows", "COMSPEC=C:\\Windows\\System32\\cmd.exe", 0 };
-  u64 envp = w32_heap_alloc(w, 8 * 16, 1); size_t total = 1; for (int i = 0; envs[i]; i++) total += e_strlen(envs[i]) + 1;
+  static const char *base_envs[] = { "PATH=C:\\Windows\\System32", "SYSTEMROOT=C:\\Windows", "TEMP=C:\\tmp", "TMP=C:\\tmp", "USERPROFILE=C:\\Users\\user", "HOMEPATH=\\Users\\user", "USERNAME=user", "COMPUTERNAME=NEBULA", "OS=Windows_NT", "NEBULA_X64=1", "BUN_JSC_useConcurrentGC=false", "BUN_JSC_useConcurrentJIT=false", "PROCESSOR_ARCHITECTURE=AMD64", "PROCESSOR_IDENTIFIER=Intel64 Family 6 Model 158 Stepping 10, GenuineIntel", "PROCESSOR_LEVEL=6", "PROCESSOR_REVISION=9e0a", "NUMBER_OF_PROCESSORS=1", "PATHEXT=.COM;.EXE;.BAT;.CMD", "HOMEDRIVE=C:", "WINDIR=C:\\Windows", "COMSPEC=C:\\Windows\\System32\\cmd.exe", 0 };
+  const char *envs[96]; int ne = 0; for (int i = 0; base_envs[i] && ne < 64; i++) envs[ne++] = base_envs[i]; for (int i = 0; i < g_nextra_env && ne < 95; i++) envs[ne++] = g_extra_env[i]; envs[ne] = 0;
+  u64 envp = w32_heap_alloc(w, 8 * 100, 1); size_t total = 1; for (int i = 0; envs[i]; i++) total += e_strlen(envs[i]) + 1;
   u64 blk = w32_heap_alloc(w, total, 1), wblk = w32_heap_alloc(w, total * 2, 1); u64 o = 0;
   for (int i = 0; envs[i]; i++) { size_t l = e_strlen(envs[i]) + 1; u8 *d = mem_ptr(w->mem, blk + o, l, 1); if (d) e_memcpy(d, envs[i], l); for (size_t k = 0; k < l; k++) wr16(c, wblk + (o + k) * 2, (u8)envs[i][k]); wr64(c, envp + i * 8, blk + o); o += l; }
   w->env_a = blk; w->env_w = wblk; wr64(c, w->ubuf + 0x228, envp); wr64(c, w->ubuf + 0x230, 0);
@@ -1257,6 +1271,8 @@ void w32_start(Win32 *w, const char *cmdline) {
   /* ProcessParameters: CommandLine UNICODE_STRING at +0x70, ImagePathName at +0x60 */
   u64 params = G_SHIM_BASE + PARAMS_OFF; size_t cl = e_strlen(w->cmdline);
   wr16(c, params + 0x70, (u16)(cl * 2)); wr16(c, params + 0x72, (u16)(cl * 2 + 2)); wr64(c, params + 0x78, w->cmdline_w);
+  wr32(c, params + 0x00, 0x400); wr32(c, params + 0x04, 0x1000); wr32(c, params + 0x08, 1);   /* MaximumLength, Length, Flags = NORMALIZED */
+  wr64(c, params + 0x20, 0x10); wr64(c, params + 0x28, 0x11); wr64(c, params + 0x30, 0x12);   /* hStdInput/Output/Error: Zig's std.io.getStdOut() reads them straight from the PEB (OpenTUI's renderer wrote its frames to handle 0) */
   u64 img = guest_wstrdup(w, "C:\\nebula\\app.exe"); wr16(c, params + 0x60, 34); wr16(c, params + 0x62, 36); wr64(c, params + 0x68, img); wr64(c, params + 0x80, wblk);
   /* stack: top minus red zone; the start-up slot acts as the return address of "the OS" */
   c->r[RSP] = G_STACK_BASE + G_STACK_SIZE - 0x100;

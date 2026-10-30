@@ -15,6 +15,14 @@ void host_set_dump(int every, const char *prefix); int host_frames(void); double
 
 #include <dirent.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
+#include <fcntl.h>
+/* private copy-on-write mapping of a host file: a 200 MB Bun executable is then backed by the page cache instead of a malloc copy */
+static u8 *map_file(const char *path, size_t *len) {
+  int fd = open(path, O_RDONLY); if (fd < 0) return 0; struct stat st; if (fstat(fd, &st) || !S_ISREG(st.st_mode)) { close(fd); return 0; }
+  size_t n = (size_t)st.st_size; if (!n) { close(fd); *len = 0; return (u8 *)malloc(1); }
+  void *p = mmap(0, n, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0); close(fd); if (p == MAP_FAILED) return 0; *len = n; return (u8 *)p; }
+
 static int mount_dir(const char *host, const char *guest, int depth) {   /* copies a host directory tree into the VFS */
   DIR *d = opendir(host); if (!d) return 0; struct dirent *e; int n = 0; x64_vfs_mkdir(guest);
   while ((e = readdir(d))) {
@@ -22,8 +30,8 @@ static int mount_dir(const char *host, const char *guest, int depth) {   /* copi
     char hp[2048], gp[2048]; snprintf(hp, sizeof hp, "%s/%s", host, e->d_name); snprintf(gp, sizeof gp, "%s\\%s", guest, e->d_name);
     struct stat st; if (stat(hp, &st)) continue;
     if (S_ISDIR(st.st_mode)) { if (depth < 40) n += mount_dir(hp, gp, depth + 1); continue; }
-    FILE *f = fopen(hp, "rb"); if (!f) continue; u8 *buf = malloc((size_t)st.st_size + 1); size_t got = fread(buf, 1, (size_t)st.st_size, f); fclose(f);
-    x64_vfs_add(gp, buf, got); free(buf); n++;
+    size_t got = 0; u8 *buf = map_file(hp, &got); if (!buf) continue;
+    x64_vfs_add(gp, buf, got); n++;   /* the VFS references the mapping (copy-on-write pages, clean ones are reclaimable) */
   }
   closedir(d); return n;
 }
@@ -32,7 +40,8 @@ static int g_prof; static struct { u64 key; u64 n; } g_pf[65536]; static u64 g_p
 static void prof_sample(u64 rip) { u64 k = rip >> 6; u32 h = (u32)(k * 0x9E3779B97F4A7C15ull >> 48); for (int i = 0; i < 65536; i++) { u32 j = (h + i) & 65535; if (!g_pf[j].n || g_pf[j].key == k) { g_pf[j].key = k; g_pf[j].n++; g_pf_total++; return; } } }
 static void prof_dump(void) { fprintf(stderr, "[x64run] profile: %llu samples, hottest 64-byte blocks:\n", (unsigned long long)g_pf_total);
   for (int t = 0; t < 30; t++) { int bi = -1; for (int j = 0; j < 65536; j++) if (g_pf[j].n && (bi < 0 || g_pf[j].n > g_pf[bi].n)) bi = j; if (bi < 0) break;
-    fprintf(stderr, "  %5.1f%%  0x%llx\n", 100.0 * (double)g_pf[bi].n / (double)g_pf_total, (unsigned long long)(g_pf[bi].key << 6)); g_pf[bi].n = 0; } }
+    u64 a = g_pf[bi].key << 6; const char *sn = ""; if (a >= 0x200000ull && a < 0x400000ull) { extern const char *x64_slot_name(u64); sn = x64_slot_name(a); }
+    fprintf(stderr, "  %5.1f%%  0x%llx %s\n", 100.0 * (double)g_pf[bi].n / (double)g_pf_total, (unsigned long long)a, sn); g_pf[bi].n = 0; } }
 int main(int argc, char **argv) {
   int inspect = 0, dump_every = 0; double max_ms = 60000; const char *prefix = "frame"; int quiet = 0;
   const char *mounts[16][2]; int nmounts = 0; int no_stdin = 0;
@@ -52,8 +61,7 @@ int main(int argc, char **argv) {
   }
   if (ai >= argc) { fprintf(stderr, "usage: x64run [--inspect] [--frames N] [--max-ms T] [--key VK@ms[:dur]] file.exe [args]\n"); return 2; }
   const char *path = argv[ai];
-  FILE *f = fopen(path, "rb"); if (!f) { perror(path); return 2; }
-  fseek(f, 0, SEEK_END); long len = ftell(f); fseek(f, 0, SEEK_SET); u8 *bytes = malloc(len); if (fread(bytes, 1, len, f) != (size_t)len) { fclose(f); return 2; } fclose(f);
+  size_t flen = 0; u8 *bytes = map_file(path, &flen); if (!bytes) { perror(path); return 2; } long len = (long)flen;
   if (inspect) { puts(x64_inspect(bytes, len)); return 0; }
   char cmdline[4096]; const char *base = strrchr(path, '/'); base = base ? base + 1 : path; snprintf(cmdline, sizeof cmdline, "%s", base);
   for (int i = ai + 1; i < argc; i++) {   /* MSVC command-line quoting rules */
@@ -64,6 +72,7 @@ int main(int argc, char **argv) {
   }
   host_set_dump(dump_every, prefix);
   for (int mi = 0; mi < nmounts; mi++) { int n = mount_dir(mounts[mi][0], mounts[mi][1], 0); if (!quiet) fprintf(stderr, "[x64run] mounted %s -> %s (%d files)\n", mounts[mi][0], mounts[mi][1], n); }   /* before load: DLLs next to the exe */
+  if (getenv("X64_GUEST_ENV")) { extern void w32_add_env(const char *); char *ge = strdup(getenv("X64_GUEST_ENV")); for (char *t = strtok(ge, ";"); t; t = strtok(0, ";")) w32_add_env(t); }
   int rc = x64_load(bytes, len, base, cmdline);
   if (g_apitrace) { extern void w32_api_trace(int); w32_api_trace(1); }
   if (rc) { fprintf(stderr, "load failed (%d): %s", rc, x64_report()); return 3; }

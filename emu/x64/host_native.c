@@ -31,6 +31,12 @@ void host_present(const u32 *bgra, int w, int h) {
 }
 int host_key(int vk) { (void)vk; return 0; }
 void host_exit(int code) { exit(code); }
+#include <sys/mman.h>
+void host_mem_discard(void *p, size_t n) {   /* drop whole pages inside [p, p+n): RSS shrinks, re-touched pages read as zero (= Windows re-commit semantics) */
+  uintptr_t a = ((uintptr_t)p + 4095) & ~(uintptr_t)4095, e = ((uintptr_t)p + n) & ~(uintptr_t)4095;
+  if (e > a) madvise((void *)a, e - a, MADV_DONTNEED);
+  if (a > (uintptr_t)p) memset(p, 0, (size_t)(a - (uintptr_t)p < n ? a - (uintptr_t)p : n));
+  if (e > a && (uintptr_t)p + n > e) memset((void *)e, 0, (size_t)((uintptr_t)p + n - e)); }
 double host_math(int op, double a, double b) {
   switch (op) { case 0: return sin(a); case 1: return cos(a); case 2: return tan(a); case 3: return exp(a); case 4: return log(a); case 5: return pow(a, b); case 6: return atan2(a, b); case 7: return asin(a); case 8: return acos(a); case 9: return atan(a); case 10: return sinh(a); case 11: return cosh(a); case 12: return tanh(a); case 13: return log10(a); case 14: return log2(a); case 15: return cbrt(a); default: return 0; }
 }

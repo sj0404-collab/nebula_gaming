@@ -23,6 +23,7 @@ double host_now_ms(void); double host_wall_ms(void);   /* wall clock, ms since t
 void   host_present(const u32 *bgra, int w, int h);        /* framebuffer of the GUI window changed */
 int    host_key(int vk);                                   /* 1 if virtual key currently pressed */
 void   host_exit(int code);                                /* guest called ExitProcess */
+void   host_mem_discard(void *p, size_t n);                /* MEM_DECOMMIT / MEM_RESET: give the host pages back (contents become zero) */
 double host_math(int op, double a, double b);              /* 0 sin 1 cos 2 tan 3 exp 4 log 5 pow 6 atan2 7 asin 8 acos 9 atan 10 sinh 11 cosh 12 tanh 13 log10 14 log2 15 cbrt */
 /* TCP networking (IPv4). Native host: Linux sockets; wasm host: stubs that fail (no raw TCP in a browser) until a relay exists. */
 int    host_net_resolve(const char *name, u8 *ip4s, int max);          /* A records; returns count, 0 = not found, -1 = no network */
@@ -323,6 +324,7 @@ const char *vfs_cwd(void);
 void vfs_normalize(const char *in, char *out, size_t cap);
 int  vfs_find_node(const char *path);
 int  vfs_add(const char *path, const u8 *data, u64 n);
+int  vfs_add_ref(const char *path, u8 *data, u64 n);
 int  vfs_mkdir(const char *path);
 int  vfs_remove(const char *path);
 int  vfs_rename(const char *from, const char *to);

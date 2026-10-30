@@ -89,7 +89,7 @@ EXPORT(x64_load) int x64_load(const u8 *bytes, size_t len, const char *name, con
   int rc = pe_load(&p->w32, bytes, len, name ? name : "app.exe");
   if (rc) return rc;
   w32_start(&p->w32, cmdline ? cmdline : name ? name : "app.exe");
-  { char fp[600]; e_snprintf(fp, sizeof fp, "C:\\nebula\\%s", p->name); if (vfs_find_node(fp) < 0) vfs_add(fp, bytes, len); }
+  { char fp[600]; e_snprintf(fp, sizeof fp, "C:\\nebula\\%s", p->name); if (vfs_find_node(fp) < 0) vfs_add_ref(fp, (u8 *)bytes, len); }
   g_loaded = 1; return 0;
 }
 /* scheduler: run runnable processes round-robin; the host sees the root process' lifecycle */
@@ -136,7 +136,7 @@ EXPORT(x64_run) int x64_run(u64 budget) {
   return RUN_YIELD;
 }
 /* ---- virtual file system / stdin (host side) ---- */
-EXPORT(x64_vfs_add) int x64_vfs_add(const char *path, const u8 *data, size_t n) { return vfs_add(path, data, n) >= 0; }
+EXPORT(x64_vfs_add) int x64_vfs_add(const char *path, const u8 *data, size_t n) { return vfs_add_ref(path, (u8 *)data, n) >= 0; }   /* host-owned buffer, referenced not copied */
 EXPORT(x64_vfs_mkdir) int x64_vfs_mkdir(const char *path) { return vfs_mkdir(path); }
 EXPORT(x64_vfs_remove) int x64_vfs_remove(const char *path) { return vfs_remove(path); }
 EXPORT(x64_vfs_size) s64 x64_vfs_size(const char *path) { u64 sz; int k = vfs_stat(path, &sz); return k == 1 ? (s64)sz : -1; }
@@ -175,6 +175,7 @@ EXPORT(x64_history) const char *x64_history(void) { int o = 0; u64 run0 = 0, las
 EXPORT(x64_mem_copy) int x64_mem_copy(u64 addr, u8 *dst, u32 n) { const u8 *p = mem_ptr(&g_mem, addr, n, 0); if (!p) return 0; e_memcpy(dst, p, n); return 1; }
 EXPORT(x64_regs) const char *x64_regs(void) { static const char *nm[16] = {"rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi","r8","r9","r10","r11","r12","r13","r14","r15"}; int o = 0; for (int i = 0; i < 16; i++) o += e_snprintf(g_regs + o, sizeof g_regs - o, "%s=%llx ", nm[i], (unsigned long long)g_cpu.r[i]); u64 sp = g_cpu.r[4]; const u8 *st = mem_ptr(&g_mem, sp, 32, 0); if (st) for (int k = 0; k < 4; k++) { u64 v = 0; for (int b = 7; b >= 0; b--) v = (v << 8) | st[k * 8 + b]; o += e_snprintf(g_regs + o, sizeof g_regs - o, "[rsp+%d]=%llx ", k * 8, (unsigned long long)v); } return g_regs; }
 EXPORT(x64_rip) u64 x64_rip(void) { return g_cpu.rip; }
+EXPORT(x64_slot_name) const char *x64_slot_name(u64 addr) { static char nm[160]; u64 off = addr - G_SHIM_BASE; if (off >= G_SHIM_SIZE) return ""; int i = (int)(off / SHIM_SLOT_SIZE); if (i < 0 || i >= g_w32.nslots) return "?"; e_snprintf(nm, sizeof nm, "%s!%s", g_w32.slots[i].dll, g_w32.slots[i].name); return nm; }
 EXPORT(x64_report) const char *x64_report(void) { return g_w32.report; }
 EXPORT(x64_console) const char *x64_console(void) { return g_w32.con; }
 EXPORT(x64_screen_w) int x64_screen_w(void) { return g_w32.screen ? g_w32.screen_w : 0; }

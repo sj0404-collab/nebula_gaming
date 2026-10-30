@@ -12,6 +12,11 @@ check "greeting"      "Hello from x86-64 Windows! argc=3" "$out"
 check "64-bit fnv"    "fnv=76a25757d9d78283" "$out"
 check "printf/math"   "sqrt(2)=1.414214 sin(1)=0.8415 pow(2,10)=1024" "$out"
 [ "$rc" = 7 ] && echo "  ok   exit code 7" || { echo "  FAIL exit code: $rc"; fail=1; }
+echo "[1b] pebstd.exe (PEB std handles, MEM_DECOMMIT semantics)"
+out=$($X --quiet tests/pebstd.exe 2>&1 || true)
+check "peb handles"   "in=0000000000000010 out=0000000000000011 err=0000000000000012 flags=1" "$out"
+check "peb WriteFile" "WriteFile(peb hStdOutput) -> 1, 87 bytes" "$out"
+check "decommit"      "decommit -> 1, recommit same, nonzero after recommit: 0, untouched byte: ab" "$out"
 echo "[2] bench.exe (CPU)"
 out=$($X --quiet --stats tests/bench.exe 2>&1 || true)
 check "sieve"         "sieve(2M): 148933 primes" "$out"
