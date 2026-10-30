@@ -243,6 +243,9 @@ Region *mem_region(Mem *m, u64 addr) {
   return 0;
 }
 u8 *mem_ptr(Mem *m, u64 addr, u64 size, int write) {
+#ifdef X64_WWATCH
+  { extern u64 x64_rip(void); if (write && addr <= (u64)X64_WWATCH && (u64)X64_WWATCH < addr + size) e_log("[wwatch] write %llx+%llu at rip=%llx\n", (unsigned long long)addr, (unsigned long long)size, (unsigned long long)x64_rip()); }
+#endif
   Region *r = &m->r[m->last];
   if (m->n && addr - r->base < r->size && addr + size - r->base <= r->size) return r->host + (addr - r->base);
   for (int i = 0; i < m->n; i++) {

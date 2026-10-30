@@ -308,7 +308,7 @@ static void exec_one(Ins *i) {
     case 0x88: case 0x89: { int sz = op & 1 ? osz : 1; decode_modrm(i); rm_set(i, sz, get_reg(i, i->reg, sz)); return; }
     case 0x8A: case 0x8B: { int sz = op & 1 ? osz : 1; decode_modrm(i); set_reg(i, i->reg, sz, rm_get(i, sz)); return; }
     case 0x8D: { decode_modrm(i); if (i->mod == 3) UNSUP("lea with register operand"); set_reg(i, i->reg, osz, EA(i)); return; }
-    case 0x8F: { decode_modrm(i); u64 v = cpu_pop(c); rm_set(i, 8, v); return; }
+    case 0x8F: { u64 v = cpu_pop(c); decode_modrm(i); fix_rip_rel(i, 0); rm_set(i, 8, v); return; }   /* pop r/m64: an rsp-based address is computed AFTER the increment (V8 tail calls rely on `pop [rsp+x]`) */
     case 0x90: if (i->rexb) { u64 t = c->r[RAX]; c->r[RAX] = c->r[R8]; c->r[R8] = t; } return;   /* nop / pause / xchg r8,rax */
     case 0x91: case 0x92: case 0x93: case 0x94: case 0x95: case 0x96: case 0x97: { int r = (op & 7) | (i->rexb << 3); u64 a = get_reg(i, RAX, osz), b = get_reg(i, r, osz); set_reg(i, RAX, osz, b); set_reg(i, r, osz, a); return; }
     case 0x98: if (osz == 8) c->r[RAX] = sext(c->r[RAX], 4); else if (osz == 4) c->r[RAX] = sext(c->r[RAX], 2) & 0xffffffff; else set_reg(i, RAX, 2, sext(c->r[RAX], 1)); return;
@@ -318,6 +318,11 @@ static void exec_one(Ins *i) {
     case 0x9E: c->rflags = (c->rflags & ~0xd5ull) | ((c->r[RAX] >> 8) & 0xd5); return;
     case 0x9F: c->r[RAX] = (c->r[RAX] & ~0xff00ull) | (((c->rflags & 0xd5) | 2) << 8); return;
     case 0xA4: case 0xA5: case 0xAA: case 0xAB: case 0xAC: case 0xAD: case 0xA6: case 0xA7: case 0xAE: case 0xAF: string_op(i, op & ~1, op & 1 ? osz : 1); return;
+    case 0xA0: case 0xA1: case 0xA2: case 0xA3: {                                   /* mov al/eax/rax <-> moffs (movabs) */
+      u64 a = i->p67 ? (u64)fetch32(i) : fetch64(i); if (i->seg == 1) a += c->fs_base; else if (i->seg == 2) a += c->gs_base;
+      int sz = (op & 1) ? osz : 1;
+      if (op & 2) wrn(c, a, sz, get_reg(i, RAX, sz)); else { u64 v = rdn(c, a, sz); if (c->status != RUN_OK) return; set_reg(i, RAX, sz, v); }
+      return; }
     case 0xA8: { flags_logic(c, (c->r[RAX] & 0xff) & fetch8(i), 1); return; }
     case 0xA9: { u64 b = osz == 2 ? fetch16(i) : sext(fetch32(i), 4); flags_logic(c, get_reg(i, RAX, osz) & b, osz); return; }
     case 0xB0: case 0xB1: case 0xB2: case 0xB3: case 0xB4: case 0xB5: case 0xB6: case 0xB7: set_reg(i, (op & 7) | (i->rexb << 3), 1, fetch8(i)); return;
@@ -429,7 +434,7 @@ static void exec_0f(Ins *i, Cpu *c) {
     case 0xBE: case 0xBF: { decode_modrm(i); int ssz = op == 0xBE ? 1 : 2; set_reg(i, i->reg, osz, sext(rm_get(i, ssz), ssz) & mask(osz)); return; }
     case 0xBC: case 0xBD: { decode_modrm(i); u64 v = rm_get(i, osz); int bits = osz * 8;
       if (i->rep == 0xF3) { /* tzcnt / lzcnt */ int n; if (!v) n = bits; else if (op == 0xBC) n = __builtin_ctzll(v); else n = __builtin_clzll(v) - (64 - bits);
-        c->rflags &= ~(u64)(F_CF | F_ZF); if (!v) c->rflags |= F_CF; if (!n) c->rflags |= F_ZF; set_reg(i, i->reg, osz, (u64)n); return; }
+        c->rflags &= ~(u64)(F_CF | F_PF | F_AF | F_ZF | F_SF | F_OF); if (!v) c->rflags |= F_CF; if (!n) c->rflags |= F_ZF; set_reg(i, i->reg, osz, (u64)n); return; }   /* OF/SF/PF/AF: undefined, hardware clears them */
       if (!v) { c->rflags |= F_ZF; return; }
       c->rflags &= ~(u64)F_ZF; int n = op == 0xBC ? __builtin_ctzll(v) : 63 - __builtin_clzll(v); set_reg(i, i->reg, osz, (u64)n); return; }
     case 0xB8: { decode_modrm(i); u64 v = rm_get(i, osz); int n = __builtin_popcountll(v); c->rflags &= ~(u64)(F_CF | F_OF | F_SF | F_ZF | F_AF | F_PF); if (!v) c->rflags |= F_ZF; set_reg(i, i->reg, osz, (u64)n); return; }
@@ -486,8 +491,8 @@ static void exec_0f(Ins *i, Cpu *c) {
       else if (i->p66) { xmm_load(i, &s, 16); d->f32[0] = (float)s.f64[0]; d->f32[1] = (float)s.f64[1]; d->q[1] = 0; }
       else { xmm_load(i, &s, 8); d->f64[1] = (double)s.f32[1]; d->f64[0] = (double)s.f32[0]; } return; }
     case 0x5B: { decode_modrm(i); Xmm s, *d = &c->x[i->reg]; xmm_load(i, &s, 16);
-      if (i->p66) for (int k = 0; k < 4; k++) d->d[k] = (u32)f2i32((double)s.f32[k], 1);                 /* cvttps2dq */
-      else if (i->rep == 0xF3) for (int k = 0; k < 4; k++) d->d[k] = (u32)f2i32((double)s.f32[k], 0);     /* cvtps2dq */
+      if (i->p66) for (int k = 0; k < 4; k++) d->d[k] = (u32)f2i32((double)s.f32[k], 0);                 /* 66 0F 5B cvtps2dq (round) */
+      else if (i->rep == 0xF3) for (int k = 0; k < 4; k++) d->d[k] = (u32)f2i32((double)s.f32[k], 1);     /* F3 0F 5B cvttps2dq (truncate) */
       else for (int k = 0; k < 4; k++) d->f32[k] = (float)(s32)s.d[k];                                       /* cvtdq2ps */
       return; }
     case 0xE6: { decode_modrm(i); Xmm s, *d = &c->x[i->reg];
@@ -586,8 +591,10 @@ int cpu_run(Cpu *c, u64 max_insns) {
       continue;
     }
 #ifdef X64_WATCH
-    if (c->rip == X64_WATCH || c->rip == X64_WATCH2) e_log("[watch] rip=%llx tid=%d r12=%llx r13=%llx r14=%llx r15=%llx rbx=%llx\n", (unsigned long long)c->rip, c->w->th[c->w->cur_th].tid, (unsigned long long)c->r[12], (unsigned long long)c->r[13], (unsigned long long)c->r[14], (unsigned long long)c->r[15], (unsigned long long)c->r[3]);
+    if (c->rip == X64_WATCH || c->rip == X64_WATCH2) { e_log("[watch] rip=%llx tid=%d rax=%llx rbx=%llx rsp=%llx rbp=%llx rsi=%llx rdi=%llx r12=%llx r13=%llx r14=%llx r15=%llx\n", (unsigned long long)c->rip, c->w->th[c->w->cur_th].tid, (unsigned long long)c->r[0], (unsigned long long)c->r[3], (unsigned long long)c->r[4], (unsigned long long)c->r[5], (unsigned long long)c->r[6], (unsigned long long)c->r[7], (unsigned long long)c->r[12], (unsigned long long)c->r[13], (unsigned long long)c->r[14], (unsigned long long)c->r[15]);
+      u8 *sp = mem_ptr(c->mem, c->r[4], 64, 0); if (sp) { e_log("        stack:"); for (int k = 0; k < 8; k++) { u64 v; e_memcpy(&v, sp + 8 * k, 8); e_log(" %llx", (unsigned long long)v); } e_log("\n"); } }
 #endif
+    c->hist[c->hist_i++ & 4095] = c->rip;
     Ins in; in.c = c; in.start = c->rip; in.ip = c->rip;
     in.rex = in.rexw = in.rexr = in.rexx = in.rexb = in.p66 = in.p67 = in.rep = in.seg = in.lock = 0; in.modrm = 0; in.ea_valid = 0; in.mod = in.reg = in.rm = 0; in.ea = 0;
     in.code = mem_ptr(c->mem, c->rip, 16, 0);

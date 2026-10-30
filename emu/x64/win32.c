@@ -325,8 +325,13 @@ static void s_RtlNtStatusToDosError(Cpu *c) { u32 st = (u32)ARG(0); u32 e;
     case 0xC0000120: e = 995; break; case 0xC0000103: e = 267; break; case 0xC0000005: e = 998; break; case 0xC0000017: e = 8; break; case 0xC0000023: e = 122; break; case 0xC0000004: e = 24; break; case 0xC00000BB: e = 50; break; case 0xC0000043: e = 32; break; case 0xC0000101: e = 145; break; case 0xC0000033: e = 123; break; case 0xC0000039: e = 161; break;
     default: e = (st & 0xC0000000u) == 0xC0000000u ? 31 : 0; }
   RET(e); }
+static int iocp_rw(Cpu *c, int fd, int write, u64 buf, u32 len, u64 bytes_out, u64 ov);   /* win32_iocp.inc */
+static void iocp_handle_closed(int pid, int fd); static void iocp_kobj_closed(int kobj); static int iocp_has_packets(int kobj);
 #include "win32_fs.inc"
+#include "win32_nt.inc"
 #include "win32_threads.inc"
+#include "win32_iocp.inc"
+#include "win32_node.inc"
 static void s_ret0(Cpu *c); static void s_atexit(Cpu *c); static void s_setjmp(Cpu *c);
 #include "win32_compat.inc"
 #include "seh.inc"
@@ -372,6 +377,41 @@ static void s_SetConsoleCP(Cpu *c) { RET(1); }
 static void s_GetConsoleScreenBufferInfo(Cpu *c) { u64 a = ARG(1); wr16(c, a, 120); wr16(c, a + 2, 40); wr16(c, a + 4, 0); wr16(c, a + 6, 0); wr16(c, a + 8, 7); wr16(c, a + 10, 0); wr16(c, a + 12, 0); wr16(c, a + 14, 119); wr16(c, a + 16, 39); wr16(c, a + 18, 120); wr16(c, a + 20, 40); RET(1); }
 static void s_SetConsoleTextAttribute(Cpu *c) { RET(1); }
 static void s_SetConsoleTitleA(Cpu *c) { RET(1); }
+static void s_SetConsoleTitleW(Cpu *c) { RET(1); }
+static void s_GetConsoleTitleW(Cpu *c) { if (ARG(0) && ARG(1)) wr16(c, ARG(0), 0); RET(0); }
+static void s_GetConsoleTitleA(Cpu *c) { if (ARG(0) && ARG(1)) wr8(c, ARG(0), 0); RET(0); }
+static void s_GetConsoleCursorInfo(Cpu *c) { if (ARG(1)) { wr32(c, ARG(1), 25); wr32(c, ARG(1) + 4, 1); } RET(1); }
+static void s_SetConsoleCursorInfo(Cpu *c) { RET(1); }
+static void s_SetConsoleCursorPosition(Cpu *c) { RET(1); }
+static void s_FillConsoleOutputCharacterW(Cpu *c) { if (ARG(4)) wr32(c, ARG(4), (u32)ARG(2)); RET(1); }
+static void s_FillConsoleOutputCharacterA(Cpu *c) { if (ARG(4)) wr32(c, ARG(4), (u32)ARG(2)); RET(1); }
+static void s_FillConsoleOutputAttribute(Cpu *c) { if (ARG(4)) wr32(c, ARG(4), (u32)ARG(2)); RET(1); }
+static void s_ScrollConsoleScreenBufferW(Cpu *c) { RET(1); }
+static void s_ScrollConsoleScreenBufferA(Cpu *c) { RET(1); }
+static void s_SetConsoleScreenBufferSize(Cpu *c) { RET(1); }
+static void s_SetConsoleWindowInfo(Cpu *c) { RET(1); }
+static void s_WriteConsoleOutputW(Cpu *c) { RET(1); }
+static void s_WriteConsoleOutputA(Cpu *c) { RET(1); }
+static void s_WriteConsoleOutputCharacterW(Cpu *c) { if (ARG(4)) wr32(c, ARG(4), (u32)ARG(2)); RET(1); }
+static void s_WriteConsoleOutputAttribute(Cpu *c) { if (ARG(4)) wr32(c, ARG(4), (u32)ARG(2)); RET(1); }
+static void s_ReadConsoleOutputW(Cpu *c) { RET(1); }
+static void s_ReadConsoleOutputCharacterW(Cpu *c) { if (ARG(4)) wr32(c, ARG(4), 0); RET(1); }
+static void s_ReadConsoleOutputAttribute(Cpu *c) { if (ARG(4)) wr32(c, ARG(4), 0); RET(1); }
+static void s_GetLargestConsoleWindowSize(Cpu *c) { RET((u64)120 | ((u64)40 << 16)); }
+static void s_WriteConsoleInputW(Cpu *c) { if (ARG(3)) wr32(c, ARG(3), (u32)ARG(2)); RET(1); }
+static void s_GetConsoleProcessList(Cpu *c) { if (ARG(0) && ARG(1)) wr32(c, ARG(0), (u32)W->pid); RET(1); }
+static void s_GetConsoleDisplayMode(Cpu *c) { if (ARG(0)) wr32(c, ARG(0), 0); RET(1); }
+static void s_GetConsoleOriginalTitleW(Cpu *c) { if (ARG(0) && ARG(1)) wr16(c, ARG(0), 0); RET(0); }
+static void s_GetConsoleAliasesLengthW(Cpu *c) { RET(0); }
+/* CONSOLE_SCREEN_BUFFER_INFOEX (96 B): cbSize, dwSize, dwCursorPosition, wAttributes, srWindow, dwMaximumWindowSize, wPopupAttributes, bFullscreenSupported, ColorTable[16] */
+static void s_GetConsoleScreenBufferInfoEx(Cpu *c) { u64 a = ARG(1); if (!a) { W->last_error = 87; RET(0); return; } wr32(c, a, 96); c->r[RDX] = a + 4; s_GetConsoleScreenBufferInfo(c); wr16(c, a + 26, 7); wr32(c, a + 28, 0);
+  static const u32 pal[16] = { 0x0c0c0c, 0xda3700, 0x0ea113, 0xdd963a, 0x1f0fc5, 0x981788, 0x009cc1, 0xcccccc, 0x767676, 0xff783b, 0x0cc616, 0xd6d661, 0x5648e7, 0x9e00b4, 0xa5f1f9, 0xf2f2f2 }; for (int i = 0; i < 16; i++) wr32(c, a + 32 + i * 4, pal[i]); RET(1); }
+static void s_SetConsoleScreenBufferInfoEx(Cpu *c) { RET(1); }
+/* CONSOLE_FONT_INFOEX: cbSize, nFont, dwFontSize (COORD), FontFamily, FontWeight, FaceName[32] */
+static void s_GetCurrentConsoleFontEx(Cpu *c) { u64 a = ARG(2); if (!a) { RET(0); return; } wr32(c, a + 4, 0); wr16(c, a + 8, 8); wr16(c, a + 10, 16); wr32(c, a + 12, 54); wr32(c, a + 16, 400); static const char f[] = "Consolas"; for (int i = 0; i <= 8; i++) wr16(c, a + 20 + i * 2, (u8)f[i]); RET(1); }
+static void s_GetCurrentConsoleFont(Cpu *c) { u64 a = ARG(2); if (a) { wr32(c, a, 0); wr16(c, a + 4, 8); wr16(c, a + 6, 16); } RET(1); }
+static void s_SetCurrentConsoleFontEx(Cpu *c) { RET(1); }
+static void s_GetConsoleFontSize(Cpu *c) { RET((u64)8 | ((u64)16 << 16)); }
 static void s_GetConsoleWindow(Cpu *c) { RET(0); }
 static void s_AllocConsole(Cpu *c) { RET(1); }
 static void s_SetConsoleCtrlHandler(Cpu *c) { RET(1); }
@@ -490,6 +530,10 @@ static void s_GetSystemInfo(Cpu *c) { u64 a = ARG(0); u8 *p = mem_ptr(c->mem, a,
 static void s_GetNativeSystemInfo(Cpu *c) { s_GetSystemInfo(c); }
 static void s_GlobalMemoryStatusEx(Cpu *c) { u64 a = ARG(0); wr32(c, a + 4, 30); wr64(c, a + 8, 4ull << 30); wr64(c, a + 16, 3ull << 30); wr64(c, a + 24, 4ull << 30); wr64(c, a + 32, 3ull << 30); wr64(c, a + 40, 8ull << 40); wr64(c, a + 48, 8ull << 40); RET(1); }
 static void s_RtlAddFunctionTable(Cpu *c) { RET(1); }
+static void s_RtlAddGrowableFunctionTable(Cpu *c) { if (ARG(0)) wr64(c, ARG(0), 0x4747); RET(0); }   /* V8 registers JIT unwind data; we never unwind through JIT frames */
+static void s_RtlGrowFunctionTable(Cpu *c) { RET(0); }
+static void s_RtlDeleteGrowableFunctionTable(Cpu *c) { RET(0); }
+static void s_RtlInstallFunctionTableCallback(Cpu *c) { RET(1); }
 static void s_RtlDeleteFunctionTable(Cpu *c) { RET(1); }
 static void s_EncodePointer(Cpu *c) { RET(ARG(0) ^ 0xA5A5A5A5ull); }
 static void s_DecodePointer(Cpu *c) { RET(ARG(0) ^ 0xA5A5A5A5ull); }
@@ -572,11 +616,41 @@ static void s_GlobalLock(Cpu *c) { RET(ARG(0)); }
 static void s_GlobalUnlock(Cpu *c) { RET(1); }
 static void s_LocalAlloc(Cpu *c) { RET(w32_heap_alloc(W, ARG(1), !!(ARG(0) & 0x40))); }
 static void s_LocalFree(Cpu *c) { w32_heap_free(W, ARG(0)); RET(0); }
+/* VirtualAlloc: every reservation is tracked so that (a) MEM_COMMIT inside an earlier reservation succeeds, (b) an address hint
+ * that points into the image / stack / heap FAILS with ERROR_INVALID_ADDRESS like on Windows (V8 probes hints near its embedded
+ * builtins and would otherwise build its code-range bookkeeping on top of node.exe's .text), (c) a hint at a free address is honoured. */
+#define VM_MAX 2048
+static struct { u64 base, size, heap; int released; } g_vm[VM_MAX]; static int g_nvm;
+static int vm_find(u64 a) { int rel = -1; for (int i = 0; i < g_nvm; i++) if (a - g_vm[i].base < g_vm[i].size) { if (!g_vm[i].released) return i; rel = i; } return rel; }
+static int vm_range_free(Mem *m, u64 a, u64 size) { for (int i = 0; i < m->n; i++) { Region *r = &m->r[i]; if (a < r->base + r->size && r->base < a + size) return 0; } return 1; }
+static void vm_recycle(Win32 *w);
+static int vm_add(u64 base, u64 size, u64 heap) { if (g_nvm >= VM_MAX) return -1; g_vm[g_nvm].base = base; g_vm[g_nvm].size = size; g_vm[g_nvm].heap = heap; g_vm[g_nvm].released = 0; return g_nvm++; }
 static void s_VirtualAlloc(Cpu *c) { u64 addr = ARG(0), size = ARG(1);
-  if (addr && mem_ptr(c->mem, addr, 1, 0)) { RET(addr); return; }
-  size = (size + 0xffff) & ~0xffffull; u64 a = w32_heap_alloc(W, size + 0x10000, 1); if (!a) { W->last_error = 8; RET(0); return; } RET((a + 0xffff) & ~0xffffull); }
+  if (addr) {
+    u64 a0 = addr & ~0xfffull, end = (addr + size + 0xfff) & ~0xfffull; int vi = vm_find(a0);
+    if (vi >= 0 && !g_vm[vi].released) { if (end <= g_vm[vi].base + g_vm[vi].size) { RET(a0); return; } W->last_error = 487; RET(0); return; }
+    if (vi >= 0) {   /* inside a RELEASED reservation: V8 re-reserves an aligned sub-range of a block it just freed — hand that sub-range out again */
+      if (end <= g_vm[vi].base + g_vm[vi].size && vm_add(a0, end - a0, 0) >= 0) { u8 *p = mem_ptr(c->mem, a0, end - a0, 1); if (p) e_memset(p, 0, (size_t)(end - a0)); RET(a0); return; }
+      W->last_error = 487; RET(0); return; }
+    if (mem_ptr(c->mem, a0, 1, 0)) { W->last_error = 487; RET(0); return; }   /* image / stack / heap / DLL: not available (Windows: ERROR_INVALID_ADDRESS) */
+    u64 a64 = addr & ~0xffffull, len = (end - a64 + 0xffff) & ~0xffffull;
+    if (c->mem->n < MAX_REGIONS - 4 && vm_range_free(c->mem, a64, len) && vm_add(a64, len, 0) >= 0 && mem_map(c->mem, a64, len, "vm")) { RET(a64); return; }
+    W->last_error = 487; RET(0); return;
+  }
+  vm_recycle(W);
+  size = (size + 0xffff) & ~0xffffull; u64 a = w32_heap_alloc(W, size + 0x10000, 1); if (!a) { W->last_error = 8; RET(0); return; }
+  u64 r = (a + 0xffff) & ~0xffffull; vm_add(r, size, a);
+  RET(r); }
 static void s_VirtualAllocEx(Cpu *c) { c->r[RCX] = ARG(1); c->r[RDX] = ARG(2); s_VirtualAlloc(c); }
-static void s_VirtualFree(Cpu *c) { RET(1); }
+static void vm_recycle(Win32 *w) {   /* free released heap-backed reservations that no active reservation overlaps (deferred, so a hint can re-reserve a just-freed range) */
+  for (int i = 0; i < g_nvm; i++) { if (!g_vm[i].released || !g_vm[i].heap) continue; int busy = 0;
+    for (int j = 0; j < g_nvm; j++) if (j != i && !g_vm[j].released && g_vm[j].base < g_vm[i].base + g_vm[i].size && g_vm[i].base < g_vm[j].base + g_vm[j].size) { busy = 1; break; }
+    if (busy) continue;
+    u64 b = g_vm[i].base, e = b + g_vm[i].size; w32_heap_free(w, g_vm[i].heap); g_vm[i] = g_vm[--g_nvm]; i = -1;   /* restart: drop released sub-entries inside it too */
+    for (int j = 0; j < g_nvm; j++) if (g_vm[j].released && !g_vm[j].heap && g_vm[j].base >= b && g_vm[j].base < e) { g_vm[j] = g_vm[--g_nvm]; j--; } } }
+static void s_VirtualFree(Cpu *c) { u64 addr = ARG(0); u32 type = (u32)ARG(2);
+  if (type == 0x8000) { int vi = vm_find(addr); if (vi >= 0 && !g_vm[vi].released && g_vm[vi].base == addr) g_vm[vi].released = 1; }   /* MEM_RELEASE */
+  RET(1); }
 static void s_VirtualProtect(Cpu *c) { if (ARG(3)) wr32(c, ARG(3), 0x40); RET(1); }
 static void s_VirtualLock(Cpu *c) { RET(1); }
 static void s_VirtualUnlock(Cpu *c) { RET(1); }
@@ -666,7 +740,6 @@ static void s_GetLogicalDrives(Cpu *c) { RET(4); }
 static void s_GetDiskFreeSpaceExA(Cpu *c) { RET(0); }
 static void s_SetHandleCount(Cpu *c) { RET(ARG(0)); }
 static void s_GetOverlappedResult(Cpu *c) { RET(0); }
-static void s_CreateIoCompletionPort(Cpu *c) { RET(0); }
 static void s_Beep(Cpu *c) { RET(1); }
 static void s_DebugBreak(Cpu *c) { c->status = RUN_BREAK; }
 static void s_K32GetProcessMemoryInfo(Cpu *c) { RET(0); }
@@ -711,6 +784,31 @@ static void s_LocalFileTimeToFileTime(Cpu *c) { wr64(c, ARG(1), rd64(c, ARG(0)))
 static void s_GlobalMemoryStatus(Cpu *c) { u64 a = ARG(0); wr32(c, a + 4, 30); wr64(c, a + 8, 4ull << 30); wr64(c, a + 16, 3ull << 30); wr64(c, a + 24, 4ull << 30); wr64(c, a + 32, 3ull << 30); wr64(c, a + 40, 8ull << 40); wr64(c, a + 48, 8ull << 40); }
 static void s_ret0(Cpu *c) { RET(0); }
 static void s_ret1(Cpu *c) { RET(1); }
+static void s_ret2(Cpu *c) { RET(2); }                  /* ERROR_FILE_NOT_FOUND for Reg* */
+static void s_ret50(Cpu *c) { RET(50); }                /* ERROR_NOT_SUPPORTED */
+static void s_ret_eunavail(Cpu *c) { W->last_error = 1168; RET(0); }   /* ERROR_NOT_FOUND */
+/* node.exe / libuv extras: ETW tracing, event log, SIDs/ACLs for named pipes, window station queries, IP helper */
+static void s_EventRegister(Cpu *c) { if (ARG(3)) wr64(c, ARG(3), 0x1234); RET(0); }
+static void s_GetProcessWindowStation(Cpu *c) { RET(0x5c); }
+/* GetUserObjectInformationW(h, index, buf, len, &needed): UOI_FLAGS 1 → USEROBJECTFLAGS { fInherit, fReserved, dwFlags = WSF_VISIBLE 1 } 12 B; UOI_NAME 2 */
+static void s_GetUserObjectInformationW(Cpu *c) { u32 idx = (u32)ARG(1); u64 b = ARG(2); u32 len = (u32)ARG(3);
+  if (idx == 1) { if (ARG(4)) wr32(c, ARG(4), 12); if (len < 12) { W->last_error = 122; RET(0); return; } wr32(c, b, 0); wr32(c, b + 4, 0); wr32(c, b + 8, 1); RET(1); return; }
+  if (idx == 2) { static const char n[] = "WinSta0"; if (ARG(4)) wr32(c, ARG(4), 16); if (len < 16) { W->last_error = 122; RET(0); return; } for (int i = 0; i <= 7; i++) wr16(c, b + i * 2, (u8)n[i]); RET(1); return; }
+  W->last_error = 87; RET(0); }
+static void s_AllocateAndInitializeSid(Cpu *c) { u64 sid = w32_heap_alloc(W, 68, 1); if (!sid) { RET(0); return; } wr8(c, sid, 1); wr8(c, sid + 1, (u8)ARG(1)); u8 *p = mem_ptr(c->mem, sid + 2, 6, 1); const u8 *ia = mem_ptr(c->mem, ARG(0), 6, 0); if (p && ia) e_memcpy(p, ia, 6); for (u32 i = 0; i < (ARG(1) & 0xff) && i < 8; i++) wr32(c, sid + 8 + i * 4, (u32)ARG(2 + i)); if (ARG(10)) wr64(c, ARG(10), sid); RET(1); }
+static void s_FreeSid(Cpu *c) { w32_heap_free(W, ARG(0)); RET(0); }
+static void s_SetEntriesInAclA(Cpu *c) { if (ARG(3)) wr64(c, ARG(3), w32_heap_alloc(W, 64, 1)); RET(0); }
+static void s_SetEntriesInAclW(Cpu *c) { s_SetEntriesInAclA(c); }
+static void s_RegQueryInfoKeyW(Cpu *c) { for (int i = 2; i <= 10; i++) if (ARG(i)) wr32(c, ARG(i), 0); RET(0); }
+static void s_RegGetValueW(Cpu *c) { if (ARG(5)) wr32(c, ARG(5), 0); RET(2); }
+static void s_GetAddrInfoW(Cpu *c) { RET(11001); }   /* WSAHOST_NOT_FOUND */
+static void s_GetNameInfoW(Cpu *c) { RET(11001); }
+static void s_WSAGetOverlappedResult(Cpu *c) { W->last_error = 10038; RET(0); }
+static void s_WSARecvFrom(Cpu *c) { W->last_error = 10038; RET(~0ull); }
+static void s_WSASendTo(Cpu *c) { W->last_error = 10038; RET(~0ull); }
+static void s_GetAdaptersAddresses(Cpu *c) { if (ARG(4)) wr32(c, ARG(4), 0); RET(232); }   /* ERROR_NO_DATA: no interfaces */
+static void s_GetUnicastIpAddressTable(Cpu *c) { RET(50); }
+static void s_MapVirtualKeyW(Cpu *c) { RET(0); }
 static void s_retm1(Cpu *c) { RET(~0ull); }
 static void s_initterm(Cpu *c) { cont_push(c, CONT_INITTERM); Win32 *w = W; w->cont[w->ncont - 1].data[0] = ARG(0); w->cont[w->ncont - 1].data[1] = ARG(1); w->cont[w->ncont - 1].data[2] = 0; c->r[RAX] = 0; w32_cont_resume(c); }
 static void s_initterm_e(Cpu *c) { cont_push(c, CONT_INITTERM); Win32 *w = W; w->cont[w->ncont - 1].data[0] = ARG(0); w->cont[w->ncont - 1].data[1] = ARG(1); w->cont[w->ncont - 1].data[2] = 1; c->r[RAX] = 0; w32_cont_resume(c); }
@@ -1006,22 +1104,32 @@ static const ShimDef shims[] = {
   CXX_SHIMS
   THREAD_SHIMS
   FS_SHIMS
+  NT_SHIMS
+  IOCP_SHIMS
   S(GetLastError), S(SetLastError), S(GetCurrentProcess), S(GetCurrentProcessId), S(ExitProcess), S(TerminateProcess),
   S(GetTickCount), S(GetTickCount64), S(QueryPerformanceCounter), S(QueryPerformanceFrequency), S(GetSystemTimeAsFileTime), S(GetSystemTimePreciseAsFileTime), S(GetSystemTime), S(GetLocalTime), S(Sleep), S(SleepEx),
-  S(GetStdHandle), S(WriteFile), S(WriteConsoleA), S(WriteConsoleW), S(ReadFile), S(ReadConsoleA), S(GetConsoleMode), S(SetConsoleMode), S(GetConsoleOutputCP), S(GetConsoleCP), S(SetConsoleOutputCP), S(SetConsoleCP), S(GetConsoleScreenBufferInfo), S(SetConsoleTextAttribute), S(SetConsoleTitleA), S(GetConsoleWindow), S(AllocConsole), S(SetConsoleCtrlHandler), S(FlushFileBuffers), S(GetFileType), S(CloseHandle),
+  S(GetStdHandle), S(WriteFile), S(WriteConsoleA), S(WriteConsoleW), S(ReadFile), S(ReadConsoleA), S(GetConsoleMode), S(SetConsoleMode), S(GetConsoleOutputCP), S(GetConsoleCP), S(SetConsoleOutputCP), S(SetConsoleCP), S(GetConsoleScreenBufferInfo), S(SetConsoleTextAttribute), S(SetConsoleTitleA), S(SetConsoleTitleW), S(GetConsoleTitleW), S(GetConsoleTitleA), S(GetConsoleCursorInfo), S(SetConsoleCursorInfo), S(SetConsoleCursorPosition), S(FillConsoleOutputCharacterW), S(FillConsoleOutputCharacterA), S(FillConsoleOutputAttribute), S(ScrollConsoleScreenBufferW), S(ScrollConsoleScreenBufferA), S(SetConsoleScreenBufferSize), S(SetConsoleWindowInfo), S(WriteConsoleOutputW), S(WriteConsoleOutputA), S(WriteConsoleOutputCharacterW), S(WriteConsoleOutputAttribute), S(ReadConsoleOutputW), S(ReadConsoleOutputCharacterW), S(ReadConsoleOutputAttribute), S(GetLargestConsoleWindowSize), S(WriteConsoleInputW), S(GetConsoleProcessList), S(GetConsoleDisplayMode), S(GetConsoleOriginalTitleW), S(GetConsoleAliasesLengthW), S(GetConsoleScreenBufferInfoEx), S(SetConsoleScreenBufferInfoEx), S(GetCurrentConsoleFontEx), S(GetCurrentConsoleFont), S(SetCurrentConsoleFontEx), S(GetConsoleFontSize), S(GetConsoleWindow), S(AllocConsole), S(SetConsoleCtrlHandler), S(FlushFileBuffers), S(GetFileType), S(CloseHandle),
   S(CreateFileA), S(CreateFileW), S(GetFileAttributesA), S(GetFileAttributesW), S(GetFileAttributesExW), S(FindFirstFileA), S(FindFirstFileW), S(FindClose), S(DeleteFileA), S(GetFullPathNameA), S(GetFinalPathNameByHandleA), S(GetLongPathNameW), S(GetLongPathNameA), S(GetShortPathNameW), S(GetVolumePathNameW), S(PathCchSkipRoot), S(PathCchCombineEx), S(PathCchCanonicalizeEx), S(CreateWaitableTimerW), S(CreateWaitableTimerA), S(CreateWaitableTimerExW), S(CreateWaitableTimerExA), S(SetWaitableTimer), S(SetWaitableTimerEx), S(CancelWaitableTimer), S(NtReadFile), S(NtWriteFile), S(GetFinalPathNameByHandleW), S(GetCurrentDirectoryA), S(GetCurrentDirectoryW), S(GetTempPathA), S(SetFilePointer), S(GetFileSize),
   S(GetCommandLineA), S(GetCommandLineW), S(GetEnvironmentStrings), S(GetEnvironmentStringsW), S(FreeEnvironmentStringsW), S(FreeEnvironmentStringsA), S(GetEnvironmentVariableA), S(GetEnvironmentVariableW), S(SetEnvironmentVariableA), S(ExpandEnvironmentStringsA), S(GetStartupInfoA), S(GetStartupInfoW),
   S(GetModuleHandleA), S(GetModuleHandleW), S(GetModuleHandleExW), S(GetModuleHandleExA), S(LoadLibraryA), S(LoadLibraryW), S(LoadLibraryExA), S(LoadLibraryExW), S(FreeLibrary), S(GetProcAddress), S(GetModuleFileNameA), S(GetModuleFileNameW), S(GetSystemDirectoryA), S(GetWindowsDirectoryA),
   S(GetVersion), S(GetVersionExA), S(GetVersionExW), S(IsProcessorFeaturePresent), S(IsDebuggerPresent), S(IsDBCSLeadByte), S(IsDBCSLeadByteEx), S(GetACP), S(GetOEMCP), S(GetCPInfo), S(GetSystemInfo), S(GetNativeSystemInfo), S(GlobalMemoryStatusEx),
-  S(RtlAddFunctionTable), S(RtlDeleteFunctionTable), S(EncodePointer), S(DecodePointer),
+  NODE_SHIMS,
+  S(RtlAddFunctionTable), S(RtlAddGrowableFunctionTable), S(RtlGrowFunctionTable), S(RtlDeleteGrowableFunctionTable), S(RtlInstallFunctionTableCallback), S(RtlDeleteFunctionTable), S(EncodePointer), S(DecodePointer),
   S(OutputDebugStringA), S(OutputDebugStringW), S(FormatMessageA), S(FormatMessageW), S(SetErrorMode), S(GetErrorMode), S(SetThreadErrorMode), S(GetLogicalProcessorInformation), S(GetProcessAffinityMask), S(SetThreadAffinityMask), S(SetProcessAffinityMask), S(GetSystemTimeAdjustment), S(SetSystemTime), S(GetThreadPriority), S(SetThreadPriority), S(SetPriorityClass), S(GetPriorityClass), S(GetThreadTimes),
   S(GetProcessHeap), S(HeapCreate), S(HeapDestroy), S(HeapAlloc), S(HeapFree), S(HeapReAlloc), S(HeapSize), S(HeapValidate), S(HeapSetInformation), S(HeapQueryInformation), S(HeapCompact), S(HeapLock), S(HeapUnlock), S(HeapWalk), S(GlobalAlloc), S(GlobalFree), S(GlobalLock), S(GlobalUnlock), S(LocalAlloc), S(LocalFree),
   S(VirtualAlloc), S(VirtualAllocEx), S(VirtualFree), S(VirtualProtect), S(VirtualLock), S(VirtualUnlock), S(VirtualQuery), S(FlushInstructionCache),
   S(CreateTimerQueue),
+  S(EventRegister), SA("EventUnregister", ret0), SA("EventSetInformation", ret0), SA("EventWriteTransfer", ret0), SA("EventWrite", ret0), SA("EventEnabled", ret0), SA("EventActivityIdControl", ret0),
+  SA("RegisterEventSourceW", ret1), SA("RegisterEventSourceA", ret1), SA("DeregisterEventSource", ret1), SA("ReportEventW", ret1), SA("ReportEventA", ret1),
+  S(GetProcessWindowStation), S(GetUserObjectInformationW), SA("GetUserObjectInformationA", GetUserObjectInformationW), S(MapVirtualKeyW),
+  S(AllocateAndInitializeSid), S(FreeSid), S(SetEntriesInAclA), S(SetEntriesInAclW), SA("SetSecurityInfo", ret0), SA("SetNamedSecurityInfoW", ret0), SA("GetSecurityInfo", ret50), SA("ConvertStringSecurityDescriptorToSecurityDescriptorW", ret0), SA("ConvertStringSecurityDescriptorToSecurityDescriptorA", ret0),
+  SA("RegEnumKeyExA", ret2), SA("RegEnumKeyExW", ret2), SA("RegEnumValueW", ret2), SA("RegEnumValueA", ret2), S(RegGetValueW), SA("RegGetValueA", RegGetValueW), SA("RegNotifyChangeKeyValue", ret0), S(RegQueryInfoKeyW), SA("RegQueryInfoKeyA", RegQueryInfoKeyW), SA("RegDeleteKeyW", ret2), SA("RegDeleteValueW", ret2), SA("RegFlushKey", ret0),
+  S(GetAddrInfoW), SA("FreeAddrInfoW", ret0), S(GetNameInfoW), S(WSAGetOverlappedResult), S(WSARecvFrom), S(WSASendTo),
+  S(GetAdaptersAddresses), S(GetUnicastIpAddressTable), SA("FreeMibTable", ret0), SA("CancelMibChangeNotify2", ret0), SA("NotifyIpInterfaceChange", ret50), SA("ConvertInterfaceIndexToLuid", ret50), SA("ConvertInterfaceLuidToNameW", ret50), SA("ConvertInterfaceLuidToIndex", ret50), SA("GetBestInterfaceEx", ret50), SA("GetIfEntry2", ret50), SA("GetIpForwardTable2", ret50), SA("GetAdaptersInfo", ret50), SA("GetNetworkParams", ret50), SA("NotifyAddrChange", ret50), SA("NotifyRouteChange", ret50), SA("GetPerAdapterInfo", ret50), SA("if_nametoindex", ret0), SA("if_indextoname", ret0), SA("ConvertInterfaceLuidToGuid", ret50), SA("ConvertInterfaceGuidToLuid", ret50),
   S(GetThreadLocale), S(GetUserDefaultLCID), S(GetUserDefaultLangID), S(GetSystemDefaultLangID), S(GetUserDefaultUILanguage), S(GetLocaleInfoA), S(GetLocaleInfoW), S(GetLocaleInfoEx), S(IsValidLocale), S(IsValidCodePage), S(EnumSystemLocalesW), S(GetUserDefaultLocaleName), S(LCMapStringW), S(LCMapStringEx), S(LCMapStringA), S(CompareStringW), S(CompareStringA), S(CompareStringEx), S(CompareStringOrdinal), S(GetStringTypeW), S(GetStringTypeA), S(MultiByteToWideChar), S(WideCharToMultiByte), S(CharUpperA),
   S(lstrlenA), S(lstrlenW), S(lstrcpyA), S(lstrcmpiA), S(lstrcmpA), S(InterlockedCompareExchange), S(InterlockedExchange), S(InterlockedIncrement), S(InterlockedDecrement), S(InterlockedExchangeAdd), S(QueueUserAPC),
   S(CreateNamedPipeW), S(CreateNamedPipeA), S(ConnectNamedPipe), S(ReadFileEx), S(WriteFileEx), S(RtlNtStatusToDosError), SA("CancelIo", ret1), SA("CancelIoEx", ret1),
-  S(GetTimeZoneInformation), S(FileTimeToSystemTime), S(SystemTimeToFileTime), S(FileTimeToLocalFileTime), S(GetDateFormatA), S(GetTimeFormatA), S(SystemFunction036), SA("ProcessPrng", SystemFunction036), SA("BCryptGenRandom", BCryptGenRandom), S(GetComputerNameA), S(GetUserNameA), S(GetDriveTypeA), S(GetLogicalDrives), S(GetDiskFreeSpaceExA), S(SetHandleCount), S(GetHandleInformation), S(SetHandleInformation), S(DuplicateHandle), S(CreatePipe), S(PeekNamedPipe), S(GetOverlappedResult), S(CreateIoCompletionPort), S(Beep), S(DebugBreak), S(GetProcessId), S(K32GetProcessMemoryInfo),
+  S(GetTimeZoneInformation), S(FileTimeToSystemTime), S(SystemTimeToFileTime), S(FileTimeToLocalFileTime), S(GetDateFormatA), S(GetTimeFormatA), S(SystemFunction036), SA("ProcessPrng", SystemFunction036), SA("BCryptGenRandom", BCryptGenRandom), S(GetComputerNameA), S(GetUserNameA), S(GetDriveTypeA), S(GetLogicalDrives), S(GetDiskFreeSpaceExA), S(SetHandleCount), S(GetHandleInformation), S(SetHandleInformation), S(DuplicateHandle), S(CreatePipe), S(PeekNamedPipe), S(GetOverlappedResult), S(Beep), S(DebugBreak), S(GetProcessId), S(K32GetProcessMemoryInfo),
   /* file system stubs — no VFS yet: everything "does not exist" */
   SA("GetFileAttributesExA", GetFileAttributesA), SA("GetFileAttributesExW", GetFileAttributesA), SA("FindFirstFileExA", FindFirstFileA), SA("FindFirstFileExW", FindFirstFileA), SA("FindNextFileA", ret0), SA("FindNextFileW", ret0), SA("FindClose", ret1),
   SA("DeleteFileA", ret0), SA("DeleteFileW", ret0), SA("RemoveDirectoryA", ret0), SA("RemoveDirectoryW", ret0), SA("CreateDirectoryA", ret0), SA("CreateDirectoryW", ret0), SA("MoveFileA", ret0), SA("MoveFileW", ret0), SA("MoveFileExA", ret0), SA("MoveFileExW", ret0), SA("CopyFileA", ret0), SA("CopyFileW", ret0),

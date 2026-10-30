@@ -3,14 +3,27 @@
  * rooted at C:\ with the process cwd C:\nebula.  Also provides CRT-style fds (0,1,2 = console, 3.. = files). */
 #include "emu.h"
 
-#define VFS_MAX_NODES 1024
+#define VFS_NODES_INIT 2048        /* the node table and its hash index grow by doubling (npm trees have tens of thousands of files) */
 #define VFS_MAX_OPEN  128
 #define VFS_MAX_FIND  32
 #define VFS_PATH      512
 
 typedef struct { char path[VFS_PATH]; u8 *data; u64 size, cap; int is_dir; int written; int used; } VNode;
 
-static VNode g_nodes[VFS_MAX_NODES];
+static VNode *g_nodes; static int g_ncap;            /* dynamic node table */
+static int *g_hash; static int g_hcap;                /* open-addressing index: 0 empty, -1 tombstone, else node index + 1 */
+static int lc(int c) { return c >= 'A' && c <= 'Z' ? c + 32 : c; }
+static u32 path_hash(const char *p) { u32 h = 2166136261u; for (; *p; p++) h = (h ^ (u32)lc((u8)*p)) * 16777619u; return h; }
+static int path_eq(const char *a, const char *b) { while (*a && lc(*a) == lc(*b)) { a++; b++; } return lc(*a) == lc(*b); }
+static void hash_insert(int i) { u32 m = (u32)g_hcap - 1, h = path_hash(g_nodes[i].path) & m; int first_tomb = -1;
+  for (;;) { int v = g_hash[h]; if (v == 0) { g_hash[first_tomb >= 0 ? first_tomb : (int)h] = i + 1; return; } if (v == -1 && first_tomb < 0) first_tomb = (int)h; h = (h + 1) & m; } }
+static void hash_remove(int i) { u32 m = (u32)g_hcap - 1, h = path_hash(g_nodes[i].path) & m; for (;;) { int v = g_hash[h]; if (v == 0) return; if (v == i + 1) { g_hash[h] = -1; return; } h = (h + 1) & m; } }
+static int hash_lookup(const char *norm) { if (!g_hcap) return -1; u32 m = (u32)g_hcap - 1, h = path_hash(norm) & m; for (;;) { int v = g_hash[h]; if (v == 0) return -1; if (v > 0 && g_nodes[v - 1].used && path_eq(g_nodes[v - 1].path, norm)) return v - 1; h = (h + 1) & m; } }
+static void nodes_grow(void) {
+  int nc = g_ncap ? g_ncap * 2 : VFS_NODES_INIT; VNode *nn = emu_alloc(sizeof(VNode) * (size_t)nc); if (!nn) return;
+  if (g_ncap) e_memcpy(nn, g_nodes, sizeof(VNode) * (size_t)g_ncap); g_nodes = nn; g_ncap = nc;
+  g_hcap = nc * 4; g_hash = emu_alloc(sizeof(int) * (size_t)g_hcap); for (int i = 0; i < g_ncap; i++) if (g_nodes[i].used) hash_insert(i); }
+static void node_free(int i) { if (i >= 0 && i < g_ncap && g_nodes[i].used) { hash_remove(i); g_nodes[i].used = 0; } }
 /* per-process state (fd table, cwd, redirections, find handles, environment) lives in a ProcFs; the scheduler
  * points vfs_P at the running process.  Files, pipes and mappings are kernel objects shared by all processes. */
 static ProcFs g_root_fs = { .cwd = "C:\\nebula", .redir = { -1, -1, -1 } };
@@ -22,9 +35,6 @@ void vfs_use(ProcFs *p) { vfs_P = p ? p : &g_root_fs; }
 ProcFs *vfs_root_fs(void) { return &g_root_fs; }
 /* stdin */
 static u8 *g_in; static u64 g_in_len, g_in_cap, g_in_pos; static int g_in_eof, g_in_wait;
-
-static int lc(int c) { return c >= 'A' && c <= 'Z' ? c + 32 : c; }
-static int path_eq(const char *a, const char *b) { while (*a && lc(*a) == lc(*b)) { a++; b++; } return lc(*a) == lc(*b); }
 
 const char *vfs_cwd(void) { return g_cwd; }
 
@@ -56,12 +66,15 @@ void vfs_normalize(const char *in, char *out, size_t cap) {
 
 int vfs_find_node(const char *path) {
   char n[VFS_PATH]; vfs_normalize(path, n, sizeof n);
-  for (int i = 0; i < VFS_MAX_NODES; i++) if (g_nodes[i].used && path_eq(g_nodes[i].path, n)) return i;
+  { int i = hash_lookup(n); if (i >= 0) return i; }
   if (!e_stricmp(n, "C:\\") || path_eq(n, g_cwd)) return -2;   /* implicit directories */
   return -1;
 }
 static int node_alloc(const char *norm) {
-  for (int i = 0; i < VFS_MAX_NODES; i++) if (!g_nodes[i].used) { e_memset(&g_nodes[i], 0, sizeof g_nodes[i]); g_nodes[i].used = 1; e_snprintf(g_nodes[i].path, VFS_PATH, "%s", norm); return i; }
+  static int next_free = 0; if (!g_ncap) nodes_grow();
+  for (int pass = 0; pass < 2; pass++) {
+    for (int k = 0; k < g_ncap; k++) { int i = (next_free + k) % g_ncap; if (!g_nodes[i].used) { e_memset(&g_nodes[i], 0, sizeof g_nodes[i]); g_nodes[i].used = 1; e_snprintf(g_nodes[i].path, VFS_PATH, "%s", norm); hash_insert(i); next_free = i + 1; return i; } }
+    int old = g_ncap; nodes_grow(); if (g_ncap == old) break; next_free = old; }
   return -1;
 }
 static void ensure_parents(const char *norm) {
@@ -91,13 +104,15 @@ int vfs_mkdir(const char *path) {
   if (vfs_find_node(norm) != -1) return 0;
   int i = node_alloc(norm); if (i < 0) return 0; g_nodes[i].is_dir = 1; ensure_parents(norm); return 1;
 }
-int vfs_remove(const char *path) { int i = vfs_find_node(path); if (i < 0) return 0; if (g_nodes[i].is_dir) { for (int k = 0; k < VFS_MAX_NODES; k++) if (g_nodes[k].used && k != i && !e_strncmp(g_nodes[k].path, g_nodes[i].path, e_strlen(g_nodes[i].path)) && g_nodes[k].path[e_strlen(g_nodes[i].path)] == '\\') return 0; } g_nodes[i].used = 0; return 1; }
-int vfs_rename(const char *from, const char *to) { int i = vfs_find_node(from); if (i < 0) return 0; char norm[VFS_PATH]; vfs_normalize(to, norm, sizeof norm); int j = vfs_find_node(norm); if (j >= 0) g_nodes[j].used = 0; e_snprintf(g_nodes[i].path, VFS_PATH, "%s", norm); ensure_parents(norm); return 1; }
+int vfs_remove(const char *path) { int i = vfs_find_node(path); if (i < 0) return 0; if (g_nodes[i].is_dir) { for (int k = 0; k < g_ncap; k++) if (g_nodes[k].used && k != i && !e_strncmp(g_nodes[k].path, g_nodes[i].path, e_strlen(g_nodes[i].path)) && g_nodes[k].path[e_strlen(g_nodes[i].path)] == '\\') return 0; } node_free(i); return 1; }
+int vfs_rename(const char *from, const char *to) { int i = vfs_find_node(from); if (i < 0) return 0; char from_norm[VFS_PATH]; e_snprintf(from_norm, sizeof from_norm, "%s", g_nodes[i].path); char norm[VFS_PATH]; vfs_normalize(to, norm, sizeof norm); int j = vfs_find_node(norm); if (j == i) return 1; if (j >= 0) { if (g_nodes[j].is_dir != g_nodes[i].is_dir) return 0; node_free(j); } hash_remove(i); e_snprintf(g_nodes[i].path, VFS_PATH, "%s", norm); hash_insert(i); ensure_parents(norm);
+  if (g_nodes[i].is_dir) {   /* move the subtree */ size_t fl = e_strlen(from_norm); for (int k = 0; k < g_ncap; k++) if (g_nodes[k].used && k != i && !e_strncmp(g_nodes[k].path, from_norm, fl) && g_nodes[k].path[fl] == '\\') { char np[VFS_PATH]; e_snprintf(np, sizeof np, "%s%s", norm, g_nodes[k].path + fl); hash_remove(k); e_snprintf(g_nodes[k].path, VFS_PATH, "%s", np); hash_insert(k); } }
+  return 1; }
 int vfs_chdir(const char *path) { char norm[VFS_PATH]; vfs_normalize(path, norm, sizeof norm); int i = vfs_find_node(norm); if (i == -1 || (i >= 0 && !g_nodes[i].is_dir)) return 0; e_snprintf(g_cwd, sizeof g_cwd, "%s", norm); return 1; }
 /* stat: returns 0 missing, 1 file, 2 dir */
 int vfs_stat(const char *path, u64 *size) { if (vfs_is_null_dev(path)) { if (size) *size = 0; return 3; } int i = vfs_find_node(path); if (i == -1) return 0; if (i == -2) { if (size) *size = 0; return 2; } if (size) *size = g_nodes[i].size; return g_nodes[i].is_dir ? 2 : 1; }
-const VNodeInfo *vfs_node_info(int i, VNodeInfo *out) { if (i < 0 || i >= VFS_MAX_NODES || !g_nodes[i].used) return 0; out->path = g_nodes[i].path; out->data = g_nodes[i].data; out->size = g_nodes[i].size; out->is_dir = g_nodes[i].is_dir; out->written = g_nodes[i].written; return out; }
-int vfs_node_count(void) { return VFS_MAX_NODES; }
+const VNodeInfo *vfs_node_info(int i, VNodeInfo *out) { if (i < 0 || i >= g_ncap || !g_nodes[i].used) return 0; out->path = g_nodes[i].path; out->data = g_nodes[i].data; out->size = g_nodes[i].size; out->is_dir = g_nodes[i].is_dir; out->written = g_nodes[i].written; return out; }
+int vfs_node_count(void) { return g_ncap; }
 
 /* ---------- kernel objects: pipes and anonymous mappings ---------- */
 #define PIPE_MAX 32
@@ -320,7 +335,7 @@ int vfs_find_first(const char *pattern) {
 int vfs_find_next(int h, char *name, size_t cap, u64 *size, int *is_dir) {
   if (h < 0 || h >= VFS_MAX_FIND || !g_find[h].used) return 0; VFind *f = &g_find[h];
   if (f->dots > 0) { e_snprintf(name, cap, f->dots == 2 ? "." : ".."); *size = 0; *is_dir = 1; f->dots--; return 1; }
-  for (; f->cursor < VFS_MAX_NODES; f->cursor++) {
+  for (; f->cursor < g_ncap; f->cursor++) {
     VNode *v = &g_nodes[f->cursor]; if (!v->used || !in_dir(v->path, f->dir)) continue;
     const char *b = basename_of(v->path); if (!glob_match(f->pat, b)) continue;
     e_snprintf(name, cap, "%s", b); *size = v->size; *is_dir = v->is_dir; f->cursor++; return 1;

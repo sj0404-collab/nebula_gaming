@@ -26,7 +26,7 @@ void   host_exit(int code);                                /* guest called ExitP
 double host_math(int op, double a, double b);              /* 0 sin 1 cos 2 tan 3 exp 4 log 5 pow 6 atan2 7 asin 8 acos 9 atan 10 sinh 11 cosh 12 tanh 13 log10 14 log2 15 cbrt */
 
 /* ---------- guest memory ---------- */
-#define MAX_REGIONS 32
+#define MAX_REGIONS 128
 typedef struct { u64 base, size; u8 *host; const char *name; u32 prot; } Region;
 
 typedef struct {
@@ -78,6 +78,7 @@ struct Cpu {
   int  exit_code;
   char err[256];
   u64  err_rip;
+  u64  hist[4096]; u32 hist_i;             /* ring of the last executed instruction addresses (fault diagnostics) */
   u32  exc_code; u64 exc_addr; u64 exc_info;   /* hardware exception behind the last fault (0 = not dispatchable) */
   Mem *mem;
   Win32 *w;
@@ -152,7 +153,7 @@ int  vfs_pipe(int *rfd, int *wfd); int vfs_pipe_avail(int fd); int vfs_pipe_id(i
 int  vfs_map_create(int file_fd, u64 size); u8 *vfs_map_data(int fd, u64 *size); int vfs_map_write_back(int fd, const u8 *src, u64 n);
 int  vfs_proc_handle(int pid); int vfs_fd_pid(int fd);
 /* ---- kernel objects (vfs.c): global, refcounted, referenced from fd tables as FD_KOBJ so inheritance/dup/close are uniform ---- */
-enum { KO_EVENT = 1, KO_MUTEX, KO_SEM, KO_THREAD, KO_TIMER };
+enum { KO_EVENT = 1, KO_MUTEX, KO_SEM, KO_THREAD, KO_TIMER, KO_IOCP };
 #define KOBJ_MAX 512
 typedef struct {
   int used, kind, refs; char name[64];
@@ -258,6 +259,8 @@ int    w32_heap_free(Win32 *w, u64 addr);
 u64    w32_heap_size(Win32 *w, u64 addr);
 u64    w32_guest_strdup(Win32 *w, const char *s);
 void   w32_report(Win32 *w, const char *fmt, ...);
+void   w32_io_poll(void);                                          /* finish parked overlapped pipe I/O (IOCP); scheduler calls it before every pick */
+void   w32_io_drop(Win32 *w);                                      /* process exit: forget its IOCP associations and parked operations */
 void   w32_tick(Win32 *w);                                         /* called by host once per frame: input + timers */
 void   w32_key(Win32 *w, int vk, int down);
 void   w32_mouse(Win32 *w, int x, int y, int event);                 /* event: 0 move, 1 ldown, 2 lup, 3 rdown, 4 rup */

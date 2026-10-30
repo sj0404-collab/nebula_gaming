@@ -36,6 +36,7 @@ static int obj_signaled(int pid, int tid, int kind, int idx, int consume) {
     case KO_EVENT: if (!k->signaled) return 0; if (consume && !k->manual) k->signaled = 0; return 1;
     case KO_MUTEX: if (k->owner_tid && !(k->owner_pid == pid && k->owner_tid == tid)) return 0; if (consume) { k->owner_pid = pid; k->owner_tid = tid; k->recursion++; k->abandoned = 0; } return 1;
     case KO_SEM: if (k->count <= 0) return 0; if (consume) k->count--; return 1;
+    case KO_IOCP: return iocp_has_packets(idx);
     case KO_TIMER: if (k->due_ms < 0 || host_now_ms() < k->due_ms) return 0; if (consume && !k->manual) { if (k->period_ms > 0) k->due_ms += k->period_ms; else k->due_ms = -1; } return 1;
   }
   return 1;
@@ -186,6 +187,7 @@ static void s_GetCurrentThreadId(Cpu *c) { RET(cur_tid(W)); }
 static void s_CreateThread(Cpu *c) { u32 tid = 0; u64 h = thread_create(c, ARG(2), ARG(3), ARG(1), (u32)ARG(4) & 4, &tid); if (h && ARG(5)) wr32(c, ARG(5), tid); if (h) { int fd = handle_fd(h); vfs_set_inherit(fd, sa_inherit(c, ARG(0))); } RET(h); }
 static void s_beginthreadex(Cpu *c) { u32 tid = 0; u64 h = thread_create(c, ARG(2), ARG(3), ARG(1), (u32)ARG(4) & 4, &tid); if (h && ARG(5)) wr32(c, ARG(5), tid); if (!h) set_errno(c, 11); RET(h); }
 static void s_beginthread(Cpu *c) { u64 h = thread_create(c, ARG(0), ARG(2), ARG(1), 0, 0); if (!h) { set_errno(c, 11); RET(~0ull); return; } RET(h); }
+static void s_QueueUserWorkItem(Cpu *c) { u32 tid = 0; u64 h = thread_create(c, ARG(0), ARG(1), 0, 0, &tid); if (h) { int fd = handle_fd(h); vfs_close(fd); } RET(h ? 1 : 0); }   /* thread-pool work item = a detached thread */
 static void s_ExitThread(Cpu *c) { thread_exit(c, (u32)ARG(0)); }
 static void s_FreeLibraryAndExitThread(Cpu *c) { thread_exit(c, (u32)ARG(1)); }
 static void s_endthreadex(Cpu *c) { thread_exit(c, (u32)ARG(0)); }
@@ -389,7 +391,7 @@ static void s_InterlockedOr(Cpu *c) { u32 old = rd32(c, ARG(0)); wr32(c, ARG(0),
 static void s_InterlockedXor(Cpu *c) { u32 old = rd32(c, ARG(0)); wr32(c, ARG(0), old ^ (u32)ARG(1)); RET(old); }
 
 #define THREAD_SHIMS \
-  S(GetCurrentThread), S(GetCurrentThreadId), S(CreateThread), SA("_beginthreadex", beginthreadex), SA("_beginthread", beginthread), S(ExitThread), S(FreeLibraryAndExitThread), SA("_endthreadex", endthreadex), SA("_endthread", endthread), \
+  S(GetCurrentThread), S(GetCurrentThreadId), S(CreateThread), S(QueueUserWorkItem), SA("_beginthreadex", beginthreadex), SA("_beginthread", beginthread), S(ExitThread), S(FreeLibraryAndExitThread), SA("_endthreadex", endthreadex), SA("_endthread", endthread), \
   S(GetExitCodeThread), S(GetThreadId), S(GetProcessIdOfThread), S(OpenThread), S(ResumeThread), S(SuspendThread), S(TerminateThread), S(SwitchToThread), S(GetThreadContext), S(SetThreadContext), \
   S(SetThreadDescription), S(GetThreadDescription), S(GetCurrentThreadStackLimits), S(SetThreadStackGuarantee), \
   S(TlsAlloc), S(TlsFree), S(TlsGetValue), S(TlsSetValue), S(FlsAlloc), S(FlsFree), S(FlsGetValue), S(FlsSetValue), \

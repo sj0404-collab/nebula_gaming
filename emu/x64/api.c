@@ -25,7 +25,7 @@ static Proc *proc_alloc(void) {
 static void proc_exit(Proc *p, int code) {
   if (p->state == 2) return;
   p->state = 2; p->exit_code = code;
-  p->w32.cpu->exit_code = code; w32_proc_teardown(&p->w32);   /* every thread dies with the process; thread objects become signalled */
+  p->w32.cpu->exit_code = code; w32_io_drop(&p->w32); w32_proc_teardown(&p->w32);   /* every thread dies with the process; thread objects become signalled */
   vfs_release_proc(p->w32.fs);
   if (p != g_root) mem_release(&p->mem);
 }
@@ -106,6 +106,7 @@ EXPORT(x64_run) int x64_run(u64 budget) {
   if (!g_loaded) return RUN_FAULT;
   g_want_stdin = 0;
   for (int attempt = 0; attempt < PROC_MAX * 2; attempt++) {
+    w32_io_poll();
     /* pick the next runnable process after g_cur */
     Proc *p = 0; int start = g_cur;
     for (int k = 0; k < g_nprocs; k++) { int i = (start + 1 + k) % g_nprocs; Proc *q = g_procs[i]; if (q && q->used && proc_runnable(q)) { p = q; g_cur = i; break; } }
@@ -162,6 +163,16 @@ EXPORT(x64_exit_code) int x64_exit_code(void) { return g_cpu.exit_code; }
 EXPORT(x64_error) const char *x64_error(void) { return g_cpu.err; }
 EXPORT(x64_error_rip) u64 x64_error_rip(void) { return g_cpu.err_rip; }
 static char g_regs[512];
+static char g_hist[4096 * 12];
+/* the last executed instruction addresses, oldest first, runs of sequential code collapsed to "start..end" */
+EXPORT(x64_history) const char *x64_history(void) { int o = 0; u64 run0 = 0, last = 0; int n = 0;
+  for (u32 i = 0; i < 4096; i++) { u64 a = g_cpu.hist[(g_cpu.hist_i + i) & 4095]; if (!a) continue;
+    if (run0 && a > last && a - last < 16) { last = a; continue; }
+    if (run0) { o += e_snprintf(g_hist + o, sizeof g_hist - o, run0 == last ? "%llx " : "%llx..%llx ", (unsigned long long)run0, (unsigned long long)last); n++; }
+    run0 = last = a; if (o > (int)sizeof g_hist - 48) break; }
+  if (run0) o += e_snprintf(g_hist + o, sizeof g_hist - o, run0 == last ? "%llx " : "%llx..%llx ", (unsigned long long)run0, (unsigned long long)last);
+  (void)n; return g_hist; }
+EXPORT(x64_mem_copy) int x64_mem_copy(u64 addr, u8 *dst, u32 n) { const u8 *p = mem_ptr(&g_mem, addr, n, 0); if (!p) return 0; e_memcpy(dst, p, n); return 1; }
 EXPORT(x64_regs) const char *x64_regs(void) { static const char *nm[16] = {"rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi","r8","r9","r10","r11","r12","r13","r14","r15"}; int o = 0; for (int i = 0; i < 16; i++) o += e_snprintf(g_regs + o, sizeof g_regs - o, "%s=%llx ", nm[i], (unsigned long long)g_cpu.r[i]); u64 sp = g_cpu.r[4]; const u8 *st = mem_ptr(&g_mem, sp, 32, 0); if (st) for (int k = 0; k < 4; k++) { u64 v = 0; for (int b = 7; b >= 0; b--) v = (v << 8) | st[k * 8 + b]; o += e_snprintf(g_regs + o, sizeof g_regs - o, "[rsp+%d]=%llx ", k * 8, (unsigned long long)v); } return g_regs; }
 EXPORT(x64_rip) u64 x64_rip(void) { return g_cpu.rip; }
 EXPORT(x64_report) const char *x64_report(void) { return g_w32.report; }

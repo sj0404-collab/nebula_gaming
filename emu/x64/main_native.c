@@ -8,7 +8,7 @@
 
 int x64_load(const u8 *bytes, size_t len, const char *name, const char *cmdline);
 static int g_apitrace;
-int x64_run(u64 budget); void x64_trace(int on); const char *x64_inspect(const u8 *b, size_t n); const char *x64_error(void); u64 x64_error_rip(void); const char *x64_report(void); u64 x64_icount(void); int x64_exit_code(void); const char *x64_error_bytes(void); const char *x64_regs(void); void x64_key(int vk, int down); double x64_sleep_ms(void); const char *x64_api_stats(void); int x64_has_window(void);
+int x64_run(u64 budget); void x64_trace(int on); const char *x64_inspect(const u8 *b, size_t n); const char *x64_error(void); u64 x64_error_rip(void); const char *x64_report(void); u64 x64_icount(void); int x64_exit_code(void); const char *x64_error_bytes(void); const char *x64_regs(void); const char *x64_history(void); int x64_mem_copy(u64 addr, unsigned char *dst, unsigned n); void x64_key(int vk, int down); double x64_sleep_ms(void); const char *x64_api_stats(void); int x64_has_window(void);
 int x64_vfs_add(const char *path, const u8 *data, size_t n); int x64_vfs_mkdir(const char *path); const char *x64_vfs_list(void); void x64_stdin_write(const u8 *data, size_t n); void x64_stdin_eof(void); int x64_wants_stdin(void);
 void host_set_dump(int every, const char *prefix); int host_frames(void); double host_now_ms(void);
 
@@ -21,7 +21,7 @@ static int mount_dir(const char *host, const char *guest, int depth) {   /* copi
     if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
     char hp[2048], gp[2048]; snprintf(hp, sizeof hp, "%s/%s", host, e->d_name); snprintf(gp, sizeof gp, "%s\\%s", guest, e->d_name);
     struct stat st; if (stat(hp, &st)) continue;
-    if (S_ISDIR(st.st_mode)) { if (depth < 8) n += mount_dir(hp, gp, depth + 1); continue; }
+    if (S_ISDIR(st.st_mode)) { if (depth < 40) n += mount_dir(hp, gp, depth + 1); continue; }
     FILE *f = fopen(hp, "rb"); if (!f) continue; u8 *buf = malloc((size_t)st.st_size + 1); size_t got = fread(buf, 1, (size_t)st.st_size, f); fclose(f);
     x64_vfs_add(gp, buf, got); free(buf); n++;
   }
@@ -64,7 +64,7 @@ int main(int argc, char **argv) {
   double t0 = host_now_ms(); int r; int ki = 0; u64 yields = 0;
   for (;;) {
     double el = host_now_ms() - t0;
-    if (el > max_ms) { if (!quiet) fprintf(stderr, "[x64run] time limit reached\n"); r = -1; break; }
+    if (el > max_ms) { if (!quiet) { fprintf(stderr, "[x64run] time limit reached\n"); if (getenv("X64_HIST")) { extern u64 x64_rip(void); fprintf(stderr, "[x64run] rip=%llx regs: %s\n[x64run] last blocks: %s\n", (unsigned long long)x64_rip(), x64_regs(), x64_history()); unsigned char b[512]; u64 a = (x64_rip() & ~0xfull) - 256; if (x64_mem_copy(a, b, 512)) { FILE *f = fopen("/tmp/rip_tl.bin", "wb"); if (f) { fwrite(b, 1, 512, f); fclose(f); fprintf(stderr, "[x64run] dumped 512 bytes from 0x%llx to /tmp/rip_tl.bin\n", (unsigned long long)a); } } } } r = -1; break; }
     while (ki < nkeys && keys[ki].at <= el) { x64_key(keys[ki].vk, keys[ki].down); ki++; }
     r = x64_run(2000000);
     if (r == RUN_YIELD && x64_wants_stdin()) { char line[4096]; if (!no_stdin && fgets(line, sizeof line, stdin)) x64_stdin_write((const u8 *)line, strlen(line)); else x64_stdin_eof(); continue; }
@@ -75,7 +75,8 @@ int main(int argc, char **argv) {
   if (!quiet) {
     fflush(stdout);
     if (r == RUN_EXIT) fprintf(stderr, "[x64run] exit code %d\n", x64_exit_code());
-    else if (r == RUN_FAULT) fprintf(stderr, "[x64run] FAULT at rip=0x%llx: %s  bytes: %s\n", (unsigned long long)x64_error_rip(), x64_error(), x64_error_bytes()), fprintf(stderr, "[x64run] regs: %s\n", x64_regs());
+    else if (r == RUN_FAULT) fprintf(stderr, "[x64run] FAULT at rip=0x%llx: %s  bytes: %s\n", (unsigned long long)x64_error_rip(), x64_error(), x64_error_bytes()), fprintf(stderr, "[x64run] regs: %s\n", x64_regs()), fprintf(stderr, "[x64run] last blocks: %s\n", x64_history());
+    if (getenv("X64_DUMP")) { unsigned char b[512]; u64 a = x64_error_rip() & ~0xfull; if (a >= 256) a -= 256; if (x64_mem_copy(a, b, 512)) { FILE *f = fopen(getenv("X64_DUMP"), "wb"); if (f) { fwrite(b, 1, 512, f); fclose(f); fprintf(stderr, "[x64run] dumped 512 bytes from 0x%llx to %s\n", (unsigned long long)a, getenv("X64_DUMP")); } } }
     else if (r == RUN_BREAK) fprintf(stderr, "[x64run] breakpoint at rip=0x%llx\n", (unsigned long long)x64_error_rip());
     fprintf(stderr, "[x64run] %llu instructions in %.3fs = %.1f MIPS, %d frames, %llu yields\n", (unsigned long long)ic, dt, dt > 0 ? ic / dt / 1e6 : 0, host_frames(), (unsigned long long)yields);
     if (x64_report()[0]) fprintf(stderr, "[x64run] report:\n%s", x64_report());

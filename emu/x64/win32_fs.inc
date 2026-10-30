@@ -100,6 +100,7 @@ static void s_CreateFileW(Cpu *c) { create_file(c, name_w(c, ARG(0))); }
 static void overlapped_seek(Cpu *c, int fd, u64 ov) { if (ov && fd >= 3) { u64 off = rd32(c, ov + 16) | ((u64)rd32(c, ov + 20) << 32); vfs_seek(fd, (s64)off, 0); } }
 static void s_ReadFile(Cpu *c) {
   int fd = handle_fd(ARG(0)); if (!fd || fd == 1 || fd == 2) { W->last_error = 6; RET(0); return; }
+  if (iocp_rw(c, fd, 0, ARG(1), (u32)ARG(2), ARG(3), ARG(4))) return;
   overlapped_seek(c, fd, ARG(4));
   s64 r = fd_read(c, fd, ARG(1), (u32)ARG(2));
   if (r == -2) { blocked_io(c, 0); return; }
@@ -136,11 +137,12 @@ static void s_NtReadFile(Cpu *c) { nt_rw(c, 0); }
 static void s_NtWriteFile(Cpu *c) { nt_rw(c, 1); }
 static void s_WriteFile(Cpu *c) {
   int fd = handle_fd(ARG(0)); if (fd <= 0) { W->last_error = 6; RET(0); return; }
+  if (iocp_rw(c, fd, 1, ARG(1), (u32)ARG(2), ARG(3), ARG(4))) return;
   overlapped_seek(c, fd, ARG(4));
   s64 r = fd_write(c, fd, ARG(1), (u32)ARG(2)); if (r == -2) { blocked_io(c, 1); return; } if (r == -3) { W->last_error = 232; RET(0); return; } if (r < 0) { W->last_error = 5; RET(0); return; }
   if (ARG(3)) wr32(c, ARG(3), (u32)r); RET(1);
 }
-static void s_CloseHandle(Cpu *c) { u64 h = ARG(0); if (h >= H_FILE_BASE && h < H_FILE_BASE + 0x1000) vfs_close((int)(h - H_FILE_BASE)); RET(1); }
+static void s_CloseHandle(Cpu *c) { u64 h = ARG(0); if (h >= H_FILE_BASE && h < H_FILE_BASE + 0x1000) { int fd = (int)(h - H_FILE_BASE); int ko = vfs_fd_kobj(fd); if (ko >= 0) { KObj *k = kobj_get(ko); if (k && k->kind == KO_IOCP && k->refs <= 1) iocp_kobj_closed(ko); } else iocp_handle_closed(W->pid, fd); vfs_close(fd); } RET(1); }
 static void s_GetFileType(Cpu *c) { int fd = handle_fd(ARG(0)); if (fd && fd < 3) { int r = vfs_resolve(fd < 0 ? 0 : fd); if (r >= 3) fd = r; } if (fd >= 3) { int k = vfs_kind(fd); RET(k == FD_PIPE ? 3 : k == FD_CONSOLE || k == FD_NULL ? 2 : k == FD_FILE ? 1 : 0); return; } RET(fd ? 2 : 0); }
 static void s_GetFileSize(Cpu *c) { int fd = handle_fd(ARG(0)); s64 s = fd >= 3 ? vfs_size(fd) : -1; if (s < 0) { W->last_error = 6; RET(0xffffffffu); return; } if (ARG(1)) wr32(c, ARG(1), (u32)((u64)s >> 32)); RET((u32)s); }
 static void s_GetFileSizeEx(Cpu *c) { int fd = handle_fd(ARG(0)); s64 s = fd >= 3 ? vfs_size(fd) : -1; if (s < 0) { W->last_error = 6; RET(0); return; } wr64(c, ARG(1), (u64)s); RET(1); }
