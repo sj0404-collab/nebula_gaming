@@ -11,6 +11,7 @@ browser, in the PWA and in the Android APK (any Chromium ≥ 133 / WebView ≥ 1
 ![7-Zip 25.01 — 7z.exe loads 7z.dll through LoadLibrary/GetProcAddress inside the emulator](docs/x64-7zip.png)
 ![C++ exceptions and 7-Zip's MSVC error path (System ERROR via __CxxFrameHandler) inside the emulator](docs/x64-exceptions.png)
 ![Rust programs: ripgrep and fd (official MSVC builds) running inside the emulator](docs/x64-rust.png)
+![CPython 3.12.10 (official python.org embeddable build) — interactive REPL over the console inside the emulator, in Chromium](docs/x64-python.png)
 
 ## What the emulator is (and is not)
 
@@ -44,6 +45,7 @@ At runtime the first unimplemented call stops the program with the API name, RIP
 | **`zstd.exe` (Zstandard 1.5.7, MSVC)** | github.com/facebook/zstd | compress/decompress round trips, built‑in benchmark (`-b1 -e3`) runs |
 | **`rg.exe` (ripgrep 14.1.1, Rust, x86_64-pc-windows-msvc)** | github.com/BurntSushi/ripgrep | single files and directory trees, regex, `-c`/`-n`/`--stats`, `-j4` worker threads — identical counts to GNU grep; Rust std's Win32 layer (`NtReadFile`, SRW locks, `WaitOnAddress`, waitable timers, `GetFinalPathNameByHandleW`, `ProcessPrng`) |
 | **`fd.exe` (fd 10.2.0, Rust)** | github.com/sharkdp/fd | file finder: `-e`, `-t f`, `-S`, coloured output (`-x` needs a `cmd`-style child, not available) |
+| **`python.exe` (CPython 3.12.10, official python.org embeddable build, MSVC v.1943)** | python.org | the whole interpreter: `python312.dll` (4.3 MB), stdlib from `python312.zip` (zipimport), C extensions `_sqlite3`/`_decimal`/`_ctypes`/`_bz2`/`_lzma`/`pyexpat`/`unicodedata`/`_asyncio`/… as `.pyd`; `-c`, scripts, the **interactive REPL over console stdin** (`ReadConsoleW`), `threading`, `subprocess` with pipes (`python.exe` spawning `python.exe`), `ctypes.windll.kernel32`, file I/O, tracebacks, exit codes; `math` within 1 ulp of the host. Not available: `_ssl`/sockets (no network), `tkinter`, `_wmi`. Start‑up ≈ 60 M instr (2 s native, ~4 s wasm64); the bundle (15 MB) is downloaded lazily on first run |
 | `hwexc.exe` (hardware exceptions) | this repo | AV / div0 / `ud2` caught by `__except` with correct `ExceptionInformation`, `__finally` during the unwind, vectored handler patches `Rip`/`Rax` and continues, 2000 faults in a loop, top-level filter → `ExitProcess(77)` |
 | `cxxexc.exe` / `sehtest.c` (zig c++ / `-fms-extensions`) | this repo | `throw`/`catch std::exception`, destructors during unwinding, nested rethrow, `vector::at`, 1000 throws in a loop; `__try/__except/__finally` incl. nested — native and in Chromium |
 | **7‑Zip error paths** (`x missing.7z`, `-tbogus`, wrong password) | 7‑zip.org | the MSVC `throw` → `__CxxFrameHandler` → catch chain inside `7z.exe`/`7z.dll` works: `System ERROR: The system cannot find the file specified.`, exit code 2 (used to stop the emulator) |
@@ -55,7 +57,7 @@ At runtime the first unimplemented call stops the program with the API name, RIP
 ```bash
 # native build + capability tests (needs zig 0.17 for the wasm step)
 ZIG=zig ./emu/x64/build.sh      # → emu/x64/x64run + public/x64/nebula_x64.wasm (≈210 KB)
-./emu/tests/run.sh              # hello/bench/busybox (files, stdin, processes+pipes)/plink/NebulaStrike/threads/heap/DLLs/real apps/x87/SEH+C++ exceptions/hardware exceptions/Rust apps/rejections — 70 checks
+./emu/tests/run.sh              # hello/bench/busybox (files, stdin, processes+pipes)/plink/NebulaStrike/threads/heap/DLLs/real apps/x87/SEH+C++ exceptions/hardware exceptions/Rust apps/CPython/rejections — 70 checks
 ./emu/x64/x64run --inspect some.exe         # JSON compatibility report
 ./emu/x64/x64run --max-ms 5000 some.exe a b # run headless (frames to .ppm with --frames N)
 ```
@@ -91,7 +93,7 @@ Scripts
 | `npm run opencode` | `bun run opencode/bridge.ts` — real agent bridge |
 | `npm run opencode:compile` | `bun build --compile` → single `opencode-bridge` binary (serves `dist/` + API) |
 | `npm run test:opencode` | `bun test` — end‑to‑end test of the bridge + real model answer |
-| `npm run test:e2e` | Playwright desktop e2e (27 scenarios incl. the x64 emulator, virtual disk + stdin, processes + pipes, threads: windows, terminal, game autotest, opencode demo/live, phone viewport) |
+| `npm run test:e2e` | Playwright desktop e2e (31 scenarios incl. the x64 emulator, CPython, virtual disk + stdin, processes + pipes, threads: windows, terminal, game autotest, opencode demo/live, phone viewport) |
 | `node e2e/with-bridge.mjs` | starts the real bridge, runs e2e with the LIVE opencode window, stops it |
 | `npm test` / `npm run test:all` | lint + typecheck + e2e (+ bridge test) |
 | `npm run opencode:compile:all` | binaries for linux‑x64/arm64, macOS arm64/x64, windows‑x64 → `release/` |

@@ -67,6 +67,7 @@ export class X64Runtime {
           if (fd === 3) this.onLog?.(text); else this.onConsole?.(fd, text);
         },
         host_now_ms: () => performance.now(),
+        host_wall_ms: () => Date.now(),
         host_present: (p: bigint, w: number, h: number) => { this.frames++; this.onPresent?.(this.bytesAt(p, w * h * 4), w, h); },
         host_math: (op: number, a: number, b: number) => MATH[op] ? MATH[op](a, b) : 0,
       },

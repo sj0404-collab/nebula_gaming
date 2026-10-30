@@ -19,5 +19,6 @@ They are used by the x64 Runner app as ready-made test subjects and by the CI ca
 | zstd.exe | https://github.com/facebook/zstd/releases/tag/v1.5.7 (zstd-v1.5.7-win64) | BSD-3-Clause / GPL-2.0 |
 | rg.exe | https://github.com/BurntSushi/ripgrep/releases/tag/14.1.1 (ripgrep-14.1.1-x86_64-pc-windows-msvc) | Unlicense / MIT |
 | fd.exe | https://github.com/sharkdp/fd/releases/tag/v10.2.0 (fd-v10.2.0-x86_64-pc-windows-msvc) | Apache-2.0 / MIT |
+| py/python.exe, python312.dll, python312.zip, python312._pth, *.pyd, sqlite3.dll, libffi-8.dll | https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip (CPython 3.12.10 embeddable, unmodified except `python312._pth`: `import site` enabled) | PSF License 2.0 (py/LICENSE.txt); sqlite3.dll public domain; libffi MIT; bzip2/xz/expat per their licences |
 
 demo.sql / demo.json / demo.lua / demo.txt are tiny inputs so each app has something to work on in the x64 Runner.

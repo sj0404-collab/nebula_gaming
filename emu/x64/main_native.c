@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 int x64_load(const u8 *bytes, size_t len, const char *name, const char *cmdline);
+static int g_apitrace;
 int x64_run(u64 budget); void x64_trace(int on); const char *x64_inspect(const u8 *b, size_t n); const char *x64_error(void); u64 x64_error_rip(void); const char *x64_report(void); u64 x64_icount(void); int x64_exit_code(void); const char *x64_error_bytes(void); const char *x64_regs(void); void x64_key(int vk, int down); double x64_sleep_ms(void); const char *x64_api_stats(void); int x64_has_window(void);
 int x64_vfs_add(const char *path, const u8 *data, size_t n); int x64_vfs_mkdir(const char *path); const char *x64_vfs_list(void); void x64_stdin_write(const u8 *data, size_t n); void x64_stdin_eof(void); int x64_wants_stdin(void);
 void host_set_dump(int every, const char *prefix); int host_frames(void); double host_now_ms(void);
@@ -36,7 +37,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[ai], "--prefix") && ai + 1 < argc) prefix = argv[++ai];
     else if (!strcmp(argv[ai], "--max-ms") && ai + 1 < argc) max_ms = atof(argv[++ai]);
     else if (!strcmp(argv[ai], "--quiet")) quiet = 1;
-    else if (!strcmp(argv[ai], "--trace")) x64_trace(1); else if (!strcmp(argv[ai], "--trace2")) x64_trace(2);
+    else if (!strcmp(argv[ai], "--trace")) x64_trace(1); else if (!strcmp(argv[ai], "--trace2")) x64_trace(2); else if (!strcmp(argv[ai], "--apitrace")) { extern void w32_api_trace(int); g_apitrace = 1; }
     else if (!strcmp(argv[ai], "--mount") && ai + 1 < argc) { const char *spec = argv[++ai]; char hostd[1024]; const char *eq = strchr(spec, '='); const char *guest = "C:\\nebula"; if (eq) { snprintf(hostd, sizeof hostd, "%.*s", (int)(eq - spec), spec); guest = eq + 1; } else snprintf(hostd, sizeof hostd, "%s", spec); nmounts++; mounts[nmounts - 1][0] = strdup(hostd); mounts[nmounts - 1][1] = guest; }
     else if (!strcmp(argv[ai], "--no-stdin")) no_stdin = 1;
     else if (!strcmp(argv[ai], "--stats")) stats = 1;
@@ -58,6 +59,7 @@ int main(int argc, char **argv) {
   host_set_dump(dump_every, prefix);
   for (int mi = 0; mi < nmounts; mi++) { int n = mount_dir(mounts[mi][0], mounts[mi][1], 0); if (!quiet) fprintf(stderr, "[x64run] mounted %s -> %s (%d files)\n", mounts[mi][0], mounts[mi][1], n); }   /* before load: DLLs next to the exe */
   int rc = x64_load(bytes, len, base, cmdline);
+  if (g_apitrace) { extern void w32_api_trace(int); w32_api_trace(1); }
   if (rc) { fprintf(stderr, "load failed (%d): %s", rc, x64_report()); return 3; }
   double t0 = host_now_ms(); int r; int ki = 0; u64 yields = 0;
   for (;;) {

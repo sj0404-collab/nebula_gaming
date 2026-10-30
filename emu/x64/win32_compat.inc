@@ -139,14 +139,11 @@ static double m_log(double x) { return host_math(4, x, 0); }
 static double m_pow(double a, double b) { return host_math(5, a, b); }
 static double m_sin(double x) { return host_math(0, x, 0); }
 static double m_cos(double x) { return host_math(1, x, 0); }
-static double m_erf(double x) {   /* Abramowitz-Stegun 7.1.26 refined with one Newton step is not enough for 1e-7; use erfc continued fraction for |x|>2 */
-  double ax = x < 0 ? -x : x, r;
-  if (ax < 2.5) { double t = ax, sum = ax, term = ax, x2 = ax * ax; for (int n = 1; n < 60; n++) { term *= -x2 / n; double add = term / (2 * n + 1); sum += add; if (add < 1e-17 && add > -1e-17) break; } (void)t; r = sum * 1.1283791670955126; }
-  else { double t = 1.0 / (1.0 + 0.5 * ax); double y = t * m_exp(-ax * ax - 1.26551223 + t * (1.00002368 + t * (0.37409196 + t * (0.09678418 + t * (-0.18628806 + t * (0.27886807 + t * (-1.13520398 + t * (1.48851587 + t * (-0.82215223 + t * 0.17087277))))))))); r = 1 - y; }
-  return x < 0 ? -r : r;
-}
-static double m_erfc(double x) { if (x < 0.5 && x > -0.5) return 1 - m_erf(x); double ax = x < 0 ? -x : x; double t = 1.0 / (1.0 + 0.5 * ax);
-  double y = t * m_exp(-ax * ax - 1.26551223 + t * (1.00002368 + t * (0.37409196 + t * (0.09678418 + t * (-0.18628806 + t * (0.27886807 + t * (-1.13520398 + t * (1.48851587 + t * (-0.82215223 + t * 0.17087277))))))))); return x < 0 ? 2 - y : y; }
+/* erf: Maclaurin series for |x| < 2.5 (converges to full double precision), continued fraction for erfc beyond that */
+static double m_erfc_cf(double ax) { double f = ax; for (int n = 60; n >= 1; n--) f = ax + (n * 0.5) / f; return m_exp(-ax * ax) / (1.7724538509055159 * f); }
+static double m_erf_series(double ax) { double sum = ax, term = ax, x2 = ax * ax; for (int n = 1; n < 80; n++) { term *= -x2 / n; double add = term / (2 * n + 1); sum += add; if (add < 1e-18 && add > -1e-18) break; } return sum * 1.1283791670955126; }
+static double m_erf(double x) { double ax = x < 0 ? -x : x, r = ax < 2.5 ? m_erf_series(ax) : 1.0 - m_erfc_cf(ax); if (r > 1) r = 1; return x < 0 ? -r : r; }
+static double m_erfc(double x) { double ax = x < 0 ? -x : x, y = ax < 2.5 ? 1.0 - m_erf_series(ax) : m_erfc_cf(ax); return x < 0 ? 2 - y : y; }
 static double m_tgamma(double x) { if (x < 0.5) return 3.141592653589793 / (m_sin(3.141592653589793 * x) * m_tgamma(1 - x));
   static const double g[] = { 0.99999999999980993, 676.5203681218851, -1259.1392167224028, 771.32342877765313, -176.61502916214059, 12.507343278686905, -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7 };
   x -= 1; double a = g[0], t = x + 7.5; for (int i = 1; i < 9; i++) a += g[i] / (x + i); return 2.5066282746310002 * m_pow(t, x + 0.5) * m_exp(-t) * a; }

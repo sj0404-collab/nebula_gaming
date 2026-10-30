@@ -19,7 +19,7 @@ typedef int8_t   s8;  typedef int16_t  s16; typedef int32_t  s32; typedef int64_
 
 /* ---------- host interface (implemented in host_native.c or imported from JS in wasm) ---------- */
 void   host_write(int fd, const char *p, size_t n);        /* console output (1 stdout, 2 stderr, 3 emulator log) */
-double host_now_ms(void);                                  /* monotonic milliseconds */
+double host_now_ms(void); double host_wall_ms(void);   /* wall clock, ms since the Unix epoch (UTC) */                                  /* monotonic milliseconds */
 void   host_present(const u32 *bgra, int w, int h);        /* framebuffer of the GUI window changed */
 int    host_key(int vk);                                   /* 1 if virtual key currently pressed */
 void   host_exit(int code);                                /* guest called ExitProcess */
@@ -236,6 +236,8 @@ struct Win32 {
   char con[65536]; int con_len;
   u64 at_exit[64]; int n_at_exit;
   int exited;
+  u64 loc_c, loc_wc, sys_nerr, sys_errlist;
+  int api_trace;
   u64 veh[16]; int nveh; u64 uef; char hw_msg[160]; u32 hw_code;   /* vectored exception handlers, top-level filter, text of the last hardware fault */
   int wndclass_registered; u64 wndclass_proc; char wndclass_name[64];
   u64 ubuf;                              /* small scratch buffer in guest memory */

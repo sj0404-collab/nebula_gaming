@@ -4,10 +4,11 @@ import { Cpu, FolderOpen, FolderInput, Play, Square, Terminal as TerminalIcon, M
 import { X64Runtime, vkFromEvent, wasm64Supported, type PeInfo, type RunStats, type VfsEntry } from '../../lib/x64/runtime';
 import { FramePresenter } from '../../lib/x64/present';
 
-interface ExeEntry { id: number; name: string; bytes: Uint8Array; info: PeInfo; source: 'sample' | 'file' }
+interface ExeEntry { id: number; name: string; bytes: Uint8Array; info: PeInfo; source: 'sample' | 'file'; pending?: string[] }   // pending: companion files fetched on first Run (big runtimes)
 
-const SAMPLE_DATA = ['demo.sql', 'demo.json', 'demo.lua', 'demo.txt'];   // small inputs for the real apps, placed in C:\nebula
-const SAMPLES: { name: string; href: string; desc: string; args?: string; files?: string[] }[] = [
+const SAMPLE_DATA = ['demo.sql', 'demo.json', 'demo.lua', 'demo.txt', 'demo.py'];   // small inputs for the real apps, placed in C:\nebula
+const PY_FILES = ['python312.dll', 'python312.zip', 'python312._pth', '_sqlite3.pyd', 'sqlite3.dll', '_decimal.pyd', '_ctypes.pyd', 'libffi-8.dll', '_bz2.pyd', '_lzma.pyd', 'pyexpat.pyd', '_elementtree.pyd', 'unicodedata.pyd', '_queue.pyd', '_socket.pyd', 'select.pyd', '_asyncio.pyd', '_zoneinfo.pyd', '_uuid.pyd', '_multiprocessing.pyd'];
+const SAMPLES: { name: string; href: string; desc: string; args?: string; files?: string[]; lazy?: boolean }[] = [
   { name: 'NebulaStrike.exe', href: '/downloads/NebulaStrike.exe', desc: 'Win32 GDI game, PE32+ x64 (light GUI exe)' },
   { name: 'hello.exe', href: '/x64/samples/hello.exe', desc: 'UCRT console: printf/qsort/malloc/math (light console exe)' },
   { name: 'bench.exe', href: '/x64/samples/bench.exe', desc: 'CPU benchmark: sieve, mandelbrot, memcpy (heavy compute)' },
@@ -24,6 +25,7 @@ const SAMPLES: { name: string; href: string; desc: string; args?: string; files?
   { name: 'rg.exe', href: '/x64/apps/rg.exe', desc: 'Real app, Rust: ripgrep 14.1.1 (BurntSushi, x86_64-pc-windows-msvc, static CRT — Rust std on Win32: NtReadFile, SRW locks, WaitOnAddress, waitable timers, threads). Default args search the demo files; also try: -c -w the · --stats -j4 the · --version', args: '-n -i "lua|sqlite" demo.lua demo.sql demo.json' },
   { name: 'fd.exe', href: '/x64/apps/fd.exe', desc: 'Real app, Rust: fd 10.2.0 (sharkdp) file finder. Default args list the demo inputs by extension; also try: -t f -S +100k · --version', args: '-e lua -e sql -e json' },
   { name: 'zstd.exe', href: '/x64/apps/zstd.exe', desc: 'Real app: Zstandard 1.5.7 (facebook/zstd, MSVC, SSE2/BMI paths). Default args run the built-in benchmark on demo.txt; also try: -f demo.txt · -d -f demo.txt.zst -o out.txt', args: '-b1 -e3 -i0 demo.txt' },
+  { name: 'python.exe', href: '/x64/apps/py/python.exe', desc: 'Real app (heavy): CPython 3.12.10 — the official python.org Windows x64 build (MSVC 19.43), python312.dll 6.9 MB + the stdlib in python312.zip + C extensions (_sqlite3, _decimal, _ctypes, unicodedata …) loaded from the virtual disk. ~15 MB, fetched on first Run. Default args run demo.py; also try: -i -q (REPL — type into the console) · -c "print(2**100)" · -m json.tool demo.json · -m timeit "sum(range(100))" · -c "import this"', args: 'demo.py', files: PY_FILES, lazy: true },
 ];
 
 const VERDICT: Record<string, { label: string; cls: string; Icon: typeof CheckCircle2 }> = {
@@ -82,9 +84,10 @@ export default function X64App() {
       for (const s of SAMPLES) {
         try {
           const r = await fetch(s.href); if (!r.ok) continue; const bytes = new Uint8Array(await r.arrayBuffer());
-          loaded.push({ id: nextId.current++, name: s.name, bytes, info: rt.inspect(bytes), source: 'sample' });
+          const d = s.href.slice(0, s.href.lastIndexOf('/') + 1);
+          loaded.push({ id: nextId.current++, name: s.name, bytes, info: rt.inspect(bytes), source: 'sample', pending: s.lazy && s.files ? s.files.map(f => d + f) : undefined });
           rt.vfsAdd('C:\\nebula\\' + s.name, bytes);   // on the virtual disk too, so busybox sh can chain them and DLLs find their exe
-          for (const f of s.files ?? []) { const d = s.href.slice(0, s.href.lastIndexOf('/') + 1); const rf = await fetch(d + f); if (rf.ok) rt.vfsAdd('C:\\nebula\\' + f, new Uint8Array(await rf.arrayBuffer())); }
+          if (!s.lazy) for (const f of s.files ?? []) { const rf = await fetch(d + f); if (rf.ok) rt.vfsAdd('C:\\nebula\\' + f, new Uint8Array(await rf.arrayBuffer())); }
         } catch { /* sample missing */ }
       }
       for (const f of SAMPLE_DATA) { try { const r = await fetch('/x64/apps/' + f); if (r.ok) rt.vfsAdd('C:\\nebula\\' + f, new Uint8Array(await r.arrayBuffer())); } catch { /* optional */ } }
@@ -153,9 +156,25 @@ export default function X64App() {
   const current = exes.find(e => e.id === selected) ?? null;
   const running = stats?.status === 'running' || stats?.status === 'waiting-stdin';
 
-  const run = useCallback(() => {
+  const [fetching, setFetching] = useState<string | null>(null);
+  const run = useCallback(async () => {
     const rt = rtRef.current; if (!rt || !current) return;
     consoleBuf.current = ''; setConsoleText(''); setLog([]); setFrames(0); setWaitingStdin(false);
+    if (current.pending && current.pending.length) {   // heavy runtime: fetch its companion files on first Run
+      const urls = current.pending; let done = 0, bytes = 0;
+      try {
+        setFetching(`downloading ${current.name} runtime (${urls.length} files)…`); setTab('console');
+        for (const u of urls) {
+          const r = await fetch(u); if (!r.ok) throw new Error(`${u}: HTTP ${r.status}`);
+          const b = new Uint8Array(await r.arrayBuffer()); bytes += b.length; done++;
+          rt.vfsAdd('C:\\nebula\\' + u.slice(u.lastIndexOf('/') + 1), b);
+          setFetching(`downloading ${current.name} runtime: ${done}/${urls.length} files, ${(bytes / 1048576).toFixed(1)} MB`);
+        }
+        setExes(list => list.map(e => e.id === current.id ? { ...e, pending: undefined } : e));
+        setLog(l => [...l, `runtime files loaded: ${done} files, ${(bytes / 1048576).toFixed(1)} MB → C:\\nebula\\`]);
+      } catch (e) { setFetching(null); setLog(l => [...l, 'DOWNLOAD: ' + String(e)]); setTab('report'); return; }
+      setFetching(null);
+    }
     const base = current.name.split('\\').pop() || current.name;
     const err = rt.start(current.bytes, base, args.trim() ? `${base} ${args.trim()}` : base);
     if (err) { setLog(l => [...l, 'LOADER: ' + err]); setStats(rt.stats()); setTab('report'); return; }
@@ -196,7 +215,7 @@ export default function X64App() {
           <input type="file" multiple className="hidden" data-x64-folder {...({ webkitdirectory: '', directory: '' } as Record<string, string>)} onChange={e => { if (e.target.files) void addFolder(e.target.files); e.target.value = ''; }} />
         </label>
         <input value={args} onChange={e => setArgs(e.target.value)} placeholder="arguments" className="w-32 rounded border border-slate-300 px-2 py-1 text-[11px] outline-none focus:border-indigo-400" />
-        <button data-x64-run disabled={!current || ready !== 'ready' || !!running} onClick={run} className="flex items-center gap-1 rounded bg-indigo-600 px-3 py-1 font-semibold text-white disabled:opacity-40 hover:bg-indigo-700"><Play size={12} /> Run</button>
+        <button data-x64-run disabled={!current || ready !== 'ready' || !!running || !!fetching} onClick={() => { void run(); }} className="flex items-center gap-1 rounded bg-indigo-600 px-3 py-1 font-semibold text-white disabled:opacity-40 hover:bg-indigo-700"><Play size={12} /> Run</button>
         <button data-x64-stop disabled={!running} onClick={stop} className="flex items-center gap-1 rounded border border-slate-300 bg-white px-2 py-1 disabled:opacity-40 hover:bg-slate-50"><Square size={11} /> Stop</button>
         <div className="ml-auto flex items-center gap-1 rounded bg-slate-100 p-0.5">
           {(['screen', 'console', 'files', 'report'] as const).map(t => (
@@ -256,7 +275,7 @@ export default function X64App() {
           )}
           {tab === 'console' && (
             <div className="flex min-h-0 flex-1 flex-col bg-[#0c0c0c]">
-              <pre ref={consoleRef} data-x64-console className="m-0 min-h-0 flex-1 overflow-auto p-3 font-mono text-[12px] leading-[1.35] text-[#cccccc] whitespace-pre-wrap">{consoleText || (running ? '' : '(no console output yet)')}</pre>
+              <pre ref={consoleRef} data-x64-console className="m-0 min-h-0 flex-1 overflow-auto p-3 font-mono text-[12px] leading-[1.35] text-[#cccccc] whitespace-pre-wrap">{consoleText || (fetching ? <span data-x64-fetching className="text-amber-300">{fetching}</span> : running ? '' : '(no console output yet)')}</pre>
               <form className={`flex shrink-0 items-center gap-1 border-t px-2 py-1 ${waitingStdin ? 'border-amber-500/60 bg-amber-950/40' : 'border-white/10'}`} onSubmit={e => { e.preventDefault(); sendStdin(false); }}>
                 <Keyboard size={13} className={waitingStdin ? 'text-amber-300' : 'text-white/40'} />
                 <input ref={stdinRef} data-x64-stdin value={stdinLine} onChange={e => setStdinLine(e.target.value)} disabled={!running} placeholder={waitingStdin ? 'program is waiting for input — type a line and press Enter' : running ? 'stdin (sent with Enter)' : 'stdin — run a program first'}

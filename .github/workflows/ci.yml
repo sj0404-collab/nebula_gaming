@@ -69,7 +69,7 @@ jobs:
 
       - name: Playwright chromium
         run: npx playwright install --with-deps chromium
-      - name: Desktop e2e (31 scenarios incl. x64 emulator hello/NebulaStrike/busybox/plink/real apps SQLite-jq-Lua-7-Zip-zstd-ripgrep-fd/virtual disk + stdin/processes + pipes/SEH + C++ + hardware exceptions, LIVE + NATIVE opencode, WebGL)
+      - name: Desktop e2e (31 scenarios incl. x64 emulator hello/NebulaStrike/busybox/plink/real apps SQLite-jq-Lua-7-Zip-zstd-ripgrep-fd/CPython 3.12/virtual disk + stdin/processes + pipes/SEH + C++ + hardware exceptions, LIVE + NATIVE opencode, WebGL)
         run: node e2e/with-bridge.mjs
         timeout-minutes: 15
 

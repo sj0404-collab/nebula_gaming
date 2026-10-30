@@ -123,6 +123,19 @@ static void file_attrs_ex(Cpu *c, const char *n) { u64 sz; int st = vfs_stat(n, 
 static void s_GetFileAttributesExA(Cpu *c) { file_attrs_ex(c, name_a(c, ARG(0))); }
 static void s_GetFileAttributesExW(Cpu *c) { file_attrs_ex(c, name_w(c, ARG(0))); }
 static void s_GetFileInformationByHandle(Cpu *c) { int fd = handle_fd(ARG(0)); if (fd < 3) { W->last_error = 6; RET(0); return; } u64 a = ARG(1); u64 ft = vfs_filetime(); s64 sz = vfs_size(fd); wr32(c, a, vfs_fd_isdir(fd) ? 0x10 : 0x80); wr64(c, a + 4, ft); wr64(c, a + 12, ft); wr64(c, a + 20, ft); wr32(c, a + 28, 0x4e45); wr32(c, a + 32, (u32)((u64)sz >> 32)); wr32(c, a + 36, (u32)sz); wr32(c, a + 40, 1); wr32(c, a + 44, 0); wr32(c, a + 48, (u32)fd); RET(1); }
+/* GetFileInformationByHandleEx(h, class, buf, size): FileBasicInfo 0, FileStandardInfo 1, FileNameInfo 2, FileAttributeTagInfo 9, FileIdInfo 18 */
+static void s_GetFileInformationByHandleEx(Cpu *c) {
+  int fd = handle_fd(ARG(0)); u32 cls = (u32)ARG(1); u64 a = ARG(2), n = ARG(3); if (fd < 3) { W->last_error = 6; RET(0); return; }
+  u64 ft = vfs_filetime(); s64 sz = vfs_size(fd); int dir = vfs_fd_isdir(fd);
+  switch (cls) {
+  case 0: if (n < 40) { W->last_error = 24; RET(0); return; } wr64(c, a, ft); wr64(c, a + 8, ft); wr64(c, a + 16, ft); wr64(c, a + 24, ft); wr32(c, a + 32, dir ? 0x10 : 0x80); wr32(c, a + 36, 0); RET(1); return;
+  case 1: if (n < 24) { W->last_error = 24; RET(0); return; } wr64(c, a, (u64)sz); wr64(c, a + 8, (u64)sz); wr32(c, a + 16, 1); wr8(c, a + 20, 0); wr8(c, a + 21, (u8)dir); RET(1); return;
+  case 2: { const char *pn = vfs_fd_path(fd); if (!pn) pn = ""; size_t l = e_strlen(pn); if (n < 4 + l * 2) { W->last_error = 24; RET(0); return; } wr32(c, a, (u32)(l * 2)); put_w(c, a + 4, pn, 0); RET(1); return; }
+  case 9: if (n < 8) { W->last_error = 24; RET(0); return; } wr32(c, a, dir ? 0x10 : 0x80); wr32(c, a + 4, 0); RET(1); return;
+  case 18: if (n < 24) { W->last_error = 24; RET(0); return; } wr64(c, a, 0x4e45); wr64(c, a + 8, (u64)fd + 1); wr64(c, a + 16, 0); RET(1); return;
+  default: W->last_error = 87; RET(0); return;   /* ERROR_INVALID_PARAMETER */
+  }
+}
 static void s_GetFileTime(Cpu *c) { u64 ft = vfs_filetime(); if (ARG(1)) wr64(c, ARG(1), ft); if (ARG(2)) wr64(c, ARG(2), ft); if (ARG(3)) wr64(c, ARG(3), ft); RET(1); }
 /* FindFirstFile family: data layout A = 320 bytes, W = 592 bytes */
 static void fill_find(Cpu *c, u64 a, const char *name, u64 sz, int dir, int wide) {
@@ -172,6 +185,48 @@ static void final_path(Cpu *c, int wide) {
 }
 static void s_GetFinalPathNameByHandleA(Cpu *c) { final_path(c, 0); }
 static void s_GetFinalPathNameByHandleW(Cpu *c) { final_path(c, 1); }
+/* GetLongPathNameW(src, dst, cap): names are already long on the virtual disk → copy */
+static void s_GetLongPathNameW(Cpu *c) { char tmp[1024]; e_snprintf(tmp, sizeof tmp, "%s", name_w(c, ARG(0))); size_t l = e_strlen(tmp); if ((u32)ARG(2) <= l) { RET(l + 1); return; } put_w(c, ARG(1), tmp, 0); RET(l); }
+static void s_GetLongPathNameA(Cpu *c) { char tmp[1024]; e_snprintf(tmp, sizeof tmp, "%s", name_a(c, ARG(0))); size_t l = e_strlen(tmp); if ((u32)ARG(2) <= l) { RET(l + 1); return; } put_a(c, ARG(1), tmp, 0); RET(l); }
+static void s_GetShortPathNameW(Cpu *c) { s_GetLongPathNameW(c); }
+/* GetVolumePathNameW(path, out, cap): everything lives on C:\ */
+static void s_GetVolumePathNameW(Cpu *c) { if ((u32)ARG(2) < 4) { W->last_error = 122; RET(0); return; } put_w(c, ARG(1), "C:\\", 0); RET(1); }
+/* collapse "\.\" and "x\..\" segments in place (keeps the root) */
+static void path_collapse(char *p) {
+  char out[1100]; size_t o = 0, i = 0, root = 0; size_t n = e_strlen(p);
+  if (n >= 2 && p[1] == ':') { out[0] = p[0]; out[1] = ':'; o = 2; i = 2; if (p[2] == '\\') { out[o++] = '\\'; i = 3; } root = o; }
+  else if (n >= 2 && p[0] == '\\' && p[1] == '\\') { out[0] = out[1] = '\\'; o = i = 2; root = 2; }
+  else if (n >= 1 && p[0] == '\\') { out[0] = '\\'; o = i = 1; root = 1; }
+  while (i <= n && o < sizeof out - 2) {
+    size_t j = i; while (j < n && p[j] != '\\') j++;
+    size_t len = j - i;
+    if (len == 1 && p[i] == '.') { }
+    else if (len == 2 && p[i] == '.' && p[i + 1] == '.') { if (o > root) { size_t k = o - 1; if (k > root && out[k - 1] == '\\') k--; while (k > root && out[k - 1] != '\\') k--; o = k; } else if (!root) { e_memcpy(out + o, "..\\", 3); o += 3; } }
+    else if (len) { e_memcpy(out + o, p + i, len); o += len; out[o++] = '\\'; }
+    i = j + 1;
+  }
+  if (o > root && out[o - 1] == '\\') o--;
+  out[o] = 0; e_memcpy(p, out, o + 1);
+}
+/* PathCchCombineEx(out, cch, in, more, flags) / PathCchCanonicalizeEx(out, cch, in, flags) */
+static void s_PathCchCombineEx(Cpu *c) {
+  char a[1024], b[1024], r[2100]; e_snprintf(a, sizeof a, "%s", ARG(2) ? name_w(c, ARG(2)) : ""); e_snprintf(b, sizeof b, "%s", ARG(3) ? name_w(c, ARG(3)) : "");
+  int b_abs = (b[0] == '\\') || (b[0] && b[1] == ':');
+  if (b_abs || !a[0]) { if (b[0] == '\\' && b[1] != '\\' && a[0] && a[1] == ':') e_snprintf(r, sizeof r, "%c:%s", a[0], b); else e_snprintf(r, sizeof r, "%s", b); }
+  else if (!b[0]) e_snprintf(r, sizeof r, "%s", a);
+  else e_snprintf(r, sizeof r, "%s%s%s", a, a[e_strlen(a) - 1] == '\\' ? "" : "\\", b);
+  path_collapse(r); size_t l = e_strlen(r); if (l + 1 > ARG(1)) { RET(0x8007007Au); return; }   /* ERROR_INSUFFICIENT_BUFFER */
+  put_w(c, ARG(0), r, 0); RET(0);
+}
+static void s_PathCchCanonicalizeEx(Cpu *c) { char r[1100]; e_snprintf(r, sizeof r, "%s", ARG(2) ? name_w(c, ARG(2)) : ""); path_collapse(r); size_t l = e_strlen(r); if (l + 1 > ARG(1)) { RET(0x8007007Au); return; } put_w(c, ARG(0), r, 0); RET(0); }
+/* PathCchSkipRoot(path, &rest): skip "C:\", "\\?\C:\", "\\server\share\" */
+static void s_PathCchSkipRoot(Cpu *c) { u64 p = ARG(0), i = 0; u16 a = rd16(c, p), b = rd16(c, p + 2);
+  if (a == '\\' && b == '\\') { u16 q = rd16(c, p + 4); i = 2; int segs = (q == '?' || q == '.') ? 1 : 2; if (segs == 1 && rd16(c, p + 6) == '\\') { i = 4; if (rd16(c, p + 10) == ':') { i = 6; if (rd16(c, p + 12) == '\\') i = 7; } else segs = 2; }
+    for (int s2 = 0; s2 < segs; s2++) { while (rd16(c, p + 2 * i) && rd16(c, p + 2 * i) != '\\') i++; if (rd16(c, p + 2 * i) == '\\') i++; } }
+  else if (b == ':') { i = 2; if (rd16(c, p + 4) == '\\') i = 3; }
+  else if (a == '\\') i = 1;
+  else { RET(0x80070057u); return; }
+  wr64(c, ARG(1), p + 2 * i); RET(0); }
 static void s_GetFullPathNameA(Cpu *c) { full_path(c, name_a(c, ARG(0)), 0); }
 static void s_GetFullPathNameW(Cpu *c) { full_path(c, name_w(c, ARG(0)), 1); }
 static void s_GetTempPathA(Cpu *c) { const char *d = "C:\\tmp\\"; size_t l = e_strlen(d); if ((u32)ARG(0) > l) put_a(c, ARG(1), d, 0); RET(l); }
@@ -313,7 +368,7 @@ static void s_TerminateProcess(Cpu *c) { int pid; if (ARG(0) == ~0ull || !wait_p
 static void s_OpenProcess(Cpu *c) { int pid = (int)ARG(2); int code; if (!proc_state(pid, &code)) { W->last_error = 87; RET(0); return; } int h = vfs_proc_handle(pid); RET(h >= 0 ? H_OF(h) : 0); }
 static void s_CreatePipe(Cpu *c) { int r, wfd; if (vfs_pipe(&r, &wfd)) { W->last_error = 8; RET(0); return; } int inh = sa_inherit(c, ARG(2)); vfs_set_inherit(r, inh); vfs_set_inherit(wfd, inh); wr64(c, ARG(0), H_OF(r)); wr64(c, ARG(1), H_OF(wfd)); RET(1); }
 static void s_PeekNamedPipe(Cpu *c) { int fd = handle_fd(ARG(0)); int avail = fd >= 3 ? vfs_pipe_avail(fd) : -1; if (avail < 0) { W->last_error = 6; RET(0); return; } if (ARG(3)) wr32(c, ARG(3), 0); if (ARG(4)) wr32(c, ARG(4), (u32)avail); if (ARG(5)) wr32(c, ARG(5), (u32)avail); RET(1); }
-static void s_DuplicateHandle(Cpu *c) { u64 h = ARG(1); int fd = handle_fd(h); u64 out; if (h == ~1ull) { int tf = vfs_kobj_handle(W->th[W->cur_th].kobj); out = tf >= 0 ? H_OF(tf) : 0; } else if (h == ~0ull || h == 0x10 || h == 0x11 || h == 0x12 || fd < 3) out = h; else { int d = vfs_dup(fd); if (d >= 0) vfs_set_inherit(d, (u32)ARG(4) != 0); out = d >= 0 ? H_OF(d) : 0; } if (ARG(3)) wr64(c, ARG(3), out); if (ARG(6) & 1) vfs_close(fd); RET(out != 0); }
+static void s_DuplicateHandle(Cpu *c) { u64 h = ARG(1); int fd = handle_fd(h); u64 out; if (h == ~1ull) { int tf = vfs_kobj_handle(W->th[W->cur_th].kobj); out = tf >= 0 ? H_OF(tf) : 0; } else if (h == ~0ull || h == 0x10 || h == 0x11 || h == 0x12 || fd < 3) out = h; else { int d = vfs_dup(fd); if (d >= 0) vfs_set_inherit(d, (u32)ARG(5) != 0);   /* bInheritHandle is the 6th argument */ out = d >= 0 ? H_OF(d) : 0; } if (ARG(3)) wr64(c, ARG(3), out); if (ARG(6) & 1) vfs_close(fd); RET(out != 0); }
 static void s_GetCurrentProcessId(Cpu *c) { RET((u64)W->pid); }
 static void s_getpid(Cpu *c) { RET((u64)W->pid); }
 static void env_put(const char *kv);
@@ -420,8 +475,22 @@ static void s_findnext64(Cpu *c) { u64 h = ARG(0); char nm[260]; u64 sz; int dir
 static void s_findclose(Cpu *c) { u64 h = ARG(0); if (h >= H_FIND_BASE) vfs_find_close((int)(h - H_FIND_BASE)); RET(0); }
 /* console input helpers */
 static void s_ReadConsoleA(Cpu *c) { s64 r = fd_read(c, -1, ARG(1), (u32)ARG(2)); if (r == -2) { blocked_io(c, 0); return; } if (ARG(3)) wr32(c, ARG(3), r < 0 ? 0 : (u32)r); RET(1); }
-static void s_ReadConsoleW(Cpu *c) { u8 tmp[2048]; u32 want = (u32)ARG(2); if (want > sizeof tmp) want = sizeof tmp; g_last_io_fd = -1; s64 r = vfs_stdin_read(tmp, want); if (r == -2) { blocked_io(c, 0); return; } if (r < 0) r = 0; for (s64 i = 0; i < r; i++) wr16(c, ARG(1) + i * 2, tmp[i]); if (ARG(3)) wr32(c, ARG(3), (u32)r); RET(1); }
-static void s_GetNumberOfConsoleInputEvents(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), vfs_stdin_available() ? 1 : 0); RET(1); }
+/* UTF-8 bytes → UTF-16 units (surrogate pairs for astral code points); returns the unit count */
+static size_t utf8_to_w16(const u8 *s, size_t n, u16 *out, size_t cap) {
+  size_t i = 0, o = 0;
+  while (i < n && o < cap) {
+    u32 b = s[i], cp = b; int extra = 0;
+    if (b >= 0xF0) { cp = b & 7; extra = 3; } else if (b >= 0xE0) { cp = b & 15; extra = 2; } else if (b >= 0xC0) { cp = b & 31; extra = 1; }
+    i++; for (int k = 0; k < extra; k++) { if (i < n && (s[i] & 0xC0) == 0x80) cp = (cp << 6) | (s[i] & 0x3F), i++; else { cp = 0xFFFD; break; } }
+    if (cp >= 0x10000) { if (o + 2 > cap) break; cp -= 0x10000; out[o++] = (u16)(0xD800 + (cp >> 10)); out[o++] = (u16)(0xDC00 + (cp & 0x3FF)); } else out[o++] = (u16)cp;
+  }
+  return o;
+}
+static void s_ReadConsoleW(Cpu *c) { u8 tmp[2048]; u16 wtmp[2048]; u32 want = (u32)ARG(2); if (want > 2048) want = 2048; g_last_io_fd = -1; s64 r = vfs_stdin_read(tmp, want); if (r == -2) { blocked_io(c, 0); return; } if (r < 0) r = 0;
+  size_t n = utf8_to_w16(tmp, (size_t)r, wtmp, want); if (!n && want >= 3) { wtmp[0] = 0x1a; wtmp[1] = 13; wtmp[2] = 10; n = 3; }   /* EOF shows up as Ctrl-Z, exactly like a real console */
+  W->last_error = 0; for (size_t i = 0; i < n; i++) wr16(c, ARG(1) + i * 2, wtmp[i]); if (ARG(3)) wr32(c, ARG(3), (u32)n); RET(1); }
+static void s_GetNumberOfConsoleInputEvents(Cpu *c) { int fd = fd_of_handle(ARG(0)); if (fd != -1 && fd != 0) { W->last_error = 6; RET(0); return; }   /* only the input buffer answers: Python tells console in/out apart this way */
+  if (ARG(1)) wr32(c, ARG(1), vfs_stdin_available() ? 1 : 0); RET(1); }
 static void s_kbhit(Cpu *c) { RET(vfs_stdin_available() ? 1 : 0); }
 static void s_getch(Cpu *c) { u8 ch; g_last_io_fd = -1; s64 r = vfs_stdin_read(&ch, 1); if (r == -2) { blocked_io(c, 0); return; } RET(r == 1 ? ch : ~0ull); }
 static void s_gets_s(Cpu *c) { c->r[R8] = c->r[RCX]; c->r[RCX] = ARG(0); /* reuse fgets: (buf, n, stdin) */ u64 buf = ARG(0); int n = (int)ARG(1); u8 tmp[4096]; g_last_io_fd = -1; s64 r = vfs_stdin_read(tmp, (u64)(n - 1) < sizeof tmp ? (u64)(n - 1) : sizeof tmp); if (r == -2) { blocked_io(c, 0); return; } if (r <= 0) { RET(0); return; } while (r > 0 && (tmp[r - 1] == '\n' || tmp[r - 1] == '\r')) r--; u8 *p = mem_ptr(c->mem, buf, (u64)r + 1, 1); if (p) { e_memcpy(p, tmp, (size_t)r); p[r] = 0; } RET(buf); }
@@ -463,17 +532,18 @@ void w32_env_init(const char **envs) { if (g_nenv) { g_env_dirty = 1; return; } 
 static void env_sync(Cpu *c) {   /* rebuild guest envp[], narrow block and wide block */
   if (!g_env_dirty) return; g_env_dirty = 0; Win32 *w = W;
   size_t total = 1; for (int i = 0; i < g_nenv; i++) total += e_strlen(g_env[i]) + 1;
-  u64 envp = w32_heap_alloc(w, 8 * (size_t)(g_nenv + 1), 1), blk = w32_heap_alloc(w, total, 1), wblk = w32_heap_alloc(w, total * 2, 1); u64 o = 0;
-  for (int i = 0; i < g_nenv; i++) { size_t l = e_strlen(g_env[i]) + 1; put_a(c, blk + o, g_env[i], 0); for (size_t k = 0; k < l; k++) wr16(c, wblk + (o + k) * 2, (u8)g_env[i][k]); wr64(c, envp + i * 8, blk + o); o += l; }
-  wr8(c, blk + o, 0); wr16(c, wblk + o * 2, 0); wr64(c, envp + g_nenv * 8, 0);
-  w->env_a = blk; w->env_w = wblk; wr64(c, w->ubuf + 0x228, envp);
+  u64 envp = w32_heap_alloc(w, 8 * (size_t)(g_nenv + 1), 1), wenvp = w32_heap_alloc(w, 8 * (size_t)(g_nenv + 1), 1), blk = w32_heap_alloc(w, total, 1), wblk = w32_heap_alloc(w, total * 2, 1); u64 o = 0;
+  for (int i = 0; i < g_nenv; i++) { size_t l = e_strlen(g_env[i]) + 1; put_a(c, blk + o, g_env[i], 0); for (size_t k = 0; k < l; k++) wr16(c, wblk + (o + k) * 2, (u8)g_env[i][k]); wr64(c, envp + i * 8, blk + o); wr64(c, wenvp + i * 8, wblk + o * 2); o += l; }
+  wr8(c, blk + o, 0); wr16(c, wblk + o * 2, 0); wr64(c, envp + g_nenv * 8, 0); wr64(c, wenvp + g_nenv * 8, 0);
+  w->env_a = blk; w->env_w = wblk; wr64(c, w->ubuf + 0x228, envp); wr64(c, w->ubuf + 0x230, wenvp);   /* _environ and _wenviron */
 }
 static void s_getenv(Cpu *c) { const char *v = env_get(gstr(c, ARG(0))); if (!v) { RET(0); return; } env_sync(c); /* return pointer inside the guest block so it stays valid */ u64 blk = W->env_a; const char *n = gstr(c, ARG(0)); size_t nl = e_strlen(n); u64 p = blk; for (int i = 0; i < g_nenv; i++) { size_t l = e_strlen(g_env[i]) + 1; if (env_find(n, nl) == i) { RET(p + nl + 1); return; } p += l; } RET(0); }
 static void s_wgetenv(Cpu *c) { const char *v = env_get(name_w(c, ARG(0))); if (!v) { RET(0); return; } u64 p = w32_heap_alloc(W, (e_strlen(v) + 1) * 2, 0); put_w(c, p, v, 0); RET(p); }
 static void s_getenv_s(Cpu *c) { const char *v = env_get(gstr(c, ARG(3))); size_t l = v ? e_strlen(v) + 1 : 0; if (ARG(0)) wr64(c, ARG(0), l); if (!v) { RET(0); return; } if (ARG(2) < l) { RET(34); return; } put_a(c, ARG(1), v, 0); RET(0); }
 static void s_dupenv_s(Cpu *c) { const char *v = env_get(gstr(c, ARG(2))); if (!v) { wr64(c, ARG(0), 0); if (ARG(1)) wr64(c, ARG(1), 0); RET(0); return; } wr64(c, ARG(0), w32_guest_strdup(W, v)); if (ARG(1)) wr64(c, ARG(1), e_strlen(v) + 1); RET(0); }
 static void s_putenv(Cpu *c) { env_put(gstr(c, ARG(0))); env_sync(c); RET(0); }   /* msvcrt rebuilds _environ at once; clearenv() loops on environ[0] */
-static void s_wputenv(Cpu *c) { env_put(name_w(c, ARG(0))); RET(0); }
+static void s_wputenv(Cpu *c) { env_put(name_w(c, ARG(0))); env_sync(c); RET(0); }
+static void s_wputenv_s(Cpu *c) { char n[1024]; e_snprintf(n, sizeof n, "%s", name_w(c, ARG(0))); env_set(n, name_w(c, ARG(1))); env_sync(c); RET(0); }
 static void s_putenv_s(Cpu *c) { char n[1024]; e_snprintf(n, sizeof n, "%s", gstr(c, ARG(0))); env_set(n, gstr(c, ARG(1))); env_sync(c); RET(0); }
 static void s_GetEnvironmentVariableA(Cpu *c) { const char *v = env_get(gstr(c, ARG(0))); if (!v) { W->last_error = 203; RET(0); return; } size_t l = e_strlen(v); if ((u32)ARG(2) <= l) { RET(l + 1); return; } put_a(c, ARG(1), v, 0); RET(l); }
 static void s_GetEnvironmentVariableW(Cpu *c) { const char *v = env_get(name_w(c, ARG(0))); if (!v) { W->last_error = 203; RET(0); return; } size_t l = e_strlen(v); if ((u32)ARG(2) <= l) { RET(l + 1); return; } put_w(c, ARG(1), v, 0); RET(l); }
@@ -485,6 +555,8 @@ static void s_ExpandEnvironmentStringsW(Cpu *c) { char out[4096]; size_t n = exp
 static void s_GetEnvironmentStrings(Cpu *c) { env_sync(c); RET(W->env_a); }
 static void s_GetEnvironmentStringsW(Cpu *c) { env_sync(c); RET(W->env_w); }
 static void s_p__environ(Cpu *c) { env_sync(c); RET(W->ubuf + 0x228); }
+static void s_p__wenviron(Cpu *c) { env_sync(c); RET(W->ubuf + 0x230); }
+static void s_get_initial_wide_environment(Cpu *c) { env_sync(c); RET(rd64(c, W->ubuf + 0x230)); }
 static void s_get_initial_narrow_environment(Cpu *c) { env_sync(c); RET(rd64(c, W->ubuf + 0x228)); }
 static void s_getmainargs(Cpu *c) { env_sync(c); wr32(c, ARG(0), rd32(c, W->ubuf + 0x200)); wr64(c, ARG(1), rd64(c, W->ubuf + 0x208)); wr64(c, ARG(2), rd64(c, W->ubuf + 0x228)); RET(0); }
 /* ---- string helpers that were ret0 stubs ---- */
@@ -521,6 +593,9 @@ static const char *errstr(int e) {
   switch (e) { case 0: return "No error"; case 1: return "Operation not permitted"; case 2: return "No such file or directory"; case 4: return "Interrupted function call"; case 5: return "Input/output error"; case 6: return "No such device or address"; case 7: return "Arg list too long"; case 8: return "Exec format error"; case 9: return "Bad file descriptor"; case 10: return "No child processes"; case 11: return "Resource temporarily unavailable"; case 12: return "Not enough memory"; case 13: return "Permission denied"; case 16: return "Resource device"; case 17: return "File exists"; case 18: return "Improper link"; case 19: return "No such device"; case 20: return "Not a directory"; case 21: return "Is a directory"; case 22: return "Invalid argument"; case 23: return "Too many open files in system"; case 24: return "Too many open files"; case 25: return "Inappropriate I/O control operation"; case 27: return "File too large"; case 28: return "No space left on device"; case 29: return "Invalid seek"; case 30: return "Read-only file system"; case 31: return "Too many links"; case 32: return "Broken pipe"; case 33: return "Math argument"; case 34: return "Result too large"; case 36: return "Resource deadlock avoided"; case 38: return "File name too long"; case 39: return "Directory not empty"; case 41: return "Not a directory"; default: return "Unknown error"; }
 }
 static void s_strerror(Cpu *c) { u64 a = W->ubuf + 0x7d0; put_a(c, a, errstr((int)ARG(0)), 0x30); RET(a); }
+/* __sys_nerr() / __sys_errlist(): the UCRT's errno message table (43 entries) */
+static void s___sys_nerr(Cpu *c) { Win32 *w = W; if (!w->sys_nerr) { w->sys_nerr = shim_bump(w, 16); wr32(c, w->sys_nerr, 43); } RET(w->sys_nerr); }
+static void s___sys_errlist(Cpu *c) { Win32 *w = W; if (!w->sys_errlist) { w->sys_errlist = w32_heap_alloc(w, 43 * 8, 1); for (int i = 0; i < 43; i++) wr64(c, w->sys_errlist + 8 * i, w32_guest_strdup(w, errstr(i))); } RET(w->sys_errlist); }
 static void s_strerror_s(Cpu *c) { put_a(c, ARG(0), errstr((int)ARG(2)), (u32)ARG(1)); RET(0); }
 static void s_strcpy_s(Cpu *c) { const char *s = gstr(c, ARG(2)); size_t l = e_strlen(s); if (l + 1 > ARG(1)) { if (ARG(1)) wr8(c, ARG(0), 0); RET(34); return; } put_a(c, ARG(0), s, 0); RET(0); }
 static void s_strcat_s(Cpu *c) { const char *d = gstr(c, ARG(0)); size_t dl = e_strlen(d); const char *s = gstr(c, ARG(2)); size_t l = e_strlen(s); if (dl + l + 1 > ARG(1)) { RET(34); return; } char tmp[4096]; if (l >= sizeof tmp) { RET(34); return; } e_memcpy(tmp, s, l + 1); put_a(c, ARG(0) + dl, tmp, 0); RET(0); }
@@ -544,5 +619,5 @@ static void s_mktemp(Cpu *c) { u64 a = ARG(0); u64 l = e_strlen(gstr(c, a)); u32
   SA("_access", access), SA("access", access), SA("_waccess", waccess), SA("_access_s", access_s), SA("_unlink", unlink), SA("unlink", unlink), SA("remove", unlink), SA("_wunlink", wunlink), SA("_wremove", wunlink), SA("_mkdir", mkdir), SA("mkdir", mkdir), SA("_wmkdir", wmkdir), SA("_rmdir", rmdir), SA("rmdir", rmdir), SA("_wrmdir", rmdir), \
   S(rename), SA("_wrename", wrename), SA("_getcwd", getcwd), SA("getcwd", getcwd), SA("_wgetcwd", wgetcwd), SA("_chdir", chdir), SA("chdir", chdir), SA("_wchdir", wchdir), SA("_fullpath", fullpath), SA("_wfullpath", wfullpath), \
   SA("_findfirst64", findfirst64), SA("_findfirst64i32", findfirst64), SA("_findnext64", findnext64), SA("_findnext64i32", findnext64), SA("_findclose", findclose), SA("_kbhit", kbhit), SA("_getch", getch), SA("_getche", getch), SA("gets_s", gets_s), \
-  S(getenv), SA("_wgetenv", wgetenv), S(getenv_s), SA("_dupenv_s", dupenv_s), SA("_putenv", putenv), SA("putenv", putenv), SA("_wputenv", wputenv), SA("_putenv_s", putenv_s), S(GetEnvironmentVariableA), S(GetEnvironmentVariableW), S(SetEnvironmentVariableA), S(SetEnvironmentVariableW), S(ExpandEnvironmentStringsA), S(ExpandEnvironmentStringsW), S(GetEnvironmentStrings), SA("GetEnvironmentStringsA", GetEnvironmentStrings), S(GetEnvironmentStringsW), SA("__p__environ", p__environ), SA("_get_initial_narrow_environment", get_initial_narrow_environment), SA("__getmainargs", getmainargs), \
-  S(strspn), S(strcspn), S(strpbrk), S(strtok), S(strtok_s), SA("_strlwr", strlwr), SA("strlwr", strlwr), SA("_strupr", strupr), SA("strupr", strupr), SA("_strrev", strrev), SA("_itoa", itoa), SA("itoa", itoa), SA("_ltoa", itoa), SA("_ultoa", ultoa), SA("_i64toa", i64toa), SA("_ui64toa", ui64toa), S(strerror), SA("_strerror", strerror), S(strerror_s), S(strcpy_s), S(strcat_s), S(strncpy_s), S(memcpy_s), SA("memmove_s", memcpy_s), SA("_mktemp", mktemp),
+  S(getenv), SA("_wgetenv", wgetenv), S(getenv_s), SA("_dupenv_s", dupenv_s), SA("_putenv", putenv), SA("putenv", putenv), SA("_wputenv", wputenv), SA("_putenv_s", putenv_s), SA("_wputenv_s", wputenv_s), S(GetEnvironmentVariableA), S(GetEnvironmentVariableW), S(SetEnvironmentVariableA), S(SetEnvironmentVariableW), S(ExpandEnvironmentStringsA), S(ExpandEnvironmentStringsW), S(GetEnvironmentStrings), SA("GetEnvironmentStringsA", GetEnvironmentStrings), S(GetEnvironmentStringsW), SA("__p__environ", p__environ), SA("_get_initial_narrow_environment", get_initial_narrow_environment), SA("__getmainargs", getmainargs), \
+  S(strspn), S(strcspn), S(strpbrk), S(strtok), S(strtok_s), SA("_strlwr", strlwr), SA("strlwr", strlwr), SA("_strupr", strupr), SA("strupr", strupr), SA("_strrev", strrev), SA("_itoa", itoa), SA("itoa", itoa), SA("_ltoa", itoa), SA("_ultoa", ultoa), SA("_i64toa", i64toa), SA("_ui64toa", ui64toa), S(strerror), S(__sys_nerr), S(__sys_errlist), SA("_strerror", strerror), S(strerror_s), S(strcpy_s), S(strcat_s), S(strncpy_s), S(memcpy_s), SA("memmove_s", memcpy_s), SA("_mktemp", mktemp),

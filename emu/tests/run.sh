@@ -123,6 +123,21 @@ check "rg -j4 --stats"        "files searched"         "$($X --quiet --max-ms 60
 check "fd by extension"       "demo.json
 demo.lua
 demo.sql" "$($X --quiet --max-ms 60000 --mount "$PWD/$A" $A/fd.exe --color never -e lua -e sql -e json 2>&1 || true)"
+echo "[15] CPython 3.12.10 (official python.org embeddable build: python.exe + python312.dll + stdlib zip + .pyd extensions)"
+PY=$A/py; PYR="$X --quiet --max-ms 120000 --mount $PWD/$PY"
+check "print(6*7)"            "42"                                   "$($PYR $PY/python.exe -c "print(6*7)" 2>&1 || true)"
+check "version + platform"    "3.12.10 win32 AMD64"                  "$($PYR $PY/python.exe -c "import sys, platform; print(sys.version.split()[0], sys.platform, platform.machine())" 2>&1 || true)"
+check "zipimport stdlib"      '"b": "x"}'              "$($PYR $PY/python.exe -c "import json, re, collections; print(json.dumps({'b': 'x', 'a': [1, 2]}, sort_keys=True))" 2>&1 || true)"
+check "sqlite3 .pyd + dll"    "(45,) 3.49.1"                         "$($PYR $PY/python.exe -c "import sqlite3; c = sqlite3.connect(':memory:'); c.execute('create table t(x)'); c.executemany('insert into t values (?)', [(i,) for i in range(10)]); print(c.execute('select sum(x) from t').fetchone(), sqlite3.sqlite_version)" 2>&1 || true)"
+check "decimal/hashlib/math"  "3.3 ba7816bf -0.6931471805599453 1.4142135623730951" "$($PYR $PY/python.exe -c "import decimal, hashlib, math; print(decimal.Decimal('1.1') + decimal.Decimal('2.2'), hashlib.sha256(b'abc').hexdigest()[:8], math.log(0.5), math.pow(2, 0.5))" 2>&1 || true)"
+check "threads"               "[49995000, 199990000, 449985000]"     "$($PYR $PY/python.exe -c "import threading, queue; q = queue.Queue(); ts = [threading.Thread(target=lambda n: q.put(sum(range(n))), args=(10000 * k,)) for k in (1, 2, 3)]; [t.start() for t in ts]; [t.join() for t in ts]; print(sorted(q.get() for _ in ts))" 2>&1 || true)"
+check "ctypes + kernel32"     "4242 8"                               "$($PYR $PY/python.exe -c "import ctypes; print(ctypes.windll.kernel32.GetCurrentProcessId(), ctypes.sizeof(ctypes.c_void_p))" 2>&1 || true)"
+check "file io + traceback"   "ZeroDivisionError: division by zero"  "$($PYR $PY/python.exe -c "open('o.txt', 'w').write('hi'); print(open('o.txt').read()); 1/0" 2>&1 || true)"
+rc=0; $PYR $PY/python.exe -c "import sys; sys.exit(3)" >/dev/null 2>&1 || rc=$?
+check "exit code"             "rc=3"                                 "rc=$rc"
+check "subprocess pipes"      "returncode=3, stdout='42" "$($PYR $PY/python.exe -c "import subprocess, sys; print(subprocess.run(['python.exe', '-c', 'import sys; print(42); print(\"err\", file=sys.stderr); sys.exit(3)'], capture_output=True, text=True))" 2>&1 || true)"
+check "REPL over stdin"       "55 привет"                            "$(printf 'x = [n * n for n in range(6)]\nprint(sum(x), %s)\n' "'привет'" | $PYR $PY/python.exe -i -q 2>&1 || true)"
+check "demo.py"               "sqlite: (3, 84.92, 'carol')"          "$(cp $A/demo.py $PY/demo.py; $PYR $PY/python.exe demo.py 2>&1 || true; rm -f $PY/demo.py)"
 echo "[6] honest rejections"
 check "32-bit PE"   '"verdict":"unsupported"' "$(printf 'MZ' | head -c 2 > /tmp/pe32.bin; python3 - <<'PY'
 import struct

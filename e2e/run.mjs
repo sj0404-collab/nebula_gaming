@@ -404,6 +404,36 @@ await test('x64: real applications — SQLite 3.50.4 (file db), jq 1.8.1, Lua 5.
   await closeAll();
 });
 
+await test('x64: CPython 3.12 (official python.org build) runs in the browser — stdlib from python312.zip, C extensions, and the REPL over console stdin', async () => {
+  const w = await x64Open();
+  await w.locator('[data-x64-exe="python.exe"]').waitFor({ timeout: 60_000 });
+  const waitStatus = (st, timeout = 180_000) => page.waitForFunction((s) => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === s, st, { timeout });
+  const start = async (args) => {
+    await w.locator('[data-x64-exe="python.exe"]').click();
+    await w.getByPlaceholder('arguments').fill(args);
+    await w.locator('[data-x64-run]').click();
+  };
+  // 1. first Run fetches the 15 MB runtime lazily, then runs a one-liner that touches json, sqlite3 (.pyd + sqlite3.dll) and decimal
+  await start(`-c "import sys, json, sqlite3, decimal; print(sys.version.split()[0], sys.platform); print(json.dumps({'answer': 6 * 7})); print(sqlite3.connect(':memory:').execute('select 40 + 2').fetchone(), decimal.Decimal(1) / 7)"`);
+  await waitStatus('exited');
+  let con = await w.locator('[data-x64-console]').innerText();
+  expect(/3\.12\.10 win32/.test(con), 'python version line missing: ' + con.slice(-400));
+  expect(/\{"answer": 42\}/.test(con), 'json output missing: ' + con.slice(-400));
+  expect(/\(42,\) 0\.1428571428571428571428571429/.test(con), 'sqlite3/decimal output missing: ' + con.slice(-400));
+  await page.screenshot({ path: resolve(SHOTS, 'x64-python.png') });
+  // 2. the REPL: python -i -q reads lines from the console input (ReadConsoleW), EOF ends it
+  await start('-i -q');
+  await waitStatus('waiting-stdin', 120_000);
+  for (const line of ['x = [n * n for n in range(6)]', 'print(sum(x), "привет")', 'import this']) { await w.locator('[data-x64-stdin]').fill(line); await w.locator('[data-x64-stdin-send]').click(); }
+  await page.waitForFunction(() => /Namespaces are one honking great idea/.test(document.querySelector('[data-x64-console]')?.textContent || ''), null, { timeout: 120_000 });
+  await w.locator('[data-x64-stdin-eof]').click(); await waitStatus('exited');
+  con = await w.locator('[data-x64-console]').innerText();
+  expect(/55 привет/.test(con), 'REPL expression output missing: ' + con.slice(-400));
+  expect(/Beautiful is better than ugly/.test(con), 'import this output missing: ' + con.slice(-400));
+  await page.screenshot({ path: resolve(SHOTS, 'x64-python-repl.png') });
+  await closeAll();
+});
+
 await test('x64: virtual disk + stdin — files mounted from the host, read/written by busybox, console input feeds blocking reads', async () => {
   const w = await x64Open();
   await w.locator('[data-x64-exe="busybox64.exe"]').waitFor({ timeout: 30_000 });

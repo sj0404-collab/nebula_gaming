@@ -1,3 +1,51 @@
+# v1.10.0 — Nebula x64: CPython 3.12.10 runs in the browser
+
+**A real Python.** The official python.org *embeddable* build of CPython 3.12.10 (`python.exe` + `python312.dll` 4.3 MB + the
+standard library in `python312.zip` + 17 C‑extension `.pyd` files, MSVC v.1943, unmodified except `import site` enabled in
+`python312._pth`) now runs inside the wasm64 emulator. It appears in the x64 Runner as `python.exe` (15 MB bundle, downloaded
+lazily the first time you press *Run*; the console shows the download progress).
+
+Verified native and in Chromium (test suite section `[15]`, e2e scenario `x64: CPython 3.12`):
+
+| feature | status |
+|---|---|
+| `-c`, scripts, `-i -q` **interactive REPL over the console** (`ReadConsoleW` 16 K wchar path of `myreadline.c`, `^Z` = EOF, Cyrillic I/O) | works |
+| stdlib via **zipimport**: `json re collections dataclasses decimal datetime zoneinfo statistics itertools functools typing traceback` | works |
+| C extensions: `_sqlite3` (+ `sqlite3.dll` 3.49.1, file and `:memory:` databases), `_decimal` (libmpdec), `_ctypes` (+ `libffi-8.dll`, `ctypes.windll.kernel32.GetCurrentProcessId()` → 4242), `_bz2 _lzma pyexpat _elementtree unicodedata _queue select _socket _asyncio _zoneinfo _uuid _multiprocessing` | load and work |
+| `threading` / `queue` / `concurrent.futures` (CPython's GIL on top of SRW locks + condition variables) | works |
+| **`subprocess`** — `python.exe` spawning `python.exe` with `capture_output`, `input=`, `check_output`, `returncode`, `stderr` | works |
+| `hashlib` (pure‑Python fallbacks — no `_hashlib`/OpenSSL), `math` (`erf/erfc/gamma/lgamma/log/pow` within 1 ulp of the host), `os.environ`, `platform.uname()` → `Windows NEBULA 10 10.0.19045 AMD64` | works |
+| file I/O, `os.listdir/stat/rename/remove`, `tempfile`, `shutil`, tracebacks with source lines, `sys.exit(n)` → exit code | works |
+| `ssl`, real sockets, `tkinter`, `_wmi`, `winsound`, `_msi` | **not available** (no network/COM in the sandbox; `import ssl` fails cleanly) |
+
+Performance, honestly: the interpreter start‑up is ≈ 60 M guest instructions — about 2 s native, ~4 s in Chromium at ~18 MIPS;
+the bundled `demo.py` (json / sqlite / decimal / dataclasses / threads / traceback) is 268 M instructions ≈ 9 s native, ~15 s in the
+browser. A pure‑Python integer loop costs ≈ 2 350 emulated instructions per iteration, i.e. Python inside the emulator is roughly
+500–1000× slower than Python on the host CPU. Fine for scripts and the REPL; not for number crunching.
+
+**What CPython needed from the Win32/CRT layer** (`win32.c`, `win32_fs.inc`, `win32_compat.inc`):
+
+* UCRT: `setlocale/_wsetlocale`, `_dclass/_fdclass` with the real UCRT constants (CPython's `Py_IS_FINITE` is `_dclass(x) <= 0`),
+  `__sys_nerr/__sys_errlist`, `_wputenv_s`, `wcsncpy_s/wcscpy_s/wcscat_s` and the rest of the `wcs*` family, a correct
+  `_localtime64_s`, a real wide `_wenviron` array kept in sync with `_environ`, `erf/erfc` rewritten (Taylor series + continued
+  fraction, ≤ 1e‑13 vs the host — the previous approximation was 1e‑7 off and `math.erf` tests showed it);
+* kernel32: `GetLongPathNameW/A`, `GetShortPathNameW`, `GetVolumePathNameW`, `GetFileInformationByHandleEx`,
+  `GetNumberOfConsoleInputEvents`, `GetActiveProcessorCount/GetMaximumProcessorCount/GetActiveProcessorGroupCount`,
+  `Initialize/Update/DeleteProcThreadAttributeList` (STARTUPINFOEX handle lists), `DisableThreadLibraryCalls`,
+  `PROCESSOR_*` environment variables; `api-ms-win-core-path!PathCch*`; the `ws2_32` ordinal‑only imports resolved by name;
+* a rewritten `ReadConsoleW` (UTF‑8 console input → UTF‑16, partial reads, `^Z`), and a **`DuplicateHandle` bug fix**: the shim read
+  `dwDesiredAccess` instead of `bInheritHandle`, so a duplicated pipe end was never inheritable and `subprocess` pipes silently fell
+  back to the console. Found with the new native `--apitrace` flag (`X64_LOG=1 x64run --apitrace … 3>&1`), which prints every
+  Win32 call with its first four arguments and return value.
+
+Tests: `emu/tests/run.sh` grows to **82 checks** (12 new: version/platform, zipimport, sqlite3, decimal/hashlib/math, threads,
+ctypes, file I/O + traceback, exit code, subprocess pipes, REPL over piped stdin, `demo.py`); the Playwright suite gains the CPython
+scenario (one‑liner + REPL with `import this`) — 31 scenarios, all green.
+
+Licence: CPython is distributed under the PSF License 2.0 (`public/x64/apps/py/LICENSE.txt`); see `public/x64/samples/README.md`.
+
+---
+
 # v1.9.0 — Nebula x64: hardware exceptions as SEH, Rust programs (ripgrep, fd)
 
 **Hardware faults are now Windows exceptions.** Until v1.8 an access violation, an integer division by zero or a `ud2` inside the
