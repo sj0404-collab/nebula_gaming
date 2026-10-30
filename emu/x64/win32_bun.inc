@@ -6,7 +6,6 @@
 /* OBJECT_ATTRIBUTES { ULONG Length @0; HANDLE RootDirectory @8; PUNICODE_STRING ObjectName @16; ULONG Attributes @24; ... }
  * UNICODE_STRING { USHORT Length @0 (bytes); USHORT MaximumLength @2; PWSTR Buffer @8 }
  * NT paths: "\??\C:\x", "\??\UNC\srv\share", "\Device\NamedPipe\name", "\??\pipe\name"; relative names resolve against RootDirectory. */
-static int e_strnicmp_(const char *a, const char *b, size_t n) { for (size_t i = 0; i < n; i++) { int x = (u8)a[i], y = (u8)b[i]; if (x >= 'A' && x <= 'Z') x += 32; if (y >= 'A' && y <= 'Z') y += 32; if (x != y) return x - y; if (!x) return 0; } return 0; }
 static void s_GetModuleFileNameW(Cpu *c);
 static int nt_object_path(Cpu *c, u64 oa, char *out, size_t cap) {
   if (!oa) return 0; u64 root = rd64(c, oa + 8), us = rd64(c, oa + 16); char name[1024]; name[0] = 0;
@@ -74,6 +73,43 @@ static void s_RtlFillMemory(Cpu *c) { u8 *p = mem_ptr(c->mem, ARG(0), ARG(1), 1)
 static void s_RtlWaitOnAddress(Cpu *c) { int retry = W->wait_active && W->wait_rip == c->rip;
   if (!retry) { u64 tp = ARG(3); u32 ms = 0xffffffffu; if (tp) { s64 t = (s64)rd64(c, tp); ms = t >= 0 ? 0 : (u32)((-t) / 10000); } c->r[R9] = ms; }   /* re-executed after a park: R9 already holds the ms */
   s_WaitOnAddress(c); if (W->block != BLOCK_NONE) return; c->r[RAX] = c->r[RAX] ? 0 : 0x102; }   /* 0x102 = STATUS_TIMEOUT */
+/* Zig's std.os.windows (OpenTUI's native DLL) calls the Nt* memory functions directly */
+static void s_VirtualAlloc(Cpu *c); static void s_VirtualFree(Cpu *c); static void s_VirtualQuery(Cpu *c);
+/* NtAllocateVirtualMemory(process, PVOID *base, zerobits, SIZE_T *size, type, protect) */
+static void s_NtAllocateVirtualMemory(Cpu *c) { u64 bp = ARG(1), sp = ARG(3); u32 type = (u32)ARG(4), prot = (u32)ARG(5);
+  u64 base = bp ? rd64(c, bp) : 0, size = sp ? rd64(c, sp) : 0; if (!size) { RET(NT_INVALID_PARAMETER); return; }
+  c->r[RCX] = base; c->r[RDX] = size; c->r[R8] = type; c->r[R9] = prot; s_VirtualAlloc(c); u64 r = c->r[RAX];
+  if (!r) { RET(W->last_error == 487 ? 0xC0000018u : 0xC0000017u); return; }   /* CONFLICTING_ADDRESSES / NO_MEMORY */
+  if (bp) wr64(c, bp, r); if (sp) wr64(c, sp, (size + 4095) & ~4095ull); RET(0); }
+/* NtFreeVirtualMemory(process, PVOID *base, SIZE_T *size, type) */
+static void s_NtFreeVirtualMemory(Cpu *c) { u64 bp = ARG(1), sp = ARG(2); u32 type = (u32)ARG(3); u64 base = bp ? rd64(c, bp) : 0, size = sp ? rd64(c, sp) : 0;
+  c->r[RCX] = base; c->r[RDX] = type == 0x8000 ? 0 : size; c->r[R8] = type; s_VirtualFree(c); RET(c->r[RAX] ? 0 : 0xC000009Au); }
+static void s_NtProtectVirtualMemory(Cpu *c) { if (ARG(4)) wr32(c, ARG(4), 0x40); RET(0); }
+/* NtQueryVirtualMemory(process, addr, class, buf, len, *retlen): MemoryBasicInformation only */
+static void s_NtQueryVirtualMemory(Cpu *c) { if ((u32)ARG(2) != 0) { RET(NT_INVALID_INFO_CLS); return; } u64 addr = ARG(1), buf = ARG(3), rl = ARG(5);
+  c->r[RCX] = addr; c->r[RDX] = buf; c->r[R8] = 48; s_VirtualQuery(c); if (rl) wr64(c, rl, 48); RET(c->r[RAX] ? 0 : 0xC000000Du); }
+/* RtlGetFullPathName_U(name, cap_bytes, buf, *filepart) → bytes written (without NUL); GetFullPathNameW's full_path() counts characters */
+static void s_RtlGetFullPathName_U(Cpu *c) { char out[1024]; vfs_normalize(name_w(c, ARG(0)), out, sizeof out); size_t l = e_strlen(out); u32 cap = (u32)ARG(1) / 2;
+  if (cap <= l) { RET((l + 1) * 2); return; } put_w(c, ARG(2), out, 0); if (ARG(3)) { size_t b = l; while (b > 0 && out[b - 1] != '\\') b--; wr64(c, ARG(3), ARG(2) + b * 2); } RET(l * 2); }
+static void s_RtlEqualUnicodeString(Cpu *c) { u64 a = ARG(0), b = ARG(1); int ci = (int)(ARG(2) & 0xff); u32 la = rd16(c, a) / 2, lb = rd16(c, b) / 2; if (la != lb) { RET(0); return; }
+  u64 pa = rd64(c, a + 8), pb = rd64(c, b + 8); for (u32 i = 0; i < la; i++) { u32 x = rd16(c, pa + 2 * i), y = rd16(c, pb + 2 * i); if (ci) { if (x >= 'a' && x <= 'z') x -= 32; if (y >= 'a' && y <= 'z') y -= 32; } if (x != y) { RET(0); return; } } RET(1); }
+static void s_RtlUpcaseUnicodeChar(Cpu *c) { u32 x = (u32)ARG(0) & 0xffff; RET(x >= 'a' && x <= 'z' ? x - 32 : x); }
+static void s_RtlGetSystemTimePrecise(Cpu *c) { RET(now_100ns()); }
+static void s_NtLockFile(Cpu *c) { nt_iosb(c, ARG(4), 0, 0); RET(0); }
+static void s_NtUnlockFile(Cpu *c) { nt_iosb(c, ARG(1), 0, 0); RET(0); }
+static void s_Module32First(Cpu *c) { W->last_error = 18; RET(0); }
+static void s_GetNamedPipeInfo(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), 0); if (ARG(2)) wr32(c, ARG(2), 65536); if (ARG(3)) wr32(c, ARG(3), 65536); if (ARG(4)) wr32(c, ARG(4), 1); RET(1); }
+/* wcsrtombs(dst, const wchar_t **src, n, mbstate*) → bytes written; UTF-8 */
+static void s_wcsrtombs(Cpu *c) { u64 d = ARG(0), sp = ARG(1), n = ARG(2); u64 s = rd64(c, sp); u64 o = 0;
+  for (;;) { u32 ch = rd16(c, s); u8 b[4]; int k = ch < 0x80 ? 1 : ch < 0x800 ? 2 : 3; if (k == 1) b[0] = (u8)ch; else if (k == 2) { b[0] = (u8)(0xC0 | (ch >> 6)); b[1] = (u8)(0x80 | (ch & 63)); } else { b[0] = (u8)(0xE0 | (ch >> 12)); b[1] = (u8)(0x80 | ((ch >> 6) & 63)); b[2] = (u8)(0x80 | (ch & 63)); }
+    if (d && o + k > n) { wr64(c, sp, s); break; } if (d) for (int j = 0; j < k; j++) wr8(c, d + o + j, b[j]); if (!ch) { if (d) wr64(c, sp, 0); break; } o += k; s += 2; }
+  RET(o); }
+/* node.exe static imports that are only reached on error/crypto-store paths: honest failure stubs instead of "unimplemented API" faults */
+static void s_GetUserProfileDirectoryW(Cpu *c) { static const char p[] = "C:\\Users\\user"; u64 lp = ARG(2); u32 cap = lp ? rd32(c, lp) : 0; if (cap < 14) { if (lp) wr32(c, lp, 14); W->last_error = 122; RET(0); return; } put_w(c, ARG(1), p, 0); if (lp) wr32(c, lp, 14); RET(1); }
+static void s_SHGetKnownFolderPath(Cpu *c) { if (ARG(3)) wr64(c, ARG(3), 0); RET(0x80004005u); }   /* E_FAIL: node falls back to USERPROFILE */
+static void s_CoTaskMemFree(Cpu *c) { RET(0); }
+static void s_GetBestRoute2(Cpu *c) { RET(1168); }   /* ERROR_NOT_FOUND */
+static void s_SymInitialize(Cpu *c) { W->last_error = 87; RET(0); }
 static void s_IsThreadAFiber(Cpu *c) { RET(0); }
 static void s_GetHostNameW(Cpu *c) { static const char h[] = "nebula"; if ((u32)ARG(1) > 6) { for (int i = 0; i < 7; i++) wr16(c, ARG(0) + 2 * i, (u8)h[i]); RET(0); return; } W->last_error = 10014; RET(-1); }
 static void s_GlobalSize(Cpu *c) { RET(w32_heap_size(W, ARG(0))); }
@@ -89,6 +125,14 @@ static void s_CreateMemoryResourceNotification(Cpu *c) { KObj *k = 0; int ex = 0
 static void s_GetTimeZoneInformationForYear(Cpu *c) { u8 *p = mem_ptr(c->mem, ARG(2), 172, 1); if (p) { e_memset(p, 0, 172); static const char n[] = "UTC"; for (int i = 0; i < 4; i++) { p[4 + 2 * i] = (u8)n[i]; p[88 + 2 * i] = (u8)n[i]; } } RET(1); }
 
 #define BUN_SHIMS \
+  S(GetUserProfileDirectoryW), S(SHGetKnownFolderPath), S(CoTaskMemFree), S(GetBestRoute2), S(SymInitialize), SA("SymCleanup", ret0), SA("SymFromAddr", ret0), SA("SymFunctionTableAccess64", ret0), SA("SymGetLineFromAddr64", ret0), \
+  SA("SymGetModuleBase64", ret0), SA("SymGetOptions", ret0), SA("SymSetOptions", ret0), SA("SymGetSearchPathW", ret0), SA("SymSetSearchPathW", ret0), SA("StackWalk64", ret0), SA("MiniDumpWriteDump", ret0), SA("UnDecorateSymbolName", ret0), \
+  SA("CertOpenStore", ret0), SA("CertOpenSystemStoreW", ret0), SA("CertCloseStore", ret1), SA("CertEnumCertificatesInStore", ret0), SA("CertFindCertificateInStore", ret0), SA("CertDuplicateCertificateContext", ret0), SA("CertFreeCertificateContext", ret1), \
+  SA("CertGetCertificateContextProperty", ret0), SA("CertGetEnhancedKeyUsage", ret0), SA("CryptCreateHash", ret0), SA("CryptDecrypt", ret0), SA("CryptDestroyHash", ret1), SA("CryptDestroyKey", ret1), SA("CryptEnumProvidersW", ret0), \
+  SA("CryptExportKey", ret0), SA("CryptGetProvParam", ret0), SA("CryptGetUserKey", ret0), SA("CryptSetHashParam", ret0), SA("CryptSignHashW", ret0), \
+  S(RtlGetFullPathName_U), S(RtlEqualUnicodeString), S(RtlUpcaseUnicodeChar), S(RtlGetSystemTimePrecise), S(NtLockFile), S(NtUnlockFile), S(Module32First), SA("Module32Next", Module32First), SA("Module32FirstW", Module32First), SA("Module32NextW", Module32First), S(GetNamedPipeInfo), S(wcsrtombs), \
+  SA("NtCreateSection", NtQueryObject), SA("NtMapViewOfSection", NtQueryObject), SA("NtUnmapViewOfSection", NtQueryObject), \
+  S(NtAllocateVirtualMemory), S(NtFreeVirtualMemory), S(NtProtectVirtualMemory), S(NtQueryVirtualMemory), \
   S(NtCreateFile), S(NtOpenFile), S(NtQueryAttributesFile), S(NtQueryFullAttributesFile), S(NtCreateNamedPipeFile), S(RtlExitUserProcess), S(RtlFillMemory), S(RtlWaitOnAddress), \
   SA("RtlWakeAddressAll", WakeByAddressAll), SA("RtlWakeAddressSingle", WakeByAddressSingle), S(IsThreadAFiber), S(GetHostNameW), SA("RtlDllShutdownInProgress", ret0), S(GlobalSize), S(IsProcessInJob), S(QueryDosDeviceW), S(K32GetModuleFileNameExW), \
   S(CreateDirectoryExW), S(CreatePseudoConsole), S(ResizePseudoConsole), S(ClosePseudoConsole), S(CreateMemoryResourceNotification), S(GetTimeZoneInformationForYear), \

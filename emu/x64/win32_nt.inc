@@ -14,6 +14,7 @@
 #define NT_PIPE_BROKEN       0xC000014Bu
 #define NT_BUFFER_TOO_SMALL  0xC0000023u
 
+static int e_strnicmp_(const char *a, const char *b, size_t n) { for (size_t i = 0; i < n; i++) { int x = (u8)a[i], y = (u8)b[i]; if (x >= 'A' && x <= 'Z') x += 32; if (y >= 'A' && y <= 'Z') y += 32; if (x != y) return x - y; if (!x) return 0; } return 0; }
 static void nt_iosb(Cpu *c, u64 iosb, u32 status, u64 info) { if (iosb) { wr32(c, iosb, status); wr32(c, iosb + 4, 0); wr64(c, iosb + 8, info); } }
 
 /* RtlGetVersion(RTL_OSVERSIONINFOW*): dwOSVersionInfoSize @0, Major @4, Minor @8, Build @12, PlatformId @16, szCSDVersion @20 (128 WCHAR) */
@@ -76,6 +77,16 @@ static void s_NtSetInformationFile(Cpu *c) {
   case 14: vfs_seek(fd, (s64)rd64(c, buf), 0); break;
   case 20: /* FileEndOfFileInformation */ { s64 end = (s64)rd64(c, buf); s64 cur = vfs_tell(fd); vfs_seek(fd, end, 0); vfs_truncate(fd); vfs_seek(fd, cur < end ? cur : end, 0); break; }
   case 19: /* FileAllocationInformation */ break;
+  case 10: case 65: { /* FileRenameInformation(Ex): Flags/ReplaceIfExists @0, RootDirectory @8, FileNameLength @16, FileName @20 (NT path or relative to RootDirectory) */
+    const char *from = vfs_fd_path(fd); if (!from) { st = NT_INVALID_HANDLE; break; }
+    u64 root = rd64(c, buf + 8); u32 nlen = rd32(c, buf + 16) / 2; char name[1024]; size_t o = 0;
+    for (u32 k = 0; k < nlen && o + 4 < sizeof name; k++) { u32 ch = rd16(c, buf + 20 + 2 * k); if (ch < 0x80) name[o++] = (char)ch; else if (ch < 0x800) { name[o++] = (char)(0xC0 | (ch >> 6)); name[o++] = (char)(0x80 | (ch & 63)); } else { name[o++] = (char)(0xE0 | (ch >> 12)); name[o++] = (char)(0x80 | ((ch >> 6) & 63)); name[o++] = (char)(0x80 | (ch & 63)); } } name[o] = 0;
+    char to[1100]; const char *n = name; if (!e_strnicmp_(n, "\\??\\", 4)) n += 4; if (!e_strnicmp_(n, "\\\\?\\", 4)) n += 4;
+    if (root) { int rfd = handle_fd(root); const char *base = rfd > 0 ? vfs_fd_path(rfd) : 0; if (!base) { st = NT_INVALID_HANDLE; break; } e_snprintf(to, sizeof to, "%s\\%s", base, n); } else e_snprintf(to, sizeof to, "%s", n);
+    int replace = cls == 10 ? rd8(c, buf) : (rd32(c, buf) & 1); u64 sz; int ex = vfs_stat(to, &sz);
+    if (ex && !replace) { st = 0xC0000035u; break; } if (ex) vfs_remove(to);
+    if (!vfs_rename(from, to)) st = 0xC0000034u; break; }
+  case 64: /* FileDispositionInformationEx: Flags bit 0 = delete */ if ((rd32(c, buf) & 1) && vfs_fd_path(fd)) vfs_remove(vfs_fd_path(fd)); break;
   default: st = NT_INVALID_INFO_CLS; break;
   }
   nt_iosb(c, iosb, st, 0); RET(st); }
