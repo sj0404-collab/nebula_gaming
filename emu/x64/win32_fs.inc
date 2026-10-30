@@ -78,8 +78,11 @@ static void create_file(Cpu *c, const char *n) {
 }
 static void s_CreateFileA(Cpu *c) { create_file(c, name_a(c, ARG(0))); }
 static void s_CreateFileW(Cpu *c) { create_file(c, name_w(c, ARG(0))); }
+/* synchronous handle + OVERLAPPED: the I/O happens at Offset/OffsetHigh (SQLite, 7-Zip and most "pread"-style code rely on this) */
+static void overlapped_seek(Cpu *c, int fd, u64 ov) { if (ov && fd >= 3) { u64 off = rd32(c, ov + 16) | ((u64)rd32(c, ov + 20) << 32); vfs_seek(fd, (s64)off, 0); } }
 static void s_ReadFile(Cpu *c) {
   int fd = handle_fd(ARG(0)); if (!fd || fd == 1 || fd == 2) { W->last_error = 6; RET(0); return; }
+  overlapped_seek(c, fd, ARG(4));
   s64 r = fd_read(c, fd, ARG(1), (u32)ARG(2));
   if (r == -2) { blocked_io(c, 0); return; }
   if (r < 0) { W->last_error = 5; RET(0); return; }
@@ -87,6 +90,7 @@ static void s_ReadFile(Cpu *c) {
 }
 static void s_WriteFile(Cpu *c) {
   int fd = handle_fd(ARG(0)); if (fd <= 0) { W->last_error = 6; RET(0); return; }
+  overlapped_seek(c, fd, ARG(4));
   s64 r = fd_write(c, fd, ARG(1), (u32)ARG(2)); if (r == -2) { blocked_io(c, 1); return; } if (r == -3) { W->last_error = 232; RET(0); return; } if (r < 0) { W->last_error = 5; RET(0); return; }
   if (ARG(3)) wr32(c, ARG(3), (u32)r); RET(1);
 }
@@ -177,6 +181,7 @@ static void file_sync(Cpu *c, u64 f, int fd) { if (!f || f < 0x10000) return; s3
 static u64 file_base(Cpu *c, u64 f) { u64 b = rd64(c, f + 16); if (!b) { b = w32_heap_alloc(W, FBUF, 0); wr64(c, f + 16, b); } return b; }
 /* take up to n bytes buffered in a FILE (used so fgets/fread see what getc left) */
 static u64 file_take(Cpu *c, u64 f, u64 dst, u64 n, int stop_nl) { if (!f || f < 0x10000) return 0; s32 cnt = (s32)rd32(c, f + 8); if (cnt <= 0) return 0; u64 p = rd64(c, f); u64 o = 0; while (o < n && cnt > 0) { u8 ch = rd8(c, p++); wr8(c, dst + o, ch); o++; cnt--; if (stop_nl && ch == '\n') break; } wr32(c, f + 8, (u32)cnt); wr64(c, f, p); return o; }
+static void file_set_eof(Cpu *c, u64 f) { if (f >= 0x10000) wr32(c, f + 24, rd32(c, f + 24) | 0x10); }
 static void s_filbuf(Cpu *c) {
   u64 f = ARG(0); int fd = file_fd(c, f); if (!fd || fd == 1 || fd == 2) { RET(~0ull); return; }
   u64 b = file_base(c, f); u8 *p = mem_ptr(c->mem, b, FBUF, 1); if (!p) { RET(~0ull); return; }
@@ -201,20 +206,22 @@ static void s_wfopen_s(Cpu *c) { char n[1024]; e_snprintf(n, sizeof n, "%s", nam
 static void s_fsopen(Cpu *c) { s_fopen(c); }
 static void s_freopen(Cpu *c) { /* redirect only supported for files → new FILE*, std streams unchanged */ int old = file_fd(c, ARG(2)); if (old >= 3) vfs_close(old); char n[1024]; e_snprintf(n, sizeof n, "%s", name_a(c, ARG(0))); int acc, disp, app; if (!parse_mode(name_a(c, ARG(1)), &acc, &disp, &app)) { RET(0); return; } int fd = vfs_open(n, acc, disp, app); if (fd < 0) { set_errno(c, errno_of(fd)); RET(0); return; } if (old >= 3) { wr32(c, ARG(2) + 28, (u32)fd); RET(ARG(2)); } else RET(make_file(c, fd)); }
 static void s_fclose(Cpu *c) { int fd = file_fd(c, ARG(0)); if (fd >= 3) { vfs_close(fd); w32_heap_free(W, ARG(0)); RET(0); } else RET(fd ? 0 : ~0ull); }
-static void s_fread(Cpu *c) { int fd = file_fd(c, ARG(3)); u64 sz = ARG(1), cnt = ARG(2); if (!fd || !sz) { RET(0); return; } u64 pre = file_take(c, ARG(3), ARG(0), sz * cnt, 0); if (pre == sz * cnt) { RET(cnt); return; } s64 r = fd_read(c, fd, ARG(0) + pre, sz * cnt - pre); if (r == -2 && pre) { RET(pre / sz); return; } if (r >= 0) r += (s64)pre; if (r == -2) { blocked_io(c, 0); return; } if (r < 0) r = 0; RET((u64)r / sz); }
+static void s_fread(Cpu *c) { int fd = file_fd(c, ARG(3)); u64 sz = ARG(1), cnt = ARG(2); if (!fd || !sz) { RET(0); return; } u64 pre = file_take(c, ARG(3), ARG(0), sz * cnt, 0); if (pre == sz * cnt) { RET(cnt); return; } s64 r = fd_read(c, fd, ARG(0) + pre, sz * cnt - pre); if (r == -2 && pre) { RET(pre / sz); return; } if (r >= 0) r += (s64)pre; if (r == -2) { blocked_io(c, 0); return; } if (r < 0) r = 0; if ((u64)r < sz * cnt) file_set_eof(c, ARG(3)); RET((u64)r / sz); }
 static void s_fwrite(Cpu *c) { int fd = file_fd(c, ARG(3)); u64 sz = ARG(1), cnt = ARG(2); if (fd <= 0 || !sz) { RET(0); return; } s64 r = fd_write(c, fd, ARG(0), sz * cnt); if (r == -2) { blocked_io(c, 1); return; } if (r < 0) r = 0; RET((u64)r / sz); }
 static void s_fgets(Cpu *c) {
   int fd = file_fd(c, ARG(2)); u64 buf = ARG(0); int n = (int)ARG(1); if (!fd || n <= 1) { RET(0); return; }
   { u64 pre = file_take(c, ARG(2), buf, (u64)(n - 1), 1); if (pre) { if (rd8(c, buf + pre - 1) != '\n' && (int)pre < n - 1 && fd >= 3) { int i = (int)pre; u8 ch; while (i < n - 1) { s64 r = vfs_read(fd, &ch, 1); if (r <= 0) break; wr8(c, buf + i, ch); i++; if (ch == '\n') break; } pre = (u64)i; } wr8(c, buf + pre, 0); RET(buf); return; } }
-  if (fd == -1 && vfs_resolve(0) == -1) { u8 tmp[4096]; g_last_io_fd = -1; s64 r = vfs_stdin_read(tmp, (u64)(n - 1) < sizeof tmp ? (u64)(n - 1) : sizeof tmp); if (r == -2) { blocked_io(c, 0); return; } if (r <= 0) { RET(0); return; } u8 *p = mem_ptr(c->mem, buf, (u64)r + 1, 1); if (p) { e_memcpy(p, tmp, (size_t)r); p[r] = 0; } RET(buf); return; }
+  if (fd == -1 && vfs_resolve(0) == -1) { u8 tmp[4096]; g_last_io_fd = -1; s64 r = vfs_stdin_read(tmp, (u64)(n - 1) < sizeof tmp ? (u64)(n - 1) : sizeof tmp); if (r == -2) { blocked_io(c, 0); return; } if (r <= 0) { file_set_eof(c, ARG(2)); RET(0); return; } u8 *p = mem_ptr(c->mem, buf, (u64)r + 1, 1); if (p) { e_memcpy(p, tmp, (size_t)r); p[r] = 0; } RET(buf); return; }
   int i = 0; u8 ch; while (i < n - 1) { s64 r = raw_read(fd, &ch, 1); if (r <= 0) break; wr8(c, buf + i, ch); i++; if (ch == '\n') break; }
-  if (!i) { RET(0); return; } wr8(c, buf + i, 0); RET(buf);
+  if (!i) { file_set_eof(c, ARG(2)); RET(0); return; } wr8(c, buf + i, 0); RET(buf);
 }
-static void s_fgetc(Cpu *c) { int fd = file_fd(c, ARG(0)); u8 ch; if (!fd) { RET(~0ull); return; } if (file_take(c, ARG(0), W->ubuf + 0x7f0, 1, 0)) { RET(rd8(c, W->ubuf + 0x7f0)); return; } s64 r = raw_read(fd, &ch, 1); if (r == -2) { blocked_io(c, 0); return; } RET(r == 1 ? ch : ~0ull); }
+static void s_fgetc(Cpu *c) { int fd = file_fd(c, ARG(0)); u8 ch; if (!fd) { RET(~0ull); return; } if (file_take(c, ARG(0), W->ubuf + 0x7f0, 1, 0)) { RET(rd8(c, W->ubuf + 0x7f0)); return; } s64 r = raw_read(fd, &ch, 1); if (r == -2) { blocked_io(c, 0); return; } if (r != 1) file_set_eof(c, ARG(0)); RET(r == 1 ? ch : ~0ull); }
 static void s_getchar(Cpu *c) { u8 ch; s64 r = raw_read(0, &ch, 1); if (r == -2) { blocked_io(c, 0); return; } RET(r == 1 ? ch : ~0ull); }
 static void s_ungetc(Cpu *c) { int fd = file_fd(c, ARG(1)); RET(fd >= 3 ? vfs_ungetc(fd, (int)ARG(0)) : ~0ull); }
 static void s_fseek(Cpu *c) { int fd = file_fd(c, ARG(0)); file_sync(c, ARG(0), fd); wr32(c, ARG(0) + 24, rd32(c, ARG(0) + 24) & ~0x10u); RET(fd >= 3 && vfs_seek(fd, (s64)(s32)(u32)ARG(1), (int)ARG(2)) >= 0 ? 0 : ~0ull); }
 static void s_fseeki64(Cpu *c) { int fd = file_fd(c, ARG(0)); file_sync(c, ARG(0), fd); wr32(c, ARG(0) + 24, rd32(c, ARG(0) + 24) & ~0x10u); RET(fd >= 3 && vfs_seek(fd, (s64)ARG(1), (int)ARG(2)) >= 0 ? 0 : ~0ull); }
+static void s_fgetpos(Cpu *c) { int fd = file_fd(c, ARG(0)); file_sync(c, ARG(0), fd); if (fd < 3) { RET(~0ull); return; } wr64(c, ARG(1), (u64)vfs_tell(fd)); RET(0); }
+static void s_fsetpos(Cpu *c) { int fd = file_fd(c, ARG(0)); file_sync(c, ARG(0), fd); wr32(c, ARG(0) + 24, rd32(c, ARG(0) + 24) & ~0x10u); RET(fd >= 3 && vfs_seek(fd, (s64)rd64(c, ARG(1)), 0) >= 0 ? 0 : ~0ull); }
 static void s_ftell(Cpu *c) { int fd = file_fd(c, ARG(0)); file_sync(c, ARG(0), fd); RET(fd >= 3 ? (u64)vfs_tell(fd) : ~0ull); }
 static void s_rewind(Cpu *c) { int fd = file_fd(c, ARG(0)); file_sync(c, ARG(0), fd); wr32(c, ARG(0) + 24, rd32(c, ARG(0) + 24) & ~0x10u); if (fd >= 3) vfs_seek(fd, 0, 0); }
 static void s_feof(Cpu *c) { int fd = file_fd(c, ARG(0)); if (ARG(0) >= 0x10000 && (rd32(c, ARG(0) + 24) & 0x10)) { RET(1); return; } RET(fd >= 3 ? vfs_eof(fd) && (s32)rd32(c, ARG(0) + 8) <= 0 : 0); }
@@ -507,7 +514,7 @@ static void s_mktemp(Cpu *c) { u64 a = ARG(0); u64 l = e_strlen(gstr(c, a)); u32
   S(CreateFileMappingA), S(CreateFileMappingW), S(MapViewOfFile), S(MapViewOfFileEx), S(UnmapViewOfFile), \
   S(ReadConsoleA), S(ReadConsoleW), S(ReadConsoleInputW), SA("ReadConsoleInputA", ReadConsoleInputW), S(PeekConsoleInputW), S(PeekConsoleInputA), S(FlushConsoleInputBuffer), S(GetNumberOfConsoleInputEvents), \
   SA("_filbuf", filbuf), SA("_flsbuf", flsbuf), SA("_fdopen", fdopen), SA("fdopen", fdopen), S(setvbuf), S(fopen), SA("_wfopen", wfopen), S(fopen_s), SA("_wfopen_s", wfopen_s), SA("_fsopen", fsopen), SA("_wfsopen", wfopen), S(freopen), S(fclose), S(fread), SA("fread_s", fread), S(fwrite), S(fgets), S(fgetc), SA("getc", fgetc), S(getchar), S(ungetc), \
-  S(fseek), SA("_fseeki64", fseeki64), S(ftell), SA("_ftelli64", ftell), S(rewind), S(feof), S(ferror), S(clearerr), SA("_fileno", fileno), SA("fileno", fileno), SA("_filelengthi64", filelengthi64), SA("_filelength", filelengthi64), SA("_isatty", isatty), SA("isatty", isatty), SA("_get_osfhandle", get_osfhandle), SA("_open_osfhandle", open_osfhandle), \
+  S(fseek), SA("_fseeki64", fseeki64), S(ftell), S(fgetpos), S(fsetpos), SA("_ftelli64", ftell), S(rewind), S(feof), S(ferror), S(clearerr), SA("_fileno", fileno), SA("fileno", fileno), SA("_filelengthi64", filelengthi64), SA("_filelength", filelengthi64), SA("_isatty", isatty), SA("isatty", isatty), SA("_get_osfhandle", get_osfhandle), SA("_open_osfhandle", open_osfhandle), \
   SA("_open", open), SA("open", open), SA("_wopen", wopen), SA("_sopen_s", sopen_s), SA("_wsopen_s", wsopen_s), SA("_sopen", sopen), SA("_close", close), SA("close", close), SA("_read", read), SA("read", read), SA("_write", write), SA("write", write), \
   S(SetHandleInformation), S(GetHandleInformation), S(GetProcessImageFileNameA), S(GetProcessImageFileNameW), S(QueryFullProcessImageNameA), S(QueryFullProcessImageNameW), S(EnumProcessModules), S(EnumProcessModulesEx), S(GetModuleFileNameExA), S(GetModuleFileNameExW), S(GetModuleBaseNameA), S(ReadProcessMemory), S(IsWow64Process), S(IsWow64Process2), S(CreateRemoteThread), S(GetProcessTimes), SA("_spawnve", spawnve), SA("_spawnvpe", spawnve), SA("_spawnv", spawnv), SA("_spawnvp", spawnv), SA("_execve", execve), SA("_execvpe", execve), SA("_execv", execv), SA("_execvp", execv), SA("_wspawnve", spawnve), SA("_lseek", lseek), SA("lseek", lseek), SA("_lseeki64", lseeki64), SA("_tell", tell), SA("_telli64", tell), SA("_eof", eof), SA("_chsize", chsize), SA("_chsize_s", chsize), SA("_dup", dup), SA("dup", dup), SA("_dup2", dup2), S(setbuf), S(CreateToolhelp32Snapshot), S(Process32First), S(Process32Next), S(Process32FirstW), S(Process32NextW), S(CreateProcessA), S(CreateProcessW), S(WaitForSingleObject), S(WaitForSingleObjectEx), S(WaitForMultipleObjects), SA("WaitForMultipleObjectsEx", WaitForMultipleObjects), S(GetExitCodeProcess), S(GetProcessId), S(TerminateProcess), S(OpenProcess), S(CreatePipe), S(PeekNamedPipe), S(DuplicateHandle), S(GetCurrentProcessId), SA("_getpid", getpid), SA("getpid", getpid), SA("_cwait", cwait), SA("_pipe", pipe), S(FlushViewOfFile), SA("_commit", commit), \
   SA("_stat64", stat64), SA("_stat64i32", stat64i32), SA("_stat32", stat64i32), SA("_stat", stat64i32), SA("stat", stat64i32), SA("_wstat64", wstat64), SA("_wstat64i32", wstat64i32), SA("_fstat64", fstat64), SA("_fstat64i32", fstat64i32), SA("_fstat32", fstat64i32), SA("_fstat", fstat64i32), SA("fstat", fstat64i32), \

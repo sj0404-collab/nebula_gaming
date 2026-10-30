@@ -184,6 +184,7 @@ static void s_CreateThread(Cpu *c) { u32 tid = 0; u64 h = thread_create(c, ARG(2
 static void s_beginthreadex(Cpu *c) { u32 tid = 0; u64 h = thread_create(c, ARG(2), ARG(3), ARG(1), (u32)ARG(4) & 4, &tid); if (h && ARG(5)) wr32(c, ARG(5), tid); if (!h) set_errno(c, 11); RET(h); }
 static void s_beginthread(Cpu *c) { u64 h = thread_create(c, ARG(0), ARG(2), ARG(1), 0, 0); if (!h) { set_errno(c, 11); RET(~0ull); return; } RET(h); }
 static void s_ExitThread(Cpu *c) { thread_exit(c, (u32)ARG(0)); }
+static void s_FreeLibraryAndExitThread(Cpu *c) { thread_exit(c, (u32)ARG(1)); }
 static void s_endthreadex(Cpu *c) { thread_exit(c, (u32)ARG(0)); }
 static void s_endthread(Cpu *c) { thread_exit(c, 0); }
 static void s_GetExitCodeThread(Cpu *c) { KObj *k = kobj_of_handle(c, ARG(0), KO_THREAD); if (!k) { W->last_error = 6; RET(0); return; } wr32(c, ARG(1), k->state == 2 ? k->exit_code : STILL_ACTIVE_); RET(1); }
@@ -372,7 +373,7 @@ static void s_InterlockedOr(Cpu *c) { u32 old = rd32(c, ARG(0)); wr32(c, ARG(0),
 static void s_InterlockedXor(Cpu *c) { u32 old = rd32(c, ARG(0)); wr32(c, ARG(0), old ^ (u32)ARG(1)); RET(old); }
 
 #define THREAD_SHIMS \
-  S(GetCurrentThread), S(GetCurrentThreadId), S(CreateThread), SA("_beginthreadex", beginthreadex), SA("_beginthread", beginthread), S(ExitThread), SA("_endthreadex", endthreadex), SA("_endthread", endthread), \
+  S(GetCurrentThread), S(GetCurrentThreadId), S(CreateThread), SA("_beginthreadex", beginthreadex), SA("_beginthread", beginthread), S(ExitThread), S(FreeLibraryAndExitThread), SA("_endthreadex", endthreadex), SA("_endthread", endthread), \
   S(GetExitCodeThread), S(GetThreadId), S(GetProcessIdOfThread), S(OpenThread), S(ResumeThread), S(SuspendThread), S(TerminateThread), S(SwitchToThread), S(GetThreadContext), S(SetThreadContext), \
   S(SetThreadDescription), S(GetThreadDescription), S(GetCurrentThreadStackLimits), S(SetThreadStackGuarantee), \
   S(TlsAlloc), S(TlsFree), S(TlsGetValue), S(TlsSetValue), S(FlsAlloc), S(FlsFree), S(FlsGetValue), S(FlsSetValue), \

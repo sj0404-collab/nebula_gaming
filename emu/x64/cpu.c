@@ -30,7 +30,7 @@ u64 cpu_pop(Cpu *c) { u64 v = rd64(c, c->r[RSP]); c->r[RSP] += 8; return v; }
 
 void cpu_reset(Cpu *c) {
   for (int i = 0; i < 16; i++) { c->r[i] = 0; c->x[i].q[0] = c->x[i].q[1] = 0; }
-  c->rflags = 0x202; c->mxcsr = 0x1f80; c->fpu_cw = 0x27f; c->status = RUN_OK; c->icount = 0; c->err[0] = 0;
+  c->rflags = 0x202; c->mxcsr = 0x1f80; c->fpu_cw = 0x27f; c->fsw = 0; c->ftop = 0; c->ftag = 0; for (int i = 0; i < 8; i++) c->fp[i] = 0; c->status = RUN_OK; c->icount = 0; c->err[0] = 0;
 }
 
 /* ---------- decoding state ---------- */
@@ -259,6 +259,7 @@ static int string_op(Ins *i, int op, int sz) {
 
 /* ---------- main loop ---------- */
 #define UNSUP(...) do { cpu_fault(c, __VA_ARGS__); return; } while (0)
+#include "x87.inc"
 
 static void exec_0f(Ins *i, Cpu *c);
 
@@ -374,15 +375,8 @@ static void exec_one(Ins *i) {
     }
     case 0xC8: { u16 size = fetch16(i); u8 lvl = fetch8(i); (void)lvl; cpu_push(c, c->r[RBP]); c->r[RBP] = c->r[RSP]; c->r[RSP] -= size; return; }
     case 0xCD: { u8 n = fetch8(i); UNSUP("int 0x%02x", n); }
-    /* x87: the CRT touches the control word; real FPU math is not emulated */
-    case 0xD9: { decode_modrm(i); int sub = i->reg & 7;
-      if (i->mod != 3 && sub == 5) { c->fpu_cw = rd16(c, EA(i)); return; }         /* fldcw */
-      if (i->mod != 3 && sub == 7) { wr16(c, EA(i), c->fpu_cw); return; }            /* fnstcw */
-      UNSUP("x87 instruction D9 /%d", sub); }
-    case 0xDB: { decode_modrm(i); if (i->mod == 3 && (i->rm & 7) == 3 && (i->reg & 7) == 4) { c->fpu_cw = 0x37f; return; } /* fninit */ UNSUP("x87 instruction DB"); }
-    case 0xDD: { decode_modrm(i); if (i->mod != 3 && (i->reg & 7) == 7) { wr16(c, EA(i), 0); return; } /* fnstsw */ UNSUP("x87 instruction DD"); }
     case 0x9B: return; /* fwait */
-    case 0xD8: case 0xDA: case 0xDC: case 0xDE: case 0xDF: UNSUP("x87 instruction 0x%02x", op);
+    case 0xD8: case 0xD9: case 0xDA: case 0xDB: case 0xDC: case 0xDD: case 0xDE: case 0xDF: exec_x87(i, c, op); return;
     default: UNSUP("unsupported opcode 0x%02x", op);
   }
 }
@@ -452,10 +446,13 @@ static void exec_0f(Ins *i, Cpu *c) {
       if (op == 0x10) { if (bytes == 16) { xmm_load(i, &v, 16); c->x[i->reg] = v; } else { xmm_load(i, &v, bytes); if (i->mod == 3) { if (bytes == 4) c->x[i->reg].d[0] = v.d[0]; else c->x[i->reg].q[0] = v.q[0]; } else { c->x[i->reg].q[1] = 0; if (bytes == 4) { c->x[i->reg].q[0] = 0; c->x[i->reg].d[0] = v.d[0]; } else c->x[i->reg].q[0] = v.q[0]; } } }
       else xmm_store(i, &c->x[i->reg], bytes);
       return; }
-    case 0x12: case 0x13: { decode_modrm(i); /* movlps/movlpd (mem) ; movhlps (reg) */
+    case 0x12: case 0x13: { decode_modrm(i); /* movlps/movlpd (mem) ; movhlps (reg) ; F2: movddup ; F3: movsldup */
+      if (op == 0x12 && i->rep == 0xF2) { u64 v = i->mod == 3 ? c->x[i->rm].q[0] : rd64(c, EA(i)); c->x[i->reg].q[0] = c->x[i->reg].q[1] = v; return; }
+      if (op == 0x12 && i->rep == 0xF3) { Xmm v; xmm_load(i, &v, 16); c->x[i->reg].d[0] = c->x[i->reg].d[1] = v.d[0]; c->x[i->reg].d[2] = c->x[i->reg].d[3] = v.d[2]; return; }
       if (op == 0x12) { if (i->mod == 3 && !i->p66) c->x[i->reg].q[0] = c->x[i->rm].q[1]; else c->x[i->reg].q[0] = rd64(c, EA(i)); }
       else wr64(c, EA(i), c->x[i->reg].q[0]); return; }
-    case 0x16: case 0x17: { decode_modrm(i); if (op == 0x16) { if (i->mod == 3 && !i->p66) c->x[i->reg].q[1] = c->x[i->rm].q[0]; else c->x[i->reg].q[1] = rd64(c, EA(i)); } else wr64(c, EA(i), c->x[i->reg].q[1]); return; }
+    case 0x16: case 0x17: { decode_modrm(i); if (op == 0x16 && i->rep == 0xF3) { Xmm v; xmm_load(i, &v, 16); c->x[i->reg].d[0] = c->x[i->reg].d[1] = v.d[1]; c->x[i->reg].d[2] = c->x[i->reg].d[3] = v.d[3]; return; }   /* movshdup */
+      if (op == 0x16) { if (i->mod == 3 && !i->p66) c->x[i->reg].q[1] = c->x[i->rm].q[0]; else c->x[i->reg].q[1] = rd64(c, EA(i)); } else wr64(c, EA(i), c->x[i->reg].q[1]); return; }
     case 0x14: case 0x15: { decode_modrm(i); Xmm s; xmm_load(i, &s, 16); Xmm *d = &c->x[i->reg], r;
       if (i->p66) { if (op == 0x14) { r.q[0] = d->q[0]; r.q[1] = s.q[0]; } else { r.q[0] = d->q[1]; r.q[1] = s.q[1]; } }
       else if (op == 0x14) { r.d[0] = d->d[0]; r.d[1] = s.d[0]; r.d[2] = d->d[1]; r.d[3] = s.d[1]; } else { r.d[0] = d->d[2]; r.d[1] = s.d[2]; r.d[2] = d->d[3]; r.d[3] = s.d[3]; }

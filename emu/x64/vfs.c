@@ -269,7 +269,9 @@ s64 vfs_size(int fd) { FdEnt *f = vf(fd); if (!f) return -1; if (f->kind == FD_P
 int vfs_eof(int fd) { FdEnt *f = vf(fd); return f ? f->eof : 1; }
 void vfs_clearerr(int fd) { FdEnt *f = vf(fd); if (f) { f->eof = 0; f->err = 0; } }
 int vfs_ungetc(int fd, int ch) { FdEnt *f = vf(fd); if (!f) return -1; f->unget = ch & 0xff; f->eof = 0; return ch & 0xff; }
-int vfs_truncate(int fd) { FdEnt *f = vf(fd); if (!f || f->kind != FD_FILE || f->node < 0) return 0; g_nodes[f->node].size = f->pos; g_nodes[f->node].written = 1; return 1; }
+int vfs_truncate(int fd) { FdEnt *f = vf(fd); if (!f || f->kind != FD_FILE || f->node < 0) return 0; VNode *v = &g_nodes[f->node];
+  if (f->pos > v->size) { if (!grow(v, f->pos)) return 0; e_memset(v->data + v->size, 0, (size_t)(f->pos - v->size)); }   /* extending: zero-fill (SetEndOfFile past EOF) */
+  v->size = f->pos; v->written = 1; return 1; }
 int vfs_fd_isdir(int fd) { FdEnt *f = vf(fd); if (!f || f->kind != FD_FILE) return 0; return f->node == -2 || (f->node >= 0 && g_nodes[f->node].is_dir); }
 const char *vfs_fd_path(int fd) { FdEnt *f = vf(fd); if (!f || f->kind != FD_FILE || f->node < 0) return g_cwd; return g_nodes[f->node].path; }
 /* new process: inherit the parent's table (all entries, same numbers — Windows semantics for inheritable handles) */

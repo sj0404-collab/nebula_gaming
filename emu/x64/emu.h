@@ -69,7 +69,9 @@ struct Cpu {
   Xmm  x[16];
   u32  mxcsr;
   u64  fs_base, gs_base;
-  u16  fpu_cw;                        /* x87 control word (only stored) */
+  u16  fpu_cw;                        /* x87 control word */
+  u16  fsw; u8 ftop, ftag;            /* x87 status word (C0-C3), stack top, tag bits (1 = valid) */
+  double fp[8];                       /* x87 stack as doubles (53-bit precision, see x87.inc) */
   /* run control */
   u64  icount;                        /* instructions executed */
   int  status;                        /* RUN_* */

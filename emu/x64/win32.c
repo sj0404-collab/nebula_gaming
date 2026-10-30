@@ -19,7 +19,12 @@ u64 w32_arg(Cpu *c, int n) {
 }
 static u64 shim_bump(Win32 *w, u64 n) { n = (n + 15) & ~15ull; u64 a = w->str_cur; if (a + n > G_SHIM_BASE + G_SHIM_SIZE) return 0; w->str_cur += n; return a; }
 u64 w32_guest_strdup(Win32 *w, const char *s) { size_t n = e_strlen(s) + 1; u64 a = w32_heap_alloc(w, n, 0); u8 *p = mem_ptr(w->mem, a, n, 1); if (p) e_memcpy(p, s, n); return a; }
-static u64 guest_wstrdup(Win32 *w, const char *s) { size_t n = e_strlen(s) + 1; u64 a = w32_heap_alloc(w, n * 2, 1); for (size_t i = 0; i < n; i++) wr16(w->cpu, a + i * 2, (u8)s[i]); return a; }
+/* UTF-8 host string → UTF-16 guest string (command line, argv, environment) */
+static u64 guest_wstrdup(Win32 *w, const char *s) { size_t n = e_strlen(s) + 1; u64 a = w32_heap_alloc(w, n * 2 + 2, 1); size_t i = 0, o = 0;
+  while (i < n) { u32 b = (u8)s[i++], cp = b; int extra = b >= 0xF0 ? 3 : b >= 0xE0 ? 2 : b >= 0xC0 ? 1 : 0; if (extra) cp = b & (0x3f >> extra);
+    for (int k = 0; k < extra && i < n && ((u8)s[i] & 0xC0) == 0x80; k++) cp = (cp << 6) | ((u8)s[i++] & 0x3f);
+    if (cp >= 0x10000) { cp -= 0x10000; wr16(w->cpu, a + o++ * 2, (u16)(0xD800 | (cp >> 10))); wr16(w->cpu, a + o++ * 2, (u16)(0xDC00 | (cp & 0x3ff))); } else wr16(w->cpu, a + o++ * 2, (u16)cp); }
+  return a; }
 
 void w32_report(Win32 *w, const char *fmt, ...) {
   if (w->report_len >= (int)sizeof w->report - 2) return;
@@ -304,6 +309,8 @@ static u64 now_100ns(void) { return (u64)(host_now_ms() * 10000.0) + 11644473600
 static u64 unix_time(void) { return 1793000000ull + (u64)(host_now_ms() / 1000.0); }   /* ~2026-10-26 + run time (host clock has no calendar in freestanding wasm) */
 #include "win32_fs.inc"
 #include "win32_threads.inc"
+static void s_ret0(Cpu *c); static void s_atexit(Cpu *c); static void s_setjmp(Cpu *c);
+#include "win32_compat.inc"
 
 /* ================= kernel32 ================= */
 static void s_GetLastError(Cpu *c) { RET(W->last_error); }
@@ -400,7 +407,6 @@ static void s_FormatMessageW(Cpu *c) { RET(0); }
 static void s_SetErrorMode(Cpu *c) { RET(0); }
 static void s_GetErrorMode(Cpu *c) { RET(0); }
 static void s_SetThreadErrorMode(Cpu *c) { RET(1); }
-static void s_GetLogicalProcessorInformation(Cpu *c) { W->last_error = 122; RET(0); }
 static void s_GetProcessAffinityMask(Cpu *c) { wr64(c, ARG(1), 1); wr64(c, ARG(2), 1); RET(1); }
 static void s_SetThreadAffinityMask(Cpu *c) { RET(1); }
 static void s_SetProcessAffinityMask(Cpu *c) { RET(1); }
@@ -842,6 +848,7 @@ static void s_dsign(Cpu *c) { RET(c->x[0].f64[0] < 0 ? 1 : 0); }
 #define S(n) { "", #n, s_##n }
 #define SA(api, fn) { "", api, s_##fn }
 static const ShimDef shims[] = {
+  COMPAT_SHIMS
   THREAD_SHIMS
   FS_SHIMS
   S(GetLastError), S(SetLastError), S(GetCurrentProcess), S(GetCurrentProcessId), S(ExitProcess), S(TerminateProcess),
@@ -862,7 +869,7 @@ static const ShimDef shims[] = {
   /* file system stubs — no VFS yet: everything "does not exist" */
   SA("GetFileAttributesExA", GetFileAttributesA), SA("GetFileAttributesExW", GetFileAttributesA), SA("FindFirstFileExA", FindFirstFileA), SA("FindFirstFileExW", FindFirstFileA), SA("FindNextFileA", ret0), SA("FindNextFileW", ret0), SA("FindClose", ret1),
   SA("DeleteFileA", ret0), SA("DeleteFileW", ret0), SA("RemoveDirectoryA", ret0), SA("RemoveDirectoryW", ret0), SA("CreateDirectoryA", ret0), SA("CreateDirectoryW", ret0), SA("MoveFileA", ret0), SA("MoveFileW", ret0), SA("MoveFileExA", ret0), SA("MoveFileExW", ret0), SA("CopyFileA", ret0), SA("CopyFileW", ret0),
-  SA("SetFileAttributesA", ret0), SA("SetFileAttributesW", ret0), SA("SetCurrentDirectoryA", ret0), SA("SetCurrentDirectoryW", ret0), SA("GetFileSizeEx", ret0), SA("GetFileSize", ret0), SA("SetFilePointer", ret0), SA("SetFilePointerEx", ret0), SA("SetEndOfFile", ret0), SA("FlushFileBuffers", ret1), SA("GetFileInformationByHandle", ret0), SA("GetFileInformationByHandleEx", ret0), SA("GetFileTime", ret0), SA("SetFileTime", ret0),
+  SA("SetFileAttributesA", ret1), SA("SetFileAttributesW", ret1), SA("SetCurrentDirectoryA", ret0), SA("SetCurrentDirectoryW", ret0), SA("GetFileSizeEx", ret0), SA("GetFileSize", ret0), SA("SetFilePointer", ret0), SA("SetFilePointerEx", ret0), SA("SetEndOfFile", ret0), SA("FlushFileBuffers", ret1), SA("GetFileInformationByHandle", ret0), SA("GetFileInformationByHandleEx", ret0), SA("GetFileTime", ret0), SA("SetFileTime", ret0),
   SA("CreateFileMappingA", ret0), SA("CreateFileMappingW", ret0), SA("MapViewOfFile", ret0), SA("UnmapViewOfFile", ret1), SA("LockFileEx", ret1), SA("UnlockFileEx", ret1), SA("LockFile", ret1), SA("UnlockFile", ret1), SA("GetTempPathA", ret0), SA("GetTempPathW", ret0), SA("GetTempFileNameA", ret0), SA("GetTempFileNameW", ret0),
   SA("CreateProcessA", ret0), SA("CreateProcessW", ret0), SA("GetExitCodeProcess", ret0), SA("OpenProcess", ret0), SA("CreatePipe", ret0), SA("CreateNamedPipeA", ret0), SA("ConnectNamedPipe", ret0), SA("PeekNamedPipe", ret0), SA("CreateToolhelp32Snapshot", ret0), SA("WaitForInputIdle", ret0), SA("SetConsoleCtrlHandler", ret1), SA("GenerateConsoleCtrlEvent", ret0),
   SA("_fullpath", fullpath), SA("_umask", umask), SA("_getpid", getpid), SA("_chdir", retm1e), SA("_spawnvp", retm1e), SA("_execve", retm1e), SA("_filbuf", retm1e), SA("_getch", retm1e), SA("_getche", retm1e), SA("_telli64", telli64), SA("_open_osfhandle", retm1e), SA("_creat", retm1e), SA("_chmod", retm1e), SA("_rmdir", retm1e), SA("_mktemp", ret0), SA("_wcsnicmp", wcsnicmp), SA("_ctime64", ctime64), S(asctime), SA("_ctime64_s", ret0), SA("_wmkdir", retm1e), SA("_wchdir", retm1e), SA("_wunlink", retm1e), SA("_wrmdir", retm1e), SA("_popen", ret0), SA("_pclose", retm1e), SA("system", retm1e), SA("_wsystem", retm1e),
@@ -891,7 +898,12 @@ static const ShimDef shims[] = {
   S(sin), S(cos), S(tan), S(exp), S(log), S(pow), S(atan2), S(asin), S(acos), S(atan), S(sinh), S(cosh), S(tanh), S(log10), S(log2), S(cbrt), S(sqrt), S(floor), S(ceil), S(fabs), S(fmod), S(round), S(trunc), S(ldexp), S(frexp), S(modf), S(hypot), SA("_hypot", hypot), S(sinf), S(cosf), S(tanf), S(expf), S(logf), S(powf), S(atan2f), S(sqrtf), S(floorf), S(ceilf), S(fabsf), S(fmodf), S(roundf), SA("_dclass", dclass), SA("_fdclass", fdclass), SA("_dsign", dsign), SA("_fdsign", dsign), SA("_dtest", dclass), SA("_fdtest", fdclass), SA("_finite", ret1), SA("_isnan", ret0), SA("_copysign", copysign), S(copysign), S(exp2), SA("nearbyint", round), SA("rint", round), S(lround), SA("llround", lround), S(fmin), S(fmax),
   SA("__C_specific_handler", ret1), SA("__CxxFrameHandler3", ret1), SA("__CxxFrameHandler4", ret1), SA("_CxxThrowException", raise), SA("__std_exception_copy", ret0), SA("__std_exception_destroy", ret0), SA("__std_type_info_destroy_list", ret0), SA("__current_exception", ret0), SA("__current_exception_context", ret0), SA("_except_handler4_common", ret1), SA("__intrinsic_setjmp", setjmp), SA("__report_gsfailure", abort), SA("_purecall", abort), SA("terminate", abort), SA("__p__mbctype", pctype_func), SA("_ismbblead", ret0), SA("__mb_cur_max", ret1),
 };
-static ShimFn find_shim(const char *dll, const char *name) { (void)dll; for (size_t i = 0; i < sizeof shims / sizeof shims[0]; i++) if (!e_strcmp(shims[i].name, name)) return shims[i].fn; extern ShimFn gdi_find_shim(const char *name); return gdi_find_shim(name); }
+/* OLEAUT32 exports most of its API by ordinal only */
+static int oleaut_dll(const char *d) { const char *k = "oleaut32"; for (int i = 0; k[i]; i++) { char ch = d[i]; if (ch >= 'A' && ch <= 'Z') ch += 32; if (ch != k[i]) return 0; } return 1; }
+static const char *oleaut_ordinal(u32 o) { switch (o) { case 2: return "SysAllocString"; case 4: return "SysAllocStringLen"; case 6: return "SysFreeString"; case 7: return "SysStringLen"; case 5: return "SysReAllocStringLen"; case 8: return "VariantInit"; case 9: return "VariantClear"; case 10: return "VariantCopy"; case 149: return "SysStringByteLen"; case 150: return "SysAllocStringByteLen"; default: return 0; } }
+static ShimFn find_shim(const char *dll, const char *name) {
+  if (name[0] == '#' && dll && (dll[0] == 'O' || dll[0] == 'o') && oleaut_dll(dll)) { u32 o = 0; for (const char *p = name + 1; *p >= '0' && *p <= '9'; p++) o = o * 10 + (u32)(*p - '0'); const char *n = oleaut_ordinal(o); if (n) name = n; }
+  for (size_t i = 0; i < sizeof shims / sizeof shims[0]; i++) if (!e_strcmp(shims[i].name, name)) return shims[i].fn; extern ShimFn gdi_find_shim(const char *name); return gdi_find_shim(name); }
 int w32_have_shim(const char *dll, const char *name) { return find_shim(dll, name) != 0; }
 
 /* ---------- init ---------- */
