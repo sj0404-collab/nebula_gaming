@@ -1,0 +1,2 @@
+public/x64/apps/** -text
+emu/tests/dll/** binary

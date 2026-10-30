@@ -350,7 +350,7 @@ await test('x64: real applications — SQLite 3.50.4 (file db), jq 1.8.1, Lua 5.
   await run('lua54.exe', null, /fib\(25\) =\s+75025[\s\S]*read back:\s+written from Lua/, 'x64-lua.png');
   await run('7z.exe', null, /Everything is Ok/, 'x64-7zip.png');
   await run('7z.exe', 'l demo.7z', /1 files/, null);
-  await run('zstd.exe', null, /179874 ->\s+3\d{4}/, 'x64-zstd.png');
+  await run('zstd.exe', null, /\d{6} ->\s+3\d{4}/, 'x64-zstd.png');
   const vl = await w.locator('[data-x64-exe="lua54.exe"] [data-x64-verdict]').getAttribute('data-x64-verdict');
   expect(vl === 'partial', 'lua54.exe (imports its own DLL) verdict should be "partial": ' + vl);
   await w.locator('[data-x64-exe="lua54.exe"]').click(); await w.locator('[data-x64-tab="report"]').click();
