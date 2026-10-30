@@ -191,12 +191,15 @@ int  proc_enum(int idx, int *pid, int *ppid, const char **name);   /* 1 if idx v
   int spawn_wait_pid, spawn_wait_mode;                                             /* _spawn*(P_WAIT/P_OVERLAY) in progress */ \
   int pw_active, pw_fd; u64 pw_rip, pw_total, pw_done;                             /* partially completed pipe write, resumed on shim retry */
 typedef struct { THREAD_CTX_FIELDS } ThreadCtx;
+#define MAX_TLS_IMAGES 8
 typedef struct {
   int used, state, tid, suspend, kobj;   /* state 1 running, 2 exited */
-  Cpu *cpu; u64 teb, stack, stack_size, tls_blk, tls_arr, start, param; u32 exit_code;
+  Cpu *cpu; u64 teb, stack, stack_size, tls_blk[MAX_TLS_IMAGES], tls_arr, start, param; u32 exit_code;
   ThreadCtx ctx;                         /* saved while not current */
 } Thread;
 
+#define MAX_MODULES 24
+typedef struct { char name[64]; u64 base, size, entry; u32 exp_rva, exp_size; int attached; } GuestModule;   /* a DLL loaded from the virtual disk */
 struct Win32 {
   Cpu *cpu;                              /* the CURRENT thread's cpu */
   Mem *mem;
@@ -206,7 +209,8 @@ struct Win32 {
   u64 teb, peb, cmdline_a, cmdline_w, env_w, env_a;           /* teb: main thread's TEB */
   union { ThreadCtx tctx; struct { THREAD_CTX_FIELDS }; };    /* current thread's state (see Thread.ctx) */
   Thread th[THREAD_MAX]; int nth, cur_th; Cpu tcpu[THREAD_MAX]; int next_tid;
-  u64 tls_tmpl, tls_tmpl_size, tls_blk_size;                  /* static TLS template from the PE TLS directory */
+  struct { u64 tmpl, tmpl_size, blk_size; } tls[MAX_TLS_IMAGES]; int ntls;   /* static TLS templates (exe + DLLs), index = slot in the TEB+0x58 array */
+  GuestModule mods[MAX_MODULES]; int nmods; u64 dll_next;     /* private DLLs (LoadLibrary / static imports) */
   int wake_gen;                                               /* bumped by WakeByAddress / InitOnceComplete */
   /* heap */
 #define HEAP_BINS 128
@@ -263,6 +267,9 @@ int    w32_thread_alive(Win32 *w);               /* current thread still runnabl
 
 /* ---------- loader ---------- */
 int  pe_load(Win32 *w, const u8 *bytes, size_t len, const char *name);
+int  pe_load_dll(Win32 *w, const u8 *bytes, size_t len, const char *name);   /* → module index or -1 */
+void pe_tls_thread_init(Win32 *w, int th);
+int  pe_is_system_dll(const char *dll);
 /* static inspection (no execution): fills a JSON-ish report of arch/subsystem/imports and supported ratio */
 int  pe_inspect(const u8 *bytes, size_t len, char *out, size_t out_sz);
 

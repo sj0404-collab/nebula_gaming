@@ -6,7 +6,8 @@
 #define RET(v) (c->r[RAX] = (u64)(v))
 #define W (c->w)
 
-enum { CONT_STARTUP = 1, CONT_INITTERM, CONT_ATEXIT, CONT_RET_RAX, CONT_RET_VAL, CONT_CREATEWND, CONT_QSORT, CONT_BSEARCH };
+enum { CONT_STARTUP = 1, CONT_INITTERM, CONT_ATEXIT, CONT_RET_RAX, CONT_RET_VAL, CONT_CREATEWND, CONT_QSORT, CONT_BSEARCH, CONT_DLLMAIN };
+static int attach_next_module(Cpu *c);
 enum { SLOT_STARTUP = 0, SLOT_CONT = 1, SLOT_FIRST = 2 };
 #define SLOT_ADDR(i) (G_SHIM_BASE + (u64)(i) * SHIM_SLOT_SIZE)
 #define TEB_OFF   0x10000
@@ -167,6 +168,7 @@ void w32_cont_resume(Cpu *c) {
   c->r[RSP] = w->cont[i].rsp;   /* every callback of one continuation starts from the same stack pointer (qsort with 10^6 comparisons must not drift) */
   switch (w->cont[i].kind) {
     case CONT_STARTUP:
+      if (w->cont[i].idx == 0 && attach_next_module(c)) return;   /* DllMain of statically imported DLLs runs before TLS callbacks and the entry point */
       if (w->cont[i].idx < w->n_tls_cb) { u64 fn = w->tls_callbacks[w->cont[i].idx++]; guest_call(c, fn, w->image_base, 1, 0, 0); return; }
       if (w->cont[i].idx == w->n_tls_cb) { w->cont[i].idx++; guest_call(c, w->entry, 0, 0, 0, 0); return; }
       do_exit(c, (int)rax); return;
@@ -187,6 +189,7 @@ void w32_cont_resume(Cpu *c) {
       if (step == 1) { guest_call(c, w->win.wndproc, w->win.hwnd, 0x0003 /* WM_MOVE */, 0, (64 << 16) | 64); return; }
       if (step == 2 && (w->win.style & 0x10000000)) { w->win.shown = 1; guest_call(c, w->win.wndproc, w->win.hwnd, 0x0018 /* WM_SHOWWINDOW */, 1, 0); return; }
       cont_finish(c, w->win.hwnd); return; }
+    case CONT_DLLMAIN: if (attach_next_module(c)) return; cont_finish(c, w->cont[i].data[0]); return;
     case CONT_QSORT: qsort_step(c, 1, rax); return;
     case CONT_BSEARCH: {
       /* data0=key data1=base data2=hi data3=size data4=cmp data5=lo; the last probe was mid=(lo+hi)/2 */
@@ -339,7 +342,7 @@ static void s_SleepEx(Cpu *c) { s_Sleep(c); }
 static void s_GetStdHandle(Cpu *c) { u32 n = (u32)ARG(0); RET(n == 0xfffffff6u ? 0x10 : n == 0xfffffff5u ? 0x11 : n == 0xfffffff4u ? 0x12 : ~0ull); }
 static void s_WriteConsoleA(Cpu *c) { s_WriteFile(c); }
 static void s_WriteConsoleW(Cpu *c) { int fd = fd_of_handle(ARG(0)); u32 n = (u32)ARG(2); if (fd <= 0) { RET(0); return; } char buf[4096]; int m = wstr_to_utf8(c, ARG(1), buf, sizeof buf, (int)n); int wr = out_write(c, fd, (const u8 *)buf, m); if (!wr) return; if (ARG(3)) wr32(c, ARG(3), n); RET(wr > 0); }
-static void s_GetConsoleMode(Cpu *c) { if (fd_of_handle(ARG(0))) { wr32(c, ARG(1), 3); RET(1); } else RET(0); }
+static void s_GetConsoleMode(Cpu *c) { int fd = fd_of_handle(ARG(0)); if (fd && vfs_resolve(fd < 0 ? 0 : fd) < 3) { wr32(c, ARG(1), fd < 0 ? 0x1f7 : 3); RET(1); } else { W->last_error = 6; RET(0); } }   /* a redirected std handle (pipe/file) is not a console */
 static void s_SetConsoleMode(Cpu *c) { RET(1); }
 static void s_GetConsoleOutputCP(Cpu *c) { RET(65001); }
 static void s_GetConsoleCP(Cpu *c) { RET(65001); }
@@ -359,18 +362,92 @@ static void s_FreeEnvironmentStringsW(Cpu *c) { RET(1); }
 static void s_FreeEnvironmentStringsA(Cpu *c) { RET(1); }
 static void s_GetStartupInfoA(Cpu *c) { u64 a = ARG(0); u8 *p = mem_ptr(c->mem, a, 104, 1); if (p) { e_memset(p, 0, 104); wr32(c, a, 104); wr64(c, a + 80, 0x10); wr64(c, a + 88, 0x11); wr64(c, a + 96, 0x12); } }
 static void s_GetStartupInfoW(Cpu *c) { s_GetStartupInfoA(c); }
-static void s_GetModuleHandleA(Cpu *c) { const char *n = rd_str(c, ARG(0), 260); if (!n) { RET(W->image_base); return; } RET(0x7ff00000000ull + ((u64)(u8)n[0] << 12)); }
-static void s_GetModuleHandleW(Cpu *c) { if (!ARG(0)) { RET(W->image_base); return; } RET(0x7ff00000000ull + ((u64)(rd16(c, ARG(0)) & 0xff) << 12)); }
-static void s_GetModuleHandleExW(Cpu *c) { if (ARG(2)) wr64(c, ARG(2), W->image_base); RET(1); }
-static void s_GetModuleHandleExA(Cpu *c) { s_GetModuleHandleExW(c); }
-static void s_LoadLibraryA(Cpu *c) { const char *n = rd_str(c, ARG(0), 260); RET(0x7ff00000000ull + ((u64)(n ? (u8)n[0] : 1) << 12)); }
-static void s_LoadLibraryW(Cpu *c) { RET(0x7ff00000000ull + ((u64)(rd16(c, ARG(0)) & 0xff) << 12)); }
+/* ---------- modules: private DLLs loaded from the virtual disk ---------- */
+static u32 mod_atoi(const char *p) { u32 v = 0; while (*p >= '0' && *p <= '9') v = v * 10 + (u32)(*p++ - '0'); return v; }
+static const char *mod_basename(const char *p) { const char *b = p; for (; *p; p++) if (*p == '\\' || *p == '/') b = p + 1; return b; }
+static int mod_name_eq(const char *a, const char *b) {   /* case-insensitive, ".dll" optional on either side */
+  for (;;) { char x = *a, y = *b; if (x >= 'A' && x <= 'Z') x += 32; if (y >= 'A' && y <= 'Z') y += 32;
+    if (x != y) { if (!x && !e_stricmp(b, ".dll")) return 1; if (!y && !e_stricmp(a, ".dll")) return 1; return 0; } if (!x) return 1; a++; b++; }
+}
+static int mod_find(Win32 *w, const char *name) { const char *bn = mod_basename(name); for (int i = 0; i < w->nmods; i++) if (mod_name_eq(w->mods[i].name, bn)) return i; return -1; }
+static int mod_by_base(Win32 *w, u64 base) { for (int i = 0; i < w->nmods; i++) if (w->mods[i].base == base) return i; return -1; }
+/* find a DLL file on the virtual disk: as given, next to the exe (cwd), C:\nebula */
+static int mod_load(Win32 *w, const char *name) {
+  int m = mod_find(w, name); if (m >= 0) return m;
+  char path[600]; const char *cands[3]; int nc = 0; cands[nc++] = name;
+  char p1[600], p2[600]; e_snprintf(p1, sizeof p1, "%s\\%s", vfs_cwd(), mod_basename(name)); cands[nc++] = p1; e_snprintf(p2, sizeof p2, "C:\\nebula\\%s", mod_basename(name)); cands[nc++] = p2;
+  for (int k = 0; k < nc; k++) {
+    e_snprintf(path, sizeof path, "%s", cands[k]);
+    int node = vfs_find_node(path); if (node < 0) { size_t l = e_strlen(path); if (l + 4 < sizeof path && e_stricmp(path + (l > 4 ? l - 4 : 0), ".dll")) { e_memcpy(path + l, ".dll", 5); node = vfs_find_node(path); } }
+    if (node < 0) continue;
+    VNodeInfo vi; if (!vfs_node_info(node, &vi) || vi.is_dir || !vi.data) continue;
+    int idx = pe_load_dll(w, vi.data, (size_t)vi.size, mod_basename(path));
+    if (idx >= 0) { char msg[400]; e_snprintf(msg, sizeof msg, "[x64] loaded DLL %s at 0x%llx (%llu KB)\n", w->mods[idx].name, (unsigned long long)w->mods[idx].base, (unsigned long long)(w->mods[idx].size >> 10)); host_write(3, msg, e_strlen(msg)); }
+    return idx;
+  }
+  return -1;
+}
+/* export lookup by name or ordinal; follows forwarders ("KERNEL32.Foo") into the shim table */
+static u64 mod_export(Win32 *w, int mi, const char *name, u32 ordinal, int depth) {
+  GuestModule *m = &w->mods[mi]; if (!m->exp_rva || depth > 4) return 0; Cpu *c = w->cpu; u64 e = m->base + m->exp_rva;
+  u32 ord_base = rd32(c, e + 16), nfunc = rd32(c, e + 20), nnames = rd32(c, e + 24), funcs = rd32(c, e + 28), names = rd32(c, e + 32), ords = rd32(c, e + 36);
+  u32 idx = 0xffffffffu;
+  if (name) { for (u32 i = 0; i < nnames && i < 65536; i++) { const char *en = rd_str(c, m->base + rd32(c, m->base + names + 4 * i), 256); if (en && !e_strcmp(en, name)) { idx = rd16(c, m->base + ords + 2 * i); break; } } }
+  else if (ordinal >= ord_base) idx = ordinal - ord_base;
+  if (idx >= nfunc) return 0;
+  u32 rva = rd32(c, m->base + funcs + 4 * idx); if (!rva) return 0;
+  if (rva >= m->exp_rva && rva < m->exp_rva + m->exp_size) {   /* forwarder */
+    const char *fw = rd_str(c, m->base + rva, 256); if (!fw) return 0; char dll[80]; int k = 0; while (fw[k] && fw[k] != '.' && k < 70) { dll[k] = fw[k]; k++; } dll[k] = 0;
+    if (fw[k] != '.') return 0; const char *fn = fw + k + 1; e_memcpy(dll + k, ".dll", 5);
+    if (!pe_is_system_dll(dll)) { int o = mod_load(w, dll); if (o >= 0) return mod_export(w, o, fn[0] == '#' ? 0 : fn, fn[0] == '#' ? (u32)mod_atoi(fn + 1) : 0, depth + 1); }
+    return w32_shim_slot(w, dll, fn);
+  }
+  return m->base + rva;
+}
+u64 w32_resolve_import(Win32 *w, const char *dll, const char *name, u32 ordinal) {
+  if (!pe_is_system_dll(dll)) { int m = mod_load(w, dll); if (m >= 0) { u64 a = mod_export(w, m, name[0] == '#' ? 0 : name, name[0] == '#' ? ordinal : 0, 0); if (a) return a; } }
+  return w32_shim_slot(w, dll, name);
+}
+/* DllMain(base, DLL_PROCESS_ATTACH, 0) for every module not yet attached (one per continuation round trip) */
+static int attach_next_module(Cpu *c) {
+  Win32 *w = W; for (int i = 0; i < w->nmods; i++) if (!w->mods[i].attached) { w->mods[i].attached = 1; if (w->mods[i].entry) { guest_call(c, w->mods[i].entry, w->mods[i].base, 1, 0, 0); return 1; } }
+  return 0;
+}
+static u64 fake_module(const char *n) { return 0x7ff00000000ull + ((u64)(n && n[0] ? (u8)n[0] : 1) << 12); }
+static void load_library(Cpu *c, const char *n) {
+  if (!n || !n[0]) { W->last_error = 87; RET(0); return; }
+  if (!pe_is_system_dll(n)) {
+    int m = mod_load(W, n);
+    if (m >= 0) { u64 base = W->mods[m].base; if (!W->mods[m].attached || W->nmods > m + 1) { int i = cont_push(c, CONT_DLLMAIN); if (i < 0) return; W->cont[i].data[0] = base; w32_cont_resume(c); return; } RET(base); return; }
+    /* not on the virtual disk: behave like a system DLL (shims by name); a real miss shows up as "unimplemented API dll!name" */
+    char msg[400]; e_snprintf(msg, sizeof msg, "[x64] LoadLibrary(%s): not found on the virtual disk, using shims\n", n); host_write(3, msg, e_strlen(msg));
+  }
+  RET(fake_module(n));
+}
+static void s_GetModuleHandleA(Cpu *c) { const char *n = rd_str(c, ARG(0), 260); if (!n) { RET(W->image_base); return; } int m = mod_find(W, n); if (m >= 0) { RET(W->mods[m].base); return; } if (mod_name_eq(mod_basename(n), W->exe_name)) { RET(W->image_base); return; } RET(fake_module(n)); }
+static void s_GetModuleHandleW(Cpu *c) { if (!ARG(0)) { RET(W->image_base); return; } char n[260]; wstr_to_utf8(c, ARG(0), n, sizeof n, -1); c->r[RCX] = 0; int m = mod_find(W, n); if (m >= 0) { RET(W->mods[m].base); return; } if (mod_name_eq(mod_basename(n), W->exe_name)) { RET(W->image_base); return; } RET(fake_module(n)); }
+static void s_GetModuleHandleExW(Cpu *c) { u64 h = W->image_base; u32 flags = (u32)ARG(0);
+  if (ARG(1)) { if (flags & 4) { for (int i = 0; i < W->nmods; i++) if (ARG(1) - W->mods[i].base < W->mods[i].size) h = W->mods[i].base; }   /* GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS */
+    else { char n[260]; wstr_to_utf8(c, ARG(1), n, sizeof n, -1); int m = mod_find(W, n); h = m >= 0 ? W->mods[m].base : mod_name_eq(mod_basename(n), W->exe_name) ? W->image_base : fake_module(n); } }
+  if (ARG(2)) wr64(c, ARG(2), h); RET(1); }
+static void s_GetModuleHandleExA(Cpu *c) { u64 h = W->image_base; u32 flags = (u32)ARG(0);
+  if (ARG(1)) { if (flags & 4) { for (int i = 0; i < W->nmods; i++) if (ARG(1) - W->mods[i].base < W->mods[i].size) h = W->mods[i].base; }
+    else { const char *n = rd_str(c, ARG(1), 260); int m = n ? mod_find(W, n) : -1; h = m >= 0 ? W->mods[m].base : (n && mod_name_eq(mod_basename(n), W->exe_name)) ? W->image_base : fake_module(n); } }
+  if (ARG(2)) wr64(c, ARG(2), h); RET(1); }
+static void s_LoadLibraryA(Cpu *c) { load_library(c, rd_str(c, ARG(0), 260)); }
+static void s_LoadLibraryW(Cpu *c) { char n[260]; wstr_to_utf8(c, ARG(0), n, sizeof n, -1); load_library(c, n); }
 static void s_LoadLibraryExA(Cpu *c) { s_LoadLibraryA(c); }
 static void s_LoadLibraryExW(Cpu *c) { s_LoadLibraryW(c); }
 static void s_FreeLibrary(Cpu *c) { RET(1); }
-static void s_GetProcAddress(Cpu *c) { const char *n = rd_str(c, ARG(1), 256); if (!n || ARG(1) < 0x10000) { RET(0); return; } if (!w32_have_shim("", n)) { char msg[320]; e_snprintf(msg, sizeof msg, "[x64] GetProcAddress miss: %s\n", n); host_write(3, msg, e_strlen(msg)); W->last_error = 127; RET(0); return; } RET(w32_shim_slot(W, "dynamic", n)); }
-static void s_GetModuleFileNameA(Cpu *c) { char p[300]; e_snprintf(p, sizeof p, "C:\\nebula\\%s", W->exe_name); size_t l = e_strlen(p); u32 n = (u32)ARG(2); if (l + 1 > n) l = n ? n - 1 : 0; u8 *d = mem_ptr(c->mem, ARG(1), l + 1, 1); if (d) { e_memcpy(d, p, l); d[l] = 0; } RET(l); }
-static void s_GetModuleFileNameW(Cpu *c) { char p[300]; e_snprintf(p, sizeof p, "C:\\nebula\\%s", W->exe_name); size_t l = e_strlen(p); u32 n = (u32)ARG(2); if (l + 1 > n) l = n ? n - 1 : 0; for (size_t i = 0; i < l; i++) wr16(c, ARG(1) + i * 2, (u8)p[i]); wr16(c, ARG(1) + l * 2, 0); RET(l); }
+static void s_GetProcAddress(Cpu *c) {
+  int m = mod_by_base(W, ARG(0));
+  if (m >= 0) { u64 a = ARG(1) < 0x10000 ? mod_export(W, m, 0, (u32)ARG(1), 0) : mod_export(W, m, rd_str(c, ARG(1), 256), 0, 0); if (!a) W->last_error = 127; RET(a); return; }
+  const char *n = rd_str(c, ARG(1), 256); if (!n || ARG(1) < 0x10000) { W->last_error = 127; RET(0); return; }
+  if (!w32_have_shim("", n)) { char msg[320]; e_snprintf(msg, sizeof msg, "[x64] GetProcAddress miss: %s\n", n); host_write(3, msg, e_strlen(msg)); W->last_error = 127; RET(0); return; }
+  RET(w32_shim_slot(W, "dynamic", n)); }
+static const char *mod_file_name(Win32 *w, u64 h) { int m = h ? mod_by_base(w, h) : -1; return m >= 0 ? w->mods[m].name : w->exe_name; }
+static void s_GetModuleFileNameA(Cpu *c) { char p[300]; e_snprintf(p, sizeof p, "C:\\nebula\\%s", mod_file_name(W, ARG(0))); size_t l = e_strlen(p); u32 n = (u32)ARG(2); if (l + 1 > n) l = n ? n - 1 : 0; u8 *d = mem_ptr(c->mem, ARG(1), l + 1, 1); if (d) { e_memcpy(d, p, l); d[l] = 0; } RET(l); }
+static void s_GetModuleFileNameW(Cpu *c) { char p[300]; e_snprintf(p, sizeof p, "C:\\nebula\\%s", mod_file_name(W, ARG(0))); size_t l = e_strlen(p); u32 n = (u32)ARG(2); if (l + 1 > n) l = n ? n - 1 : 0; for (size_t i = 0; i < l; i++) wr16(c, ARG(1) + i * 2, (u8)p[i]); wr16(c, ARG(1) + l * 2, 0); RET(l); }
 static void s_GetSystemDirectoryA(Cpu *c) { const char *d = "C:\\Windows\\System32"; size_t l = e_strlen(d); if ((u32)ARG(1) > l) { u8 *p = mem_ptr(c->mem, ARG(0), l + 1, 1); if (p) e_memcpy(p, d, l + 1); } RET(l); }
 static void s_GetWindowsDirectoryA(Cpu *c) { const char *d = "C:\\Windows"; size_t l = e_strlen(d); if ((u32)ARG(1) > l) { u8 *p = mem_ptr(c->mem, ARG(0), l + 1, 1); if (p) e_memcpy(p, d, l + 1); } RET(l); }
 static void s_GetVersion(Cpu *c) { RET(0x23f00206); }
@@ -919,7 +996,7 @@ void w32_init(Win32 *w, Cpu *c, Mem *m) { g_fs_w = w; ProcFs *fs = w->fs ? w->fs
   c->gs_base = w->teb; c->fs_base = w->teb;
   w->th[0].used = 1; w->th[0].state = 1; w->th[0].cpu = c; w->th[0].teb = w->teb; w->th[0].kobj = -1; w->th[0].exit_code = 259; w->cur_th = 0; w->nth = 1; w->wait_deadline = -1;
   wr64(c, w->teb + 0x08, G_STACK_BASE + G_STACK_SIZE); wr64(c, w->teb + 0x10, G_STACK_BASE); wr64(c, w->teb + 0x30, w->teb); wr64(c, w->teb + 0x40, 4242); wr64(c, w->teb + 0x48, 4243); wr64(c, w->teb + 0x60, w->peb);
-  wr64(c, w->teb + 0x58, w32_heap_alloc(w, 64, 1));
+  w->th[0].tls_arr = w32_heap_alloc(w, 8 * MAX_TLS_IMAGES, 1); wr64(c, w->teb + 0x58, w->th[0].tls_arr);
   u64 params = G_SHIM_BASE + PARAMS_OFF; wr64(c, w->peb + 0x20, params); wr32(c, w->peb + 0x118, 10); wr32(c, w->peb + 0x11c, 0); wr16(c, w->peb + 0x120, 19045); wr64(c, w->peb + 0x18, shim_bump(w, 0x100));
   wr8(c, w->peb + 0x02, 0); /* BeingDebugged */
   w->ubuf = shim_bump(w, 0x1000);

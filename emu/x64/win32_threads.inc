@@ -119,9 +119,8 @@ static u64 thread_create(Cpu *c, u64 start, u64 param, u64 stack_size, int suspe
   int tid = g_next_tid; g_next_tid += 4;
   wr64(c, t->teb + 0x08, t->stack + sz); wr64(c, t->teb + 0x10, t->stack); wr64(c, t->teb + 0x30, t->teb); wr64(c, t->teb + 0x40, (u64)w->pid); wr64(c, t->teb + 0x48, (u64)tid); wr64(c, t->teb + 0x60, w->peb);
   /* static TLS: a private copy of the template block, reachable through TEB+0x58 → array[_tls_index = 0] */
-  u64 arr = w32_heap_alloc(w, 64, 1); u64 blk = 0;
-  if (w->tls_blk_size) { blk = w32_heap_alloc(w, w->tls_blk_size, 1); if (w->tls_tmpl_size) { const u8 *src = mem_ptr(w->mem, w->tls_tmpl, w->tls_tmpl_size, 0); u8 *dst = mem_ptr(w->mem, blk, w->tls_tmpl_size, 1); if (src && dst) e_memcpy(dst, src, (size_t)w->tls_tmpl_size); } wr64(c, arr, blk); }
-  wr64(c, t->teb + 0x58, arr); t->tls_blk = blk; t->tls_arr = arr;
+  u64 arr = w32_heap_alloc(w, 8 * MAX_TLS_IMAGES, 1); e_memset(t->tls_blk, 0, sizeof t->tls_blk);
+  wr64(c, t->teb + 0x58, arr); t->tls_arr = arr; pe_tls_thread_init(w, k);
   Cpu *tc = &w->tcpu[k]; cpu_reset(tc); tc->mem = w->mem; tc->w = w; tc->fs_base = tc->gs_base = t->teb; tc->trace = c->trace;
   tc->r[RSP] = t->stack + sz - 0x100; tc->rip = SLOT_ADDR(SLOT_STARTUP); cpu_push(tc, 0);
   t->cpu = tc; t->used = 1; t->state = 1; t->tid = tid; t->suspend = suspended ? 1 : 0; t->exit_code = STILL_ACTIVE_; t->start = start; t->param = param;
@@ -139,7 +138,7 @@ static void thread_mark_exited(Win32 *w, int k, u32 code) {
   t->state = 2; t->exit_code = code;
   KObj *ko = kobj_get(t->kobj); if (ko) { ko->state = 2; ko->exit_code = code; }
   for (int i = 0; i < KOBJ_MAX; i++) { KObj *m = kobj_get(i); if (m && m->kind == KO_MUTEX && m->owner_pid == w->pid && m->owner_tid == t->tid) { m->owner_tid = 0; m->owner_pid = 0; m->recursion = 0; m->abandoned = 1; } }
-  if (k && t->tls_blk) { w32_heap_free(w, t->tls_blk); t->tls_blk = 0; }
+  if (k) for (int i = 0; i < MAX_TLS_IMAGES; i++) if (t->tls_blk[i]) { w32_heap_free(w, t->tls_blk[i]); t->tls_blk[i] = 0; }
   if (t->kobj >= 0) { kobj_ref(t->kobj, -1); t->kobj = -1; }
   if (k) t->used = 0;   /* slot (and its cached stack/TEB) reusable; the main thread keeps its slot */
 }

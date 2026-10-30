@@ -49,6 +49,17 @@ static const u8 *pe_rva(PeHdr *h, u32 rva, u32 need) {
   return 0;
 }
 
+/* DLLs that the emulator provides itself (shims); anything else is a "private" DLL to be loaded from the virtual disk */
+int pe_is_system_dll(const char *dll) {
+  static const char *sys[] = { "kernel32", "kernelbase", "ntdll", "user32", "gdi32", "msvcrt", "ucrtbase", "vcruntime140", "vcruntime140_1", "msvcp140", "msvcp140_1", "msvcp140_2", "msvcp140_atomic_wait", "msvcp140_codecvt_ids", "concrt140",
+    "advapi32", "shell32", "ole32", "oleaut32", "ws2_32", "wsock32", "comctl32", "comdlg32", "shlwapi", "psapi", "winmm", "imm32", "version", "crypt32", "secur32", "bcrypt", "setupapi", "dbghelp", "iphlpapi", "userenv", "uxtheme", "dwmapi",
+    "dxgi", "opengl32", "glu32", "dinput8", "dsound", "wininet", "winhttp", "mpr", "netapi32", "rpcrt4", "wintrust", "powrprof", "hid", "cfgmgr32", "normaliz", "msimg32", "winspool", "avrt", "ncrypt", "wtsapi32", "propsys", "shcore", "api-ms", "ext-ms", "d3d", "xinput", "xaudio2", "gdiplus", "msvcr", "msvcp", "libgcc_s_seh-1", "libstdc++-6", "libwinpthread-1", 0 };
+  char b[64]; int n = 0; for (const char *p = dll; *p && n < 63; p++) { char ch = *p; if (ch >= 'A' && ch <= 'Z') ch += 32; b[n++] = ch; } b[n] = 0;
+  if (n > 4 && !e_strcmp(b + n - 4, ".dll")) b[n - 4] = 0; if (n > 4 && !e_strcmp(b + n - 4, ".drv")) b[n - 4] = 0;
+  for (int i = 0; sys[i]; i++) { size_t l = e_strlen(sys[i]); if (!e_strcmp(b, sys[i])) return 1; if ((!e_strcmp(sys[i], "api-ms") || !e_strcmp(sys[i], "ext-ms") || !e_strcmp(sys[i], "d3d") || !e_strcmp(sys[i], "xinput") || !e_strcmp(sys[i], "xaudio2") || !e_strcmp(sys[i], "msvcr") || !e_strcmp(sys[i], "msvcp")) && !e_strncmp(b, sys[i], l)) return 1; }
+  return 0;
+}
+
 /* ---------- import helper shared by loader and inspector ---------- */
 typedef void (*ImportCb)(void *ctx, const char *dll, const char *name, u32 ordinal, u32 iat_rva);
 static int pe_walk_imports(PeHdr *h, ImportCb cb, void *ctx) {
@@ -76,30 +87,53 @@ static int pe_walk_imports(PeHdr *h, ImportCb cb, void *ctx) {
 /* ---------- loader ---------- */
 u64 w32_data_import(Win32 *w, const char *name);
 int w32_data_import_off(const char *name);
+u64 w32_resolve_import(Win32 *w, const char *dll, const char *name, u32 ordinal);
 typedef struct { Win32 *w; u8 *img; u64 base; int unknown; } LoadCtx;
 static void load_import(void *ctx, const char *dll, const char *name, u32 ordinal, u32 iat_rva) {
   LoadCtx *lc = ctx; char tmp[32]; const char *n = name;
   if (!n) { e_snprintf(tmp, sizeof tmp, "#%u", ordinal); n = tmp; }
-  u64 slot = w32_data_import(lc->w, n); if (!slot) slot = w32_shim_slot(lc->w, dll, n);
+  u64 slot = w32_data_import(lc->w, n); if (!slot) slot = w32_resolve_import(lc->w, dll, n, ordinal);
   u8 *p = lc->img + iat_rva; p[0] = slot; p[1] = slot >> 8; p[2] = slot >> 16; p[3] = slot >> 24; p[4] = slot >> 32; p[5] = slot >> 40; p[6] = slot >> 48; p[7] = slot >> 56;
 }
 
-int pe_load(Win32 *w, const u8 *bytes, size_t len, const char *name) {
-  PeHdr h; int rc = pe_parse(&h, bytes, len);
-  if (rc) { w32_report(w, "not a PE file (code %d)", rc); return -1; }
-  if (h.machine != 0x8664) { w32_report(w, "unsupported machine 0x%x (only x86-64 / PE32+ is emulated)", h.machine); return -2; }
-  if (h.magic != 0x20b) { w32_report(w, "not PE32+"); return -2; }
-  if (h.chars & 0x2000) { w32_report(w, "file is a DLL, not an executable"); return -3; }
-  if (h.dd[14][1]) { w32_report(w, ".NET / CLR executable — needs the .NET runtime, not supported"); return -4; }
-  u64 base = h.image_base; u64 size = (h.size_image + 0xffff) & ~0xffffull;
-  /* collide with our fixed regions? relocate */
-  int collide = (base < G_HEAP_BASE + 0x40000000ull && base + size > G_SHIM_BASE) ? 1 : 0;
-  if (base == 0 || collide) {
-    if (!h.dd[5][1] && !(h.dllchars & 0x40)) { w32_report(w, "image base 0x%llx collides and the file has no relocations", (unsigned long long)base); return -5; }
-    base = 0x0000000140000000ull; if (base < G_HEAP_BASE + 0x40000000ull) base = 0x0000000180000000ull;
+/* static TLS: one slot per image in the per-thread pointer array (TEB+0x58 → arr[idx]); every live thread gets its own block */
+void pe_tls_thread_init(Win32 *w, int th) {
+  Cpu *c = w->cpu; u64 arr = w->th[th].tls_arr; if (!arr) return;
+  for (int i = 0; i < w->ntls; i++) {
+    if (w->th[th].tls_blk[i]) continue;
+    u64 blk = w32_heap_alloc(w, w->tls[i].blk_size, 1); if (!blk) return;
+    if (w->tls[i].tmpl_size) { const u8 *src = mem_ptr(w->mem, w->tls[i].tmpl, w->tls[i].tmpl_size, 0); u8 *dst = mem_ptr(w->mem, blk, w->tls[i].tmpl_size, 1); if (src && dst) e_memcpy(dst, src, (size_t)w->tls[i].tmpl_size); }
+    wr64(c, arr + 8 * i, blk); w->th[th].tls_blk[i] = blk;
   }
-  u8 *img = mem_map(w->mem, base, size, "image");
-  if (!img) { w32_report(w, "cannot map image (%llu bytes)", (unsigned long long)size); return -6; }
+}
+static int pe_tls_register(Win32 *w, u64 raw_start, u64 raw_end, u32 zero, u64 idx_addr) {
+  if (w->ntls >= MAX_TLS_IMAGES) return -1;
+  int idx = w->ntls++; w->tls[idx].tmpl = raw_start; w->tls[idx].tmpl_size = raw_end > raw_start ? raw_end - raw_start : 0; w->tls[idx].blk_size = w->tls[idx].tmpl_size + zero + 16;
+  if (idx_addr) wr32(w->cpu, idx_addr, (u32)idx);
+  for (int t = 0; t < THREAD_MAX; t++) if (w->th[t].used) pe_tls_thread_init(w, t);
+  return idx;
+}
+
+/* map an image (exe or DLL) into the process: sections, relocations, imports. Returns 0 or a negative code (reported). */
+static int pe_map(Win32 *w, const u8 *bytes, size_t len, const char *name, int want_dll, PeHdr *hp, u64 *pbase, u64 *psize) {
+  PeHdr h; int rc = pe_parse(&h, bytes, len);
+  if (rc) { w32_report(w, "%s: not a PE file (code %d)", name, rc); return -1; }
+  if (h.machine != 0x8664) { w32_report(w, "%s: unsupported machine 0x%x (only x86-64 / PE32+ is emulated)", name, h.machine); return -2; }
+  if (h.magic != 0x20b) { w32_report(w, "%s: not PE32+", name); return -2; }
+  if (!want_dll && (h.chars & 0x2000)) { w32_report(w, "file is a DLL, not an executable"); return -3; }
+  if (want_dll && !(h.chars & 0x2000)) { w32_report(w, "%s: not a DLL", name); return -3; }
+  if (h.dd[14][1]) { w32_report(w, "%s: .NET / CLR image — needs the .NET runtime, not supported", name); return -4; }
+  u64 base = h.image_base; u64 size = (h.size_image + 0xffff) & ~0xffffull;
+  /* collide with our fixed regions or with something already mapped? relocate */
+  int collide = (base < G_SHIM_BASE + G_SHIM_SIZE && base + size > G_SHIM_BASE) || (base < G_STACK_BASE + G_STACK_SIZE && base + size > G_STACK_BASE) || (base < G_HEAP_BASE + 0x40000000ull && base + size > G_HEAP_BASE);
+  if (!collide) for (u64 a = base; a < base + size; a += 0x10000) if (mem_region(w->mem, a)) { collide = 1; break; }
+  if (base == 0 || collide) {
+    if (!h.dd[5][1] && !(h.dllchars & 0x40)) { w32_report(w, "%s: image base 0x%llx collides and the file has no relocations", name, (unsigned long long)base); return -5; }
+    if (!want_dll) { base = 0x0000000140000000ull; if (base < G_HEAP_BASE + 0x40000000ull) base = 0x0000000180000000ull; }
+    else { if (!w->dll_next) w->dll_next = 0x0000000190000000ull; base = w->dll_next; w->dll_next += size + 0x10000; }
+  }
+  u8 *img = mem_map(w->mem, base, size, want_dll ? "dll" : "image");
+  if (!img) { w32_report(w, "%s: cannot map image (%llu bytes)", name, (unsigned long long)size); return -6; }
   e_memcpy(img, bytes, h.size_headers < len ? h.size_headers : len);
   for (int i = 0; i < h.nsec; i++) {
     const u8 *s = bytes + h.sec_off + 40 * i; u32 vs = le32(s + 8), va = le32(s + 12), rs = le32(s + 16), rp = le32(s + 20);
@@ -121,23 +155,38 @@ int pe_load(Win32 *w, const u8 *bytes, size_t len, const char *name) {
       r += bsz;
     }
   }
-  /* imports → shim slots */
+  /* register before resolving imports so that circular DLL dependencies terminate */
+  if (want_dll) {
+    if (w->nmods >= MAX_MODULES) { w32_report(w, "%s: too many DLLs (max %d)", name, MAX_MODULES); return -7; }
+    GuestModule *m = &w->mods[w->nmods++]; e_memset(m, 0, sizeof *m);
+    const char *bn = name; for (const char *p = name; *p; p++) if (*p == '\\' || *p == '/') bn = p + 1;
+    e_snprintf(m->name, sizeof m->name, "%s", bn); m->base = base; m->size = size; m->entry = h.entry ? base + h.entry : 0; m->exp_rva = h.dd[0][0]; m->exp_size = h.dd[0][1];
+  }
+  /* imports → shim slots or exports of other loaded DLLs */
   LoadCtx lc = { w, img, base, 0 };
   pe_walk_imports(&h, load_import, &lc);
+  *hp = h; *pbase = base; *psize = size; return 0;
+}
+int pe_load_dll(Win32 *w, const u8 *bytes, size_t len, const char *name) {
+  PeHdr h; u64 base, size; int before = w->nmods;
+  if (pe_map(w, bytes, len, name, 1, &h, &base, &size)) return -1;
+  if (h.dd[9][0] && h.dd[9][0] + 40 <= size) {   /* DLL static TLS: register a slot (mingw DLLs carry one, MSVC DLLs with thread_local too) */
+    const u8 *t = mem_ptr(w->mem, base + h.dd[9][0], 40, 0);
+    if (t) { u64 rs = le64(t), re = le64(t + 8), idx_addr = le64(t + 16); u32 zero = le32(t + 32); if (pe_tls_register(w, rs, re, zero, idx_addr) < 0) w32_report(w, "%s: too many images with static TLS (max %d)", name, MAX_TLS_IMAGES); }
+  }
+  return before;   /* index of the module registered by pe_map */
+}
+int pe_load(Win32 *w, const u8 *bytes, size_t len, const char *name) {
+  PeHdr h; u64 base, size; int rc = pe_map(w, bytes, len, name, 0, &h, &base, &size); if (rc) return rc;
+  u8 *img = mem_ptr(w->mem, base, size, 1); if (!img) return -6;
   w->image_base = base; w->image_size = size; w->entry = base + h.entry; w->subsystem = h.subsystem;
   e_snprintf(w->exe_name, sizeof w->exe_name, "%s", name);
-  /* TLS: write index 0, build a thread block */
+  /* TLS: register the template (slot 0 for the exe), build the main thread's block */
   Cpu *c = w->cpu;
   if (h.dd[9][0] && h.dd[9][0] + 40 <= size) {
     const u8 *t = img + h.dd[9][0];
     u64 raw_start = le64(t), raw_end = le64(t + 8), idx_addr = le64(t + 16), cb_addr = le64(t + 24); u32 zero = le32(t + 32);
-    u64 blk_sz = (raw_end > raw_start ? raw_end - raw_start : 0) + zero + 16;
-    u64 blk = w32_heap_alloc(w, blk_sz, 1);
-    if (raw_end > raw_start) { u8 *src = mem_ptr(w->mem, raw_start, raw_end - raw_start, 0); u8 *dst = mem_ptr(w->mem, blk, raw_end - raw_start, 1); if (src && dst) e_memcpy(dst, src, (size_t)(raw_end - raw_start)); }
-    u64 arr = w32_heap_alloc(w, 64, 1); wr64(c, arr, blk);
-    wr64(c, w->teb + 0x58, arr);
-    w->tls_tmpl = raw_start; w->tls_tmpl_size = raw_end > raw_start ? raw_end - raw_start : 0; w->tls_blk_size = blk_sz; w->th[0].tls_blk = blk; w->th[0].tls_arr = arr;
-    if (idx_addr) wr32(c, idx_addr, 0);
+    pe_tls_register(w, raw_start, raw_end, zero, idx_addr);
     /* callbacks: stored for the start-up sequence */
     if (cb_addr) { for (int k = 0; k < 16; k++) { u64 fn = rd64(c, cb_addr + k * 8); if (!fn) break; w->tls_callbacks[w->n_tls_cb++] = fn; } }
   }
@@ -146,7 +195,7 @@ int pe_load(Win32 *w, const u8 *bytes, size_t len, const char *name) {
 }
 
 /* ---------- static inspection ---------- */
-typedef struct { char *out; size_t sz, pos; int n, known, unknown; char dlls[64][48]; int ndll; int unknown_listed; } InsCtx;
+typedef struct { char *out; size_t sz, pos; int n, known, unknown, priv; char dlls[64][48]; int ndll; int unknown_listed; } InsCtx;
 static void ins_put(InsCtx *x, const char *fmt, ...) { if (x->pos >= x->sz) return; __builtin_va_list ap; __builtin_va_start(ap, fmt); int n = e_vsnprintf(x->out + x->pos, x->sz - x->pos, fmt, ap); __builtin_va_end(ap); x->pos += n; if (x->pos > x->sz - 1) x->pos = x->sz - 1; }
 int w32_have_shim(const char *dll, const char *name);
 static void ins_import(void *ctx, const char *dll, const char *name, u32 ordinal, u32 iat_rva) {
@@ -155,6 +204,7 @@ static void ins_import(void *ctx, const char *dll, const char *name, u32 ordinal
   int found = 0; for (int i = 0; i < x->ndll; i++) if (!e_stricmp(x->dlls[i], dll)) { found = 1; break; }
   if (!found && x->ndll < 64) { e_snprintf(x->dlls[x->ndll++], 48, "%s", dll); }
   if (w32_have_shim(dll, name) || (name && w32_data_import_off(name))) x->known++;
+  else if (!pe_is_system_dll(dll)) { x->priv++; x->known++; }   /* resolved from the private DLL next to the exe at load time */
   else { x->unknown++; if (x->unknown_listed < 60) { ins_put(x, "%s%s!%s", x->unknown_listed ? ", " : "", dll, name); x->unknown_listed++; } else if (x->unknown_listed == 60) { ins_put(x, ", ..."); x->unknown_listed++; } }
 }
 int pe_inspect(const u8 *bytes, size_t len, char *out, size_t out_sz) {
@@ -174,7 +224,7 @@ int pe_inspect(const u8 *bytes, size_t len, char *out, size_t out_sz) {
   size_t mark = x.pos;
   pe_walk_imports(&h, ins_import, &x);
   (void)mark;
-  ins_put(&x, "\",\"imports\":%d,\"knownImports\":%d,\"unknownImportsCount\":%d,\"dlls\":[", x.n, x.known, x.unknown);
+  ins_put(&x, "\",\"imports\":%d,\"knownImports\":%d,\"unknownImportsCount\":%d,\"privateDllImports\":%d,\"dlls\":[", x.n, x.known, x.unknown, x.priv);
   for (int i = 0; i < x.ndll; i++) ins_put(&x, "%s\"%s\"", i ? "," : "", x.dlls[i]);
   /* verdict */
   const char *verdict; const char *why;
@@ -185,6 +235,7 @@ int pe_inspect(const u8 *bytes, size_t len, char *out, size_t out_sz) {
     int heavy = 0; for (int i = 0; i < x.ndll; i++) { const char *d = x.dlls[i];
       if (!e_strncmp(d, "d3d", 3) || !e_strncmp(d, "D3D", 3) || !e_stricmp(d, "opengl32.dll") || !e_stricmp(d, "dxgi.dll") || !e_stricmp(d, "vulkan-1.dll") || !e_stricmp(d, "xinput1_4.dll") || !e_stricmp(d, "dsound.dll") || !e_stricmp(d, "xaudio2_9.dll") || !e_stricmp(d, "mono-2.0-bdwgc.dll") || !e_stricmp(d, "UnityPlayer.dll") || !e_stricmp(d, "GameAssembly.dll")) heavy = 1; }
     if (heavy) { verdict = "unsupported"; why = "needs GPU/audio subsystems (Direct3D, OpenGL, Vulkan, XAudio, Unity/Mono) that have no wasm64 implementation here"; }
+    else if (x.unknown == 0 && x.priv) { verdict = "partial"; why = "all system imports have shims; the program also imports its own DLLs, which are loaded from the virtual disk if you add them next to the exe"; }
     else if (x.unknown == 0) { verdict = "likely"; why = "all imports have shims"; }
     else if (x.unknown * 5 <= x.n * 2) { verdict = "partial"; why = "most imports have shims (no network/GPU/audio); the program runs until the first unimplemented call"; }
     else { verdict = "unlikely"; why = "most imports are not implemented"; }

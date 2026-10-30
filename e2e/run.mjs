@@ -331,6 +331,35 @@ await test('x64: threads & synchronisation — Win32 threads (CreateThread/CS/SR
   await closeAll();
 });
 
+await test('x64: real applications — SQLite 3.50.4 (file db), jq 1.8.1, Lua 5.4 + lua54.dll, 7-Zip 25.01 + 7z.dll, zstd 1.5.7 run in the browser with correct output', async () => {
+  const w = await x64Open();
+  await w.locator('[data-x64-exe="zstd.exe"]').waitFor({ timeout: 60_000 });
+  const run = async (exe, args, expectRe, shot, timeout = 90_000) => {
+    await w.locator(`[data-x64-exe="${exe}"]`).click();
+    if (args !== null) await w.getByPlaceholder('arguments').fill(args);
+    await w.locator('[data-x64-run]').click();
+    await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout });
+    const con = await w.locator('[data-x64-console]').innerText();
+    expect(expectRe.test(con), `${exe}: unexpected output: ${con.slice(0, 400)}`);
+    if (shot) await page.screenshot({ path: resolve(SHOTS, shot) });
+    return con;
+  };
+  await run('sqlite3.exe', null, /2000\|-?\d+\.0\|-?\d+\.0\|[\s\S]*[\r\n]ok/, 'x64-sqlite.png');            // default args: -init demo.sql demo.db .quit
+  await run('sqlite3.exe', 'demo.db "select count(*), typeof(v) from t;"', /2000\|real/, null);            // the database file persisted on the virtual disk
+  await run('jq.exe', null, /\{"name":"ann","n":2\}\s*\{"name":"cid","n":3\}/, 'x64-jq.png');
+  await run('lua54.exe', null, /fib\(25\) =\s+75025[\s\S]*read back:\s+written from Lua/, 'x64-lua.png');
+  await run('7z.exe', null, /Everything is Ok/, 'x64-7zip.png');
+  await run('7z.exe', 'l demo.7z', /1 files/, null);
+  await run('zstd.exe', null, /179874 ->\s+3\d{4}/, 'x64-zstd.png');
+  const vl = await w.locator('[data-x64-exe="lua54.exe"] [data-x64-verdict]').getAttribute('data-x64-verdict');
+  expect(vl === 'partial', 'lua54.exe (imports its own DLL) verdict should be "partial": ' + vl);
+  await w.locator('[data-x64-exe="lua54.exe"]').click(); await w.locator('[data-x64-tab="report"]').click();
+  const rep = await w.locator('[data-x64-report]').innerText();
+  await page.screenshot({ path: resolve(SHOTS, 'x64-lua-report.png') });
+  expect(/Own DLLs/.test(rep), 'report should show the selected exe: ' + rep.slice(0, 200));
+  await closeAll();
+});
+
 await test('x64: virtual disk + stdin — files mounted from the host, read/written by busybox, console input feeds blocking reads', async () => {
   const w = await x64Open();
   await w.locator('[data-x64-exe="busybox64.exe"]').waitFor({ timeout: 30_000 });

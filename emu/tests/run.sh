@@ -76,6 +76,30 @@ check "threads in child + pipe" "39 checks, 0 failed" "$($X --quiet --no-stdin -
 echo "[8] heap: 10^5 live blocks, blocks spanning heap regions, sort of 100000 lines"
 check "sort -n 20000"  "20000"                       "$($BB sh -c 'seq 1 20000 | sort -n | tail -1' 2>&1 || true)"
 check "sort -rn 1e5"   "100000"                      "$($BB sh -c 'seq 1 100000 | sort -rn | head -1' 2>&1 || true)"
+echo "[9] private DLLs: static imports, LoadLibrary, GetProcAddress, DllMain, per-thread TLS"
+check "usedll.exe"   "static import: add3=6 name=mydll says hi
+LoadLibrary=0000000180000000 same=1
+GetProcAddress dll_hyp -> ok, f(3,4)=25.0
+missing=0000000000000000 err=127
+path=C:\\nebula\\mydll.dll
+kernel32 GetTickCount=ok" "$($X --quiet --mount "$PWD/tests/dll" tests/dll/usedll.exe 2>&1 || true)"
+check "DLL thread TLS" "thread 10: tls=57
+thread 100: tls=507
+main after threads: 9 (expect 9)" "$($X --quiet --mount "$PWD/tests/dll" tests/dll/tlsuse.exe 2>&1 | tail -3 || true)"
+echo "[10] real applications (public/x64/apps: SQLite 3.50.4, jq 1.8.1, Lua 5.4.2 + DLL, 7-Zip 25.01 + DLL, zstd 1.5.7)"
+A=../public/x64/apps
+check "sqlite3 :memory:" "3|3.50.4"      "$($X --quiet --max-ms 30000 $A/sqlite3.exe :memory: 'select 1+2, sqlite_version();' 2>&1 || true)"
+check "sqlite3 file db" "2000|ok|"       "$($X --quiet --no-stdin --max-ms 120000 --mount "$PWD/$A" $S/busybox64.exe sh -c './sqlite3.exe -init demo.sql demo.db .quit >/dev/null 2>&1; echo "select count(*) from t; pragma integrity_check;" | ./sqlite3.exe demo.db | tr -d "\\r" | tr "\\n" "|"' 2>&1 || true)"
+check "jq"              '{"name":"cid","n":3}' "$($X --quiet --max-ms 30000 --mount "$PWD/$A" $A/jq.exe -M -c '.users[] | select(.age > 40) | {name, n: (.langs|length)}' demo.json 2>&1 || true)"
+check "lua54 + lua54.dll" "fib(25) =	75025" "$($X --quiet --max-ms 60000 --mount "$PWD/$A" $A/lua54.exe demo.lua 2>&1 | head -1 | cut -f3- || true)"
+check "7z.exe + 7z.dll round trip" "7Z_OK" "$($X --quiet --no-stdin --max-ms 120000 --mount "$PWD/$A" $S/busybox64.exe sh -c './7z.exe a -bb0 -mx1 d.7z demo.txt >/dev/null && ./7z.exe x -y -oout d.7z >/dev/null && cmp demo.txt out/demo.txt && echo 7Z_OK' 2>&1 || true)"
+check "zstd round trip" "ZSTD_OK"        "$($X --quiet --no-stdin --max-ms 120000 --mount "$PWD/$A" $S/busybox64.exe sh -c './zstd.exe -q -f demo.txt -o d.zst && ./zstd.exe -q -d -f d.zst -o back.txt && cmp demo.txt back.txt && echo ZSTD_OK' 2>&1 || true)"
+echo "[11] x87 FPU subset (long double printf / fsin / fyl2x)"
+check "x87.exe" "ld: 1.9090909091 1909
+sqrtl: 1.414213562
+fistp: 1909090
+fmodl: 1.5000 sinl: 0.841471
+strtold: 2.718282" "$($X --quiet tests/x87.exe 2>&1 | grep -v 'via mingw\|cmp:' || true)"
 echo "[6] honest rejections"
 check "32-bit PE"   '"verdict":"unsupported"' "$(printf 'MZ' | head -c 2 > /tmp/pe32.bin; python3 - <<'PY'
 import struct

@@ -6,7 +6,7 @@ export interface PeInfo {
   ok: boolean; error?: string;
   arch?: string; machine?: number; pe32plus?: boolean; subsystem?: string; dll?: boolean; clr?: boolean;
   imageBase?: string; sizeOfImage?: number; entry?: string; sections?: number; relocs?: boolean; tls?: boolean; exceptions?: boolean; resources?: number;
-  sectionNames?: string[]; unknownImports?: string; imports?: number; knownImports?: number; unknownImportsCount?: number; dlls?: string[];
+  sectionNames?: string[]; unknownImports?: string; imports?: number; knownImports?: number; unknownImportsCount?: number; privateDllImports?: number; dlls?: string[];
   verdict?: 'likely' | 'partial' | 'unlikely' | 'unsupported'; why?: string;
 }
 

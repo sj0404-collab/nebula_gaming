@@ -6,7 +6,8 @@ import { FramePresenter } from '../../lib/x64/present';
 
 interface ExeEntry { id: number; name: string; bytes: Uint8Array; info: PeInfo; source: 'sample' | 'file' }
 
-const SAMPLES = [
+const SAMPLE_DATA = ['demo.sql', 'demo.json', 'demo.lua', 'demo.txt'];   // small inputs for the real apps, placed in C:\nebula
+const SAMPLES: { name: string; href: string; desc: string; args?: string; files?: string[] }[] = [
   { name: 'NebulaStrike.exe', href: '/downloads/NebulaStrike.exe', desc: 'Win32 GDI game, PE32+ x64 (light GUI exe)' },
   { name: 'hello.exe', href: '/x64/samples/hello.exe', desc: 'UCRT console: printf/qsort/malloc/math (light console exe)' },
   { name: 'bench.exe', href: '/x64/samples/bench.exe', desc: 'CPU benchmark: sieve, mandelbrot, memcpy (heavy compute)' },
@@ -14,6 +15,11 @@ const SAMPLES = [
   { name: 'plink.exe', href: '/x64/samples/plink.exe', desc: 'Real third-party binary: PuTTY plink 0.85 (MSVC/clang-cl). Try args: -V' },
   { name: 'threads.exe', href: '/x64/samples/threads.exe', desc: 'Win32 threads & sync self-test: CreateThread, critical sections, SRW locks, condition variables, events, mutexes, semaphores, WaitForMultipleObjects, TLS, Interlocked (39 checks)' },
   { name: 'pthreads.exe', href: '/x64/samples/pthreads.exe', desc: 'winpthreads (mingw64 libpthread) self-test: pthread_create/join, mutex, cond, rwlock, barrier, once, TLS keys, 4-thread parallel sum (9 checks)' },
+  { name: 'sqlite3.exe', href: '/x64/apps/sqlite3.exe', desc: 'Real app: SQLite 3.50.4 shell (sqlite.org, MSVC). Default args run demo.sql against a file database (2000 rows, index, integrity_check). Try: :memory: "select sqlite_version(), 6*7;"', args: '-init demo.sql demo.db .quit' },
+  { name: 'jq.exe', href: '/x64/apps/jq.exe', desc: 'Real app: jq 1.8.1 JSON processor (jqlang, mingw64). Default args query demo.json', args: '-M -c ".users[] | select(.age > 30) | {name, n: (.langs|length)}" demo.json' },
+  { name: 'lua54.exe', href: '/x64/apps/lua54.exe', desc: 'Real app: Lua 5.4.2 interpreter (LuaBinaries) — lua54.exe imports lua54.dll, loaded from the virtual disk like on Windows. Default args run demo.lua', args: 'demo.lua', files: ['lua54.dll'] },
+  { name: '7z.exe', href: '/x64/apps/7z.exe', desc: 'Real app: 7-Zip 25.01 console (7z.exe + 7z.dll loaded via LoadLibrary/GetProcAddress). Default args pack demo.txt; also try: x -y -oout demo.7z · l demo.7z · i · b -mmt1 1 -md20 (benchmark, ~1 min)', args: 'a -bb0 -mx1 demo.7z demo.txt', files: ['7z.dll'] },
+  { name: 'zstd.exe', href: '/x64/apps/zstd.exe', desc: 'Real app: Zstandard 1.5.7 (facebook/zstd, MSVC, SSE2/BMI paths). Default args run the built-in benchmark on demo.txt; also try: -f demo.txt · -d -f demo.txt.zst -o out.txt', args: '-b1 -e3 -i0 demo.txt' },
 ];
 
 const VERDICT: Record<string, { label: string; cls: string; Icon: typeof CheckCircle2 }> = {
@@ -70,8 +76,14 @@ export default function X64App() {
       // preload samples (best effort)
       const loaded: ExeEntry[] = [];
       for (const s of SAMPLES) {
-        try { const r = await fetch(s.href); if (!r.ok) continue; const bytes = new Uint8Array(await r.arrayBuffer()); loaded.push({ id: nextId.current++, name: s.name, bytes, info: rt.inspect(bytes), source: 'sample' }); } catch { /* sample missing */ }
+        try {
+          const r = await fetch(s.href); if (!r.ok) continue; const bytes = new Uint8Array(await r.arrayBuffer());
+          loaded.push({ id: nextId.current++, name: s.name, bytes, info: rt.inspect(bytes), source: 'sample' });
+          rt.vfsAdd('C:\\nebula\\' + s.name, bytes);   // on the virtual disk too, so busybox sh can chain them and DLLs find their exe
+          for (const f of s.files ?? []) { const d = s.href.slice(0, s.href.lastIndexOf('/') + 1); const rf = await fetch(d + f); if (rf.ok) rt.vfsAdd('C:\\nebula\\' + f, new Uint8Array(await rf.arrayBuffer())); }
+        } catch { /* sample missing */ }
       }
+      for (const f of SAMPLE_DATA) { try { const r = await fetch('/x64/apps/' + f); if (r.ok) rt.vfsAdd('C:\\nebula\\' + f, new Uint8Array(await r.arrayBuffer())); } catch { /* optional */ } }
       if (!alive) return;
       rt.vfsAdd('C:\\nebula\\readme.txt', new TextEncoder().encode('Nebula x64 virtual disk\nThis file lives in C:\\nebula\\readme.txt inside the emulator.\nTry: busybox64.exe cat readme.txt | wc -l | sort | sha256sum readme.txt\n'));
       setFiles(rt.vfsList());
@@ -200,7 +212,7 @@ export default function X64App() {
             {ready === 'unsupported' && <div className="p-3 text-rose-700">This browser has no WebAssembly memory64 (wasm64). Chrome/Edge ≥ 133, Firefox ≥ 134 or Android WebView ≥ 133 is required.</div>}
             {ready === 'error' && <div className="p-3 text-rose-700">Emulator failed to load: {initError}</div>}
             {exes.map(e => { const v = V(e.info.ok ? e.info.verdict : 'invalid'); return (
-              <button key={e.id} data-x64-exe={e.name} onClick={() => setSelected(e.id)} className={`flex w-full items-start gap-2 border-b border-slate-100 px-3 py-2 text-left hover:bg-indigo-50 ${selected === e.id ? 'bg-indigo-50' : ''}`}>
+              <button key={e.id} data-x64-exe={e.name} onClick={() => { setSelected(e.id); const d = SAMPLES.find(x => x.name === e.name)?.args; if (e.source === 'sample' && d !== undefined) setArgs(d); }} className={`flex w-full items-start gap-2 border-b border-slate-100 px-3 py-2 text-left hover:bg-indigo-50 ${selected === e.id ? 'bg-indigo-50' : ''}`}>
                 <v.Icon size={14} className={`mt-0.5 shrink-0 ${v.cls.split(' ')[1]}`} />
                 <span className="min-w-0 flex-1">
                   <span className="block truncate font-semibold">{e.name}</span>
@@ -313,6 +325,7 @@ function PeReport({ e, stats, log, apiStats }: { e: ExeEntry; stats: RunStats | 
               <dt className="text-slate-500">Image</dt><dd>base {i.imageBase}, {(i.sizeOfImage ?? 0 / 1024).toLocaleString()} bytes, entry {i.entry}, {i.sections} sections ({i.sectionNames?.join(' ')})</dd>
               <dt className="text-slate-500">Features</dt><dd>{[i.relocs && 'relocations', i.tls && 'TLS', i.exceptions && 'SEH tables', (i.resources ?? 0) > 0 && 'resources'].filter(Boolean).join(', ') || '—'}</dd>
               <dt className="text-slate-500">Imports</dt><dd>{i.imports} total · {i.knownImports} implemented · <span className={(i.unknownImportsCount ?? 0) ? 'font-semibold text-rose-700' : ''}>{i.unknownImportsCount} missing</span></dd>
+              {!!i.privateDllImports && (<><dt className="text-slate-500">Own DLLs</dt><dd>{i.privateDllImports} import(s) come from the program's own DLLs — put those .dll files next to the exe (same folder / C:\nebula) and they are loaded like on Windows: static imports, LoadLibrary, GetProcAddress, DllMain, per-thread TLS.</dd></>)}
               <dt className="text-slate-500">DLLs</dt><dd className="break-words">{i.dlls?.join(', ')}</dd>
               {!!i.unknownImports && (<><dt className="text-slate-500">Missing APIs</dt><dd className="break-words font-mono text-[10px] text-rose-700">{i.unknownImports}</dd></>)}
             </dl>
@@ -322,7 +335,7 @@ function PeReport({ e, stats, log, apiStats }: { e: ExeEntry; stats: RunStats | 
       {stats && (
         <div className="rounded-lg border border-slate-200 bg-white p-3 text-[11px]">
           <div className="font-semibold">Last run: <span className={stats.status === 'fault' ? 'text-rose-700' : 'text-emerald-700'}>{stats.status}</span>{stats.status === 'exited' ? ` with code ${stats.exitCode}` : ''}</div>
-          <div className="mt-1 text-slate-600">{stats.icount.toLocaleString()} instructions in {(stats.elapsedMs / 1000).toFixed(2)} s ({stats.mips.toFixed(1)} MIPS) · {stats.frames} frames presented · {stats.memMB.toFixed(1)} MB guest memory{stats.title ? ` · window “${stats.title}”` : ''}</div>
+          <div className="mt-1 text-slate-600">{stats.icount.toLocaleString()} instructions in {(stats.elapsedMs / 1000).toFixed(2)} s ({stats.mips.toFixed(1)} MIPS) · {stats.frames} frames presented · {stats.memMB.toFixed(1)} MB host memory reserved this session{stats.title ? ` · window “${stats.title}”` : ''}</div>
           {stats.status === 'fault' && <div className="mt-1 rounded bg-rose-50 p-2 font-mono text-[10px] text-rose-800" data-x64-fault>STOP at RIP {stats.errorRip}: {stats.error}<br />bytes: {stats.errorBytes}</div>}
           {stats.report && <pre className="mt-2 whitespace-pre-wrap rounded bg-amber-50 p-2 font-mono text-[10px] text-amber-900">{stats.report}</pre>}
           {apiStats && <details className="mt-2"><summary className="cursor-pointer text-slate-500">Win32 API calls ({apiStats.split(',').length})</summary><div className="mt-1 break-words font-mono text-[10px] text-slate-600">{apiStats.split(',').join('  ')}</div></details>}
@@ -330,7 +343,7 @@ function PeReport({ e, stats, log, apiStats }: { e: ExeEntry; stats: RunStats | 
         </div>
       )}
       <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-[10px] leading-relaxed text-slate-600">
-        <b>What this is:</b> a user-mode x86-64 interpreter (integer ISA + SSE2, PE32+ loader, kernel32/UCRT/user32/gdi32 shims) compiled to wasm64 and drawing through WebGL. Programs get an in-memory C:\ drive (Files tab), stdin from the console input line, and a real environment block. It is honest about its limits: 32-bit, .NET, Direct3D/OpenGL/Vulkan, audio and networking are not emulated (threads, child processes and pipes are) — such programs stop at the first missing API, and the report above tells you which one.
+        <b>What this is:</b> a user-mode x86-64 interpreter (integer ISA + SSE2, PE32+ loader, kernel32/UCRT/user32/gdi32 shims) compiled to wasm64 and drawing through WebGL. Programs get an in-memory C:\ drive (Files tab), stdin from the console input line, and a real environment block. It is honest about its limits: 32-bit, .NET, Direct3D/OpenGL/Vulkan, audio and networking are not emulated (threads, child processes, pipes and the program's own DLLs are) — such programs stop at the first missing API, and the report above tells you which one.
       </div>
     </div>
   );

@@ -29,7 +29,7 @@ jobs:
           ls -la public/x64/nebula_x64.wasm
       - name: PE compatibility scan of the bundled samples (report)
         run: |
-          for f in public/downloads/NebulaStrike.exe public/x64/samples/*.exe; do echo "== $f"; ./emu/x64/x64run --inspect "$f" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['verdict'], '|', d['why']); print('imports', d['imports'], 'known', d['knownImports'], 'missing', d['unknownImportsCount'])"; done
+          for f in public/downloads/NebulaStrike.exe public/x64/samples/*.exe public/x64/apps/*.exe; do echo "== $f"; ./emu/x64/x64run --inspect "$f" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['verdict'], '|', d['why']); print('imports', d['imports'], 'known', d['knownImports'], 'missing', d['unknownImportsCount'])"; done
       - uses: actions/upload-artifact@v4
         with:
           name: nebula_x64-wasm64
@@ -69,7 +69,7 @@ jobs:
 
       - name: Playwright chromium
         run: npx playwright install --with-deps chromium
-      - name: Desktop e2e (28 scenarios incl. x64 emulator hello/NebulaStrike/busybox/plink/virtual disk + stdin/processes + pipes, LIVE + NATIVE opencode, WebGL)
+      - name: Desktop e2e (29 scenarios incl. x64 emulator hello/NebulaStrike/busybox/plink/real apps SQLite-jq-Lua-7-Zip-zstd/virtual disk + stdin/processes + pipes, LIVE + NATIVE opencode, WebGL)
         run: node e2e/with-bridge.mjs
         timeout-minutes: 15
 

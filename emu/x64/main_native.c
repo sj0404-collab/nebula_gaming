@@ -56,8 +56,8 @@ int main(int argc, char **argv) {
     if (q && o + 1 < sizeof cmdline) cmdline[o++] = '"'; cmdline[o] = 0;
   }
   host_set_dump(dump_every, prefix);
+  for (int mi = 0; mi < nmounts; mi++) { int n = mount_dir(mounts[mi][0], mounts[mi][1], 0); if (!quiet) fprintf(stderr, "[x64run] mounted %s -> %s (%d files)\n", mounts[mi][0], mounts[mi][1], n); }   /* before load: DLLs next to the exe */
   int rc = x64_load(bytes, len, base, cmdline);
-  for (int mi = 0; mi < nmounts; mi++) { int n = mount_dir(mounts[mi][0], mounts[mi][1], 0); if (!quiet) fprintf(stderr, "[x64run] mounted %s -> %s (%d files)\n", mounts[mi][0], mounts[mi][1], n); }
   if (rc) { fprintf(stderr, "load failed (%d): %s", rc, x64_report()); return 3; }
   double t0 = host_now_ms(); int r; int ki = 0; u64 yields = 0;
   for (;;) {

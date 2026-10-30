@@ -95,7 +95,7 @@ static void s_WriteFile(Cpu *c) {
   if (ARG(3)) wr32(c, ARG(3), (u32)r); RET(1);
 }
 static void s_CloseHandle(Cpu *c) { u64 h = ARG(0); if (h >= H_FILE_BASE && h < H_FILE_BASE + 0x1000) vfs_close((int)(h - H_FILE_BASE)); RET(1); }
-static void s_GetFileType(Cpu *c) { int fd = handle_fd(ARG(0)); if (fd >= 3) { int k = vfs_kind(fd); RET(k == FD_PIPE ? 3 : k == FD_CONSOLE || k == FD_NULL ? 2 : k == FD_FILE ? 1 : 0); return; } RET(fd ? 2 : 0); }
+static void s_GetFileType(Cpu *c) { int fd = handle_fd(ARG(0)); if (fd && fd < 3) { int r = vfs_resolve(fd < 0 ? 0 : fd); if (r >= 3) fd = r; } if (fd >= 3) { int k = vfs_kind(fd); RET(k == FD_PIPE ? 3 : k == FD_CONSOLE || k == FD_NULL ? 2 : k == FD_FILE ? 1 : 0); return; } RET(fd ? 2 : 0); }
 static void s_GetFileSize(Cpu *c) { int fd = handle_fd(ARG(0)); s64 s = fd >= 3 ? vfs_size(fd) : -1; if (s < 0) { W->last_error = 6; RET(0xffffffffu); return; } if (ARG(1)) wr32(c, ARG(1), (u32)((u64)s >> 32)); RET((u32)s); }
 static void s_GetFileSizeEx(Cpu *c) { int fd = handle_fd(ARG(0)); s64 s = fd >= 3 ? vfs_size(fd) : -1; if (s < 0) { W->last_error = 6; RET(0); return; } wr64(c, ARG(1), (u64)s); RET(1); }
 static void s_SetFilePointer(Cpu *c) { int fd = handle_fd(ARG(0)); s64 off = (s32)(u32)ARG(1); if (ARG(2)) off |= (s64)rd32(c, ARG(2)) << 32; s64 r = fd >= 3 ? vfs_seek(fd, off, (int)ARG(3)) : -1; if (r < 0) { W->last_error = 6; RET(0xffffffffu); return; } if (ARG(2)) wr32(c, ARG(2), (u32)((u64)r >> 32)); RET((u32)r); }

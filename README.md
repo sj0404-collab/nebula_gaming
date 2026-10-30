@@ -7,13 +7,15 @@ browser, in the PWA and in the Android APK (any Chromium ≥ 133 / WebView ≥ 1
 
 ![NebulaStrike.exe running inside the emulator](docs/x64-nebulastrike.png)
 ![PuTTY plink.exe (official MSVC build) running inside the emulator](docs/x64-plink.png)
+![SQLite 3.50.4 shell (official MSVC build) building a file database inside the emulator, in Chromium](docs/x64-sqlite.png)
+![7-Zip 25.01 — 7z.exe loads 7z.dll through LoadLibrary/GetProcAddress inside the emulator](docs/x64-7zip.png)
 
 ## What the emulator is (and is not)
 
 | layer | implemented | notes |
 |---|---|---|
-| CPU | x86‑64 integer ISA, SSE/SSE2 (+ the SSE4.1/AVX‑free subset compilers emit at `-O2`), x87 control only | interpreter, ~20–35 MIPS (wasm64 ≈ 60 % of native C) |
-| Loader | PE32+ (relocations, imports by name/ordinal, TLS callbacks, data imports such as `_environ`/`_iob`), command line, environment, TEB/PEB | 32‑bit PE, DLLs, .NET are rejected with an honest verdict |
+| CPU | x86‑64 integer ISA, SSE/SSE2 (+ the SSE4.1/AVX‑free subset compilers emit at `-O2`, SSE3 `movddup`/`movs[lh]dup`), **x87 FPU subset** (load/store/arith/compare/transcendentals, 53‑bit precision) | interpreter, ~20–35 MIPS (wasm64 ≈ 60 % of native C) |
+| Loader | PE32+ exe **and the program's own DLLs** (relocations, imports by name/ordinal, exports + forwarders, `DllMain`, static TLS per image and per thread, TLS callbacks, data imports such as `_environ`/`_iob`), `LoadLibrary`/`GetProcAddress`/`GetModuleHandle` on real modules, command line, environment, TEB/PEB | 32‑bit PE and .NET are rejected with an honest verdict; system DLLs are always the emulator's shims |
 | KERNEL32 | heap, virtual memory, **threads + synchronisation** (`CreateThread`, critical sections, SRW locks, condition variables, events, mutexes, semaphores, `WaitFor{Single,Multiple}Objects(Ex)`, `WaitOnAddress`, `InitOnce`, `QueueUserAPC`, thread TLS/static TLS, winpthreads), TLS/FLS, time/QPC, console I/O **+ stdin**, **in‑memory file system** (`CreateFile/ReadFile/WriteFile/SetFilePointer/FindFirstFile/GetFileAttributes/Create‑Delete‑Move/Current directory/file mappings`), dynamic environment block, **processes** (`CreateProcessA/W`, `WaitForSingleObject/WaitForMultipleObjects`, `GetExitCodeProcess`, `TerminateProcess`, `OpenProcess`, Toolhelp snapshot, `ReadProcessMemory`, psapi names), **anonymous pipes** (`CreatePipe`, `PeekNamedPipe`, handle inheritance via `SECURITY_ATTRIBUTES`/`SetHandleInformation`/`STARTF_USESTDHANDLES`), locale stubs | **no threads** (fail cleanly); up to 32 processes share one cooperative scheduler inside the wasm module; the disk lives in RAM — mount a folder, download what the program wrote |
 | UCRT / msvcrt | printf family (ANSI + wide), string/memory/ctype, math (via host), malloc, qsort/bsearch, time/strftime, getenv/putenv, atexit, setjmp, **stdio on real files** (`fopen/fread/fgets/getc(_filbuf)/fseek/ftell/_open/_read/_write/_lseek/_stat/_access/_unlink/rename/_mkdir/_getcwd/dup/dup2`) | redirections `>`/`<` work in busybox `sh`; pipes/`$(…)` need child processes |
 | USER32 / GDI32 | windows, message loop, timers, keyboard/mouse, DCs, DIBs, BitBlt/StretchBlt, pens/brushes, text (bitmap font) | **no Direct3D/OpenGL/Vulkan, no audio, no dialog resources** |
@@ -32,6 +34,11 @@ At runtime the first unimplemented call stops the program with the API name, RIP
 | `NebulaStrike.exe` (Win32 GDI game, PE32+) | this repo | plays at 60 fps in the browser, ~245 fps headless |
 | `busybox64.exe` (busybox‑w32, mingw64‑gcc 16) | frippery.org | file applets work on the virtual disk: `ls -l cat wc sort head tail grep sed awk cut find diff cmp cp tee xxd base64 md5sum sha256sum stat du mkdir gzip` + stdin; **`sh` is a real shell now**: pipelines (`seq 1 5 \| sort -rn \| head -2`), `$(…)`, background jobs `&`/`wait`/`kill`, `ps` (reads sibling processes' command lines through `ReadProcessMemory`), `xargs -I{} sh -c`, `yes \| head` (EPIPE), 1 MB through a pipe, `time` — each stage is a separate emulated process (busybox‑w32 `--forkshell` via `_spawnve` + inherited file mapping); sockets still stop at Winsock |
 | `threads.exe` / `pthreads.exe` (Win32 threads + sync / mingw winpthreads) | this repo | 39/39 and 9/9 checks native and in Chromium (wasm64); 4 CPU‑bound threads 43 MIPS aggregate |
+| **`sqlite3.exe` (SQLite 3.50.4, official MSVC build)** | sqlite.org | `:memory:` and **file databases** (LockFileEx, OVERLAPPED offsets): 2000‑row table + index + `pragma integrity_check` → ok, in the browser 17 MIPS |
+| **`jq.exe` (jq 1.8.1)** | github.com/jqlang | filters, `-s`, math, `--version` — correct output |
+| **`lua54.exe` + `lua54.dll` (Lua 5.4.2)** | luabinaries | the exe imports the interpreter DLL → loaded from the virtual disk at its preferred base; scripts, `io.open`, `os.date` work (31 M instr / 2 s wasm64) |
+| **`7z.exe` + `7z.dll` (7‑Zip 25.01)** and `7za.exe` | 7‑zip.org | `7z.dll` loaded via `LoadLibrary` + `GetProcAddress("CreateObject")`; `a`/`x`/`l`/`i`/`b` work, 7z/zip round trips bit‑exact; `b -mmt1` ≈ 34 MIPS |
+| **`zstd.exe` (Zstandard 1.5.7, MSVC)** | github.com/facebook/zstd | compress/decompress round trips, built‑in benchmark (`-b1 -e3`) runs |
 | `plink.exe` (PuTTY 0.85, MSVC/clang‑cl) | putty.org | `-V` runs to completion; real sessions need Winsock |
 | `putty.exe` (GUI) | putty.org | runs up to `CreateDialogParamA` (dialog resources not implemented) |
 | `curl.exe` (8.23, mingw) | curl.se | stops at `Secur32!InitSecurityInterfaceA` (TLS stack) |
@@ -40,7 +47,7 @@ At runtime the first unimplemented call stops the program with the API name, RIP
 ```bash
 # native build + capability tests (needs zig 0.17 for the wasm step)
 ZIG=zig ./emu/x64/build.sh      # → emu/x64/x64run + public/x64/nebula_x64.wasm (≈210 KB)
-./emu/tests/run.sh              # hello/bench/busybox (files, stdin, processes+pipes)/plink/NebulaStrike/threads/heap/rejections — 45 checks
+./emu/tests/run.sh              # hello/bench/busybox (files, stdin, processes+pipes)/plink/NebulaStrike/threads/heap/DLLs/real apps/x87/rejections — 54 checks
 ./emu/x64/x64run --inspect some.exe         # JSON compatibility report
 ./emu/x64/x64run --max-ms 5000 some.exe a b # run headless (frames to .ppm with --frames N)
 ```
