@@ -132,12 +132,14 @@ static void ent_addref(FdEnt *e) {
   else if (e->kind == FD_MAP) g_maps[e->obj].refs++;
   else if (e->kind == FD_PROC) proc_handle_ref(e->obj, 1);
   else if (e->kind == FD_KOBJ) kobj_ref(e->obj, 1);
+  else if (e->kind == FD_SOCK) w32_sock_ref(e->obj, 1);
 }
 static void ent_release(FdEnt *e) {
   if (e->kind == FD_PIPE) { Pipe *p = &g_pipes[e->obj]; if (e->wend) p->writers--; else p->readers--; if (p->readers <= 0 && p->writers <= 0) p->used = 0; }
   else if (e->kind == FD_MAP) { if (--g_maps[e->obj].refs <= 0) g_maps[e->obj].used = 0; }
   else if (e->kind == FD_PROC) proc_handle_ref(e->obj, -1);
   else if (e->kind == FD_KOBJ) kobj_ref(e->obj, -1);
+  else if (e->kind == FD_SOCK) w32_sock_ref(e->obj, -1);
   e->kind = 0;
 }
 static int ent_new(int kind) { int k = slot_alloc(); if (k < 0) return -1; FdEnt *e = &vfs_P->fd[k]; e_memset(e, 0, sizeof *e); e->kind = kind; e->node = -1; e->unget = -1; return k + 3; }
@@ -251,6 +253,7 @@ int kobj_new(int kind, const char *name, int *existed) {
 }
 KObj *kobj_get(int idx) { return idx >= 0 && idx < KOBJ_MAX && g_kobjs[idx].used ? &g_kobjs[idx] : 0; }
 void kobj_ref(int idx, int delta) { KObj *k = kobj_get(idx); if (!k) return; k->refs += delta; if (k->refs <= 0) k->used = 0; }
+int vfs_sock_handle(int idx) { int fd = ent_new(FD_SOCK); if (fd < 0) return -1; vf(fd)->obj = idx; w32_sock_ref(idx, 1); return fd; }
 int vfs_kobj_handle(int idx) { if (!kobj_get(idx)) return -1; int fd = ent_new(FD_KOBJ); if (fd < 0) return -1; vf(fd)->obj = idx; kobj_ref(idx, 1); return fd; }
 int vfs_fd_kobj(int fd) { FdEnt *f = vf(fd); return f && f->kind == FD_KOBJ ? f->obj : -1; }
 

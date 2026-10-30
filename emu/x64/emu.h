@@ -24,10 +24,24 @@ void   host_present(const u32 *bgra, int w, int h);        /* framebuffer of the
 int    host_key(int vk);                                   /* 1 if virtual key currently pressed */
 void   host_exit(int code);                                /* guest called ExitProcess */
 double host_math(int op, double a, double b);              /* 0 sin 1 cos 2 tan 3 exp 4 log 5 pow 6 atan2 7 asin 8 acos 9 atan 10 sinh 11 cosh 12 tanh 13 log10 14 log2 15 cbrt */
+/* TCP networking (IPv4). Native host: Linux sockets; wasm host: stubs that fail (no raw TCP in a browser) until a relay exists. */
+int    host_net_resolve(const char *name, u8 *ip4s, int max);          /* A records; returns count, 0 = not found, -1 = no network */
+int    host_net_connect(const u8 *ip4, int port, int *wsa_err);        /* starts a non-blocking connect; host socket id >= 0 or -1 (+ winsock error) */
+int    host_net_listen(const u8 *ip4, int port, int backlog, int *wsa_err);   /* bound+listening host socket, or -1 */
+int    host_net_accept(int s, u8 *peer_ip4, int *peer_port);           /* new host socket, -2 would block, -3 error */
+int    host_net_status(int s);                                         /* connect progress: 0 in progress, 1 connected, <0 = -winsock error */
+s64    host_net_read(int s, u8 *buf, u64 n);                           /* >0 bytes, 0 EOF, -2 would block, -3 error (reset) */
+s64    host_net_write(int s, const u8 *buf, u64 n);                    /* bytes written (waits briefly for room), -3 error */
+int    host_net_readable(int s);                                       /* 1 when a read would not block (data, EOF or error) */
+int    host_net_avail(int s);                                          /* bytes available without blocking */
+void   host_net_shutdown(int s, int how);
+void   host_net_close(int s);
+int    host_net_name(int s, int peer, u8 *ip4, int *port);             /* local (0) / peer (1) address; 1 ok */
 
 /* ---------- guest memory ---------- */
-#define MAX_REGIONS 128
+#define MAX_REGIONS 256
 typedef struct { u64 base, size; u8 *host; const char *name; u32 prot; } Region;
+int emu_free(void *p);                 /* 1 = memory returned to the host (native), 0 = not freeable (wasm arena) */
 
 typedef struct {
   Region  r[MAX_REGIONS];
@@ -36,6 +50,7 @@ typedef struct {
   u64     fault_addr;                 /* set on failed translation */
   int     fault_write;
 } Mem;
+int mem_unmap(Mem *m, u64 base);       /* drop a mem_map region (large VirtualAlloc reservation released) */
 
 u8  *mem_map(Mem *m, u64 base, u64 size, const char *name);   /* add region (host memory allocated) */
 u8  *mem_ptr(Mem *m, u64 addr, u64 size, int write);          /* NULL on fault */
@@ -136,8 +151,8 @@ typedef struct {
 typedef struct { u64 hwnd; u32 msg; u64 wparam, lparam; u32 time; } GuestMsg;
 
 /* ---- per-process file-descriptor / environment state (vfs.c) ---- */
-#define FD_MAX 128
-enum { FD_FILE = 1, FD_CONSOLE, FD_PIPE, FD_MAP, FD_PROC, FD_NULL, FD_KOBJ };   /* FD_KOBJ: event / mutex / semaphore / thread (kobj table) */
+#define FD_MAX 512
+enum { FD_FILE = 1, FD_CONSOLE, FD_PIPE, FD_MAP, FD_PROC, FD_NULL, FD_KOBJ, FD_SOCK };   /* FD_SOCK: winsock socket (win32_net.inc table) */   /* FD_KOBJ: event / mutex / semaphore / thread (kobj table) */
 typedef struct { int kind; int node; u64 pos; int append, eof, err, unget, alias, obj, wend; int noinherit; } FdEnt;   /* noinherit: not copied into children */
 typedef struct { int used; char dir[512]; char pat[128]; int cursor; int dots; } VFind;
 typedef struct { u64 addr, size; int fd; } MapView;
@@ -167,6 +182,9 @@ int   kobj_new(int kind, const char *name, int *existed);   /* returns index or 
 KObj *kobj_get(int idx);
 void  kobj_ref(int idx, int delta);
 int   vfs_kobj_handle(int idx);        /* new fd referencing the object (+1 ref) */
+int   vfs_sock_handle(int idx);        /* new fd of kind FD_SOCK referencing socket table entry idx */
+int   w32_net_pending(void);           /* win32_net.inc: parked socket operations (scheduler must keep polling) */
+void  w32_sock_ref(int idx, int delta); /* win32_net.inc: refcount of a socket table entry (closed at 0) */
 int   vfs_fd_kobj(int fd);             /* idx or -1 */
 /* ---- process table (api.c) ---- */
 enum { BLOCK_NONE = 0, BLOCK_STDIN, BLOCK_PROC, BLOCK_PIPE_R, BLOCK_PIPE_W, BLOCK_SLEEP, BLOCK_OBJ, BLOCK_CS, BLOCK_SRW, BLOCK_CV, BLOCK_ADDR };

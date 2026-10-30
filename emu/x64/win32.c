@@ -331,7 +331,9 @@ static void iocp_handle_closed(int pid, int fd); static void iocp_kobj_closed(in
 #include "win32_nt.inc"
 #include "win32_threads.inc"
 #include "win32_iocp.inc"
+#include "win32_net.inc"
 #include "win32_node.inc"
+static void s_CancelIo(Cpu *c) { sock_cancel_io(c, ARG(0)); RET(1); }   /* pipes: parked ReadFile/WriteFile stay (libuv cancels those only on close) */
 static void s_ret0(Cpu *c); static void s_atexit(Cpu *c); static void s_setjmp(Cpu *c);
 #include "win32_compat.inc"
 #include "seh.inc"
@@ -620,11 +622,12 @@ static void s_LocalFree(Cpu *c) { w32_heap_free(W, ARG(0)); RET(0); }
  * that points into the image / stack / heap FAILS with ERROR_INVALID_ADDRESS like on Windows (V8 probes hints near its embedded
  * builtins and would otherwise build its code-range bookkeeping on top of node.exe's .text), (c) a hint at a free address is honoured. */
 #define VM_MAX 2048
-static struct { u64 base, size, heap; int released; } g_vm[VM_MAX]; static int g_nvm;
+static struct { u64 base, size, heap; int released, mapped; } g_vm[VM_MAX]; static int g_nvm;   /* heap: backing heap block (small), mapped: own region (large) */
+static u64 g_vm_cursor = 0x600000000ull;   /* where large anonymous reservations are placed */
 static int vm_find(u64 a) { int rel = -1; for (int i = 0; i < g_nvm; i++) if (a - g_vm[i].base < g_vm[i].size) { if (!g_vm[i].released) return i; rel = i; } return rel; }
 static int vm_range_free(Mem *m, u64 a, u64 size) { for (int i = 0; i < m->n; i++) { Region *r = &m->r[i]; if (a < r->base + r->size && r->base < a + size) return 0; } return 1; }
 static void vm_recycle(Win32 *w);
-static int vm_add(u64 base, u64 size, u64 heap) { if (g_nvm >= VM_MAX) return -1; g_vm[g_nvm].base = base; g_vm[g_nvm].size = size; g_vm[g_nvm].heap = heap; g_vm[g_nvm].released = 0; return g_nvm++; }
+static int vm_add(u64 base, u64 size, u64 heap) { if (g_nvm >= VM_MAX) return -1; g_vm[g_nvm].base = base; g_vm[g_nvm].size = size; g_vm[g_nvm].heap = heap; g_vm[g_nvm].released = 0; g_vm[g_nvm].mapped = 0; return g_nvm++; }
 static void s_VirtualAlloc(Cpu *c) { u64 addr = ARG(0), size = ARG(1);
   if (addr) {
     u64 a0 = addr & ~0xfffull, end = (addr + size + 0xfff) & ~0xfffull; int vi = vm_find(a0);
@@ -633,21 +636,28 @@ static void s_VirtualAlloc(Cpu *c) { u64 addr = ARG(0), size = ARG(1);
       if (end <= g_vm[vi].base + g_vm[vi].size && vm_add(a0, end - a0, 0) >= 0) { u8 *p = mem_ptr(c->mem, a0, end - a0, 1); if (p) e_memset(p, 0, (size_t)(end - a0)); RET(a0); return; }
       W->last_error = 487; RET(0); return; }
     if (mem_ptr(c->mem, a0, 1, 0)) { W->last_error = 487; RET(0); return; }   /* image / stack / heap / DLL: not available (Windows: ERROR_INVALID_ADDRESS) */
+    /* a hint into free address space: V8 scatters these randomly (ASLR) and falls back to VirtualAlloc(NULL) when they fail, so only
+     * honour large ones (alignment-sensitive reservations); small pages would each cost a region (MAX_REGIONS) and slow down mem_ptr */
     u64 a64 = addr & ~0xffffull, len = (end - a64 + 0xffff) & ~0xffffull;
-    if (c->mem->n < MAX_REGIONS - 4 && vm_range_free(c->mem, a64, len) && vm_add(a64, len, 0) >= 0 && mem_map(c->mem, a64, len, "vm")) { RET(a64); return; }
+    if (len >= (1ull << 20) && c->mem->n < MAX_REGIONS - 8 && vm_range_free(c->mem, a64, len)) { int vi2 = vm_add(a64, len, 0); if (vi2 >= 0 && mem_map(c->mem, a64, len, "vm")) { g_vm[vi2].mapped = 1; RET(a64); return; } }
     W->last_error = 487; RET(0); return;
   }
   vm_recycle(W);
-  size = (size + 0xffff) & ~0xffffull; u64 a = w32_heap_alloc(W, size + 0x10000, 1); if (!a) { W->last_error = 8; RET(0); return; }
-  u64 r = (a + 0xffff) & ~0xffffull; vm_add(r, size, a);
+  size = (size + 0xffff) & ~0xffffull;
+  if (size >= (1ull << 20) && c->mem->n < MAX_REGIONS - 8) {   /* large reservation (V8 heap / code range): own region, pages untouched until used (host zero pages stay lazy) */
+    u64 base = g_vm_cursor; int tries = 0; while (!vm_range_free(c->mem, base, size) && tries++ < 4096) base += (size + 0xffffff) & ~0xffffffull;
+    if (tries < 4096) { int vi2 = vm_add(base, size, 0); if (vi2 >= 0 && mem_map(c->mem, base, size, "vm")) { g_vm[vi2].mapped = 1; g_vm_cursor = base + ((size + 0xffffff) & ~0xffffffull); RET(base); return; } if (vi2 >= 0) g_nvm--; }
+  }
+  u64 a = w32_heap_alloc(W, size + 0x10000, 1); if (!a) { e_log("[x64] VirtualAlloc(NULL, %llu) failed: regions=%d vm=%d\n", (unsigned long long)size, c->mem->n, g_nvm); W->last_error = 8; RET(0); return; }
+  u64 r = (a + 0xffff) & ~0xffffull; if (vm_add(r, size, a) < 0) e_log("[x64] VM table full (%d)\n", g_nvm);
   RET(r); }
 static void s_VirtualAllocEx(Cpu *c) { c->r[RCX] = ARG(1); c->r[RDX] = ARG(2); s_VirtualAlloc(c); }
 static void vm_recycle(Win32 *w) {   /* free released heap-backed reservations that no active reservation overlaps (deferred, so a hint can re-reserve a just-freed range) */
-  for (int i = 0; i < g_nvm; i++) { if (!g_vm[i].released || !g_vm[i].heap) continue; int busy = 0;
+  for (int i = 0; i < g_nvm; i++) { if (!g_vm[i].released || (!g_vm[i].heap && !g_vm[i].mapped)) continue; int busy = 0;
     for (int j = 0; j < g_nvm; j++) if (j != i && !g_vm[j].released && g_vm[j].base < g_vm[i].base + g_vm[i].size && g_vm[i].base < g_vm[j].base + g_vm[j].size) { busy = 1; break; }
     if (busy) continue;
-    u64 b = g_vm[i].base, e = b + g_vm[i].size; w32_heap_free(w, g_vm[i].heap); g_vm[i] = g_vm[--g_nvm]; i = -1;   /* restart: drop released sub-entries inside it too */
-    for (int j = 0; j < g_nvm; j++) if (g_vm[j].released && !g_vm[j].heap && g_vm[j].base >= b && g_vm[j].base < e) { g_vm[j] = g_vm[--g_nvm]; j--; } } }
+    u64 b = g_vm[i].base, e = b + g_vm[i].size; if (g_vm[i].heap) w32_heap_free(w, g_vm[i].heap); else mem_unmap(w->mem, b); g_vm[i] = g_vm[--g_nvm]; i = -1;   /* restart: drop released sub-entries inside it too */
+    for (int j = 0; j < g_nvm; j++) if (g_vm[j].released && !g_vm[j].heap && !g_vm[j].mapped && g_vm[j].base >= b && g_vm[j].base < e) { g_vm[j] = g_vm[--g_nvm]; j--; } } }
 static void s_VirtualFree(Cpu *c) { u64 addr = ARG(0); u32 type = (u32)ARG(2);
   if (type == 0x8000) { int vi = vm_find(addr); if (vi >= 0 && !g_vm[vi].released && g_vm[vi].base == addr) g_vm[vi].released = 1; }   /* MEM_RELEASE */
   RET(1); }
@@ -767,7 +777,6 @@ static void s__wsetlocale(Cpu *c) { Win32 *w = W; if (!w->loc_wc) { w->loc_wc = 
 static void s_localeconv(Cpu *c) { u64 b = W->ubuf + 0x700; if (!rd64(c, b)) { wr8(c, b + 0xa0, '.'); wr8(c, b + 0xa1, 0); wr8(c, b + 0xa2, 0); wr64(c, b, b + 0xa0); for (int i = 1; i < 9; i++) wr64(c, b + i * 8, b + 0xa2); for (int i = 0; i < 8; i++) wr8(c, b + 72 + i, 127); } RET(b); }
 /* WS2_32: no network — sockets fail cleanly */
 static void s_WSAStartup(Cpu *c) { u64 d = ARG(1); if (d) { wr16(c, d, 0x0202); wr16(c, d + 2, 0x0202); } RET(0); }
-static void s_WSAGetLastError(Cpu *c) { RET(10093); }
 static void s_sock_err(Cpu *c) { W->last_error = 10093; RET((u64)(s64)-1); }
 static void s_gethostname(Cpu *c) { const char *h = "nebula"; if ((u32)ARG(1) > 6) { u8 *p = mem_ptr(c->mem, ARG(0), 7, 1); if (p) e_memcpy(p, h, 7); } RET(0); }
 static void s_htons(Cpu *c) { u16 v = (u16)ARG(0); RET((u16)((v >> 8) | (v << 8))); }
@@ -801,11 +810,6 @@ static void s_SetEntriesInAclA(Cpu *c) { if (ARG(3)) wr64(c, ARG(3), w32_heap_al
 static void s_SetEntriesInAclW(Cpu *c) { s_SetEntriesInAclA(c); }
 static void s_RegQueryInfoKeyW(Cpu *c) { for (int i = 2; i <= 10; i++) if (ARG(i)) wr32(c, ARG(i), 0); RET(0); }
 static void s_RegGetValueW(Cpu *c) { if (ARG(5)) wr32(c, ARG(5), 0); RET(2); }
-static void s_GetAddrInfoW(Cpu *c) { RET(11001); }   /* WSAHOST_NOT_FOUND */
-static void s_GetNameInfoW(Cpu *c) { RET(11001); }
-static void s_WSAGetOverlappedResult(Cpu *c) { W->last_error = 10038; RET(0); }
-static void s_WSARecvFrom(Cpu *c) { W->last_error = 10038; RET(~0ull); }
-static void s_WSASendTo(Cpu *c) { W->last_error = 10038; RET(~0ull); }
 static void s_GetAdaptersAddresses(Cpu *c) { if (ARG(4)) wr32(c, ARG(4), 0); RET(232); }   /* ERROR_NO_DATA: no interfaces */
 static void s_GetUnicastIpAddressTable(Cpu *c) { RET(50); }
 static void s_MapVirtualKeyW(Cpu *c) { RET(0); }
@@ -1124,11 +1128,10 @@ static const ShimDef shims[] = {
   S(GetProcessWindowStation), S(GetUserObjectInformationW), SA("GetUserObjectInformationA", GetUserObjectInformationW), S(MapVirtualKeyW),
   S(AllocateAndInitializeSid), S(FreeSid), S(SetEntriesInAclA), S(SetEntriesInAclW), SA("SetSecurityInfo", ret0), SA("SetNamedSecurityInfoW", ret0), SA("GetSecurityInfo", ret50), SA("ConvertStringSecurityDescriptorToSecurityDescriptorW", ret0), SA("ConvertStringSecurityDescriptorToSecurityDescriptorA", ret0),
   SA("RegEnumKeyExA", ret2), SA("RegEnumKeyExW", ret2), SA("RegEnumValueW", ret2), SA("RegEnumValueA", ret2), S(RegGetValueW), SA("RegGetValueA", RegGetValueW), SA("RegNotifyChangeKeyValue", ret0), S(RegQueryInfoKeyW), SA("RegQueryInfoKeyA", RegQueryInfoKeyW), SA("RegDeleteKeyW", ret2), SA("RegDeleteValueW", ret2), SA("RegFlushKey", ret0),
-  S(GetAddrInfoW), SA("FreeAddrInfoW", ret0), S(GetNameInfoW), S(WSAGetOverlappedResult), S(WSARecvFrom), S(WSASendTo),
   S(GetAdaptersAddresses), S(GetUnicastIpAddressTable), SA("FreeMibTable", ret0), SA("CancelMibChangeNotify2", ret0), SA("NotifyIpInterfaceChange", ret50), SA("ConvertInterfaceIndexToLuid", ret50), SA("ConvertInterfaceLuidToNameW", ret50), SA("ConvertInterfaceLuidToIndex", ret50), SA("GetBestInterfaceEx", ret50), SA("GetIfEntry2", ret50), SA("GetIpForwardTable2", ret50), SA("GetAdaptersInfo", ret50), SA("GetNetworkParams", ret50), SA("NotifyAddrChange", ret50), SA("NotifyRouteChange", ret50), SA("GetPerAdapterInfo", ret50), SA("if_nametoindex", ret0), SA("if_indextoname", ret0), SA("ConvertInterfaceLuidToGuid", ret50), SA("ConvertInterfaceGuidToLuid", ret50),
   S(GetThreadLocale), S(GetUserDefaultLCID), S(GetUserDefaultLangID), S(GetSystemDefaultLangID), S(GetUserDefaultUILanguage), S(GetLocaleInfoA), S(GetLocaleInfoW), S(GetLocaleInfoEx), S(IsValidLocale), S(IsValidCodePage), S(EnumSystemLocalesW), S(GetUserDefaultLocaleName), S(LCMapStringW), S(LCMapStringEx), S(LCMapStringA), S(CompareStringW), S(CompareStringA), S(CompareStringEx), S(CompareStringOrdinal), S(GetStringTypeW), S(GetStringTypeA), S(MultiByteToWideChar), S(WideCharToMultiByte), S(CharUpperA),
   S(lstrlenA), S(lstrlenW), S(lstrcpyA), S(lstrcmpiA), S(lstrcmpA), S(InterlockedCompareExchange), S(InterlockedExchange), S(InterlockedIncrement), S(InterlockedDecrement), S(InterlockedExchangeAdd), S(QueueUserAPC),
-  S(CreateNamedPipeW), S(CreateNamedPipeA), S(ConnectNamedPipe), S(ReadFileEx), S(WriteFileEx), S(RtlNtStatusToDosError), SA("CancelIo", ret1), SA("CancelIoEx", ret1),
+  S(CreateNamedPipeW), S(CreateNamedPipeA), S(ConnectNamedPipe), S(ReadFileEx), S(WriteFileEx), S(RtlNtStatusToDosError), S(CancelIo), SA("CancelIoEx", CancelIo),
   S(GetTimeZoneInformation), S(FileTimeToSystemTime), S(SystemTimeToFileTime), S(FileTimeToLocalFileTime), S(GetDateFormatA), S(GetTimeFormatA), S(SystemFunction036), SA("ProcessPrng", SystemFunction036), SA("BCryptGenRandom", BCryptGenRandom), S(GetComputerNameA), S(GetUserNameA), S(GetDriveTypeA), S(GetLogicalDrives), S(GetDiskFreeSpaceExA), S(SetHandleCount), S(GetHandleInformation), S(SetHandleInformation), S(DuplicateHandle), S(CreatePipe), S(PeekNamedPipe), S(GetOverlappedResult), S(Beep), S(DebugBreak), S(GetProcessId), S(K32GetProcessMemoryInfo),
   /* file system stubs — no VFS yet: everything "does not exist" */
   SA("GetFileAttributesExA", GetFileAttributesA), SA("GetFileAttributesExW", GetFileAttributesA), SA("FindFirstFileExA", FindFirstFileA), SA("FindFirstFileExW", FindFirstFileA), SA("FindNextFileA", ret0), SA("FindNextFileW", ret0), SA("FindClose", ret1),
@@ -1139,7 +1142,7 @@ static const ShimDef shims[] = {
   SA("_fullpath", fullpath), SA("_umask", umask), SA("_getpid", getpid), SA("_chdir", retm1e), SA("_spawnvp", retm1e), SA("_execve", retm1e), SA("_filbuf", retm1e), SA("_getch", retm1e), SA("_getche", retm1e), SA("_telli64", telli64), SA("_open_osfhandle", retm1e), SA("_creat", retm1e), SA("_chmod", retm1e), SA("_rmdir", retm1e), SA("_mktemp", ret0), SA("_wcsnicmp", wcsnicmp), SA("_ctime64", ctime64), S(asctime), SA("_ctime64_s", ret0), SA("_wmkdir", retm1e), SA("_wchdir", retm1e), SA("_wunlink", retm1e), SA("_wrmdir", retm1e), SA("_popen", popen), SA("_wpopen", wpopen), SA("_pclose", pclose), SA("system", system), SA("_wsystem", wsystem),
   SA("AreFileApisANSI", ret1), SA("SetFileApisToANSI", ret0), SA("SetFileApisToOEM", ret0),
   /* WS2_32 */
-  S(WSAStartup), SA("WSACleanup", ret0), S(WSAGetLastError), SA("WSASetLastError", ret0), S(gethostname), S(htons), SA("ntohs", htons), S(htonl), SA("ntohl", htonl), SA("socket", sock_err), SA("WSASocketW", sock_err), SA("WSASocketA", sock_err), SA("connect", sock_err), SA("bind", sock_err), SA("listen", sock_err), SA("accept", sock_err), SA("send", sock_err), SA("recv", sock_err), SA("sendto", sock_err), SA("recvfrom", sock_err), SA("select", sock_err), SA("closesocket", ret0), SA("shutdown", sock_err), SA("ioctlsocket", sock_err), SA("setsockopt", sock_err), SA("getsockopt", sock_err), SA("getsockname", sock_err), SA("getpeername", sock_err), SA("gethostbyname", ret0), SA("gethostbyaddr", ret0), SA("getaddrinfo", sock_err), SA("freeaddrinfo", ret0), SA("getnameinfo", sock_err), SA("inet_addr", ret0), SA("inet_ntoa", ret0), SA("inet_pton", ret0), SA("inet_ntop", ret0), SA("__WSAFDIsSet", ret0), SA("WSAIoctl", sock_err), SA("WSAEventSelect", sock_err), SA("WSAWaitForMultipleEvents", sock_err), SA("WSAEnumNetworkEvents", sock_err), SA("WSACreateEvent", ret0), SA("WSACloseEvent", ret1), SA("WSAResetEvent", ret1), SA("WSASend", sock_err), SA("WSARecv", sock_err), SA("WSAPoll", sock_err), SA("getservbyname", ret0), SA("getprotobyname", ret0), SA("WSADuplicateSocketW", sock_err), SA("WSAAddressToStringW", sock_err), SA("WSAStringToAddressW", sock_err),
+  NET_SHIMS
   SA("InitializeSListHead", ret0), S(VerSetConditionMask), SA("VerifyVersionInfoW", ret1), SA("VerifyVersionInfoA", ret1), SA("SetStdHandle", ret1), S(GlobalMemoryStatus), S(ReadConsoleW), SA("ReadConsoleA", ReadConsoleW), SA("GetDateFormatW", ret0), SA("GetTimeFormatW", ret0), SA("GetDateFormatEx", ret0), S(LocalFileTimeToFileTime), S(InterlockedPushEntrySList), S(InterlockedPopEntrySList), S(InterlockedFlushSList), SA("QueryDepthSList", ret0), S(GetSystemDirectoryW), SA("GetWindowsDirectoryW", GetSystemDirectoryW), SA("GetWindowsDirectoryA", GetSystemDirectoryA), SA("SearchPathW", ret0), SA("SearchPathA", ret0), S(GetUserNameW), S(GetComputerNameW), S(GetComputerNameExW), SA("GetComputerNameExA", GetComputerNameA), SA("GetCompressedFileSizeA", retm1), SA("GetCompressedFileSizeW", retm1),
   /* COMCTL32 */
   SA("InitCommonControls", ret0), SA("InitCommonControlsEx", ret1), SA("MakeDragList", ret1), SA("LBItemFromPt", retm1), SA("DrawInsert", ret0),

@@ -19,11 +19,13 @@ void *emu_alloc(size_t n) {
   e_memset(p, 0, n);
   return p;
 }
+int emu_free(void *p) { (void)p; return 0; }   /* arena: no free (caller pools the block) */
 size_t emu_alloc_used(void) { return used_total; }
 #else
 #include <stdlib.h>
 static size_t used_total = 0;
 void *emu_alloc(size_t n) { used_total += n; return calloc(1, n ? n : 1); }
+int emu_free(void *p) { free(p); return 1; }
 size_t emu_alloc_used(void) { return used_total; }
 #endif
 
@@ -237,6 +239,14 @@ u8 *mem_map(Mem *m, u64 base, u64 size, const char *name) {
   Region *r = &m->r[m->n++];
   r->base = base; r->size = size; r->host = h; r->name = name; r->prot = 7;
   return h;
+}
+/* drop a region created by mem_map (VirtualFree MEM_RELEASE of a large reservation); the host memory goes back to the pool (wasm) or the OS (native) */
+int mem_unmap(Mem *m, u64 base) {
+  for (int i = 0; i < m->n; i++) if (m->r[i].base == base) {
+    u8 *h = m->r[i].host; u64 size = m->r[i].size;
+    if (!emu_free(h) && g_npool < POOL_MAX) { g_pool[g_npool].host = h; g_pool[g_npool].size = size; g_npool++; }
+    for (int j = i + 1; j < m->n; j++) m->r[j - 1] = m->r[j]; m->n--; m->last = 0; return 1; }
+  return 0;
 }
 Region *mem_region(Mem *m, u64 addr) {
   for (int i = 0; i < m->n; i++) if (addr - m->r[i].base < m->r[i].size) return &m->r[i];

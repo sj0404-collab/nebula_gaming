@@ -116,7 +116,7 @@ EXPORT(x64_run) int x64_run(u64 budget) {
       for (int i = 0; i < g_nprocs; i++) { Proc *q = g_procs[i]; if (!q || !q->used || q->state != 1) continue; w32_threads_summary(&q->w32, &stdin_wait, &sleeping, &best); }
       if (g_root->state == 2) return RUN_EXIT;
       if (stdin_wait) { g_want_stdin = 1; return RUN_YIELD; }
-      if (sleeping) return RUN_YIELD;
+      if (sleeping || w32_net_pending()) return RUN_YIELD;   /* network completions arrive from the host: keep polling */
       cpu_fault(&g_root->cpu, "deadlock: every thread of every process is blocked (wait on an object, lock, pipe or process that nobody will signal)"); return RUN_FAULT;
     }
     int r = run_one(p, budget);
@@ -182,7 +182,7 @@ EXPORT(x64_screen_h) int x64_screen_h(void) { return g_w32.screen ? g_w32.screen
 EXPORT(x64_screen) const u32 *x64_screen(void) { return g_w32.screen; }
 EXPORT(x64_title) const char *x64_title(void) { return g_w32.win.title; }
 EXPORT(x64_subsystem) int x64_subsystem(void) { return g_w32.subsystem; }
-EXPORT(x64_sleep_ms) double x64_sleep_ms(void) { double best = -1; int si = 0, sl = 0; for (int i = 0; i < g_nprocs; i++) { Proc *q = g_procs[i]; if (!q || !q->used || q->state != 1) continue; w32_threads_summary(&q->w32, &si, &sl, &best); } return best < 0 ? 0 : best; }
+EXPORT(x64_sleep_ms) double x64_sleep_ms(void) { double best = -1; int si = 0, sl = 0; for (int i = 0; i < g_nprocs; i++) { Proc *q = g_procs[i]; if (!q || !q->used || q->state != 1) continue; w32_threads_summary(&q->w32, &si, &sl, &best); } if (w32_net_pending() && (best < 0 || best > 2)) best = 2; return best < 0 ? 0 : best; }
 EXPORT(x64_thread_count) int x64_thread_count(void) { int n = 0; for (int i = 0; i < g_nprocs; i++) if (g_procs[i] && g_procs[i]->used && g_procs[i]->state == 1) n += w32_thread_count(&g_procs[i]->w32); return n; }
 EXPORT(x64_proc_count) int x64_proc_count(void) { int n = 0; for (int i = 0; i < g_nprocs; i++) if (g_procs[i] && g_procs[i]->used && g_procs[i]->state == 1) n++; return n; }
 EXPORT(x64_mem_used) u64 x64_mem_used(void) { return emu_alloc_used(); }

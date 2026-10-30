@@ -20,6 +20,7 @@ static struct { int used, pid, fd, port; u64 key; int skip; } g_iocp_assoc[IOCP_
 #define PEND_MAX 256
 typedef struct { int used, write, fd, port, pid; Win32 *w; u64 key, buf, ov; u32 len; } PendOp;
 static PendOp g_pend[PEND_MAX];
+static void net_poll(void); static void net_drop(Win32 *w);   /* win32_net.inc */
 
 static int iocp_by_kobj(int kobj) { for (int i = 0; i < IOCP_MAX; i++) if (g_iocp[i].used && g_iocp[i].kobj == kobj) return i; return -1; }
 static int iocp_has_packets(int kobj) { int i = iocp_by_kobj(kobj); return i >= 0 && g_iocp[i].len > 0; }
@@ -106,8 +107,10 @@ void w32_io_poll(void) {
     if (ovp) { for (int i = 0; i < 8; i++) { ovp[i] = (u8)(status >> (8 * i)); ovp[8 + i] = (u8)(bytes >> (8 * i)); } }
     iocp_post(o->port, o->key, o->ov, (u32)bytes, err); o->used = 0;
   }
+  net_poll();
 }
 void w32_io_drop(Win32 *w) {
+  net_drop(w);
   for (int k = 0; k < PEND_MAX; k++) if (g_pend[k].used && g_pend[k].w == w) g_pend[k].used = 0;
   for (int i = 0; i < IOCP_ASSOC_MAX; i++) if (g_iocp_assoc[i].used && g_iocp_assoc[i].pid == w->pid) g_iocp_assoc[i].used = 0;
 }
