@@ -60,3 +60,10 @@ downloads the unmodified `opencode-windows-x64-baseline` 1.19.5 from npm, starts
 `emu/tools/tui_respond.py` answering the terminal queries, and `emu/tools/tui_drive.py` types a prompt, waits for the
 answer, then asks the agent to run `echo nebula-bash-ok` through its bash tool.  Terminal screenshots of every stage are
 uploaded as the `opencode-tui-screenshots` artifact and the last screens land in the job summary.
+
+Result of run [41202512110](https://github.com/sj0404-collab/nebula_gaming/actions/runs/41202512110) (ubuntu-latest,
+2026-10-31): first frame after 8 min, `123*457` → `56211` after another 6 min, then the agent used its bash tool —
+the emulator log shows `CreateProcess(C:\Windows\System32\cmd.exe /d /s /c "echo nebula-bash-ok")` — and the TUI
+rendered the command, its output and the final answer:
+
+![opencode bash tool inside the x64 emulator](screenshots/opencode-tui-x64-bash-tool.png)

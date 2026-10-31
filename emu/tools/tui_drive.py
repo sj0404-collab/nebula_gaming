@@ -55,7 +55,7 @@ snapshot('3-answer')
 send(b'Run the shell command: echo nebula-bash-ok   and tell me exactly what it printed.'); time.sleep(10); send(b'\r')
 # the TUI shows the prompt (1), the tool call `$ echo nebula-bash-ok` (2), then the command output / the final
 # answer (3+); the turn is finished when a second '▣  Build · <model> · <time>' status line appears
-done_turn = lambda s: len(re.findall(r'▣\s+Build · [^\n·]+ · \d+[ms]', s)) >= 2
+done_turn = lambda s: len(re.findall(r'▣\s+Build · [^\n·]+ · \d+(?:\.\d+)?[ms]', s)) >= 2
 tool = wait_for(lambda s: s.count('nebula-bash-ok') >= 3 or done_turn(s), 25 * 60, 'bash tool output')
 if tool: wait_for(done_turn, 10 * 60, 'bash turn finished')
 snapshot('4-bash-tool')
