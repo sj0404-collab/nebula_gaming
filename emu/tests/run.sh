@@ -218,6 +218,26 @@ check "rg --pre (Rust pipes: CreateNamedPipeW + ReadFileEx/APC)" "demo.lua
 rm -f $A/pre.cmd
 check "fd -x cmd /c"          "found ./demo.lua"                     "$($X --quiet --max-ms 60000 --mount $PWD/$A $A/fd.exe --color never -e lua -x cmd /c echo found {} 2>&1 | tr -d '\r' || true)"
 rm -f $A/out.txt
+echo "[17] powershell.exe (emu/pwsh/pwsh.c, embedded at C:/Windows/System32/WindowsPowerShell/v1.0: Expand-Archive and the scripting subset installers use)"
+PSX="$X --quiet --max-ms 120000 --mount $PWD/tests=C:\\nebula $A/cmd.exe /c"
+check "found on PATH"           "WindowsPowerShell.v1.0.powershell.exe" "$($PSX "powershell -NoProfile -Command (Get-Command powershell.exe)" 2>&1 || true)"
+# the exact spawn opencode uses to unpack ripgrep (cmd.exe /d /s /c "powershell.exe ^"-NoProfile^" … Expand-Archive …")
+printf '@echo off\r\ncmd.exe /d /s /c "powershell.exe ^"-NoProfile^" ^"-NonInteractive^" ^"-Command^" ^"$global:ProgressPreference^ =^ ^'"'"'SilentlyContinue^'"'"'^;^ Expand-Archive^ -LiteralPath^ ^'"'"'C:\\nebula\\pwtest.zip^'"'"'^ -DestinationPath^ ^'"'"'C:\\tmp\\pw^'"'"'^ -Force^""\r\necho exit=%%ERRORLEVEL%%\r\npowershell -NoProfile -Command "(Get-ChildItem -Recurse -File -Name C:\\tmp\\pw) -join '"'"' '"'"'; (Get-Content C:\\tmp\\pw\\pkg\\data\\numbers.txt | Measure-Object).Count; Get-Content C:\\tmp\\pw\\pkg\\data\\numbers.txt | Select-Object -Last 1"\r\n' > tests/t_pw.bat
+check "Expand-Archive exactly as opencode spawns it (deflate + stored, nested dirs)" "exit=0 pkg.README.txt pkg.bin.tool.cmd pkg.data.numbers.txt 100 10000" "$($PSX C:\\nebula\\t_pw.bat 2>&1 | tr -d '\r' | tr '\n' ' ' || true)"
+printf '%s\r\n' "[System.IO.Compression.ZipFile]::ExtractToDirectory('C:\nebula\pwtest.zip', 'C:\tmp\pw2')" "& 'C:\tmp\pw2\pkg\bin\tool.cmd' 42" "(Get-Content 'C:\tmp\pw2\pkg\README.txt' | Measure-Object).Count" > tests/t_zip.ps1
+check "ZipFile::ExtractToDirectory + external program from the archive" "tool-ran 42
+50" "$($PSX "powershell -NoProfile -File C:\\nebula\\t_zip.ps1" 2>&1 | tr -d '\r' || true)"
+printf '%s\r\n' "param()" "\$ErrorActionPreference = 'Stop'" "\$dir = Join-Path \$env:TEMP 'pstest'" "New-Item -ItemType Directory -Path \$dir -Force | Out-Null" "Set-Content -Path (Join-Path \$dir 'a.txt') -Value \"alpha\`nbeta\`ngamma\"" "\$lines = Get-Content (Join-Path \$dir 'a.txt') | Where-Object { \$_ -like '*a*' }" "Write-Output (\"matched {0}: {1}\" -f \$lines.Count, (\$lines -join ','))" "if ((Test-Path \$dir) -and (\$lines.Count -eq 3)) { 'cond ok' } else { 'cond bad' }" "try { Get-Content C:\\missing.txt } catch { 'caught' }" "foreach (\$n in 1,2,3) { \$sum += \$n }" "\"sum=\$sum\"" "\$h = (Get-FileHash (Join-Path \$dir 'a.txt')).Hash" "\$h.Length" "cmd /c echo via-cmd" "exit 3" > tests/t_ps.ps1
+check "script: pipeline, -f, if/-and, try/catch, foreach, hash, external" "matched 3: alpha,beta,gamma
+cond ok
+caught
+sum=6
+64
+via-cmd" "$($PSX "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\nebula\\t_ps.ps1" 2>&1 | tr -d '\r' || true)"
+rc=0; $PSX "powershell -NoProfile -File C:\\nebula\\t_ps.ps1" >/dev/null 2>&1 || rc=$?
+check "script exit code"        "rc=3" "rc=$rc"
+check "unknown cmdlet"          "The term 'Get-Nonsense' is not recognized" "$($PSX "powershell -Command Get-Nonsense" 2>&1 || true)"
+rm -f tests/t_ps.ps1 tests/t_zip.ps1 tests/t_pw.bat
 echo "[6] honest rejections"
 check "32-bit PE"   '"verdict":"unsupported"' "$(printf 'MZ' | head -c 2 > /tmp/pe32.bin; python3 - <<'PY'
 import struct

@@ -19,7 +19,7 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with: { version: 0.17.0 }
       - name: Build cmd.exe from source (emu/cmd, zig cc -target x86_64-windows-gnu) + native runner + wasm64 module (zig cc -target wasm64-freestanding)
-        run: BUILD_CMD=1 ZIG=zig ./emu/x64/build.sh
+        run: BUILD_CMD=1 BUILD_PWSH=1 ZIG=zig ./emu/x64/build.sh
       - name: cmd.exe built from source matches the committed emu/cmd/cmd.exe and public/x64/apps/cmd.exe
         run: |
           cmp emu/cmd/cmd.exe public/x64/apps/cmd.exe

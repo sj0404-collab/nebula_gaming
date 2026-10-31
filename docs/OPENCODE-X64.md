@@ -76,6 +76,16 @@ It ran `rg.exe --json … STARLIGHT_TOKEN .` as a child process (visible in the 
 
 ![opencode grep tool inside the x64 emulator](screenshots/opencode-tui-x64-grep-tool.png)
 
+Since v1.13.0 the runner no longer pre-installs `rg.exe`: the emulator ships its own `powershell.exe`
+(`emu/pwsh/pwsh.c`, embedded at `C:\Windows\System32\WindowsPowerShell\v1.0` and on `PATH`), so opencode's ripgrep
+bootstrap runs unchanged — it downloads the `ripgrep-*-x86_64-pc-windows-msvc.zip` release over the emulated socket layer
+and unpacks it with the exact spawn it uses on real Windows,
+`cmd.exe /d /s /c "powershell.exe ^"-NoProfile^" ^"-NonInteractive^" ^"-Command^" ^"… Expand-Archive -LiteralPath … -Force^""`
+(`emu/tests/run.sh` block 17 replays that spawn against `emu/tests/pwtest.zip`).  Because `powershell` is now on `PATH`,
+opencode's `Shell.acceptable()` also picks it for the bash tool (`powershell -NoProfile -Command "<cmd>"`) instead of
+`cmd.exe` — the mini-PowerShell runs `echo`, pipelines, `&` external programs and `cmd /c …`, which is what the agent
+actually issues; anything outside its subset fails with a PowerShell-style "The term … is not recognized" error.
+
 ### Speed
 
 The interpreter got a 4 KB-page translation cache (TLB) and a host-side fast path for forward `rep movs`/`rep stos`

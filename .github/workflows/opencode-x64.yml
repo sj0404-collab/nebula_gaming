@@ -37,8 +37,7 @@ jobs:
           X64_LOG: '1'
           TUI_RESPOND_LOG: /tmp/respond.log
         run: |
-          mkdir -p /tmp/out /tmp/home/.cache/opencode/bin /tmp/proj && cp -r emu/tools/opencode-home/. /tmp/home/
-          cp public/x64/apps/rg.exe /tmp/home/.cache/opencode/bin/rg.exe     # ripgrep for the grep/glob tools (no powershell to unzip it)
+          mkdir -p /tmp/out /tmp/home /tmp/proj && cp -r emu/tools/opencode-home/. /tmp/home/
           cp -r emu/tools/opencode-project/. /tmp/proj/                        # the "project" opencode is started in (C:\nebula)
           mkfifo /tmp/in.fifo
           : > /tmp/tui.txt
