@@ -121,6 +121,12 @@ What it took (all in `emu/x64/`):
 * `FileDispositionInfo(Ex)` / `FileDispositionInformation(Ex)` / `FILE_FLAG_DELETE_ON_CLOSE`: delete-on-close with
   POSIX semantics and `ERROR_DIR_NOT_EMPTY` for non-empty directories — `fs.rmSync({recursive})` is
   `std::filesystem::remove_all`, which first tries to delete the top entry that way and only recurses when that fails.
+* `CreateProcessW` honours `lpCurrentDirectory` (npm runs every lifecycle script with `cwd: <package dir>`; before, the
+  child inherited the parent's cwd and `node ./postinstall.mjs` ran in the project root).
+* `MAX_REGIONS` 256 → 4096: V8 reserves its heap in hundreds of ≥ 1 MB chunks, each its own lazily-backed region; with
+  the old cap `VirtualAlloc` started failing at ≈ 300 MB of JS heap (`npm rebuild` died with "JavaScript heap out of memory").
+* `PATH` must contain the Node.js directory, as the Windows installer arranges: `x64run --env 'PATH=C:\node;C:\Windows\System32;…'`
+  (`--env` takes one raw `NAME=value`; `X64_GUEST_ENV` splits on `;`, which PATH itself contains).
 * `C:\nebula` became a real directory node (it was implicit = "the cwd", so `lstat` failed after a `cd`).
 
 ### Speed

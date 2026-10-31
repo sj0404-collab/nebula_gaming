@@ -333,6 +333,7 @@ const char *vfs_fd_path(int fd) { FdEnt *f = vf(fd); if (!f || f->kind != FD_FIL
 /* new process: inherit the parent's table (all entries, same numbers — Windows semantics for inheritable handles) */
 void vfs_init_proc(ProcFs *p, const ProcFs *parent) {
   e_memset(p, 0, sizeof *p); p->redir[0] = p->redir[1] = p->redir[2] = -1; e_snprintf(p->cwd, sizeof p->cwd, "%s", parent ? parent->cwd : "C:\\nebula");
+  if (g_spawn_cwd && g_spawn_cwd[0]) { char norm[VFS_PATH]; const ProcFs *save = vfs_P; vfs_P = (ProcFs *)(parent ? parent : &g_root_fs); vfs_normalize(g_spawn_cwd, norm, sizeof norm); vfs_P = (ProcFs *)save; e_snprintf(p->cwd, sizeof p->cwd, "%s", norm); }   /* lpCurrentDirectory, relative to the parent's cwd */
   if (parent) {
     for (int k = 0; k < FD_MAX; k++) if (parent->fd[k].kind && !parent->fd[k].noinherit) { p->fd[k] = parent->fd[k]; ent_addref(&p->fd[k]); }
     for (int k = 0; k < 3; k++) { if (parent->redir[k] >= 3) { ProcFs *save = vfs_P; vfs_P = p; int d = vfs_dup(parent->redir[k]); vfs_P = save; p->redir[k] = d; } else p->redir[k] = parent->redir[k]; }

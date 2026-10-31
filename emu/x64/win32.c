@@ -6,8 +6,8 @@
 #define RET(v) (c->r[RAX] = (u64)(v))
 #define W (c->w)
 /* extra guest environment variables ("NAME=value"), added by the host before the exe starts (x64run: X64_GUEST_ENV="A=1;B=2") */
-static char g_extra_env_buf[32][256]; static const char *g_extra_env[32]; static int g_nextra_env;
-void w32_add_env(const char *kv) { if (g_nextra_env < 32 && kv && kv[0]) { e_snprintf(g_extra_env_buf[g_nextra_env], 256, "%s", kv); g_extra_env[g_nextra_env] = g_extra_env_buf[g_nextra_env]; g_nextra_env++; } }
+static char g_extra_env_buf[32][2048]; static const char *g_extra_env[32]; static int g_nextra_env;
+void w32_add_env(const char *kv) { if (g_nextra_env < 32 && kv && kv[0]) { e_snprintf(g_extra_env_buf[g_nextra_env], sizeof g_extra_env_buf[0], "%s", kv); g_extra_env[g_nextra_env] = g_extra_env_buf[g_nextra_env]; g_nextra_env++; } }
 
 enum { CONT_STARTUP = 1, CONT_INITTERM, CONT_ATEXIT, CONT_RET_RAX, CONT_RET_VAL, CONT_CREATEWND, CONT_QSORT, CONT_BSEARCH, CONT_DLLMAIN };
 static int attach_next_module(Cpu *c);

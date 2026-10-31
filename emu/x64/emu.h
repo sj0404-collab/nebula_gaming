@@ -56,7 +56,7 @@ void   host_gfx_readback(int tex_id, u32 *bgra);                       /* GPU ta
 void   host_gfx_free(int id);
 
 /* ---------- guest memory ---------- */
-#define MAX_REGIONS 256
+#define MAX_REGIONS 4096   /* V8 reserves hundreds of 1 MB chunks; each large reservation is its own region (lazy host pages) */
 typedef struct { u64 base, size; u8 *host; const char *name; u32 prot; } Region;
 int emu_free(void *p);                 /* 1 = memory returned to the host (native), 0 = not freeable (wasm arena) */
 
@@ -219,7 +219,7 @@ enum { BLOCK_NONE = 0, BLOCK_STDIN, BLOCK_PROC, BLOCK_PIPE_R, BLOCK_PIPE_W, BLOC
 int  proc_main_thread_kobj(int pid);
 Win32 *proc_w32_at(int i);                          /* iterate live processes (NULL when i is past the table) */
 int  proc_spawn(Win32 *parent, const char *exe_path, const char *cmdline, const int std_fd[3]);   /* returns pid or -errno */
-extern const char *const *g_spawn_env; extern int g_spawn_nenv;   /* CreateProcess lpEnvironment: when set, the child gets exactly these "NAME=value" strings instead of inheriting */
+extern const char *const *g_spawn_env; extern int g_spawn_nenv; extern const char *g_spawn_cwd;   /* CreateProcess lpCurrentDirectory (0 = inherit) */   /* CreateProcess lpEnvironment: when set, the child gets exactly these "NAME=value" strings instead of inheriting */
 void w32_env_replace(const char *const *kv, int n);
 int  proc_state(int pid, int *exit_code);           /* 0 unknown, 1 running, 2 exited */
 void proc_handle_ref(int pid, int delta);

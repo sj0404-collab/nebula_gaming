@@ -391,7 +391,7 @@ static int resolve_exe(Cpu *c, const char *exe, char *cand, size_t cap) {
   if (!e_stricmp(bn, W->exe_name)) { e_snprintf(cand, cap, "C:\\nebula\\%s", W->exe_name); return vfs_stat(cand, &sz) == 1; }
   return 0;
 }
-static void create_process(Cpu *c, const char *app, const char *cmd) {
+static void create_process(Cpu *c, const char *app, const char *cmd, const char *cwd) {
   char exe[1024]; exe[0] = 0;
   if (app && app[0]) e_snprintf(exe, sizeof exe, "%s", app);
   else { /* first token of the command line */ const char *p = cmd; size_t o = 0; if (*p == '"') { p++; while (*p && *p != '"' && o + 1 < sizeof exe) exe[o++] = *p++; } else while (*p && *p != ' ' && o + 1 < sizeof exe) exe[o++] = *p++; exe[o] = 0; }
@@ -412,15 +412,16 @@ static void create_process(Cpu *c, const char *app, const char *cmd) {
     }
     g_spawn_env = envv; g_spawn_nenv = nenv;
   }
+  g_spawn_cwd = cwd && cwd[0] ? cwd : 0;
   int pid = proc_spawn(W, cand, cmd && cmd[0] ? cmd : exe, std);
-  g_spawn_env = 0; g_spawn_nenv = 0; if (envbuf) emu_free(envbuf);
-  { char m[600]; e_snprintf(m, sizeof m, "[x64] CreateProcess(%s | %s) flags=0x%x std=%d,%d,%d -> pid %d\n", cand, cmd ? cmd : "", (u32)ARG(5), std[0], std[1], std[2], pid); host_write(3, m, e_strlen(m)); }
+  g_spawn_env = 0; g_spawn_nenv = 0; g_spawn_cwd = 0; if (envbuf) emu_free(envbuf);
+  { char m[900]; e_snprintf(m, sizeof m, "[x64] CreateProcess(%s | %s) flags=0x%x std=%d,%d,%d cwd=%s -> pid %d\n", cand, cmd ? cmd : "", (u32)ARG(5), std[0], std[1], std[2], cwd && cwd[0] ? cwd : "(inherit)", pid); host_write(3, m, e_strlen(m)); }
   if (pid < 0) { W->last_error = pid == -8 ? 8 : 2; RET(0); return; }
   u64 pi = ARG(9); if (pi) { int h = vfs_proc_handle(pid); wr64(c, pi, h >= 0 ? H_OF(h) : 0); { int tk = proc_main_thread_kobj(pid); int tf = tk >= 0 ? vfs_kobj_handle(tk) : -1; wr64(c, pi + 8, tf >= 0 ? H_OF(tf) : 0); } wr32(c, pi + 16, (u32)pid); wr32(c, pi + 20, (u32)pid + 1); }
   RET(1);
 }
-static void s_CreateProcessA(Cpu *c) { char app[1024]; e_snprintf(app, sizeof app, "%s", ARG(0) ? name_a(c, ARG(0)) : ""); char cmd[4096]; e_snprintf(cmd, sizeof cmd, "%s", ARG(1) ? name_a(c, ARG(1)) : ""); create_process(c, app, cmd); }
-static void s_CreateProcessW(Cpu *c) { char app[1024]; e_snprintf(app, sizeof app, "%s", ARG(0) ? name_w(c, ARG(0)) : ""); char cmd[4096]; if (ARG(1)) wstr_to_utf8(c, ARG(1), cmd, sizeof cmd, -1); else cmd[0] = 0; create_process(c, app, cmd); }
+static void s_CreateProcessA(Cpu *c) { char app[1024]; e_snprintf(app, sizeof app, "%s", ARG(0) ? name_a(c, ARG(0)) : ""); char cmd[4096]; e_snprintf(cmd, sizeof cmd, "%s", ARG(1) ? name_a(c, ARG(1)) : ""); char cwd[1024]; e_snprintf(cwd, sizeof cwd, "%s", ARG(7) ? name_a(c, ARG(7)) : ""); create_process(c, app, cmd, cwd); }
+static void s_CreateProcessW(Cpu *c) { char app[1024]; e_snprintf(app, sizeof app, "%s", ARG(0) ? name_w(c, ARG(0)) : ""); char cmd[4096]; if (ARG(1)) wstr_to_utf8(c, ARG(1), cmd, sizeof cmd, -1); else cmd[0] = 0; char cwd[1024]; e_snprintf(cwd, sizeof cwd, "%s", ARG(7) ? name_w(c, ARG(7)) : ""); create_process(c, app, cmd, cwd); }
 static int wait_proc_handle(u64 h, int *pid_out) { int fd = handle_fd(h); if (fd < 3) return 0; int pid = vfs_fd_pid(fd); if (pid < 0) return 0; *pid_out = pid; return 1; }
 static void s_GetExitCodeProcess(Cpu *c) { int pid; if (!wait_proc_handle(ARG(0), &pid)) { if (ARG(0) == ~0ull) { wr32(c, ARG(1), 259); RET(1); return; } W->last_error = 6; RET(0); return; } int code; int st = proc_state(pid, &code); wr32(c, ARG(1), st == 2 ? (u32)code : 259); RET(1); }
 static void s_GetProcessId(Cpu *c) { int pid; if (ARG(0) == ~0ull) { RET((u64)W->pid); return; } RET(wait_proc_handle(ARG(0), &pid) ? (u64)pid : 0); }

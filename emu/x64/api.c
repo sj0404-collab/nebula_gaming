@@ -44,7 +44,7 @@ int proc_main_thread_kobj(int pid) { Proc *p = proc_find(pid); return p ? p->w32
 int proc_enum(int idx, int *pid, int *ppid, const char **name) { if (idx == 0) { *pid = HOST_PID; *ppid = 4; *name = "explorer.exe"; return 1; } idx--; int k = 0; for (int i = 0; i < PROC_MAX; i++) { Proc *p = g_procs[i]; if (!p || !p->used || p->state == 2) continue; if (k++ == idx) { *pid = p->pid; *ppid = p->ppid; *name = p->name; return 1; } } return 0; }
 static const char *basename_of(const char *p) { const char *b = p; for (const char *q = p; *q; q++) if (*q == '\\' || *q == '/') b = q + 1; return b; }
 /* CreateProcess: load an exe from the VFS into a fresh address space; std_fd[k]: -2 inherit, -1 console, >=3 parent's table entry */
-const char *const *g_spawn_env; int g_spawn_nenv;
+const char *const *g_spawn_env; int g_spawn_nenv; const char *g_spawn_cwd;
 int proc_spawn(Win32 *parent, const char *exe_path, const char *cmdline, const int std_fd[3]) {
   int node = vfs_find_node(exe_path); VNodeInfo in; if (node < 0 || !vfs_node_info(node, &in) || in.is_dir) return -2;
   Proc *p = proc_alloc(); if (!p) return -8;
