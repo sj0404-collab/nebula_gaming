@@ -41,7 +41,7 @@ def send(b):
     with open(fifo, 'wb', buffering=0) as w: w.write(b)
 
 # 1. first frame: the home screen has the big logo + prompt; look for a healthy amount of text
-if not wait_for(lambda s: sum(1 for c in s if not c.isspace()) > 300, 40 * 60, 'first frame'):
+if not wait_for(lambda s: ('ctrl+p' in s or 'Ask anything' in s) and sum(1 for c in s if not c.isspace()) > 100, 40 * 60, 'first frame'):
     snapshot('no-frame'); sys.exit(3)
 time.sleep(20); snapshot('1-home')
 
