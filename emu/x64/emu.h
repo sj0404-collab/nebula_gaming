@@ -362,5 +362,6 @@ void vfs_stdin_eof(void);
 int  vfs_stdin_waiting(void);
 s64  vfs_stdin_read(u8 *buf, u64 n);
 int  vfs_stdin_available(void);
+void vfs_stdin_unread(const u8 *p, int n);
 
 #endif

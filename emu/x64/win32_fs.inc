@@ -575,18 +575,31 @@ static void s_gets_s(Cpu *c) { c->r[R8] = c->r[RCX]; c->r[RCX] = ARG(0); /* reus
 
 
 /* console input records (INPUT_RECORD = 20 bytes): one KEY_EVENT (key down) per stdin byte; '\n' → VK_RETURN '\r' */
-static void put_key_record(Cpu *c, u64 a, u8 ch) {
+static void put_key_record(Cpu *c, u64 a, u16 ch) {
   u16 vk = ch == '\n' ? 0x0D : ch == '\t' ? 0x09 : ch == 8 ? 0x08 : ch == 27 ? 0x1B : (ch >= 'a' && ch <= 'z') ? (u16)(ch - 32) : (ch >= 'A' && ch <= 'Z') ? ch : (ch >= '0' && ch <= '9') ? ch : 0;
   if (ch == '\n') ch = '\r';
   wr16(c, a, 1); wr16(c, a + 2, 0); wr32(c, a + 4, 1); wr16(c, a + 8, 1); wr16(c, a + 10, vk); wr16(c, a + 12, 0); wr16(c, a + 14, ch); wr32(c, a + 16, 0);
 }
+/* stdin bytes are UTF-8; key records carry UTF-16 code units (surrogate pairs for astral characters, like the real console with VT input) */
+static u8 g_kin_pend[8]; static int g_kin_npend;
 static void s_ReadConsoleInputW(Cpu *c) {
   u32 cap = (u32)ARG(2); if (!cap) { if (ARG(3)) wr32(c, ARG(3), 0); RET(1); return; }
-  u8 tmp[256]; g_last_io_fd = -1; s64 r = vfs_stdin_read(tmp, cap < sizeof tmp ? cap : sizeof tmp);
+  u8 tmp[264]; g_last_io_fd = -1; u32 want = cap < 256 ? cap : 256;
+  e_memcpy(tmp, g_kin_pend, (size_t)g_kin_npend);
+  s64 r = vfs_stdin_read(tmp + g_kin_npend, want);
   if (r == -2) { blocked_io(c, 0); return; }
-  if (r <= 0) { /* EOF: deliver Ctrl-Z Enter so line readers terminate */ put_key_record(c, ARG(1), 26); if (ARG(3)) wr32(c, ARG(3), 1); RET(1); return; }
-  for (s64 i = 0; i < r; i++) put_key_record(c, ARG(1) + (u64)i * 20, tmp[i]);
-  if (ARG(3)) wr32(c, ARG(3), (u32)r); RET(1);
+  if (r <= 0) { /* EOF: deliver Ctrl-Z Enter so line readers terminate */ g_kin_npend = 0; put_key_record(c, ARG(1), 26); if (ARG(3)) wr32(c, ARG(3), 1); RET(1); return; }
+  s64 n = r + g_kin_npend; g_kin_npend = 0; u32 out = 0; s64 i = 0;
+  while (i < n && out < cap) {
+    u8 b = tmp[i]; int len = b < 0x80 ? 1 : (b & 0xE0) == 0xC0 ? 2 : (b & 0xF0) == 0xE0 ? 3 : (b & 0xF8) == 0xF0 ? 4 : 1; u32 cp = b;
+    if (len > 1 && i + len > n) { if (n - i <= 4) { g_kin_npend = (int)(n - i); e_memcpy(g_kin_pend, tmp + i, (size_t)g_kin_npend); } break; }   /* incomplete sequence: keep for the next call */
+    if (len == 2) cp = ((b & 0x1F) << 6) | (tmp[i + 1] & 0x3F); else if (len == 3) cp = ((b & 0x0F) << 12) | ((tmp[i + 1] & 0x3F) << 6) | (tmp[i + 2] & 0x3F); else if (len == 4) cp = ((b & 0x07) << 18) | ((tmp[i + 1] & 0x3F) << 12) | ((tmp[i + 2] & 0x3F) << 6) | (tmp[i + 3] & 0x3F);
+    i += len;
+    if (cp >= 0x10000) { if (out + 2 > cap) { i -= len; break; } cp -= 0x10000; put_key_record(c, ARG(1) + (u64)out * 20, (u16)(0xD800 + (cp >> 10))); out++; put_key_record(c, ARG(1) + (u64)out * 20, (u16)(0xDC00 + (cp & 0x3FF))); out++; }
+    else { put_key_record(c, ARG(1) + (u64)out * 20, (u16)cp); out++; }
+  }
+  if (i < n && !g_kin_npend) { vfs_stdin_unread(tmp + i, (int)(n - i)); }
+  if (ARG(3)) wr32(c, ARG(3), out); RET(1);
 }
 static void s_PeekConsoleInputW(Cpu *c) { if (ARG(3)) wr32(c, ARG(3), vfs_stdin_available() ? 1 : 0); if (vfs_stdin_available() && ARG(2)) put_key_record(c, ARG(1), '\n'); RET(1); }
 static void s_FlushConsoleInputBuffer(Cpu *c) { RET(1); }

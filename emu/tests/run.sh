@@ -27,6 +27,10 @@ out=$( (sleep 1; printf 'hi') | $X --quiet tests/regwait.exe 2>&1 || true)
 check "callback"      "callback ctx=0000000000001234 timedout=0" "$out"
 check "event"         "event wait -> 0" "$out"
 check "records"       "records=2" "$out"
+echo "[1e] keys.exe (UTF-8 stdin -> UTF-16 key records)"
+out=$(printf 'a\320\237\321\200\360\237\230\200z\n' | $X --quiet tests/keys.exe 2>&1 || true)
+check "utf16 units"   "0061 041f 0440 d83d de00 007a 000d" "$out"
+check "count"         "total=7" "$out"
 echo "[2] bench.exe (CPU)"
 out=$($X --quiet --stats tests/bench.exe 2>&1 || true)
 check "sieve"         "sieve(2M): 148933 primes" "$out"

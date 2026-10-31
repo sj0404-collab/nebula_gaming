@@ -374,3 +374,12 @@ s64 vfs_stdin_read(u8 *buf, u64 n) {
   return (s64)o;
 }
 int vfs_stdin_available(void) { return g_in_pos < g_in_len || g_in_eof; }
+/* push bytes back in front of the unread input (they were just read, so the buffer has room before g_in_pos; otherwise grow) */
+void vfs_stdin_unread(const u8 *p, int n) {
+  if (n <= 0) return;
+  if ((u64)n <= g_in_pos) { g_in_pos -= (u64)n; e_memcpy(g_in + g_in_pos, p, (size_t)n); return; }
+  u64 rest = g_in_len - g_in_pos, need = rest + (u64)n;
+  if (need > g_in_cap) { u64 nc = need + 4096; u8 *nb = emu_alloc((size_t)nc); if (!nb) return; e_memcpy(nb + n, g_in + g_in_pos, (size_t)rest); g_in = nb; g_in_cap = nc; }
+  else e_memmove(g_in + n, g_in + g_in_pos, (size_t)rest);
+  e_memcpy(g_in, p, (size_t)n); g_in_pos = 0; g_in_len = need;
+}
