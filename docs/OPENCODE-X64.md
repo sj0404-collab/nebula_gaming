@@ -67,3 +67,17 @@ the emulator log shows `CreateProcess(C:\Windows\System32\cmd.exe /d /s /c "echo
 rendered the command, its output and the final answer:
 
 ![opencode bash tool inside the x64 emulator](screenshots/opencode-tui-x64-bash-tool.png)
+
+Run [41206004528](https://github.com/sj0404-collab/nebula_gaming/actions/runs/41206004528) added a fourth stage: ripgrep
+(`rg.exe` from the bundled samples) is pre-installed in `~/.cache/opencode/bin`, a small demo project
+(`emu/tools/opencode-project`) is mounted as `C:\nebula`, and the agent is asked which file contains `STARLIGHT_TOKEN`.
+It ran `rg.exe --json … STARLIGHT_TOKEN .` as a child process (visible in the emulator log), got 1 match and answered
+`beta.c`:
+
+![opencode grep tool inside the x64 emulator](screenshots/opencode-tui-x64-grep-tool.png)
+
+### Speed
+
+The interpreter got a 4 KB-page translation cache (TLB) and a host-side fast path for forward `rep movs`/`rep stos`
+(commit 1625985): `opencode.exe --version` 69.9 s → 58.5 s and a Lua benchmark 25.9 s → 20.1 s on the same machine
+(~55–73 MIPS). A predecoded basic-block cache would be the next step for a bigger jump.
