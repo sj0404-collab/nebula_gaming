@@ -323,6 +323,7 @@ static u64 now_100ns(void) { return (u64)(host_wall_ms() * 10000.0) + 1164447360
 static u64 unix_time(void) { return (u64)(host_wall_ms() / 1000.0); }
 static void queue_apc(Win32 *w, u64 fn, u64 a0, u64 a1, u64 a2);
 static void s_RtlNtStatusToDosError(Cpu *c) { u32 st = (u32)ARG(0); u32 e;
+  if ((st & 0xFFFF0000u) == 0x80070000u) { RET(st & 0xFFFFu); return; }   /* NTSTATUS_FROM_WIN32(err): the Win32 code travels in the low 16 bits (libuv SET_REQ_ERROR) */
   switch (st) { case 0: e = 0; break; case 0x103: e = 997; break; case 0xC0000008: e = 6; break; case 0xC000000D: e = 87; break; case 0xC000000F: case 0xC0000034: e = 2; break; case 0xC000003A: e = 3; break;
     case 0xC0000022: case 0xC00000BA: e = 5; break; case 0xC0000011: e = 38; break; case 0xC0000035: e = 183; break; case 0xC000014B: e = 109; break; case 0xC00000B1: e = 232; break; case 0xC00000AD: case 0xC00000AE: e = 231; break;
     case 0xC0000120: e = 995; break; case 0xC0000103: e = 267; break; case 0xC0000005: e = 998; break; case 0xC0000017: e = 8; break; case 0xC0000023: e = 122; break; case 0xC0000004: e = 24; break; case 0xC00000BB: e = 50; break; case 0xC0000043: e = 32; break; case 0xC0000101: e = 145; break; case 0xC0000033: e = 123; break; case 0xC0000039: e = 161; break;
@@ -337,6 +338,7 @@ static void iocp_handle_closed(int pid, int fd); static void iocp_kobj_closed(in
 #include "win32_net.inc"
 #include "win32_node.inc"
 #include "win32_bun.inc"
+#include "d3d11.inc"
 static void s_CancelIo(Cpu *c) { sock_cancel_io(c, ARG(0)); RET(1); }   /* pipes: parked ReadFile/WriteFile stay (libuv cancels those only on close) */
 static void s_ret0(Cpu *c); static void s_atexit(Cpu *c); static void s_setjmp(Cpu *c);
 #include "win32_compat.inc"
@@ -1146,6 +1148,7 @@ static const ShimDef shims[] = {
   NT_SHIMS
   IOCP_SHIMS
   BUN_SHIMS
+  D3D_SHIMS
   S(GetLastError), S(SetLastError), S(GetCurrentProcess), S(GetCurrentProcessId), S(ExitProcess), S(TerminateProcess),
   S(GetTickCount), S(GetTickCount64), S(QueryPerformanceCounter), S(QueryPerformanceFrequency), S(GetSystemTimeAsFileTime), S(GetSystemTimePreciseAsFileTime), S(GetSystemTime), S(GetLocalTime), S(Sleep), S(SleepEx),
   S(GetStdHandle), S(WriteFile), S(WriteConsoleA), S(WriteConsoleW), S(ReadFile), S(ReadConsoleA), S(GetConsoleMode), S(SetConsoleMode), S(GetConsoleOutputCP), S(GetConsoleCP), S(SetConsoleOutputCP), S(SetConsoleCP), S(GetConsoleScreenBufferInfo), S(SetConsoleTextAttribute), S(SetConsoleTitleA), S(SetConsoleTitleW), S(GetConsoleTitleW), S(GetConsoleTitleA), S(GetConsoleCursorInfo), S(SetConsoleCursorInfo), S(SetConsoleCursorPosition), S(FillConsoleOutputCharacterW), S(FillConsoleOutputCharacterA), S(FillConsoleOutputAttribute), S(ScrollConsoleScreenBufferW), S(ScrollConsoleScreenBufferA), S(SetConsoleScreenBufferSize), S(SetConsoleWindowInfo), S(WriteConsoleOutputW), S(WriteConsoleOutputA), S(WriteConsoleOutputCharacterW), S(WriteConsoleOutputAttribute), S(ReadConsoleOutputW), S(ReadConsoleOutputCharacterW), S(ReadConsoleOutputAttribute), S(GetLargestConsoleWindowSize), S(WriteConsoleInputW), S(GetConsoleProcessList), S(GetConsoleDisplayMode), S(GetConsoleOriginalTitleW), S(GetConsoleAliasesLengthW), S(GetConsoleScreenBufferInfoEx), S(SetConsoleScreenBufferInfoEx), S(GetCurrentConsoleFontEx), S(GetCurrentConsoleFont), S(SetCurrentConsoleFontEx), S(GetConsoleFontSize), S(GetConsoleWindow), S(AllocConsole), S(SetConsoleCtrlHandler), S(FlushFileBuffers), S(GetFileType), S(CloseHandle),

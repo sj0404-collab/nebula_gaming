@@ -70,11 +70,13 @@ static int out_write(Cpu *c, int fd, const u8 *p, u64 n) { s64 r = raw_write(fd,
 /* Rust std's anonymous pipes are named pipes: CreateNamedPipeW("\\\\.\\pipe\\__rust_anonymous_pipe1__…") for "ours" + CreateFileW(same name) for "theirs" */
 #define NPIPE_MAX 16
 static struct { char name[160]; int fd; int used; } g_npipes[NPIPE_MAX];
-static int npipe_prefix(const char *n) { static const char pre[] = "\\\\.\\pipe\\"; for (int i = 0; pre[i]; i++) if (!n[i] || (n[i] != pre[i] && !(pre[i] == '\\' && n[i] == '/'))) return 0; return 1; }
-static void s_CreateNamedPipeW(Cpu *c) {
-  const char *n = name_w(c, ARG(0)); u32 mode = (u32)ARG(1);
-  if (!npipe_prefix(n)) { W->last_error = 123; RET(~0ull); return; }
-  for (int k = 0; k < NPIPE_MAX; k++) if (g_npipes[k].used && !e_stricmp(g_npipes[k].name, n)) { W->last_error = 5; RET(~0ull); return; }   /* FILE_FLAG_FIRST_PIPE_INSTANCE: name in use */
+/* "\\\\.\\pipe\\name" and "\\\\?\\pipe\\name" (libuv) are the same namespace; names are compared after this prefix */
+static int npipe_prefix(const char *n) { static const char pre[] = "\\\\.\\pipe\\"; for (int i = 0; pre[i]; i++) if (!n[i] || (n[i] != pre[i] && !(pre[i] == '\\' && n[i] == '/') && !(i == 2 && n[i] == '?'))) return 0; return 1; }
+static int npipe_same(const char *a, const char *b) { return !e_stricmp(a + 4, b + 4); }
+static void create_named_pipe(Cpu *c, const char *n) {
+  u32 mode = (u32)ARG(1);
+  if (!npipe_prefix(n)) { char m[300]; e_snprintf(m, sizeof m, "[x64] CreateNamedPipe: unsupported name '%s'\n", n); host_write(3, m, e_strlen(m)); W->last_error = 123; RET(~0ull); return; }
+  for (int k = 0; k < NPIPE_MAX; k++) if (g_npipes[k].used && npipe_same(g_npipes[k].name, n)) { W->last_error = 5; RET(~0ull); return; }   /* FILE_FLAG_FIRST_PIPE_INSTANCE: name in use */
   int r, wfd; if (vfs_pipe(&r, &wfd)) { W->last_error = 8; RET(~0ull); return; }
   int ours = (mode & 3) == 2 ? wfd : r, theirs = ours == r ? wfd : r;   /* PIPE_ACCESS_INBOUND (1): the server reads; OUTBOUND (2): it writes */
   vfs_set_inherit(ours, sa_inherit(c, ARG(7))); vfs_set_inherit(theirs, 0);
@@ -82,12 +84,13 @@ static void s_CreateNamedPipeW(Cpu *c) {
   g_npipes[k].used = 1; g_npipes[k].fd = theirs; e_snprintf(g_npipes[k].name, sizeof g_npipes[k].name, "%s", n);
   RET(H_OF(ours));
 }
-static void s_CreateNamedPipeA(Cpu *c) { s_CreateNamedPipeW(c); }   /* name_w vs name_a differ only in decoding; Rust uses the W form */
+static void s_CreateNamedPipeW(Cpu *c) { create_named_pipe(c, name_w(c, ARG(0))); }   /* Rust std */
+static void s_CreateNamedPipeA(Cpu *c) { create_named_pipe(c, name_a(c, ARG(0))); }   /* libuv: "\\\\.\\pipe\\uv\\%p-%lu" for every stdio pipe of uv_spawn */
 static void s_ConnectNamedPipe(Cpu *c) { RET(1); }
 static void create_file(Cpu *c, const char *n) {
   u32 access = (u32)ARG(1), disp = (u32)ARG(4);
   if (!e_stricmp(n, "CONOUT$")) { RET(0x11); return; } if (!e_stricmp(n, "CONIN$")) { RET(0x10); return; }
-  if (npipe_prefix(n)) { for (int k = 0; k < NPIPE_MAX; k++) if (g_npipes[k].used && !e_stricmp(g_npipes[k].name, n)) { int fd = g_npipes[k].fd; g_npipes[k].used = 0; vfs_set_inherit(fd, sa_inherit(c, ARG(3))); RET(H_OF(fd)); return; } W->last_error = 2; RET(~0ull); return; }
+  if (npipe_prefix(n)) { for (int k = 0; k < NPIPE_MAX; k++) if (g_npipes[k].used && npipe_same(g_npipes[k].name, n)) { int fd = g_npipes[k].fd; g_npipes[k].used = 0; vfs_set_inherit(fd, sa_inherit(c, ARG(3))); RET(H_OF(fd)); return; } W->last_error = 2; RET(~0ull); return; }
   int acc = ((access & 0x80000000u) ? 1 : 0) | ((access & 0x40000004u) ? 2 : 0); if (!acc) acc = 1;
   int fd = vfs_open(n, acc, (int)disp, (access & 4) && !(access & 0x40000000u));
   if (fd < 0) { W->last_error = lasterr_of(fd); RET(~0ull); return; }
@@ -399,6 +402,7 @@ static void create_process(Cpu *c, const char *app, const char *cmd) {
   if (si && (rd32(c, si + 60) & 0x100)) { std[0] = std_from_handle(rd64(c, si + 80)); std[1] = std_from_handle(rd64(c, si + 88)); std[2] = std_from_handle(rd64(c, si + 96)); }
   views_flush_all(c);   /* the child must see what the parent wrote into shared mappings */
   int pid = proc_spawn(W, cand, cmd && cmd[0] ? cmd : exe, std);
+  { char m[600]; e_snprintf(m, sizeof m, "[x64] CreateProcess(%s | %s) flags=0x%x std=%d,%d,%d -> pid %d\n", cand, cmd ? cmd : "", (u32)ARG(5), std[0], std[1], std[2], pid); host_write(3, m, e_strlen(m)); }
   if (pid < 0) { W->last_error = pid == -8 ? 8 : 2; RET(0); return; }
   u64 pi = ARG(9); if (pi) { int h = vfs_proc_handle(pid); wr64(c, pi, h >= 0 ? H_OF(h) : 0); { int tk = proc_main_thread_kobj(pid); int tf = tk >= 0 ? vfs_kobj_handle(tk) : -1; wr64(c, pi + 8, tf >= 0 ? H_OF(tf) : 0); } wr32(c, pi + 16, (u32)pid); wr32(c, pi + 20, (u32)pid + 1); }
   RET(1);

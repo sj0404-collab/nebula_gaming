@@ -31,6 +31,24 @@ echo "[1e] keys.exe (UTF-8 stdin -> UTF-16 key records)"
 out=$(printf 'a\320\237\321\200\360\237\230\200z\n' | $X --quiet tests/keys.exe 2>&1 || true)
 check "utf16 units"   "0061 041f 0440 d83d de00 007a 000d" "$out"
 check "count"         "total=7" "$out"
+echo "[1f] d3d11clear.exe (Direct3D 11 device + swap chain + clear + Present)"
+rm -f /tmp/d3d_*.ppm; out=$(cd /tmp && X64_LOG=1 $OLDPWD/$X --quiet --no-stdin --frames 1 --max-ms 10000 $OLDPWD/tests/d3d11clear.exe 2>&1 || true)
+check "device"        "device ok, feature level 0xb000" "$out"
+check "backbuffer"    "backbuffer 640x480 format 87" "$out"
+check "three frames"  "frame 2 presented (0.1 0.8 0.3)" "$out"
+check "ok"            "d3d11clear ok" "$out"
+check "frame pixels"  "frame_0001:(51, 102, 230) frame_0002:(230, 77, 26) frame_0003:(26, 204, 77)" "$(python3 - <<'PY'
+import glob
+def px(f):
+    d=open(f,'rb').read(); parts=d.split(b'\n',3); w,h=map(int,parts[1].split()); o=parts[3]; i=(200*w+300)*3; return tuple(o[i:i+3])
+print(' '.join(f.split('/')[-1][:-4]+':'+str(px(f)) for f in sorted(glob.glob('/tmp/frame_000[123].ppm'))))
+PY
+)"
+rm -f /tmp/frame_*.ppm
+echo "[1g] uvpipe.exe (libuv-style child stdout: named pipe + IOCP zero-read + CreateProcess)"
+out=$($X --quiet --no-stdin --max-ms 20000 tests/uvpipe.exe 2>&1 || true)
+check "zero-read ready" "GQCS -> 1 bytes=0 key=42" "$out"
+check "child output"    "data: \[hi from child" "$out"
 echo "[2] bench.exe (CPU)"
 out=$($X --quiet --stats tests/bench.exe 2>&1 || true)
 check "sieve"         "sieve(2M): 148933 primes" "$out"

@@ -43,3 +43,4 @@ emu/tests/*.png
 emu/tests/*.pdb
 emu/tests/*.lib
 emu/third_party/
+frame_*.ppm

@@ -84,11 +84,16 @@ static int iocp_rw(Cpu *c, int fd, int write, u64 buf, u32 len, u64 bytes_out, u
     g_pend[k].used = 1; g_pend[k].write = write; g_pend[k].fd = rfd; g_pend[k].port = g_iocp_assoc[ai].port; g_pend[k].pid = W->pid; g_pend[k].w = W; g_pend[k].key = g_iocp_assoc[ai].key; g_pend[k].buf = buf; g_pend[k].ov = ov; g_pend[k].len = len;
     wr64(c, ov, 0x103); wr64(c, ov + 8, 0); W->last_error = 997; RET(0); return 1;
   }
+  int quiet = (rd64(c, ov + 24) & 1) != 0;   /* OVERLAPPED.hEvent with the low bit set = "do not queue a completion packet" (libuv relies on this) */
+  if (!write && len == 0) {   /* libuv's zero-byte read: "data is ready" → immediate success, bytes stay in the pipe; writer gone + empty → EOF */
+    if (vfs_pipe_avail(rfd) > 0) { wr64(c, ov, 0); wr64(c, ov + 8, 0); if (bytes_out) wr32(c, bytes_out, 0);
+      if (!(g_iocp_assoc[ai].skip & 1) && !quiet) iocp_post(g_iocp_assoc[ai].port, g_iocp_assoc[ai].key, ov, 0, 0); RET(1); return 1; }
+    wr64(c, ov, 0xC000014Bull); wr64(c, ov + 8, 0); W->last_error = 109; RET(0); return 1; }
   s64 r; if (write) { const u8 *p = mem_ptr(c->mem, buf, len, 0); r = p ? vfs_write(rfd, p, len) : -1; } else { u8 *p = mem_ptr(c->mem, buf, len, 1); r = p ? vfs_read(rfd, p, len) : -1; }
   if (r == -2) { /* raced: park it */ int k; for (k = 0; k < PEND_MAX && g_pend[k].used; k++); if (k < PEND_MAX) { g_pend[k].used = 1; g_pend[k].write = write; g_pend[k].fd = rfd; g_pend[k].port = g_iocp_assoc[ai].port; g_pend[k].pid = W->pid; g_pend[k].w = W; g_pend[k].key = g_iocp_assoc[ai].key; g_pend[k].buf = buf; g_pend[k].ov = ov; g_pend[k].len = len; wr64(c, ov, 0x103); W->last_error = 997; RET(0); return 1; } r = -1; }
   if (r < 0 || (r == 0 && !write)) { u32 err = (r == -3 || r == 0) ? (write ? 232 : 109) : 5; wr64(c, ov, r == 0 || r == -3 ? 0xC000014Bull : 0xC0000001ull); wr64(c, ov + 8, 0); W->last_error = err; RET(0); return 1; }
   wr64(c, ov, 0); wr64(c, ov + 8, (u64)r); if (bytes_out) wr32(c, bytes_out, (u32)r);
-  if (!(g_iocp_assoc[ai].skip & 1)) iocp_post(g_iocp_assoc[ai].port, g_iocp_assoc[ai].key, ov, (u32)r, 0);
+  if (!(g_iocp_assoc[ai].skip & 1) && !quiet) iocp_post(g_iocp_assoc[ai].port, g_iocp_assoc[ai].key, ov, (u32)r, 0);
   RET(1); return 1; }
 
 /* scheduler hook: finish parked operations whose pipe became ready */
@@ -99,6 +104,10 @@ void w32_io_poll(void) {
     if (pi < 0) { o->used = 0; continue; }
     if (vfs_pipe_would_block(pi, o->write)) continue;
     Mem *m = o->w->mem; s64 r;
+    if (!o->write && o->len == 0) {   /* zero-byte read: data ready → success; writer closed with nothing left → EOF (109) */
+      u8 *ovp = mem_ptr(m, o->ov, 16, 1); if (vfs_pipe_avail(o->fd) > 0) { if (ovp) e_memset(ovp, 0, 16); iocp_post(o->port, o->key, o->ov, 0, 0); }
+      else { if (ovp) { e_memset(ovp, 0, 16); ovp[0] = 0x4B; ovp[1] = 0x01; ovp[2] = 0x00; ovp[3] = 0xC0; } iocp_post(o->port, o->key, o->ov, 0, 109); }
+      o->used = 0; continue; }
     if (o->write) { const u8 *p = mem_ptr(m, o->buf, o->len, 0); r = p ? vfs_write(o->fd, p, o->len) : -1; } else { u8 *p = mem_ptr(m, o->buf, o->len, 1); r = p ? vfs_read(o->fd, p, o->len) : -1; }
     if (r == -2) continue;
     u8 *ovp = mem_ptr(m, o->ov, 16, 1);

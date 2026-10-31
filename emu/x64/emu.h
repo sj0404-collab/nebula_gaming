@@ -123,7 +123,7 @@ typedef void (*ShimFn)(Cpu *c);
 typedef struct { const char *dll; const char *name; ShimFn fn; } ShimDef;
 
 #define SHIM_SLOT_SIZE 16
-#define MAX_SHIMS 1024
+#define MAX_SHIMS 2048
 typedef struct { const char *dll; const char *name; ShimFn fn; int calls; } ShimSlot;
 
 /* guest layout */

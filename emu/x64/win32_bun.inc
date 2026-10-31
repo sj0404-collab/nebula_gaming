@@ -28,7 +28,7 @@ static void s_NtCreateFile(Cpu *c) {
   u64 hp = ARG(0); u32 access = (u32)ARG(1); u64 oa = ARG(2), iosb = ARG(3); u32 disp = (u32)ARG(7), opts = (u32)ARG(8);
   char path[1024]; if (!nt_object_path(c, oa, path, sizeof path)) { nt_iosb(c, iosb, 0xC0000033u, 0); RET(0xC0000033u); return; }   /* OBJECT_NAME_INVALID */
   /* named pipes: client side of a CreateNamedPipe server, or the server end created through NtCreateNamedPipeFile */
-  if (npipe_prefix(path)) { for (int k = 0; k < NPIPE_MAX; k++) if (g_npipes[k].used && !e_stricmp(g_npipes[k].name, path)) { int fd = g_npipes[k].fd; g_npipes[k].used = 0; vfs_set_inherit(fd, 0); wr64(c, hp, H_OF(fd)); nt_iosb(c, iosb, 0, 1); RET(0); return; }
+  if (npipe_prefix(path)) { for (int k = 0; k < NPIPE_MAX; k++) if (g_npipes[k].used && npipe_same(g_npipes[k].name, path)) { int fd = g_npipes[k].fd; g_npipes[k].used = 0; vfs_set_inherit(fd, 0); wr64(c, hp, H_OF(fd)); nt_iosb(c, iosb, 0, 1); RET(0); return; }
     nt_iosb(c, iosb, 0xC0000034u, 0); RET(0xC0000034u); return; }
   if (!e_stricmp(path, "CONOUT$")) { wr64(c, hp, 0x11); nt_iosb(c, iosb, 0, 1); RET(0); return; } if (!e_stricmp(path, "CONIN$")) { wr64(c, hp, 0x10); nt_iosb(c, iosb, 0, 1); RET(0); return; }
   int wdisp = disp == 0 ? 2 : disp == 1 ? 3 : disp == 2 ? 1 : disp == 3 ? 4 : disp == 4 ? 5 : 2;   /* SUPERSEDE OPEN CREATE OPEN_IF OVERWRITE OVERWRITE_IF */
