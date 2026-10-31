@@ -13,6 +13,7 @@
 #define SOCK_MAX 256
 typedef struct { int used, refs, host, state, err, nonblock, bound; u8 lip[4]; int lport; } Sock;   /* state: 0 new 1 connecting 2 connected 3 listening 4 failed */
 static Sock g_socks[SOCK_MAX];
+static int sock_ready_mask(int si);
 #define SPEND_MAX 256
 typedef struct { int used, kind, sock, pid, port, acc; Win32 *w; u64 key, ov, buf; u32 len; } SockOp;   /* kind: 1 zero-read 2 read 3 connect 4 accept */
 static SockOp g_spend[SPEND_MAX];
@@ -120,9 +121,12 @@ static void s_WSASend(Cpu *c) { SOCK_ARG0(si); u64 bufs = ARG(1); u32 n = (u32)A
   if (bytesp) wr32(c, bytesp, (u32)r);
   if (ov) { wr64(c, ov, 0); wr64(c, ov + 8, (u64)r); int port = -1, skip = 0; u64 key = 0; if (sock_assoc(c, si, &port, &key, &skip) && !(skip & 1)) iocp_post(port, key, ov, (u32)r, 0); }
   RET(0); }
-static void s_recv(Cpu *c) { SOCK_ARG0(si); u32 len = (u32)ARG(2); u8 *p = mem_ptr(c->mem, ARG(1), len, 1); if (!p || g_socks[si].host < 0) { W->last_error = 10014; RET(~0ull); return; }
+static void s_recv(Cpu *c) { SOCK_ARG0(si); u32 len = (u32)ARG(2);
+  if (len == 0) { int m = sock_ready_mask(si); if (g_socks[si].state == 2) { RET(0); return; } W->last_error = (m & 4) ? (g_socks[si].err ? (u32)g_socks[si].err : 10061) : 10057; RET(~0ull); return; }   /* recv(s, NULL, 0): Bun probes connection state this way */
+  u8 *p = mem_ptr(c->mem, ARG(1), len, 1); if (!p || g_socks[si].host < 0) { W->last_error = 10014; RET(~0ull); return; }
   s64 r = host_net_read(g_socks[si].host, p, len); if (r == -2) { W->last_error = 10035; RET(~0ull); return; } if (r == -3) { W->last_error = 10054; RET(~0ull); return; } RET((u64)r); }
-static void s_send(Cpu *c) { SOCK_ARG0(si); u32 len = (u32)ARG(2); const u8 *p = mem_ptr(c->mem, ARG(1), len, 0); if (!p || g_socks[si].host < 0) { W->last_error = 10014; RET(~0ull); return; }
+static void s_send(Cpu *c) { SOCK_ARG0(si); u32 len = (u32)ARG(2); if (len == 0) { RET(0); return; }
+  const u8 *p = mem_ptr(c->mem, ARG(1), len, 0); if (!p || g_socks[si].host < 0) { W->last_error = 10014; RET(~0ull); return; }
   s64 r = host_net_write(g_socks[si].host, p, len); if (r < 0) { W->last_error = 10054; RET(~0ull); return; } RET((u64)r); }
 /* accept(): non-blocking; AcceptEx(listen, accept, buf, 0, local_len, remote_len, &bytes, ov) → completes through the port, buffer gets the two sockaddrs */
 static void s_accept(Cpu *c) { SOCK_ARG0(si); Sock *s = &g_socks[si]; if (s->state != 3) { W->last_error = 10022; RET(~0ull); return; }
