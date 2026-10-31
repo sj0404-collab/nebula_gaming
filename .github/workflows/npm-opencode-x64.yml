@@ -35,8 +35,8 @@ jobs:
           ls -la node/node.exe
       - name: node.exe --version / npm --version through the emulator
         run: |
-          ./emu/x64/x64run --quiet --no-stdin --max-ms 600000 --mount /tmp/x/node=C:\node /tmp/x/node/node.exe --version
-          ./emu/x64/x64run --quiet --no-stdin --max-ms 600000 --mount /tmp/x/node=C:\node /tmp/x/node/node.exe C:\node\node_modules\npm\bin\npm-cli.js --version
+          ./emu/x64/x64run --quiet --no-stdin --max-ms 600000 --mount '/tmp/x/node=C:\node' /tmp/x/node/node.exe --version
+          ./emu/x64/x64run --quiet --no-stdin --max-ms 600000 --mount '/tmp/x/node=C:\node' /tmp/x/node/node.exe 'C:\node\node_modules\npm\bin\npm-cli.js' --version
       - name: npm install opencode-ai@1.19.5 (registry metadata + tarballs over the emulated network, postinstall inside the guest)
         id: npm_install
         continue-on-error: true
@@ -45,8 +45,8 @@ jobs:
         run: |
           set +e
           start=$(date +%s)
-          ./emu/x64/x64run --quiet --no-stdin --max-ms 7200000 --mount /tmp/x/node=C:\node --mount-rw '/tmp/x/home=C:\Users\user' --mount-rw '/tmp/x/tmp=C:\tmp' --mount-rw '/tmp/x/proj=C:\nebula' \
-            /tmp/x/node/node.exe C:\node\node_modules\npm\bin\npm-cli.js install opencode-ai@1.19.5 --loglevel=notice --foreground-scripts 2>&1 | tee /tmp/x/out/npm-install.txt | tr -d '\r' | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' | grep -v '^[\\|/-]*$' | tail -c 20000
+          ./emu/x64/x64run --quiet --no-stdin --max-ms 7200000 --mount '/tmp/x/node=C:\node' --mount-rw '/tmp/x/home=C:\Users\user' --mount-rw '/tmp/x/tmp=C:\tmp' --mount-rw '/tmp/x/proj=C:\nebula' \
+            /tmp/x/node/node.exe 'C:\node\node_modules\npm\bin\npm-cli.js' install opencode-ai@1.19.5 --loglevel=notice --foreground-scripts 2>&1 | tee /tmp/x/out/npm-install.txt | tr -d '\r' | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' | grep -v '^[\\|/-]*$' | tail -c 20000
           rc=${PIPESTATUS[0]}
           echo "npm install exit code: $rc  (took $(( $(date +%s) - start )) s)"
           ls -la /tmp/x/proj/node_modules /tmp/x/proj/node_modules/opencode-ai/bin 2>/dev/null || true
@@ -59,16 +59,16 @@ jobs:
         run: |
           echo "::warning::full 'npm install opencode-ai' did not finish — see npm-install.txt; installing by tarball URL instead"
           rm -rf /tmp/x/proj/node_modules /tmp/x/proj/package*.json
-          ./emu/x64/x64run --quiet --no-stdin --max-ms 7200000 --mount /tmp/x/node=C:\node --mount-rw '/tmp/x/home=C:\Users\user' --mount-rw '/tmp/x/tmp=C:\tmp' --mount-rw '/tmp/x/proj=C:\nebula' \
-            /tmp/x/node/node.exe C:\node\node_modules\npm\bin\npm-cli.js install --omit=optional --loglevel=notice --foreground-scripts https://registry.npmjs.org/opencode-ai/-/opencode-ai-1.19.5.tgz https://registry.npmjs.org/opencode-windows-x64-baseline/-/opencode-windows-x64-baseline-1.19.5.tgz 2>&1 | tee /tmp/x/out/npm-install-fallback.txt | tr -d '\r' | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' | grep -v '^[\\|/-]*$' | tail -c 8000
+          ./emu/x64/x64run --quiet --no-stdin --max-ms 7200000 --mount '/tmp/x/node=C:\node' --mount-rw '/tmp/x/home=C:\Users\user' --mount-rw '/tmp/x/tmp=C:\tmp' --mount-rw '/tmp/x/proj=C:\nebula' \
+            /tmp/x/node/node.exe 'C:\node\node_modules\npm\bin\npm-cli.js' install --omit=optional --loglevel=notice --foreground-scripts https://registry.npmjs.org/opencode-ai/-/opencode-ai-1.19.5.tgz https://registry.npmjs.org/opencode-windows-x64-baseline/-/opencode-windows-x64-baseline-1.19.5.tgz 2>&1 | tee /tmp/x/out/npm-install-fallback.txt | tr -d '\r' | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' | grep -v '^[\\|/-]*$' | tail -c 8000
           [ "$(stat -c %s /tmp/x/proj/node_modules/opencode-ai/bin/opencode.exe)" -gt 100000000 ]
       - name: npx opencode --version (node.exe → npx → cmd.exe → node_modules\.bin\opencode.cmd → opencode.exe)
         env:
           X64_GUEST_ENV: HOME=C:\Users\user;NPM_CONFIG_UPDATE_NOTIFIER=false
           X64_LOG: '1'
         run: |
-          ./emu/x64/x64run --quiet --no-stdin --max-ms 1200000 --mount /tmp/x/node=C:\node --mount-rw '/tmp/x/home=C:\Users\user' --mount-rw '/tmp/x/proj=C:\nebula' \
-            /tmp/x/node/node.exe C:\node\node_modules\npm\bin\npx-cli.js opencode --version 2>/tmp/x/out/npx.err | tr -d '\r' | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' | tee /tmp/x/out/npx-version.txt
+          ./emu/x64/x64run --quiet --no-stdin --max-ms 1200000 --mount '/tmp/x/node=C:\node' --mount-rw '/tmp/x/home=C:\Users\user' --mount-rw '/tmp/x/proj=C:\nebula' \
+            /tmp/x/node/node.exe 'C:\node\node_modules\npm\bin\npx-cli.js' opencode --version 2>/tmp/x/out/npx.err | tr -d '\r' | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' | tee /tmp/x/out/npx-version.txt
           grep -a "CreateProcess" /tmp/x/out/npx.err | cut -c1-200
           grep -q "1.19.5" /tmp/x/out/npx-version.txt
       - name: Run the npm-installed TUI and drive it (prompt → answer → bash tool → grep tool)
@@ -80,7 +80,7 @@ jobs:
           printf 'node_modules\n' > /tmp/x/proj/.ignore; printf 'node_modules\n' > /tmp/x/proj/.gitignore   # keep ripgrep out of the 211 MB binary
           mkfifo /tmp/in.fifo
           : > /tmp/tui.txt
-          (./emu/x64/x64run --max-ms 6000000 --mount /tmp/x/node=C:\node --mount-rw '/tmp/x/proj=C:\nebula' --mount-rw '/tmp/x/home=C:\Users\user' /tmp/x/proj/node_modules/opencode-ai/bin/opencode.exe > /tmp/tui.txt 2>/tmp/tui.err 3>&2 < /tmp/in.fifo &)
+          (./emu/x64/x64run --max-ms 6000000 --mount '/tmp/x/node=C:\node' --mount-rw '/tmp/x/proj=C:\nebula' --mount-rw '/tmp/x/home=C:\Users\user' /tmp/x/proj/node_modules/opencode-ai/bin/opencode.exe > /tmp/tui.txt 2>/tmp/tui.err 3>&2 < /tmp/in.fifo &)
           (python3 emu/tools/tui_respond.py /tmp/tui.txt /tmp/in.fifo >/dev/null 2>/tmp/respond.err &)
           set +e
           python3 emu/tools/tui_drive.py /tmp/tui.txt /tmp/in.fifo /tmp/x/out; rc=$?
