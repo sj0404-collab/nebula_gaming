@@ -93,7 +93,7 @@ jobs:
           for f in 3-answer 4-bash-tool 5-grep-tool; do echo '```' >> "$GITHUB_STEP_SUMMARY"; tail -c 2500 /tmp/x/out/$f.txt 2>/dev/null >> "$GITHUB_STEP_SUMMARY" || true; echo '```' >> "$GITHUB_STEP_SUMMARY"; done
           grep -a "RESULT" -r /tmp/x/out || true
           echo "--- ~/.cache/opencode/bin:"; ls -la /tmp/x/home/.cache/opencode/bin || true
-          mkdir -p /tmp/x/out/oclog; cp -r /tmp/x/home/.local/share/opencode/log/. /tmp/x/out/oclog/ 2>/dev/null || true
+          mkdir -p /tmp/x/out/oclog /tmp/x/out/npm-logs; cp -r /tmp/x/home/.local/share/opencode/log/. /tmp/x/out/oclog/ 2>/dev/null || true; cp /tmp/x/home/npm-cache/_logs/*.log /tmp/x/out/npm-logs/ 2>/dev/null || true
           [ "$rc" -ne 3 ]
       - uses: actions/upload-artifact@v4
         if: always()

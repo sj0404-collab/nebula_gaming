@@ -108,6 +108,15 @@ The full `npm install opencode-ai` (resolving all 13 platform packages) addition
 metadata inside the guest, which needs more than the sandbox's 2 GB — `.github/workflows/npm-opencode-x64.yml` runs
 that form on a 16 GB runner (with the tarball-URL form as a fallback) and then drives the npm-installed TUI.
 
+On the GitHub runner (`npm-opencode-x64.yml`, run 41231346438): the tarball-URL install finished in 19 min
+(`added 2 packages`, postinstall OK), `npx opencode --version` → `1.19.5` in 2 min, and the npm-installed TUI answered
+`123*457 → 56211`, ran the bash tool and found `STARLIGHT_TOKEN` in `beta.c` (`RESULT first_frame=1 answer=1 bash_tool=1 grep_tool=1`).
+The full `npm install opencode-ai` got through all 13 packuments but hit `ECONNRESET` on the tarball after 20 min — it
+is kept as the first attempt (the npm debug log is now in the artifact), the URL form is the fallback.
+
+![npm-installed opencode answering](screenshots/npm-opencode-x64-answer.png)
+![npm-installed opencode using tools](screenshots/npm-opencode-x64-tools.png)
+
 What it took (all in `emu/x64/`):
 
 * **write-back mounts** (`--mount-rw host=guest`): files the guest creates or modifies are written to the host folder
