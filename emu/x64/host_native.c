@@ -89,3 +89,13 @@ void host_net_close(int s) { close(s); }
 int host_net_name(int s, int peer, u8 *ip4, int *port) {
   struct sockaddr_in a; socklen_t al = sizeof a; int r = peer ? getpeername(s, (struct sockaddr *)&a, &al) : getsockname(s, (struct sockaddr *)&a, &al);
   if (r < 0) return 0; if (ip4) memcpy(ip4, &a.sin_addr, 4); if (port) *port = ntohs(a.sin_port); return 1; }
+/* GPU back end: the native runner has no GPU; draw calls stop honestly in the D3D11 layer */
+int host_gfx_init(void) { return 0; }
+int host_gfx_shader(int kind, const char *glsl) { (void)kind; (void)glsl; return -1; }
+void host_gfx_buffer(int id, const u8 *data, u32 len, u32 bind) { (void)id; (void)data; (void)len; (void)bind; }
+void host_gfx_texture(int id, int w, int h, int fmt, const u8 *px, u32 pitch) { (void)id; (void)w; (void)h; (void)fmt; (void)px; (void)pitch; }
+void host_gfx_clear(int tex_id, const float *rgba) { (void)tex_id; (void)rgba; }
+void host_gfx_clear_depth(int tex_id, float depth) { (void)tex_id; (void)depth; }
+void host_gfx_draw(const u32 *cmd) { (void)cmd; }
+void host_gfx_readback(int tex_id, u32 *bgra) { (void)tex_id; (void)bgra; }
+void host_gfx_free(int id) { (void)id; }

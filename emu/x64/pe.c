@@ -233,9 +233,11 @@ int pe_inspect(const u8 *bytes, size_t len, char *out, size_t out_sz) {
   else if (is_dll) { verdict = "unsupported"; why = "DLL, not an executable"; }
   else if (is_clr) { verdict = "unsupported"; why = ".NET executable — needs the CLR"; }
   else {
-    int heavy = 0; for (int i = 0; i < x.ndll; i++) { const char *d = x.dlls[i];
+    int heavy = 0, d3d11 = 0; for (int i = 0; i < x.ndll; i++) { const char *d = x.dlls[i];
+      if (!e_stricmp(d, "d3d11.dll") || !e_stricmp(d, "dxgi.dll")) { d3d11 = 1; continue; }   /* Direct3D 11 has a (partial) WebGL2 translation layer */
       if (!e_strncmp(d, "d3d", 3) || !e_strncmp(d, "D3D", 3) || !e_stricmp(d, "opengl32.dll") || !e_stricmp(d, "dxgi.dll") || !e_stricmp(d, "vulkan-1.dll") || !e_stricmp(d, "xinput1_4.dll") || !e_stricmp(d, "dsound.dll") || !e_stricmp(d, "xaudio2_9.dll") || !e_stricmp(d, "mono-2.0-bdwgc.dll") || !e_stricmp(d, "UnityPlayer.dll") || !e_stricmp(d, "GameAssembly.dll")) heavy = 1; }
-    if (heavy) { verdict = "unsupported"; why = "needs GPU/audio subsystems (Direct3D, OpenGL, Vulkan, XAudio, Unity/Mono) that have no wasm64 implementation here"; }
+    if (heavy) { verdict = "unsupported"; why = "needs GPU/audio subsystems (Direct3D 9/12, OpenGL, Vulkan, XAudio, Unity/Mono) that have no wasm64 implementation here"; }
+    else if (d3d11) { verdict = "partial"; why = "Direct3D 11 through the WebGL2 translation layer (device, swap chain, buffers, textures, SM4/5 vertex + pixel shaders, Draw/DrawIndexed); compute/geometry/tessellation and many state paths are not implemented and stop with the method name"; }
     else if (x.unknown == 0 && x.priv) { verdict = "partial"; why = "all system imports have shims; the program also imports its own DLLs, which are loaded from the virtual disk if you add them next to the exe"; }
     else if (x.unknown == 0) { verdict = "likely"; why = "all imports have shims"; }
     else if (x.unknown * 5 <= x.n * 2) { verdict = "partial"; why = "most imports have shims (no network/GPU/audio); the program runs until the first unimplemented call"; }

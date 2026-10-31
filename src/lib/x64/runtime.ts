@@ -1,3 +1,4 @@
+import { WebGLGfx } from './gfx';
 // Nebula x64 — JS host for the wasm64 x86-64 emulator (emu/x64).  Pointers/sizes cross the boundary as BigInt (memory64).
 export type RunStatus = 'idle' | 'running' | 'waiting-stdin' | 'exited' | 'fault' | 'break' | 'stopped';
 export interface VfsEntry { path: string; size: number; dir: boolean; written: boolean }
@@ -53,6 +54,10 @@ export class X64Runtime {
   onLog: ((text: string) => void) | null = null;
   onStdinWait: ((waiting: boolean) => void) | null = null;
   private waitingStdin = false;
+  readonly gfx = new WebGLGfx();
+  private lastFrame: { p: bigint; w: number; h: number } | null = null;
+  /** the most recently presented window contents (still valid after the program exits) — lets a re-mounted canvas show the final frame */
+  lastPresented(): { px: Uint8Array; w: number; h: number } | null { const f = this.lastFrame; return f && this.ex ? { px: this.bytesAt(f.p, f.w * f.h * 4), w: f.w, h: f.h } : null; }
 
   async init(url = '/x64/nebula_x64.wasm'): Promise<void> {
     if (this.ex) return;
@@ -68,8 +73,18 @@ export class X64Runtime {
         },
         host_now_ms: () => performance.now(),
         host_wall_ms: () => Date.now(),
-        host_present: (p: bigint, w: number, h: number) => { this.frames++; this.onPresent?.(this.bytesAt(p, w * h * 4), w, h); },
+        host_present: (p: bigint, w: number, h: number) => { this.frames++; this.lastFrame = { p, w, h }; this.onPresent?.(this.bytesAt(p, w * h * 4), w, h); },
         host_math: (op: number, a: number, b: number) => MATH[op] ? MATH[op](a, b) : 0,
+        // Direct3D 11 layer → WebGL2 (src/lib/x64/gfx.ts)
+        host_gfx_init: () => { this.gfx.log = (t) => this.onLog?.(t); return this.gfx.init(); },
+        host_gfx_shader: (kind: number, glsl: bigint) => this.gfx.shader(kind, this.cstr(glsl)),
+        host_gfx_buffer: (id: number, data: bigint, len: number, bind: number) => this.gfx.buffer(id, data && len ? this.bytesAt(data, len).slice() : null, bind),
+        host_gfx_texture: (id: number, w: number, h: number, fmt: number, px: bigint, pitch: number) => this.gfx.texture(id, w, h, fmt, px ? this.bytesAt(px, (pitch || w * 16) * h) : null, pitch),
+        host_gfx_clear: (id: number, rgba: bigint) => this.gfx.clear(id, new Float32Array(this.ex!.memory.buffer, Number(rgba), 4)),
+        host_gfx_clear_depth: (id: number, depth: number) => this.gfx.clearDepth(id, depth),
+        host_gfx_draw: (cmd: bigint) => this.gfx.draw(new Uint32Array(this.ex!.memory.buffer, Number(cmd), 160)),
+        host_gfx_readback: (id: number, out: bigint) => { const t = this.gfx.size(id); if (t) this.gfx.readback(id, this.bytesAt(out, t.w * t.h * 4)); },
+        host_gfx_free: (id: number) => this.gfx.free(id),
       },
     };
     const { instance } = await WebAssembly.instantiate(bytes, imports);
@@ -100,7 +115,7 @@ export class X64Runtime {
     const p = this.putCached(bytes);
     const rc = ex.x64_load(p, BigInt(bytes.length), this.putStr(name), this.putStr(cmdline ?? name));
     if (rc !== 0) { this.status = 'fault'; return this.cstr(ex.x64_report()) || `loader error ${rc}`; }
-    this.status = 'running'; this.running = true; this.t0 = performance.now(); this.frames = 0;
+    this.status = 'running'; this.running = true; this.t0 = performance.now(); this.frames = 0; this.lastFrame = null;
     this.schedule();
     return null;
   }

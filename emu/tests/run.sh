@@ -45,6 +45,11 @@ print(' '.join(f.split('/')[-1][:-4]+':'+str(px(f)) for f in sorted(glob.glob('/
 PY
 )"
 rm -f /tmp/frame_*.ppm
+echo "[1f2] d3d11tri.exe (DXBC → GLSL translation; the native runner has no GPU, so Draw must stop honestly)"
+out=$(X64_LOG=1 $X --no-stdin --max-ms 10000 tests/d3d11tri.exe 2>&1 || true)
+check "vs translated"  "vertex shader .*: 1432 bytes of DXBC → .* bytes of GLSL ES 3.00" "$out"
+check "ps translated"  "pixel shader .*: 576 bytes of DXBC → .* bytes of GLSL ES 3.00" "$out"
+check "honest draw"    "D3D11 Draw: this host has no GPU back end" "$out"
 echo "[1g] uvpipe.exe (libuv-style child stdout: named pipe + IOCP zero-read + CreateProcess)"
 out=$($X --quiet --no-stdin --max-ms 20000 tests/uvpipe.exe 2>&1 || true)
 check "zero-read ready" "GQCS -> 1 bytes=0 key=42" "$out"

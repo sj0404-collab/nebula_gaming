@@ -26,3 +26,22 @@ int host_net_avail(int s) { (void)s; return 0; }
 void host_net_shutdown(int s, int how) { (void)s; (void)how; }
 void host_net_close(int s) { (void)s; }
 int host_net_name(int s, int peer, u8 *ip4, int *port) { (void)s; (void)peer; (void)ip4; (void)port; return 0; }
+/* GPU back end (WebGL2 in src/lib/x64/gfx.ts) */
+__attribute__((import_module("env"), import_name("host_gfx_init"))) int js_gfx_init(void);
+__attribute__((import_module("env"), import_name("host_gfx_shader"))) int js_gfx_shader(int kind, const char *glsl);
+__attribute__((import_module("env"), import_name("host_gfx_buffer"))) void js_gfx_buffer(int id, const u8 *data, u32 len, u32 bind);
+__attribute__((import_module("env"), import_name("host_gfx_texture"))) void js_gfx_texture(int id, int w, int h, int fmt, const u8 *px, u32 pitch);
+__attribute__((import_module("env"), import_name("host_gfx_clear"))) void js_gfx_clear(int tex_id, const float *rgba);
+__attribute__((import_module("env"), import_name("host_gfx_clear_depth"))) void js_gfx_clear_depth(int tex_id, float depth);
+__attribute__((import_module("env"), import_name("host_gfx_draw"))) void js_gfx_draw(const u32 *cmd);
+__attribute__((import_module("env"), import_name("host_gfx_readback"))) void js_gfx_readback(int tex_id, u32 *bgra);
+__attribute__((import_module("env"), import_name("host_gfx_free"))) void js_gfx_free(int id);
+int host_gfx_init(void) { return js_gfx_init(); }
+int host_gfx_shader(int kind, const char *glsl) { return js_gfx_shader(kind, glsl); }
+void host_gfx_buffer(int id, const u8 *data, u32 len, u32 bind) { js_gfx_buffer(id, data, len, bind); }
+void host_gfx_texture(int id, int w, int h, int fmt, const u8 *px, u32 pitch) { js_gfx_texture(id, w, h, fmt, px, pitch); }
+void host_gfx_clear(int tex_id, const float *rgba) { js_gfx_clear(tex_id, rgba); }
+void host_gfx_clear_depth(int tex_id, float depth) { js_gfx_clear_depth(tex_id, depth); }
+void host_gfx_draw(const u32 *cmd) { js_gfx_draw(cmd); }
+void host_gfx_readback(int tex_id, u32 *bgra) { js_gfx_readback(tex_id, bgra); }
+void host_gfx_free(int id) { js_gfx_free(id); }

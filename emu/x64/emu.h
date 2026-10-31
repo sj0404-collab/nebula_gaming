@@ -39,6 +39,17 @@ void   host_net_shutdown(int s, int how);
 void   host_net_close(int s);
 int    host_net_name(int s, int peer, u8 *ip4, int *port);             /* local (0) / peer (1) address; 1 ok */
 
+/* GPU back end for the D3D11 layer (browser: WebGL2 in src/lib/x64/gfx.ts; native runner: none — returns 0 from host_gfx_init). */
+int    host_gfx_init(void);                                            /* 1 = draws are possible */
+int    host_gfx_shader(int kind, const char *glsl);                    /* kind 0 fragment / 1 vertex; host shader id >= 0 or -1 (error logged on fd 3) */
+void   host_gfx_buffer(int id, const u8 *data, u32 len, u32 bind);     /* (re)upload a buffer object; bind = D3D11_BIND_* flags (index buffers need their own GL target) */
+void   host_gfx_texture(int id, int w, int h, int fmt, const u8 *px, u32 pitch);   /* (re)upload a texture; px NULL → allocate (render target / depth) */
+void   host_gfx_clear(int tex_id, const float *rgba);                  /* clear a colour target */
+void   host_gfx_clear_depth(int tex_id, float depth);                  /* clear the depth buffer of a target */
+void   host_gfx_draw(const u32 *cmd);                                  /* one draw: GFX_CMD_WORDS words, layout in gfx_cmd.h */
+void   host_gfx_readback(int tex_id, u32 *bgra);                       /* GPU target → BGRA rows, top row first */
+void   host_gfx_free(int id);
+
 /* ---------- guest memory ---------- */
 #define MAX_REGIONS 256
 typedef struct { u64 base, size; u8 *host; const char *name; u32 prot; } Region;

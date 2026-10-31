@@ -36,6 +36,7 @@ const results = [];
 let page;
 const errors = [];
 async function test(name, fn) {
+  if (process.env.E2E_GREP && !name.includes(process.env.E2E_GREP) && !name.startsWith('desktop loads')) return;   // run a subset locally: E2E_GREP=d3d11 node e2e/run.mjs
   const t = Date.now();
   try { await fn(); results.push({ name, ok: true, ms: Date.now() - t }); console.log(`  ✓ ${name} (${Date.now() - t} ms)`); }
   catch (e) {
@@ -275,6 +276,32 @@ await test('x64: NebulaStrike.exe (real Win32 GDI PE32+) renders frames through 
   expect(await w.locator('[data-x64-status]').getAttribute('data-x64-status') === 'stopped', 'stop failed');
   await closeAll();
 });
+await test('x64: d3d11tri.exe — Direct3D 11 draw calls rendered by WebGL2 (DXBC → GLSL): triangle + indexed quad visible on the swap chain', async () => {
+  const w = await x64Open();
+  await w.locator('[data-x64-exe="d3d11tri.exe"]').click();
+  await w.locator('[data-x64-run]').click();
+  await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout: 60_000 });
+  const con = await w.locator('[data-x64-console]').innerText();
+  expect(/frame 2: triangle \+ quad drawn and presented/.test(con) && /d3d11tri ok/.test(con), 'd3d11tri did not finish: ' + con.slice(-400));
+  await w.locator('[data-x64-tab="screen"]').click(); await sleep(500);
+  const canvas = w.locator('[data-x64-screen]');
+  const hist = await canvas.evaluate((c) => {
+    const gl = c.getContext('webgl2') || c.getContext('webgl'); const px = new Uint8Array(c.width * c.height * 4); gl.readPixels(0, 0, c.width, c.height, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    const h = { yellow: 0, red: 0, green: 0, blue: 0, clear: 0, total: 0 };
+    for (let i = 0; i < px.length; i += 4) {
+      const r = px[i], g = px[i + 1], b = px[i + 2]; h.total++;
+      if (r > 200 && g > 200 && b < 80) h.yellow++; else if (r > 150 && g < 100 && b < 100) h.red++; else if (g > 150 && r < 100 && b < 100) h.green++;
+      else if (b > 150 && r < 100 && g < 100) h.blue++; else if (Math.abs(r - 26) < 12 && Math.abs(g - 26) < 12 && Math.abs(b - 77) < 14) h.clear++;
+    }
+    return h;
+  });
+  expect(hist.yellow > 50, 'indexed yellow quad missing: ' + JSON.stringify(hist));
+  expect(hist.red > 50 && hist.green > 50 && hist.blue > 50, 'triangle corners (red/green/blue) missing: ' + JSON.stringify(hist));
+  expect(hist.clear > hist.total * 0.2, 'clear colour (0.1,0.1,0.3) missing: ' + JSON.stringify(hist));
+  await page.screenshot({ path: resolve(SHOTS, 'x64-d3d11tri.png') });
+  await closeAll();
+});
+
 await test('x64: real third-party binaries — busybox-w32 awk/sha256sum and PuTTY plink -V run with correct output', async () => {
   const w = await x64Open();
   await w.locator('[data-x64-exe="busybox64.exe"]').waitFor({ timeout: 30_000 });
