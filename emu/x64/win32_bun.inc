@@ -17,7 +17,7 @@ static int nt_object_path(Cpu *c, u64 oa, char *out, size_t cap) {
   if (!e_strnicmp_(n, "\\Device\\NamedPipe\\", 18)) { e_snprintf(out, cap, "\\\\.\\pipe\\%s", n + 18); return 1; }
   if (!e_strnicmp_(n, "\\??\\", 4)) n += 4; else if (!e_strnicmp_(n, "\\DosDevices\\", 12)) n += 12;
   if (!e_strnicmp_(n, "\\\\?\\", 4)) n += 4;
-  if (root && root != ~0ull) { int fd = handle_fd(root); const char *base = fd > 0 ? vfs_fd_path(fd) : 0; if (!base) return 0;
+  if (root && root != ~0ull && !((n[0] && n[1] == ':') || n[0] == '\\')) { int fd = handle_fd(root); const char *base = fd > 0 ? vfs_fd_path(fd) : 0; if (!base) return 0;   /* Bun's deleteTree passes RootDirectory together with an absolute name: the name wins */
     if (!*n) e_snprintf(out, cap, "%s", base); else { size_t bl = e_strlen(base); e_snprintf(out, cap, "%s%s%s", base, bl && (base[bl - 1] == '\\' || base[bl - 1] == '/') ? "" : "\\", n); } return 1; }
   if (!e_strnicmp_(n, "\\Device\\Null", 12) || !e_strnicmp_(n, "\\??\\NUL", 7)) { e_snprintf(out, cap, "NUL"); return 1; }
   if (!*n) return 0;
@@ -40,7 +40,7 @@ static void s_NtCreateFile(Cpu *c) {
   int acc = ((access & 0x80000001u) ? 1 : 0) | ((access & 0x40000006u) ? 2 : 0); if (!acc || st == 2) acc = st == 2 ? 1 : 1;
   if (st == 2) wdisp = 3;
   int fd = vfs_open(path, acc, wdisp, (access & 4) && !(access & 0x40000002u));
-  if (fd < 0) { u32 ns = fd == -2 ? 0xC0000034u : fd == -17 ? 0xC0000035u : fd == -21 ? 0xC00000BAu : fd == -24 ? 0xC000009Au : 0xC0000022u; nt_iosb(c, iosb, ns, 0); RET(ns); return; }
+  if (fd < 0) { u32 ns = fd == -2 ? 0xC0000034u : fd == -17 ? 0xC0000035u : fd == -21 ? 0xC00000BAu : fd == -24 ? 0xC000009Au : 0xC0000022u; e_log("[x64] NtCreateFile(%s) access=0x%x disp=%u opts=0x%x -> 0x%x (st=%d)\n", path, access, disp, opts, ns, st); nt_iosb(c, iosb, ns, 0); RET(ns); return; }
   u64 info = st == 0 ? 2 : (disp == 4 || disp == 5) ? 3 : disp == 0 ? 0 : 1;   /* FILE_CREATED / OVERWRITTEN / SUPERSEDED / OPENED */
   wr64(c, hp, H_FILE_BASE + (u64)fd); nt_iosb(c, iosb, 0, info); RET(0);
 }

@@ -127,6 +127,9 @@ What it took (all in `emu/x64/`):
   the old cap `VirtualAlloc` started failing at ≈ 300 MB of JS heap (`npm rebuild` died with "JavaScript heap out of memory").
 * `PATH` must contain the Node.js directory, as the Windows installer arranges: `x64run --env 'PATH=C:\node;C:\Windows\System32;…'`
   (`--env` takes one raw `NAME=value`; `X64_GUEST_ENV` splits on `;`, which PATH itself contains).
+* `NtCreateFile` with `RootDirectory` **and** an absolute name (Bun's `deleteTree`, used by `fs.rm`/`rmSync` and by
+  Effect's `makeTempDirectoryScoped`): the name wins.  Before, the path was doubled (`C:\x\C:\x\sub` → NOT_FOUND) and the
+  grep tool's ripgrep download failed at the very end with "environment error (FileSystem.makeTempDirectoryScoped)".
 * `C:\nebula` became a real directory node (it was implicit = "the cwd", so `lstat` failed after a `cd`).
 
 ### Speed
