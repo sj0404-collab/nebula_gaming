@@ -15,7 +15,7 @@ rules = [
 ]
 counts = {k: 0 for k, _ in rules}
 pos = 0
-log = open('/home/user/.cache/respond.log', 'ab', buffering=0)
+log = open(os.environ.get('TUI_RESPOND_LOG', '/tmp/respond.log'), 'ab', buffering=0)
 while True:
     try:
         with open(out_path, 'rb') as f:

@@ -1,0 +1,11 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "pollinations": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Pollinations (free)",
+      "options": { "baseURL": "https://text.pollinations.ai/openai", "apiKey": "free" },
+      "models": { "openai": { "name": "openai (pollinations)" } }
+    }
+  }
+}

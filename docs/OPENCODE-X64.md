@@ -52,3 +52,11 @@ bun  -e "Bun.spawnSync([...cmd,'/c','echo hi from bun'])"                   → 
 bun  -e "Bun.spawn([...], {stdout:'pipe'})"                                 → "async hi\r\n"
 ```
 `emu/tests/uvpipe.exe` replays the sequence in plain C and is part of `run.sh`.
+
+## Running it on GitHub instead of a laptop
+
+`.github/workflows/opencode-x64.yml` (manual, weekly, and on `v*` tags) builds the native runner on `ubuntu-latest`,
+downloads the unmodified `opencode-windows-x64-baseline` 1.19.5 from npm, starts the TUI through the emulator with
+`emu/tools/tui_respond.py` answering the terminal queries, and `emu/tools/tui_drive.py` types a prompt, waits for the
+answer, then asks the agent to run `echo nebula-bash-ok` through its bash tool.  Terminal screenshots of every stage are
+uploaded as the `opencode-tui-screenshots` artifact and the last screens land in the job summary.

@@ -1,0 +1,63 @@
+name: opencode TUI inside the x64 emulator (long run)
+
+# The opencode agent (a 211 MB Windows/Bun executable) running on the Nebula x64 emulator takes ~10 minutes to its
+# first frame and ~5 minutes per LLM answer, and needs >1 GB RAM — too much for a laptop-class sandbox, fine for a
+# GitHub runner.  Produces terminal screenshots as artifacts and a summary.  Manual + weekly + on tags.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 4 * * 1'
+  push:
+    tags: ['v*']
+
+jobs:
+  opencode-tui:
+    name: opencode 1.19.5 TUI · first frame · LLM answer · bash tool
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the native runner
+        run: ./emu/x64/nbuild.sh && ./emu/x64/x64run --inspect emu/tests/hello.exe | head -c 300
+      - name: Tools (pyte + pillow for terminal rendering, DejaVu font)
+        run: |
+          sudo apt-get install -y -q fonts-dejavu-core >/dev/null || true
+          python3 -m pip install -q pyte pillow
+      - name: Download opencode-windows-x64-baseline 1.19.5 (npm registry, unmodified)
+        run: |
+          mkdir -p /tmp/oc && cd /tmp/oc
+          curl -sSL -o oc.tgz https://registry.npmjs.org/opencode-windows-x64-baseline/-/opencode-windows-x64-baseline-1.19.5.tgz
+          tar xzf oc.tgz && ls -la package/bin/opencode.exe
+      - name: Version check (opencode.exe --version through the emulator)
+        run: |
+          ./emu/x64/x64run --quiet --no-stdin --max-ms 600000 /tmp/oc/package/bin/opencode.exe --version
+      - name: Run the TUI and drive it (prompt → answer → bash tool)
+        env:
+          X64_GUEST_ENV: OPENCODE_DISABLE_MODELS_FETCH=1;OPENCODE_DISABLE_AUTOUPDATE=1;OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER=1;OPENCODE_DISABLE_FFF=1
+          X64_LOG: '1'
+          TUI_RESPOND_LOG: /tmp/respond.log
+        run: |
+          mkdir -p /tmp/out /tmp/home && cp -r emu/tools/opencode-home/. /tmp/home/
+          mkfifo /tmp/in.fifo
+          : > /tmp/tui.txt
+          (./emu/x64/x64run --max-ms 6000000 --mount '/tmp/home=C:\Users\user' /tmp/oc/package/bin/opencode.exe > /tmp/tui.txt 2>/tmp/tui.err 3>&2 < /tmp/in.fifo &)
+          (python3 emu/tools/tui_respond.py /tmp/tui.txt /tmp/in.fifo >/dev/null 2>/tmp/respond.err &)
+          set +e
+          python3 emu/tools/tui_drive.py /tmp/tui.txt /tmp/in.fifo /tmp/out; rc=$?
+          set -e
+          pkill -f x64run || true
+          echo "drive exit code: $rc"
+          echo "### opencode TUI in the x64 emulator" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"; tail -c 2500 /tmp/out/3-answer.txt 2>/dev/null >> "$GITHUB_STEP_SUMMARY" || true; echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"; tail -c 2500 /tmp/out/4-bash-tool.txt 2>/dev/null >> "$GITHUB_STEP_SUMMARY" || true; echo '```' >> "$GITHUB_STEP_SUMMARY"
+          grep -a "RESULT" -r /tmp/out || true
+          tail -c 3000 /tmp/tui.err || true
+          [ "$rc" -ne 3 ]
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: opencode-tui-screenshots
+          path: |
+            /tmp/out/
+            /tmp/tui.err
+            /tmp/respond.log
