@@ -59,5 +59,10 @@ done_turn = lambda s: len(re.findall(r'▣\s+Build · [^\n·]+ · \d+(?:\.\d+)?[
 tool = wait_for(lambda s: s.count('nebula-bash-ok') >= 3 or done_turn(s), 25 * 60, 'bash tool output')
 if tool: wait_for(done_turn, 10 * 60, 'bash turn finished')
 snapshot('4-bash-tool')
-print(f'RESULT first_frame=1 answer={int(got)} bash_tool={int(tool)}', flush=True)
+# 4. grep tool: opencode runs ripgrep (rg.exe, another child process) over the mounted project
+send(b'Which file in this project contains the word STARLIGHT_TOKEN? Use the grep tool, then answer with the file name only.'); time.sleep(10); send(b'\r')
+grep_ok = wait_for(lambda s: 'beta.c' in s, 25 * 60, 'grep tool found beta.c')
+if grep_ok: wait_for(lambda s: len(re.findall(r'▣\s+Build · [^\n·]+ · \d+(?:\.\d+)?[ms]', s)) >= 3, 10 * 60, 'grep turn finished')
+snapshot('5-grep-tool')
+print(f'RESULT first_frame=1 answer={int(got)} bash_tool={int(tool)} grep_tool={int(grep_ok)}', flush=True)
 sys.exit(0 if got else 2)
