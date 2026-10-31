@@ -70,9 +70,11 @@ static u64 open_kobj_handle(Cpu *c, int kind, const char *name, int inherit) {
   W->last_error = 2; return 0;
 }
 
+static int net_select_ready(ThreadCtx *x);   /* win32_net.inc: any socket of a parked select()/WSAPoll() ready? */
 /* ---- is a (possibly non-current) thread runnable? clears nothing; the retried shim completes the wait ---- */
 static int ctx_runnable(Win32 *w, ThreadCtx *x, int tid) {
   switch (x->block) {
+    case BLOCK_SELECT: return deadline_passed(x->wait_deadline) || net_select_ready(x);
     case BLOCK_NONE: return 1;
     case BLOCK_STDIN: return vfs_stdin_available() != 0;
     case BLOCK_PROC: { if (!x->nblock_pids) return 1; for (int i = 0; i < x->nblock_pids; i++) { int code; if (proc_state(x->block_pids[i], &code) != 1) return 1; } return 0; }
@@ -104,6 +106,7 @@ void w32_threads_summary(Win32 *w, int *stdin_wait, int *sleeping, double *best_
     if (x->block == BLOCK_NONE) rem = 0;
     else if (x->block == BLOCK_STDIN) *stdin_wait = 1;
     else if (x->block == BLOCK_SLEEP) { if (x->sleeping) { rem = x->sleep_until_ms - now; *sleeping = 1; } else rem = 0; }
+    else if (x->block == BLOCK_SELECT) { rem = 2; if (x->wait_deadline >= 0 && x->wait_deadline - now < rem) rem = x->wait_deadline - now; *sleeping = 1; }   /* socket readiness comes from the host: poll every 2 ms */
     else if (x->block >= BLOCK_OBJ) {
       if (x->wait_deadline >= 0) { rem = x->wait_deadline - now; *sleeping = 1; }
       if (x->block == BLOCK_OBJ) for (int j = 0; j < x->nwobj; j++) { if (x->wobj_kind[j] == 3) *stdin_wait = 1; if (x->wobj_kind[j] != 2) continue; KObj *k = kobj_get(x->wobj_idx[j]); if (k && k->kind == KO_TIMER && k->due_ms >= 0) { double r2 = k->due_ms - now; if (r2 < 0) r2 = 0; if (rem < 0 || r2 < rem) rem = r2; *sleeping = 1; } }

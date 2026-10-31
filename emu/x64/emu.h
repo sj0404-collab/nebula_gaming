@@ -190,7 +190,7 @@ int   w32_net_pending(void);           /* win32_net.inc: parked socket operation
 void  w32_sock_ref(int idx, int delta); /* win32_net.inc: refcount of a socket table entry (closed at 0) */
 int   vfs_fd_kobj(int fd);             /* idx or -1 */
 /* ---- process table (api.c) ---- */
-enum { BLOCK_NONE = 0, BLOCK_STDIN, BLOCK_PROC, BLOCK_PIPE_R, BLOCK_PIPE_W, BLOCK_SLEEP, BLOCK_OBJ, BLOCK_CS, BLOCK_SRW, BLOCK_CV, BLOCK_ADDR };
+enum { BLOCK_NONE = 0, BLOCK_STDIN, BLOCK_PROC, BLOCK_PIPE_R, BLOCK_PIPE_W, BLOCK_SLEEP, BLOCK_OBJ, BLOCK_CS, BLOCK_SRW, BLOCK_CV, BLOCK_ADDR, BLOCK_SELECT };
 int  proc_main_thread_kobj(int pid);
 Win32 *proc_w32_at(int i);                          /* iterate live processes (NULL when i is past the table) */
 int  proc_spawn(Win32 *parent, const char *exe_path, const char *cmdline, const int std_fd[3]);   /* returns pid or -errno */

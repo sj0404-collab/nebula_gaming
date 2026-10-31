@@ -211,6 +211,52 @@ static void net_poll(void) {
       spend_finish(o, 0, 0, 0); continue; }
   }
 }
+/* ---- select() / WSAPoll(): readiness polling (libuv's slow-poll thread uses select on providers without AFD fast poll; Bun's uSockets sits on uv_poll) ----
+ * mask bits: 1 readable (data / EOF / accept pending), 2 writable (connected), 4 exceptional (connect failed) */
+static int sock_ready_mask(int si) {
+  Sock *s = &g_socks[si]; if (!s->used) return 4; int m = 0;
+  if (s->state == 1 && s->host >= 0) { int st = host_net_status(s->host); if (st > 0) s->state = 2; else if (st < 0) { s->state = 4; s->err = -st; } }
+  if (s->state == 4) m |= 4 | 1;
+  if (s->state == 2) { m |= 2; if (s->host >= 0 && host_net_readable(s->host)) m |= 1; }
+  if (s->state == 3 && s->host >= 0 && host_net_readable(s->host)) m |= 1;
+  return m;
+}
+static int net_select_ready(ThreadCtx *x) { for (int i = 0; i < x->nwobj; i++) if (sock_ready_mask(x->wobj_idx[i]) & x->wobj_kind[i]) return 1; return 0; }
+/* fd_set: u32 fd_count; u64 fd_array[64] */
+static void sel_collect(Cpu *c, u64 set, int bit, int *n, int *socks, int *masks) {
+  if (!set) return; u32 cnt = rd32(c, set); if (cnt > 64) cnt = 64;
+  for (u32 i = 0; i < cnt; i++) { int si = sock_of(c, rd64(c, set + 8 + 8 * i)); if (si < 0) continue; int k; for (k = 0; k < *n; k++) if (socks[k] == si) break; if (k == *n) { if (*n >= 64) return; socks[k] = si; masks[k] = 0; (*n)++; } masks[k] |= bit; }
+}
+static int sel_writeback(Cpu *c, u64 set, int bit) {
+  if (!set) return 0; u32 cnt = rd32(c, set); if (cnt > 64) cnt = 64; u32 out = 0;
+  for (u32 i = 0; i < cnt; i++) { u64 h = rd64(c, set + 8 + 8 * i); int si = sock_of(c, h); if (si >= 0 && (sock_ready_mask(si) & bit)) wr64(c, set + 8 + 8 * out++, h); }
+  wr32(c, set, out); return (int)out;
+}
+/* select(nfds, readfds, writefds, exceptfds, timeout) */
+static void s_select(Cpu *c) {
+  Win32 *w = W; u64 rs = ARG(1), ws = ARG(2), es = ARG(3), tv = ARG(4);
+  int n = 0, socks[64], masks[64]; sel_collect(c, rs, 1, &n, socks, masks); sel_collect(c, ws, 2, &n, socks, masks); sel_collect(c, es, 4, &n, socks, masks);
+  if (!n) { w->last_error = 10022; wait_end(w); RET(~0ull); return; }
+  u32 ms = 0xffffffffu; if (tv) { s64 sec = (s32)rd32(c, tv), us = (s32)rd32(c, tv + 4); s64 t = sec * 1000 + us / 1000; ms = t < 0 ? 0 : t > 0xfffffffell ? 0xfffffffeu : (u32)t; }
+  int any = 0; for (int i = 0; i < n; i++) if (sock_ready_mask(socks[i]) & masks[i]) any = 1;
+  double dl = wait_begin(c, ms);
+  if (!any && !deadline_passed(dl)) { w->nwobj = n; for (int i = 0; i < n; i++) { w->wobj_idx[i] = socks[i]; w->wobj_kind[i] = masks[i]; } park(c, BLOCK_SELECT); return; }
+  wait_end(w); int total = sel_writeback(c, rs, 1) + sel_writeback(c, ws, 2) + sel_writeback(c, es, 4); RET((u64)total);
+}
+static void s___WSAFDIsSet(Cpu *c) { u64 set = ARG(1); if (!set) { RET(0); return; } u32 cnt = rd32(c, set); if (cnt > 64) cnt = 64; for (u32 i = 0; i < cnt; i++) if (rd64(c, set + 8 + 8 * i) == ARG(0)) { RET(1); return; } RET(0); }
+/* WSAPoll(fds, n, timeout_ms): WSAPOLLFD { SOCKET fd; short events; short revents } = 16 B; POLLRDNORM 0x100 POLLWRNORM 0x10 POLLERR 1 POLLHUP 2 POLLNVAL 4 */
+static void s_WSAPoll(Cpu *c) {
+  Win32 *w = W; u64 fds = ARG(0); u32 nf = (u32)ARG(1); s32 to = (s32)ARG(2); if (!fds || !nf) { w->last_error = 10022; wait_end(w); RET(~0ull); return; }
+  int n = 0, socks[64], masks[64], any = 0;
+  for (u32 i = 0; i < nf && n < 64; i++) { u64 h = rd64(c, fds + 16 * i); u16 ev = rd16(c, fds + 16 * i + 8); int si = sock_of(c, h); if (si < 0) { any = 1; continue; } int m = 4; if (ev & 0x300) m |= 1; if (ev & 0x10) m |= 2; socks[n] = si; masks[n] = m; n++; if (sock_ready_mask(si) & m) any = 1; }
+  double dl = wait_begin(c, to < 0 ? 0xffffffffu : (u32)to);
+  if (!any && n && !deadline_passed(dl)) { w->nwobj = n; for (int i = 0; i < n; i++) { w->wobj_idx[i] = socks[i]; w->wobj_kind[i] = masks[i]; } park(c, BLOCK_SELECT); return; }
+  wait_end(w); u32 total = 0;
+  for (u32 i = 0; i < nf; i++) { u64 h = rd64(c, fds + 16 * i); u16 ev = rd16(c, fds + 16 * i + 8), rev = 0; int si = sock_of(c, h);
+    if (si < 0) rev = 4; else { int m = sock_ready_mask(si); if ((m & 1) && (ev & 0x300)) rev |= (u16)(ev & 0x300); if ((m & 2) && (ev & 0x10)) rev |= 0x10; if (m & 4) rev |= 1; }
+    wr16(c, fds + 16 * i + 10, rev); if (rev) total++; }
+  RET(total);
+}
 static void net_drop(Win32 *w) { for (int k = 0; k < SPEND_MAX; k++) if (g_spend[k].used && g_spend[k].w == w) { g_spend[k].used = 0; g_net_pending--; } }
 static void sock_cancel_io(Cpu *c, u64 h) { int si = sock_of(c, h); if (si < 0) return; for (int k = 0; k < SPEND_MAX; k++) if (g_spend[k].used && g_spend[k].sock == si && g_spend[k].pid == W->pid) spend_finish(&g_spend[k], 0xC0000120u, 0, 995); }
 
@@ -219,6 +265,6 @@ static void sock_cancel_io(Cpu *c, u64 h) { int si = sock_of(c, h); if (si < 0) 
   S(socket), SA("WSASocketW", socket), SA("WSASocketA", socket), S(closesocket), S(bind), S(listen), S(connect), S(accept), S(send), S(recv), S(shutdown), S(ioctlsocket), S(setsockopt), S(getsockopt), \
   S(getsockname), S(getpeername), S(WSAIoctl), S(WSASend), S(WSARecv), S(WSAGetOverlappedResult), S(ConnectEx), S(AcceptEx), S(GetAcceptExSockaddrs), S(DisconnectEx), SA("TransmitFile", sock_err), \
   S(GetAddrInfoW), S(FreeAddrInfoW), SA("getaddrinfo", getaddrinfo), SA("freeaddrinfo", FreeAddrInfoW), S(GetNameInfoW), SA("getnameinfo", sock_err), S(inet_addr), SA("inet_ntoa", ret0), S(inet_pton), S(inet_ntop), \
-  SA("sendto", sock_err), SA("recvfrom", sock_err), SA("select", sock_err), SA("gethostbyname", ret0), SA("gethostbyaddr", ret0), SA("__WSAFDIsSet", ret0), SA("WSAEventSelect", sock_err), \
-  SA("WSAWaitForMultipleEvents", sock_err), SA("WSAEnumNetworkEvents", sock_err), SA("WSACreateEvent", ret0), SA("WSACloseEvent", ret1), SA("WSAResetEvent", ret1), SA("WSAPoll", sock_err), \
+  SA("sendto", sock_err), SA("recvfrom", sock_err), S(select), SA("gethostbyname", ret0), SA("gethostbyaddr", ret0), S(__WSAFDIsSet), SA("WSAEventSelect", sock_err), \
+  SA("WSAWaitForMultipleEvents", sock_err), SA("WSAEnumNetworkEvents", sock_err), SA("WSACreateEvent", ret0), SA("WSACloseEvent", ret1), SA("WSAResetEvent", ret1), S(WSAPoll), \
   SA("getservbyname", ret0), SA("getprotobyname", ret0), SA("WSADuplicateSocketW", sock_err), SA("WSAAddressToStringW", sock_err), SA("WSAStringToAddressW", sock_err), SA("WSARecvFrom", sock_err), SA("WSASendTo", sock_err),
