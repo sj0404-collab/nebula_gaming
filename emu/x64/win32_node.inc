@@ -58,7 +58,7 @@ static void s_SetFileInformationByHandle(Cpu *c) {                  /* FileEndOf
   int fd = handle_fd(ARG(0)); u32 cls = (u32)ARG(1);
   if (fd < 3) { W->last_error = 6; RET(0); return; }
   if (cls == 6) { s64 eof = (s64)rd64(c, ARG(2)); s64 cur = vfs_tell(fd); if (vfs_seek(fd, eof, 0) < 0 || !vfs_truncate(fd)) { W->last_error = 87; RET(0); return; } vfs_seek(fd, cur < eof ? cur : eof, 0); RET(1); return; }
-  if (cls == 4 || cls == 21) { RET(1); return; }                   /* FileDispositionInfo(Ex): delete on close — nothing to do for an in-memory file */
+  if (cls == 4 || cls == 21) { int del = cls == 4 ? rd8(c, ARG(2)) != 0 : (rd32(c, ARG(2)) & 1) != 0; if (del && vfs_dir_nonempty(vfs_fd_path(fd))) { W->last_error = 145; RET(0); return; } vfs_delete_on_close(fd, del); if (del && (cls == 21 && (rd32(c, ARG(2)) & 2))) vfs_remove(vfs_fd_path(fd)); RET(1); return; }   /* FileDispositionInfo(Ex): delete on close; FILE_DISPOSITION_POSIX_SEMANTICS unlinks the name at once (std::filesystem::remove_all) */
   if (cls == 3 || cls == 22) {                                     /* FileRenameInfo(Ex): { ReplaceIfExists/Flags @0, RootDirectory @8, FileNameLength @16, FileName @20 } */
     u32 len = rd32(c, ARG(2) + 16); char to[1024]; u32 n = len / 2; if (n >= sizeof to) n = sizeof to - 1; for (u32 i = 0; i < n; i++) to[i] = (char)rd16(c, ARG(2) + 20 + i * 2); to[n] = 0;
     const char *tp = to; if (tp[0] == '\\' && tp[1] == '?' && tp[2] == '?' && tp[3] == '\\') tp += 4;

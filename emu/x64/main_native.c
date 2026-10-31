@@ -55,7 +55,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[ai], "--max-ms") && ai + 1 < argc) max_ms = atof(argv[++ai]);
     else if (!strcmp(argv[ai], "--quiet")) quiet = 1;
     else if (!strcmp(argv[ai], "--trace")) x64_trace(1); else if (!strcmp(argv[ai], "--trace2")) x64_trace(2); else if (!strcmp(argv[ai], "--apitrace")) { extern void w32_api_trace(int); g_apitrace = 1; }
-    else if (!strcmp(argv[ai], "--mount") && ai + 1 < argc) { const char *spec = argv[++ai]; char hostd[1024]; const char *eq = strchr(spec, '='); const char *guest = "C:\\nebula"; if (eq) { snprintf(hostd, sizeof hostd, "%.*s", (int)(eq - spec), spec); guest = eq + 1; } else snprintf(hostd, sizeof hostd, "%s", spec); nmounts++; mounts[nmounts - 1][0] = strdup(hostd); mounts[nmounts - 1][1] = guest; }
+    else if (!strcmp(argv[ai], "--mount-rw") && ai + 1 < argc) { extern void host_fs_mount_rw(const char *, const char *); const char *spec = argv[++ai]; char hostd[1024]; const char *eq = strchr(spec, '='); const char *guest = "C:\\nebula"; if (eq) { snprintf(hostd, sizeof hostd, "%.*s", (int)(eq - spec), spec); guest = eq + 1; } else snprintf(hostd, sizeof hostd, "%s", spec); char abs_[1024]; if (!realpath(hostd, abs_)) snprintf(abs_, sizeof abs_, "%s", hostd); host_fs_mount_rw(abs_, guest); nmounts++; mounts[nmounts - 1][0] = strdup(abs_); mounts[nmounts - 1][1] = guest; }   /* like --mount, but files the guest writes land on the host (and leave RAM) */
+    else if (!strcmp(argv[ai], "--mount") && ai + 1 < argc) { const char *spec = argv[++ai]; char hostd[1024]; const char *eq = strchr(spec, '='); const char *guest = "C:\\nebula"; if (eq) { snprintf(hostd, sizeof hostd, "%.*s", (int)(eq - spec), spec); guest = eq + 1; } else snprintf(hostd, sizeof hostd, "%s", spec); char abs2[1024]; if (!realpath(hostd, abs2)) snprintf(abs2, sizeof abs2, "%s", hostd); nmounts++; mounts[nmounts - 1][0] = strdup(abs2); mounts[nmounts - 1][1] = guest; }
     else if (!strcmp(argv[ai], "--no-stdin")) no_stdin = 1;
     else if (!strcmp(argv[ai], "--stats")) stats = 1;
     else if (!strcmp(argv[ai], "--key") && ai + 1 < argc) { int vk; double at; int dur = 100; if (sscanf(argv[++ai], "%i@%lf:%d", &vk, &at, &dur) >= 2 && nkeys < 62) { keys[nkeys].vk = vk; keys[nkeys].at = at; keys[nkeys].down = 1; nkeys++; keys[nkeys].vk = vk; keys[nkeys].at = at + dur; keys[nkeys].down = 0; nkeys++; } }
@@ -76,6 +77,9 @@ int main(int argc, char **argv) {
   for (int mi = 0; mi < nmounts; mi++) { int n = mount_dir(mounts[mi][0], mounts[mi][1], 0); if (!quiet) fprintf(stderr, "[x64run] mounted %s -> %s (%d files)\n", mounts[mi][0], mounts[mi][1], n); }   /* before load: DLLs next to the exe */
   if (getenv("X64_TAP")) { extern const char *g_vfs_tap; g_vfs_tap = getenv("X64_TAP"); }
   if (getenv("X64_GUEST_ENV")) { extern void w32_add_env(const char *); char *ge = strdup(getenv("X64_GUEST_ENV")); for (char *t = strtok(ge, ";"); t; t = strtok(0, ";")) w32_add_env(t); }
+  char guest_name[1200]; { char abs_[1024]; const char *an = realpath(path, abs_) ? abs_ : path; const char *nm = base;
+    for (int mi = 0; mi < nmounts; mi++) { size_t hl = strlen(mounts[mi][0]); if (!strncmp(an, mounts[mi][0], hl) && an[hl] == '/') { snprintf(guest_name, sizeof guest_name, "%s%s", mounts[mi][1], an + hl); for (char *q = guest_name; *q; q++) if (*q == '/') *q = '\\'; nm = guest_name; break; } }
+    base = nm; }   /* an exe that lives inside a --mount keeps its real path (process.execPath, GetModuleFileName) */
   int rc = x64_load(bytes, len, base, cmdline);
   if (g_apitrace) { extern void w32_api_trace(int); w32_api_trace(1); }
   if (rc) { fprintf(stderr, "load failed (%d): %s", rc, x64_report()); return 3; }
@@ -106,5 +110,6 @@ int main(int argc, char **argv) {
     if (x64_report()[0]) fprintf(stderr, "[x64run] report:\n%s", x64_report());
     if (stats) fprintf(stderr, "[x64run] api calls: %s\n", x64_api_stats());
   }
+  vfs_sync_all();   /* flush files still open / never closed to the write-back mounts */
   return r == RUN_EXIT ? x64_exit_code() : r == -1 ? 0 : 100 + r;
 }

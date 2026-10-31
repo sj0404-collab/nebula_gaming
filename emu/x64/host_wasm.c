@@ -13,6 +13,7 @@ int host_key(int vk) { (void)vk; return 0; }
 void host_exit(int code) { (void)code; }
 void host_mem_discard(void *p, size_t n) { e_memset(p, 0, n); }   /* linear memory cannot shrink; keep the zero-on-recommit semantics */
 double host_math(int op, double a, double b) { return js_math(op, a, b); }
+int host_fs_op(int op, const char *a, const char *b, u8 **data, u64 *size) { (void)op; (void)a; (void)b; (void)data; (void)size; return 0; }   /* browser: no write-back mounts (yet) */
 /* networking: no raw TCP from a browser page — every call fails cleanly (WSAENETDOWN); a WebSocket relay can plug in here later */
 int host_net_resolve(const char *name, u8 *ip4s, int max) { (void)name; (void)ip4s; (void)max; return -1; }
 int host_net_connect(const u8 *ip4, int port, int *wsa_err) { (void)ip4; (void)port; if (wsa_err) *wsa_err = 10050; return -1; }

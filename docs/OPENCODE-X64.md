@@ -86,6 +86,43 @@ opencode's `Shell.acceptable()` also picks it for the bash tool (`powershell -No
 `cmd.exe` — the mini-PowerShell runs `echo`, pipelines, `&` external programs and `cmd /c …`, which is what the agent
 actually issues; anything outside its subset fails with a PowerShell-style "The term … is not recognized" error.
 
+## `npm install opencode-ai` inside the emulator (v1.14.0)
+
+The user-facing install route — `node.exe` + `npm` from the official Node.js 24 win-x64 zip, nothing patched — runs
+on the emulated Windows end to end (measured on the 2-core sandbox):
+
+```
+node.exe npm-cli.js --version                      → 11.6.1                          9 s
+node.exe npm-cli.js view opencode-ai version       → 1.19.5 (registry over TLS)      2 m 40 s
+node.exe npm-cli.js install <opencode-ai.tgz> <opencode-windows-x64-baseline.tgz>
+   download 79.6 MB → npm-cache/_cacache (sha512), extract 211 MB opencode.exe into node_modules,
+   postinstall: cmd.exe /d /s /c node ./postinstall.mjs
+       → powershell.exe -NoProfile -NonInteractive -Command "(Add-Type … )::IsProcessorFeaturePresent(40)"  → False (no AVX2 here)
+       → copy node_modules/opencode-windows-x64-baseline/bin/opencode.exe → opencode-ai/bin/opencode.exe
+       → opencode.exe --version (child process, exit 0)                              ≈ 18 min
+node.exe npx-cli.js opencode --version             → cmd.exe /d /s /c opencode --version
+                                                   → node_modules\.bin\opencode.cmd → opencode.exe → 1.19.5   1 m 40 s
+```
+
+The full `npm install opencode-ai` (resolving all 13 platform packages) additionally parses ≈ 90 MB of registry
+metadata inside the guest, which needs more than the sandbox's 2 GB — `.github/workflows/npm-opencode-x64.yml` runs
+that form on a 16 GB runner (with the tarball-URL form as a fallback) and then drives the npm-installed TUI.
+
+What it took (all in `emu/x64/`):
+
+* **write-back mounts** (`--mount-rw host=guest`): files the guest creates or modifies are written to the host folder
+  when the last handle closes and dropped from RAM (reloaded lazily on the next open); `mkdir`/`rename`/`delete`
+  are mirrored too (`host_fs_op` in `host_native.c`, `node_sync`/`node_load` in `vfs.c`).  Before this, every
+  extracted file stayed in memory and npm ran out of RAM at ≈ 1.3 GB.
+* `CreateProcessW` honours `lpEnvironment` (UTF-16 block) — npm's `PATH=…\node_modules\.bin;…` for scripts and `npx`
+  was silently dropped before, so `opencode` was "not recognized" by `cmd.exe`.
+* `GetModuleFileName(NULL)` / PEB `ImagePathName` report the real image path (`C:\node\node.exe`), so
+  `process.execPath` is right and run-script's `PATH` prefix points at a directory that has `node.exe`.
+* `FileDispositionInfo(Ex)` / `FileDispositionInformation(Ex)` / `FILE_FLAG_DELETE_ON_CLOSE`: delete-on-close with
+  POSIX semantics and `ERROR_DIR_NOT_EMPTY` for non-empty directories — `fs.rmSync({recursive})` is
+  `std::filesystem::remove_all`, which first tries to delete the top entry that way and only recurses when that fails.
+* `C:\nebula` became a real directory node (it was implicit = "the cwd", so `lstat` failed after a `cd`).
+
 ### Speed
 
 The interpreter got a 4 KB-page translation cache (TLB) and a host-side fast path for forward `rep movs`/`rep stos`

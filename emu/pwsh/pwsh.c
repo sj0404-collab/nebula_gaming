@@ -930,7 +930,14 @@ static char *decode_utf16_b64(const char *b64) {   /* -EncodedCommand: base64 of
   Buf out = { 0, 0, 0 }; for (int i = 0; i + 1 < raw.n; i += 2) { u32 cp = (BYTE)raw.p[i] | ((BYTE)raw.p[i + 1] << 8); if (cp < 0x80) bputc(&out, (char)cp); else if (cp < 0x800) { bputc(&out, (char)(0xC0 | (cp >> 6))); bputc(&out, (char)(0x80 | (cp & 63))); } else { bputc(&out, (char)(0xE0 | (cp >> 12))); bputc(&out, (char)(0x80 | ((cp >> 6) & 63))); bputc(&out, (char)(0x80 | (cp & 63))); } }
   char *r = sdup(bstr(&out)); bfree(&raw); bfree(&out); return r;
 }
-static int run_script_text(const char *text) { Toks ts = { 0, 0, 0 }; tokenize(text, &ts); int st = exec_range(&ts, 0, ts.n - 1); return g_quit == 1 ? g_exit_code : (st ? (g_last_exit ? g_last_exit : 1) : 0); }
+DI BOOL IsProcessorFeaturePresent(DWORD f);
+/* Add-Type P/Invoke one-liners installers use to probe the CPU (opencode-ai postinstall: IsProcessorFeaturePresent(40) = AVX2) —
+   there is no C# compiler here, so the single supported shape is answered by calling kernel32 directly. */
+static int pinvoke_shortcut(const char *text) {
+  const char *p = sstr(text, "::IsProcessorFeaturePresent("); if (!p || !sstr(text, "Add-Type")) return 0;
+  u32 f = (u32)satoi(p + slen("::IsProcessorFeaturePresent("), 0); outline(IsProcessorFeaturePresent(f) ? "True" : "False"); return 1;
+}
+static int run_script_text(const char *text) { if (pinvoke_shortcut(text)) return 0; Toks ts = { 0, 0, 0 }; tokenize(text, &ts); int st = exec_range(&ts, 0, ts.n - 1); return g_quit == 1 ? g_exit_code : (st ? (g_last_exit ? g_last_exit : 1) : 0); }
 
 void mainCRTStartup(void) {
   g_heap = GetProcessHeap(); g_in = GetStdHandle((DWORD)-10); g_out = GetStdHandle((DWORD)-11); g_err = GetStdHandle((DWORD)-12);

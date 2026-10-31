@@ -44,6 +44,7 @@ int proc_main_thread_kobj(int pid) { Proc *p = proc_find(pid); return p ? p->w32
 int proc_enum(int idx, int *pid, int *ppid, const char **name) { if (idx == 0) { *pid = HOST_PID; *ppid = 4; *name = "explorer.exe"; return 1; } idx--; int k = 0; for (int i = 0; i < PROC_MAX; i++) { Proc *p = g_procs[i]; if (!p || !p->used || p->state == 2) continue; if (k++ == idx) { *pid = p->pid; *ppid = p->ppid; *name = p->name; return 1; } } return 0; }
 static const char *basename_of(const char *p) { const char *b = p; for (const char *q = p; *q; q++) if (*q == '\\' || *q == '/') b = q + 1; return b; }
 /* CreateProcess: load an exe from the VFS into a fresh address space; std_fd[k]: -2 inherit, -1 console, >=3 parent's table entry */
+const char *const *g_spawn_env; int g_spawn_nenv;
 int proc_spawn(Win32 *parent, const char *exe_path, const char *cmdline, const int std_fd[3]) {
   int node = vfs_find_node(exe_path); VNodeInfo in; if (node < 0 || !vfs_node_info(node, &in) || in.is_dir) return -2;
   Proc *p = proc_alloc(); if (!p) return -8;
@@ -54,7 +55,9 @@ int proc_spawn(Win32 *parent, const char *exe_path, const char *cmdline, const i
   vfs_init_proc(p->w32.fs, parent->fs);
   for (int k = 0; k < 3; k++) if (std_fd[k] != -2) { ProcFs *f = p->w32.fs; if (f->redir[k] != -1) { vfs_use(f); vfs_close(f->redir[k]); } f->redir[k] = -1; if (std_fd[k] >= 3 && f->fd[std_fd[k] - 3].kind) { vfs_use(f); f->redir[k] = vfs_dup(std_fd[k]); } }
   vfs_use(p->w32.fs);
-  int rc = pe_load(&p->w32, in.data, (size_t)in.size, p->name);
+  if (g_spawn_env) w32_env_replace(g_spawn_env, g_spawn_nenv);
+  const u8 *img = vfs_node_data(node); if (!img) return -2;
+  int rc = pe_load(&p->w32, img, (size_t)in.size, p->name); e_snprintf(p->w32.exe_path, sizeof p->w32.exe_path, "%s", in.path);
   if (rc) { vfs_use(save); proc_exit(p, 127); p->used = 0; return -2; }
   w32_start(&p->w32, cmdline);
   vfs_use(save); w32_set_current(parent);
@@ -88,10 +91,11 @@ EXPORT(x64_load) int x64_load(const u8 *bytes, size_t len, const char *name, con
   mem_release(&p->mem); cpu_reset(&p->cpu);
   w32_init(&p->w32, &p->cpu, &p->mem); p->w32.pid = p->pid; p->w32.ppid = HOST_PID;
   vfs_init_proc(p->w32.fs, 0); vfs_use(p->w32.fs);
-  int rc = pe_load(&p->w32, bytes, len, name ? name : "app.exe");
+  int rc = pe_load(&p->w32, bytes, len, name ? basename_of(name) : "app.exe");
   if (rc) return rc;
+  if (name && e_strchr(name, '\\')) e_snprintf(p->w32.exe_path, sizeof p->w32.exe_path, "%s", name); else e_snprintf(p->w32.exe_path, sizeof p->w32.exe_path, "C:\\nebula\\%s", p->name);
   w32_start(&p->w32, cmdline ? cmdline : name ? name : "app.exe");
-  { char fp[600]; e_snprintf(fp, sizeof fp, "C:\\nebula\\%s", p->name); if (vfs_find_node(fp) < 0) vfs_add_ref(fp, (u8 *)bytes, len); }
+  if (vfs_find_node(p->w32.exe_path) < 0) vfs_add_ref(p->w32.exe_path, (u8 *)bytes, len);
   g_loaded = 1; return 0;
 }
 /* scheduler: run runnable processes round-robin; the host sees the root process' lifecycle */
@@ -142,7 +146,7 @@ EXPORT(x64_vfs_add) int x64_vfs_add(const char *path, const u8 *data, size_t n) 
 EXPORT(x64_vfs_mkdir) int x64_vfs_mkdir(const char *path) { return vfs_mkdir(path); }
 EXPORT(x64_vfs_remove) int x64_vfs_remove(const char *path) { return vfs_remove(path); }
 EXPORT(x64_vfs_size) s64 x64_vfs_size(const char *path) { u64 sz; int k = vfs_stat(path, &sz); return k == 1 ? (s64)sz : -1; }
-EXPORT(x64_vfs_data) const u8 *x64_vfs_data(const char *path) { int i = vfs_find_node(path); VNodeInfo in; if (i < 0 || !vfs_node_info(i, &in) || in.is_dir) return 0; return in.data; }
+EXPORT(x64_vfs_data) const u8 *x64_vfs_data(const char *path) { int i = vfs_find_node(path); VNodeInfo in; if (i < 0 || !vfs_node_info(i, &in) || in.is_dir) return 0; return vfs_node_data(i); }
 static char g_vfs_json[65536];
 EXPORT(x64_vfs_list) const char *x64_vfs_list(void) {
   size_t o = 0; g_vfs_json[o++] = '['; int first = 1; VNodeInfo in;

@@ -37,6 +37,29 @@ void host_mem_discard(void *p, size_t n) {   /* drop whole pages inside [p, p+n)
   if (e > a) madvise((void *)a, e - a, MADV_DONTNEED);
   if (a > (uintptr_t)p) memset(p, 0, (size_t)(a - (uintptr_t)p < n ? a - (uintptr_t)p : n));
   if (e > a && (uintptr_t)p + n > e) memset((void *)e, 0, (size_t)((uintptr_t)p + n - e)); }
+/* ---------- write-back mounts: --mount-rw host=guest ---------- */
+#include <sys/stat.h>
+#include <dirent.h>
+static struct { char host[1024]; char guest[512]; } g_rw[8]; static int g_nrw;
+void host_fs_mount_rw(const char *host, const char *guest) { if (g_nrw < 8) { snprintf(g_rw[g_nrw].host, sizeof g_rw[g_nrw].host, "%s", host); snprintf(g_rw[g_nrw].guest, sizeof g_rw[g_nrw].guest, "%s", guest); g_nrw++; } }
+static int rw_map(const char *guest, char *out, size_t cap) {   /* guest (normalized C:\...) → host path, case-insensitive prefix match on the mount point */
+  for (int i = 0; i < g_nrw; i++) { size_t gl = strlen(g_rw[i].guest); if (strncasecmp(guest, g_rw[i].guest, gl)) continue; if (guest[gl] != 0 && guest[gl] != '\\') continue;
+    size_t n = (size_t)snprintf(out, cap, "%s%s", g_rw[i].host, guest + gl); if (n >= cap) return 0; for (char *q = out + strlen(g_rw[i].host); *q; q++) if (*q == '\\') *q = '/'; return 1; }
+  return 0;
+}
+static void rw_mkdirs(const char *path) { char t[2048]; snprintf(t, sizeof t, "%s", path); for (char *q = t + 1; *q; q++) if (*q == '/') { *q = 0; mkdir(t, 0755); *q = '/'; } }
+int host_fs_op(int op, const char *a, const char *b, u8 **data, u64 *size) {
+  char ha[2048], hb[2048];
+  if (op == 6) { if (data && *data && size) munmap(*data, (size_t)*size); return 1; }
+  if (!a || !rw_map(a, ha, sizeof ha)) return 0;
+  if (op == 1) { rw_mkdirs(ha); int fd = open(ha, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (fd < 0) return 0; u64 off = 0; while (off < *size) { ssize_t w = write(fd, *data + off, (size_t)(*size - off)); if (w <= 0) { close(fd); return 0; } off += (u64)w; } close(fd); return 1; }
+  if (op == 2) { int fd = open(ha, O_RDONLY); if (fd < 0) return 0; struct stat st; if (fstat(fd, &st) || !S_ISREG(st.st_mode)) { close(fd); return 0; } if (!data || !size) { close(fd); return 1; }   /* existence probe */
+    size_t n = (size_t)st.st_size; void *p = n ? mmap(0, n, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0) : 0; close(fd); if (n && p == MAP_FAILED) return 0; *data = (u8 *)p; *size = n; return 1; }
+  if (op == 3) { rw_mkdirs(ha); return mkdir(ha, 0755) == 0 || errno == EEXIST; }
+  if (op == 4) { return (*size ? rmdir(ha) : unlink(ha)) == 0; }
+  if (op == 5) { if (!b || !rw_map(b, hb, sizeof hb)) return 0; rw_mkdirs(hb); return rename(ha, hb) == 0; }
+  return 0;
+}
 double host_math(int op, double a, double b) {
   switch (op) { case 0: return sin(a); case 1: return cos(a); case 2: return tan(a); case 3: return exp(a); case 4: return log(a); case 5: return pow(a, b); case 6: return atan2(a, b); case 7: return asin(a); case 8: return acos(a); case 9: return atan(a); case 10: return sinh(a); case 11: return cosh(a); case 12: return tanh(a); case 13: return log10(a); case 14: return log2(a); case 15: return cbrt(a); default: return 0; }
 }

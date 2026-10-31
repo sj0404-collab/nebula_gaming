@@ -73,7 +73,8 @@ static void s_NtSetInformationFile(Cpu *c) {
   u32 st = 0;
   switch (cls) {
   case 4: case 16: case 24: break;
-  case 13: /* FileDispositionInformation: DeleteFile u8 */ if (rd8(c, buf) && vfs_fd_path(fd)) { vfs_remove(vfs_fd_path(fd)); } break;
+  case 13: /* FileDispositionInformation: DeleteFile u8 */ if (rd8(c, buf) && vfs_dir_nonempty(vfs_fd_path(fd))) { st = 0xC0000101u; break; } vfs_delete_on_close(fd, rd8(c, buf) != 0); break;
+  case 64: /* FileDispositionInformationEx: Flags u32 (1 delete, 2 POSIX semantics) */ { u32 fl = rd32(c, buf); if ((fl & 1) && vfs_dir_nonempty(vfs_fd_path(fd))) { st = 0xC0000101u; break; } vfs_delete_on_close(fd, (fl & 1) != 0); if ((fl & 3) == 3 && vfs_fd_path(fd)) vfs_remove(vfs_fd_path(fd)); } break;
   case 14: vfs_seek(fd, (s64)rd64(c, buf), 0); break;
   case 20: /* FileEndOfFileInformation */ { s64 end = (s64)rd64(c, buf); s64 cur = vfs_tell(fd); vfs_seek(fd, end, 0); vfs_truncate(fd); vfs_seek(fd, cur < end ? cur : end, 0); break; }
   case 19: /* FileAllocationInformation */ break;
@@ -86,7 +87,6 @@ static void s_NtSetInformationFile(Cpu *c) {
     int replace = cls == 10 ? rd8(c, buf) : (rd32(c, buf) & 1); u64 sz; int ex = vfs_stat(to, &sz);
     if (ex && !replace) { st = 0xC0000035u; break; } if (ex) vfs_remove(to);
     if (!vfs_rename(from, to)) st = 0xC0000034u; break; }
-  case 64: /* FileDispositionInformationEx: Flags bit 0 = delete */ if ((rd32(c, buf) & 1) && vfs_fd_path(fd)) vfs_remove(vfs_fd_path(fd)); break;
   default: st = NT_INVALID_INFO_CLS; break;
   }
   nt_iosb(c, iosb, st, 0); RET(st); }

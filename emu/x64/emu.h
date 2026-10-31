@@ -23,7 +23,12 @@ double host_now_ms(void); double host_wall_ms(void);   /* wall clock, ms since t
 void   host_present(const u32 *bgra, int w, int h);        /* framebuffer of the GUI window changed */
 int    host_key(int vk);                                   /* 1 if virtual key currently pressed */
 void   host_exit(int code);                                /* guest called ExitProcess */
-void   host_mem_discard(void *p, size_t n);                /* MEM_DECOMMIT / MEM_RESET: give the host pages back (contents become zero) */
+void   host_mem_discard(void *p, size_t n);
+/* write-back mounts (native runner --mount-rw): the VFS asks the host to persist / reload / mirror directory operations.
+   op 1 WRITE(a, data, size) → 1 if the file now lives on the host (the VFS may drop its copy);  2 LOAD(a) → data/size (mapped, read-only-ish);
+   3 MKDIR(a);  4 REMOVE(a, *size = is_dir);  5 RENAME(a, b);  6 UNLOAD(*data, *size) release a LOAD/mount mapping.  Returns 0 when a path is not under a write-back mount. */
+int    host_fs_op(int op, const char *a, const char *b, u8 **data, u64 *size);
+void   vfs_sync_all(void);                /* MEM_DECOMMIT / MEM_RESET: give the host pages back (contents become zero) */
 double host_math(int op, double a, double b);              /* 0 sin 1 cos 2 tan 3 exp 4 log 5 pow 6 atan2 7 asin 8 acos 9 atan 10 sinh 11 cosh 12 tanh 13 log10 14 log2 15 cbrt */
 /* TCP networking (IPv4). Native host: Linux sockets; wasm host: stubs that fail (no raw TCP in a browser) until a relay exists. */
 int    host_net_resolve(const char *name, u8 *ip4s, int max);          /* A records; returns count, 0 = not found, -1 = no network */
@@ -181,7 +186,7 @@ typedef struct { int used; char dir[512]; char pat[128]; int cursor; int dots; }
 typedef struct { u64 addr, size; int fd; } MapView;
 typedef struct {
   FdEnt fd[FD_MAX]; int redir[3]; char cwd[512]; VFind find[32];
-  char *env[256]; int nenv, env_dirty; u64 strtok_next;
+  char *env[512]; int nenv, env_dirty; u64 strtok_next;
   MapView views[32]; int nviews;
 } ProcFs;
 extern ProcFs *vfs_P;
@@ -214,6 +219,8 @@ enum { BLOCK_NONE = 0, BLOCK_STDIN, BLOCK_PROC, BLOCK_PIPE_R, BLOCK_PIPE_W, BLOC
 int  proc_main_thread_kobj(int pid);
 Win32 *proc_w32_at(int i);                          /* iterate live processes (NULL when i is past the table) */
 int  proc_spawn(Win32 *parent, const char *exe_path, const char *cmdline, const int std_fd[3]);   /* returns pid or -errno */
+extern const char *const *g_spawn_env; extern int g_spawn_nenv;   /* CreateProcess lpEnvironment: when set, the child gets exactly these "NAME=value" strings instead of inheriting */
+void w32_env_replace(const char *const *kv, int n);
 int  proc_state(int pid, int *exit_code);           /* 0 unknown, 1 running, 2 exited */
 void proc_handle_ref(int pid, int delta);
 ProcFs *proc_fs(int pid);
@@ -251,7 +258,7 @@ struct Win32 {
   Mem *mem;
   ShimSlot slots[MAX_SHIMS]; int nslots;
   u64 image_base; u64 image_size; u64 entry; int subsystem;   /* 2 GUI, 3 console */
-  char exe_name[260]; char cmdline[1024];
+  char exe_name[260]; char exe_path[600]; char cmdline[1024];   /* exe_path: full guest path of the image (GetModuleFileName(NULL), PEB ImagePathName) */
   u64 teb, peb, cmdline_a, cmdline_w, env_w, env_a;           /* teb: main thread's TEB */
   union { ThreadCtx tctx; struct { THREAD_CTX_FIELDS }; };    /* current thread's state (see Thread.ctx) */
   Thread th[THREAD_MAX]; int nth, cur_th; Cpu tcpu[THREAD_MAX]; int next_tid;
@@ -351,6 +358,9 @@ int  vfs_rename(const char *from, const char *to);
 int  vfs_chdir(const char *path);
 int  vfs_stat(const char *path, u64 *size);
 const VNodeInfo *vfs_node_info(int i, VNodeInfo *out);
+const u8 *vfs_node_data(int i);
+int vfs_delete_on_close(int fd, int on);
+int vfs_dir_nonempty(const char *path);               /* file bytes (reloads a node evicted to a write-back mount and pins it: images must stay resident) */
 int  vfs_node_count(void);
 int  vfs_open(const char *path, int access, int disp, int append);
 int  vfs_close(int fd);

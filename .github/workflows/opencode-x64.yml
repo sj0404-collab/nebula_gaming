@@ -41,7 +41,7 @@ jobs:
           cp -r emu/tools/opencode-project/. /tmp/proj/                        # the "project" opencode is started in (C:\nebula)
           mkfifo /tmp/in.fifo
           : > /tmp/tui.txt
-          (./emu/x64/x64run --max-ms 6000000 --mount /tmp/proj --mount '/tmp/home=C:\Users\user' /tmp/oc/package/bin/opencode.exe > /tmp/tui.txt 2>/tmp/tui.err 3>&2 < /tmp/in.fifo &)
+          (./emu/x64/x64run --max-ms 6000000 --mount-rw /tmp/proj --mount-rw '/tmp/home=C:\Users\user' /tmp/oc/package/bin/opencode.exe > /tmp/tui.txt 2>/tmp/tui.err 3>&2 < /tmp/in.fifo &)   # --mount-rw: opencode's log dir, ripgrep download and sessions land on the runner's disk
           (python3 emu/tools/tui_respond.py /tmp/tui.txt /tmp/in.fifo >/dev/null 2>/tmp/respond.err &)
           set +e
           python3 emu/tools/tui_drive.py /tmp/tui.txt /tmp/in.fifo /tmp/out; rc=$?
@@ -54,6 +54,8 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"; tail -c 2500 /tmp/out/5-grep-tool.txt 2>/dev/null >> "$GITHUB_STEP_SUMMARY" || true; echo '```' >> "$GITHUB_STEP_SUMMARY"
           grep -a "RESULT" -r /tmp/out || true
           tail -c 3000 /tmp/tui.err || true
+          echo "--- ~/.cache/opencode/bin (ripgrep downloaded + unpacked by the emulator's powershell.exe):"; ls -la /tmp/home/.cache/opencode/bin || true
+          echo "--- opencode log:"; mkdir -p /tmp/oclog; cp -r /tmp/home/.local/share/opencode/log/. /tmp/oclog/ 2>/dev/null || true; ls -la /tmp/oclog || true; grep -h -a -i "ripgrep\|error" /tmp/oclog/*.log 2>/dev/null | tail -40 || true
           [ "$rc" -ne 3 ]
       - uses: actions/upload-artifact@v4
         if: always()
@@ -63,3 +65,4 @@ jobs:
             /tmp/out/
             /tmp/tui.err
             /tmp/respond.log
+            /tmp/oclog/

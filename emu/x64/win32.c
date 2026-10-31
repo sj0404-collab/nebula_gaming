@@ -449,8 +449,8 @@ static int mod_load(Win32 *w, const char *name) {
     e_snprintf(path, sizeof path, "%s", cands[k]);
     int node = vfs_find_node(path); if (node < 0) { size_t l = e_strlen(path); if (l + 4 < sizeof path && e_stricmp(path + (l > 4 ? l - 4 : 0), ".dll")) { e_memcpy(path + l, ".dll", 5); node = vfs_find_node(path); } }
     if (node < 0) continue;
-    VNodeInfo vi; if (!vfs_node_info(node, &vi) || vi.is_dir || !vi.data) continue;
-    int idx = pe_load_dll(w, vi.data, (size_t)vi.size, mod_basename(path));
+    VNodeInfo vi; if (!vfs_node_info(node, &vi) || vi.is_dir) continue; const u8 *img = vfs_node_data(node); if (!img) continue;
+    int idx = pe_load_dll(w, img, (size_t)vi.size, mod_basename(path));
     if (idx >= 0) { char msg[400]; e_snprintf(msg, sizeof msg, "[x64] loaded DLL %s at 0x%llx (%llu KB)\n", w->mods[idx].name, (unsigned long long)w->mods[idx].base, (unsigned long long)(w->mods[idx].size >> 10)); host_write(3, msg, e_strlen(msg)); }
     return idx;
   }
@@ -536,8 +536,9 @@ static void s_GetProcAddress(Cpu *c) {
   if (!w32_have_shim("", n)) { char msg[320]; e_snprintf(msg, sizeof msg, "[x64] GetProcAddress miss: %s\n", n); host_write(3, msg, e_strlen(msg)); W->last_error = 127; RET(0); return; }
   RET(w32_shim_slot(W, "dynamic", n)); }
 static const char *mod_file_name(Win32 *w, u64 h) { int m = h ? mod_by_base(w, h) : -1; return m >= 0 ? w->mods[m].name : w->exe_name; }
-static void s_GetModuleFileNameA(Cpu *c) { char p[300]; e_snprintf(p, sizeof p, "C:\\nebula\\%s", mod_file_name(W, ARG(0))); size_t l = e_strlen(p); u32 n = (u32)ARG(2); if (l + 1 > n) l = n ? n - 1 : 0; u8 *d = mem_ptr(c->mem, ARG(1), l + 1, 1); if (d) { e_memcpy(d, p, l); d[l] = 0; } RET(l); }
-static void s_GetModuleFileNameW(Cpu *c) { char p[300]; e_snprintf(p, sizeof p, "C:\\nebula\\%s", mod_file_name(W, ARG(0))); size_t l = e_strlen(p); u32 n = (u32)ARG(2); if (l + 1 > n) l = n ? n - 1 : 0; for (size_t i = 0; i < l; i++) wr16(c, ARG(1) + i * 2, (u8)p[i]); wr16(c, ARG(1) + l * 2, 0); RET(l); }
+static void mod_full_path(Win32 *w, u64 h, char *p, size_t cap) { int m = h ? mod_by_base(w, h) : -1; if (m < 0 && w->exe_path[0]) e_snprintf(p, cap, "%s", w->exe_path); else e_snprintf(p, cap, "C:\\nebula\\%s", mod_file_name(w, h)); }
+static void s_GetModuleFileNameA(Cpu *c) { char p[600]; mod_full_path(W, ARG(0), p, sizeof p); size_t l = e_strlen(p); u32 n = (u32)ARG(2); if (l + 1 > n) l = n ? n - 1 : 0; u8 *d = mem_ptr(c->mem, ARG(1), l + 1, 1); if (d) { e_memcpy(d, p, l); d[l] = 0; } RET(l); }
+static void s_GetModuleFileNameW(Cpu *c) { char p[600]; mod_full_path(W, ARG(0), p, sizeof p); size_t l = e_strlen(p); u32 n = (u32)ARG(2); if (l + 1 > n) l = n ? n - 1 : 0; for (size_t i = 0; i < l; i++) wr16(c, ARG(1) + i * 2, (u8)p[i]); wr16(c, ARG(1) + l * 2, 0); RET(l); }
 static void s_GetSystemDirectoryA(Cpu *c) { const char *d = "C:\\Windows\\System32"; size_t l = e_strlen(d); if ((u32)ARG(1) > l) { u8 *p = mem_ptr(c->mem, ARG(0), l + 1, 1); if (p) e_memcpy(p, d, l + 1); } RET(l); }
 static void s_GetWindowsDirectoryA(Cpu *c) { const char *d = "C:\\Windows"; size_t l = e_strlen(d); if ((u32)ARG(1) > l) { u8 *p = mem_ptr(c->mem, ARG(0), l + 1, 1); if (p) e_memcpy(p, d, l + 1); } RET(l); }
 static void s_GetVersion(Cpu *c) { RET(0x23f00206); }
@@ -1281,7 +1282,7 @@ void w32_start(Win32 *w, const char *cmdline) {
   wr16(c, params + 0x70, (u16)(cl * 2)); wr16(c, params + 0x72, (u16)(cl * 2 + 2)); wr64(c, params + 0x78, w->cmdline_w);
   wr32(c, params + 0x00, 0x400); wr32(c, params + 0x04, 0x1000); wr32(c, params + 0x08, 1);   /* MaximumLength, Length, Flags = NORMALIZED */
   wr64(c, params + 0x20, 0x10); wr64(c, params + 0x28, 0x11); wr64(c, params + 0x30, 0x12);   /* hStdInput/Output/Error: Zig's std.io.getStdOut() reads them straight from the PEB (OpenTUI's renderer wrote its frames to handle 0) */
-  u64 img = guest_wstrdup(w, "C:\\nebula\\app.exe"); wr16(c, params + 0x60, 34); wr16(c, params + 0x62, 36); wr64(c, params + 0x68, img); wr64(c, params + 0x80, wblk);
+  { char ip[600]; if (w->exe_path[0]) e_snprintf(ip, sizeof ip, "%s", w->exe_path); else e_snprintf(ip, sizeof ip, "C:\\nebula\\%s", w->exe_name); u64 img = guest_wstrdup(w, ip); u16 il = (u16)(e_strlen(ip) * 2); wr16(c, params + 0x60, il); wr16(c, params + 0x62, il + 2); wr64(c, params + 0x68, img); } wr64(c, params + 0x80, wblk);
   /* stack: top minus red zone; the start-up slot acts as the return address of "the OS" */
   c->r[RSP] = G_STACK_BASE + G_STACK_SIZE - 0x100;
   c->rip = SLOT_ADDR(SLOT_STARTUP); cpu_push(c, 0);   /* fake return address popped by dispatch */

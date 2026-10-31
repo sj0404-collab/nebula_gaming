@@ -94,7 +94,7 @@ static void create_file(Cpu *c, const char *n) {
   int acc = ((access & 0x80000000u) ? 1 : 0) | ((access & 0x40000004u) ? 2 : 0); if (!acc) acc = 1;
   int fd = vfs_open(n, acc, (int)disp, (access & 4) && !(access & 0x40000000u));
   if (fd < 0) { W->last_error = lasterr_of(fd); RET(~0ull); return; }
-  vfs_set_inherit(fd, sa_inherit(c, ARG(3)));
+  vfs_set_inherit(fd, sa_inherit(c, ARG(3))); if (ARG(5) & 0x04000000u) vfs_delete_on_close(fd, 1);   /* FILE_FLAG_DELETE_ON_CLOSE */
   W->last_error = (disp == 4 || disp == 2) && vfs_tell(fd) == 0 ? 0 : 0; RET(H_FILE_BASE + fd);
 }
 static void s_CreateFileA(Cpu *c) { create_file(c, name_a(c, ARG(0))); }
@@ -401,7 +401,19 @@ static void create_process(Cpu *c, const char *app, const char *cmd) {
   u64 si = ARG(8); int std[3] = { -2, -2, -2 };   /* -2 = inherit */
   if (si && (rd32(c, si + 60) & 0x100)) { std[0] = std_from_handle(rd64(c, si + 80)); std[1] = std_from_handle(rd64(c, si + 88)); std[2] = std_from_handle(rd64(c, si + 96)); }
   views_flush_all(c);   /* the child must see what the parent wrote into shared mappings */
+  /* lpEnvironment: a block of NAME=value strings (UTF-16 when CREATE_UNICODE_ENVIRONMENT) → the child's whole environment */
+  const char *envv[512]; int nenv = 0; char *envbuf = 0;
+  if (ARG(6)) {
+    int wide = (ARG(5) & 0x400) != 0; u64 a = ARG(6); size_t cap = 1 << 20; envbuf = emu_alloc(cap); size_t o = 0;
+    for (int guard = 0; guard < 4096 && nenv < 512; guard++) {
+      if (wide) { if (!rd16(c, a)) break; size_t room = cap - o; if (room < 8) break; wstr_to_utf8(c, a, envbuf + o, room > 32768 ? 32768 : room, -1); while (rd16(c, a)) a += 2; a += 2; }
+      else { if (!rd8(c, a)) break; size_t k = 0; while (rd8(c, a + k) && o + k + 1 < cap) { envbuf[o + k] = (char)rd8(c, a + k); k++; } envbuf[o + k] = 0; a += k + 1; }
+      envv[nenv++] = envbuf + o; o += e_strlen(envbuf + o) + 1;
+    }
+    g_spawn_env = envv; g_spawn_nenv = nenv;
+  }
   int pid = proc_spawn(W, cand, cmd && cmd[0] ? cmd : exe, std);
+  g_spawn_env = 0; g_spawn_nenv = 0; if (envbuf) emu_free(envbuf);
   { char m[600]; e_snprintf(m, sizeof m, "[x64] CreateProcess(%s | %s) flags=0x%x std=%d,%d,%d -> pid %d\n", cand, cmd ? cmd : "", (u32)ARG(5), std[0], std[1], std[2], pid); host_write(3, m, e_strlen(m)); }
   if (pid < 0) { W->last_error = pid == -8 ? 8 : 2; RET(0); return; }
   u64 pi = ARG(9); if (pi) { int h = vfs_proc_handle(pid); wr64(c, pi, h >= 0 ? H_OF(h) : 0); { int tk = proc_main_thread_kobj(pid); int tf = tk >= 0 ? vfs_kobj_handle(tk) : -1; wr64(c, pi + 8, tf >= 0 ? H_OF(tf) : 0); } wr32(c, pi + 16, (u32)pid); wr32(c, pi + 20, (u32)pid + 1); }
@@ -610,7 +622,7 @@ static void s_FlushConsoleInputBuffer(Cpu *c) { RET(1); }
 static void s_PeekConsoleInputA(Cpu *c) { s_PeekConsoleInputW(c); }
 
 /* ---- process environment (dynamic): host table, mirrored into guest memory on demand ---- */
-#define ENV_MAX 256
+#define ENV_MAX 512
 #define g_env (vfs_P->env)
 #define g_nenv (vfs_P->nenv)
 #define g_env_dirty (vfs_P->env_dirty)
@@ -623,6 +635,7 @@ static void env_put(const char *kv) {   /* "NAME=value" sets, "NAME=" removes (m
   if (i >= 0) g_env[i] = copy; else if (g_nenv < ENV_MAX) g_env[g_nenv++] = copy; g_env_dirty = 1;
 }
 static void env_set(const char *name, const char *val) { char kv[4096]; e_snprintf(kv, sizeof kv, "%s=%s", name, val ? val : ""); env_put(kv); }
+void w32_env_replace(const char *const *kv, int n) { g_nenv = 0; for (int i = 0; i < n; i++) env_put(kv[i]); g_env_dirty = 1; }
 void w32_env_init(const char **envs) { if (g_nenv) { g_env_dirty = 1; return; } g_env_dirty = 1; for (int i = 0; envs[i]; i++) env_put(envs[i]); }
 static void env_sync(Cpu *c) {   /* rebuild guest envp[], narrow block and wide block */
   if (!g_env_dirty) return; g_env_dirty = 0; Win32 *w = W;
