@@ -230,7 +230,7 @@ void e_log(const char *fmt, ...) { char b[1024]; va_list ap; va_start(ap, fmt); 
 #define POOL_MAX 128
 static struct { u8 *host; u64 size; } g_pool[POOL_MAX]; static int g_npool;
 static u8 *pool_take(u64 size) { for (int i = 0; i < g_npool; i++) if (g_pool[i].size == size) { u8 *h = g_pool[i].host; g_pool[i] = g_pool[--g_npool]; e_memset(h, 0, (size_t)size); return h; } return 0; }
-void mem_release(Mem *m) { for (int i = 0; i < m->n; i++) { if (g_npool < POOL_MAX) { g_pool[g_npool].host = m->r[i].host; g_pool[g_npool].size = m->r[i].size; g_npool++; } } m->n = 0; m->last = 0; }
+void mem_release(Mem *m) { for (int i = 0; i < m->n; i++) { if (g_npool < POOL_MAX) { g_pool[g_npool].host = m->r[i].host; g_pool[g_npool].size = m->r[i].size; g_npool++; } } m->n = 0; m->last = 0; mem_tlb_flush(m); }
 u8 *mem_map(Mem *m, u64 base, u64 size, const char *name) {
   if (m->n >= MAX_REGIONS) return 0;
   size = (size + 0xfff) & ~0xfffull;
@@ -245,7 +245,7 @@ int mem_unmap(Mem *m, u64 base) {
   for (int i = 0; i < m->n; i++) if (m->r[i].base == base) {
     u8 *h = m->r[i].host; u64 size = m->r[i].size;
     if (!emu_free(h) && g_npool < POOL_MAX) { g_pool[g_npool].host = h; g_pool[g_npool].size = size; g_npool++; }
-    for (int j = i + 1; j < m->n; j++) m->r[j - 1] = m->r[j]; m->n--; m->last = 0; return 1; }
+    for (int j = i + 1; j < m->n; j++) m->r[j - 1] = m->r[j]; m->n--; m->last = 0; mem_tlb_flush(m); return 1; }
   return 0;
 }
 Region *mem_region(Mem *m, u64 addr) {
@@ -257,11 +257,15 @@ u8 *mem_ptr(Mem *m, u64 addr, u64 size, int write) {
   { extern u64 x64_rip(void); if (write && addr <= (u64)X64_WWATCH && (u64)X64_WWATCH < addr + size) e_log("[wwatch] write %llx+%llu at rip=%llx\n", (unsigned long long)addr, (unsigned long long)size, (unsigned long long)x64_rip()); }
 #endif
   Region *r = &m->r[m->last];
-  if (m->n && addr - r->base < r->size && addr + size - r->base <= r->size) return r->host + (addr - r->base);
+  if (m->n && addr - r->base < r->size && addr + size - r->base <= r->size) goto hit;
   for (int i = 0; i < m->n; i++) {
     r = &m->r[i];
-    if (addr - r->base < r->size && addr + size - r->base <= r->size) { m->last = i; return r->host + (addr - r->base); }
+    if (addr - r->base < r->size && addr + size - r->base <= r->size) { m->last = i; goto hit; }
   }
   m->fault_addr = addr; m->fault_write = write;
   return 0;
+hit:;
+  u64 pg = addr >> 12, pb = pg << 12;   /* remember the page if it lies fully inside the region */
+  if (pb >= r->base && pb + 4096 <= r->base + r->size) { Tlb *t = &m->tlb[pg & (TLB_N - 1)]; t->tag = pg + 1; t->host = r->host + (pb - r->base); }
+  return r->host + (addr - r->base);
 }

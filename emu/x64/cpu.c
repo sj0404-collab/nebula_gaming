@@ -239,6 +239,24 @@ static int string_op(Ins *i, int op, int sz) {
   Cpu *c = i->c; s64 step = (c->rflags & F_DF) ? -sz : sz;
   u64 cnt = i->rep ? (i->p67 ? (u32)c->r[RCX] : c->r[RCX]) : 1;
   if (i->rep && cnt == 0) return 1;
+  /* fast path: forward `rep movs` / `rep stos` with both ranges inside one region and not overlapping → one host copy/fill
+     (memcpy/memset in msvcrt, Bun and the JSC GC are `rep movsb`/`rep stosb` loops; this turns N guest iterations into one) */
+  if (i->rep && cnt > 1 && step > 0 && !i->p67 && (op == 0xA4 || op == 0xAA) && cnt <= (1ull << 30) / (u64)sz) {
+    u64 bytes = cnt * (u64)sz, si = c->r[RSI], di = c->r[RDI];
+    if (i->seg == 1) si += c->fs_base; else if (i->seg == 2) si += c->gs_base;
+    u8 *d = mem_ptr(c->mem, di, bytes, 1);
+    if (d) {
+      if (op == 0xAA) {
+        u64 v = c->r[RAX];
+        if (sz == 1) e_memset(d, (int)(u8)v, (size_t)bytes);
+        else for (u64 k = 0; k < bytes; k += sz) __builtin_memcpy(d + k, &v, sz);
+        c->r[RDI] += bytes; c->r[RCX] = 0; return 1;
+      }
+      int overlap = (di > si && di < si + bytes) || (si > di && si < di + bytes);
+      u8 *sp = overlap ? 0 : mem_ptr(c->mem, si, bytes, 0);
+      if (sp) { e_memcpy(d, sp, (size_t)bytes); c->r[RSI] += bytes; c->r[RDI] += bytes; c->r[RCX] = 0; return 1; }
+    }
+  }
   u64 iter = 0;
   while (cnt) {
     u64 si = c->r[RSI], di = c->r[RDI];

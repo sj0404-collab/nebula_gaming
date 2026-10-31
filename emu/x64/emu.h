@@ -55,19 +55,28 @@ void   host_gfx_free(int id);
 typedef struct { u64 base, size; u8 *host; const char *name; u32 prot; } Region;
 int emu_free(void *p);                 /* 1 = memory returned to the host (native), 0 = not freeable (wasm arena) */
 
+#define TLB_BITS 12
+#define TLB_N (1 << TLB_BITS)
+typedef struct { u64 tag; u8 *host; } Tlb;   /* tag = page number + 1 (0 = empty); host = host address of that 4 KB page */
 typedef struct {
   Region  r[MAX_REGIONS];
   int     n;
   int     last;                       /* last-hit cache */
   u64     fault_addr;                 /* set on failed translation */
   int     fault_write;
+  Tlb     tlb[TLB_N];                 /* direct-mapped page translation cache (code / stack / heap no longer thrash `last`) */
 } Mem;
 int mem_unmap(Mem *m, u64 base);       /* drop a mem_map region (large VirtualAlloc reservation released) */
 
 u8  *mem_map(Mem *m, u64 base, u64 size, const char *name);   /* add region (host memory allocated) */
 u8  *mem_ptr(Mem *m, u64 addr, u64 size, int write);          /* NULL on fault */
 /* inline fast path: hit in the last-used region (the common case inside a loop), otherwise the full lookup */
-static inline u8 *mem_ptr_fast(Mem *m, u64 addr, u64 size, int write) { Region *r = &m->r[m->last]; u64 off = addr - r->base; if (off < r->size && off + size <= r->size) return r->host + off; return mem_ptr(m, addr, size, write); }
+static inline u8 *mem_ptr_fast(Mem *m, u64 addr, u64 size, int write) {
+  u64 pg = addr >> 12; Tlb *t = &m->tlb[pg & (TLB_N - 1)];
+  if (t->tag == pg + 1) { u64 o = addr & 4095; if (o + size <= 4096) return t->host + o; }
+  return mem_ptr(m, addr, size, write);
+}
+static inline void mem_tlb_flush(Mem *m) { for (int i = 0; i < TLB_N; i++) m->tlb[i].tag = 0; }
 Region *mem_region(Mem *m, u64 addr);
 void mem_release(Mem *m);                                     /* give all regions back to the pool */
 void *emu_alloc(size_t n);                                    /* zeroed host memory, never freed (bump) */
