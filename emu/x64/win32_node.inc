@@ -72,7 +72,7 @@ static void s_nebula_regwait_thunk(Cpu *c) {
   do_wait(c, 1, 0, h, 0, ms); if (c->status == RUN_YIELD) return;    /* parked: re-executed here after the wake-up */
   u32 r = (u32)c->r[RAX]; wr32(c, blk + 44, 1);
   if (rd32(c, blk + 40)) { RET(0); return; }                         /* UnregisterWait raced the signal: just finish the helper thread */
-  c->r[RCX] = ctx; c->r[RDX] = r == 0x102 ? 1 : 0; c->rip = cb;    /* tail call: the callback returns straight into the thread-exit stub */
+  guest_call(c, cb, ctx, r == 0x102 ? 1 : 0, 0, 0);                 /* callback(context, timed_out) returns into the continuation slot → thread exit */
 }
 static void s_RegisterWaitForSingleObject(Cpu *c) {
   u64 out = ARG(0), h = ARG(1), cb = ARG(2), ctx = ARG(3), ms = ARG(4), flags = ARG(5);

@@ -17,6 +17,16 @@ out=$($X --quiet tests/pebstd.exe 2>&1 || true)
 check "peb handles"   "in=0000000000000010 out=0000000000000011 err=0000000000000012 flags=1" "$out"
 check "peb WriteFile" "WriteFile(peb hStdOutput) -> 1, 87 bytes" "$out"
 check "decommit"      "decommit -> 1, recommit same, nonzero after recommit: 0, untouched byte: ab" "$out"
+echo "[1c] waitin.exe (console input handle is waitable)"
+out=$( (sleep 1; printf 'hi') | $X --quiet tests/waitin.exe 2>&1 || true)
+check "wait timeout"  "wait(50ms) before input -> 258" "$out"
+check "wait signaled" "wait(5s) -> 0 (0=signaled)" "$out"
+check "key records"   "ReadConsoleInput: 2 records 'h' 'i'" "$out"
+echo "[1d] regwait.exe (RegisterWaitForSingleObject on console input)"
+out=$( (sleep 1; printf 'hi') | $X --quiet tests/regwait.exe 2>&1 || true)
+check "callback"      "callback ctx=0000000000001234 timedout=0" "$out"
+check "event"         "event wait -> 0" "$out"
+check "records"       "records=2" "$out"
 echo "[2] bench.exe (CPU)"
 out=$($X --quiet --stats tests/bench.exe 2>&1 || true)
 check "sieve"         "sieve(2M): 148933 primes" "$out"

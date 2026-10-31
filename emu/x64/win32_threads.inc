@@ -30,6 +30,7 @@ static void park(Cpu *c, int block) { W->block = block; retry_and_yield(c, g_cur
 /* ---- kernel objects ---- */
 static int obj_signaled(int pid, int tid, int kind, int idx, int consume) {
   if (kind == 1) { int code; return proc_state(idx, &code) != 1; }
+  if (kind == 3) return vfs_stdin_available();
   KObj *k = kobj_get(idx); if (!k) return 1;   /* object vanished: never hang on it */
   switch (k->kind) {
     case KO_THREAD: return k->state == 2;
@@ -50,7 +51,8 @@ static int wait_check(int pid, int tid, const int *kinds, const int *idxs, int n
 static int wait_handle(Cpu *c, u64 h, int *kind, int *idx) {
   if (h == ~1ull) { *kind = 2; *idx = cur_thread(W)->kobj; return 1; }
   if (h == ~0ull) { *kind = 1; *idx = W->pid; return 1; }
-  int fd = handle_fd(h); if (fd < 3) return 0;
+  int fd = handle_fd(h); if (h == 0x10 || (fd >= 3 && vfs_resolve(fd) == -1)) { *kind = 3; *idx = 0; return 1; }   /* console input handle: signaled while input is pending (libuv's raw tty reader waits on it) */
+  if (fd < 3) return 0;
   int pid = vfs_fd_pid(fd); if (pid >= 0) { *kind = 1; *idx = pid; return 1; }
   int k = vfs_fd_kobj(fd); if (k >= 0) { *kind = 2; *idx = k; return 1; }
   return 0;
@@ -104,7 +106,7 @@ void w32_threads_summary(Win32 *w, int *stdin_wait, int *sleeping, double *best_
     else if (x->block == BLOCK_SLEEP) { if (x->sleeping) { rem = x->sleep_until_ms - now; *sleeping = 1; } else rem = 0; }
     else if (x->block >= BLOCK_OBJ) {
       if (x->wait_deadline >= 0) { rem = x->wait_deadline - now; *sleeping = 1; }
-      if (x->block == BLOCK_OBJ) for (int j = 0; j < x->nwobj; j++) { if (x->wobj_kind[j] != 2) continue; KObj *k = kobj_get(x->wobj_idx[j]); if (k && k->kind == KO_TIMER && k->due_ms >= 0) { double r2 = k->due_ms - now; if (r2 < 0) r2 = 0; if (rem < 0 || r2 < rem) rem = r2; *sleeping = 1; } }
+      if (x->block == BLOCK_OBJ) for (int j = 0; j < x->nwobj; j++) { if (x->wobj_kind[j] == 3) *stdin_wait = 1; if (x->wobj_kind[j] != 2) continue; KObj *k = kobj_get(x->wobj_idx[j]); if (k && k->kind == KO_TIMER && k->due_ms >= 0) { double r2 = k->due_ms - now; if (r2 < 0) r2 = 0; if (rem < 0 || r2 < rem) rem = r2; *sleeping = 1; } }
     }
     if (rem >= 0) { if (rem < 0) rem = 0; if (*best_ms < 0 || rem < *best_ms) *best_ms = rem; }
   }
@@ -135,6 +137,7 @@ static u64 thread_create(Cpu *c, u64 start, u64 param, u64 stack_size, int suspe
   t->kobj = idx;
   int fd = vfs_kobj_handle(idx); if (fd < 0) { W->last_error = 4; return 0; }
   if (tid_out) *tid_out = (u32)tid;
+  { char m[200]; e_snprintf(m, sizeof m, "[x64] thread %d created by %u: start=0x%llx param=0x%llx\n", tid, (unsigned)cur_tid(w), (unsigned long long)start, (unsigned long long)param); host_write(3, m, e_strlen(m)); }
   return H_OF(fd);
 }
 /* a thread is gone (returned, ExitThread, TerminateThread, process exit): publish its exit code, abandon its mutexes */
