@@ -17,6 +17,8 @@ void host_set_dump(int every, const char *prefix); int host_frames(void); double
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <errno.h>
 /* private copy-on-write mapping of a host file: a 200 MB Bun executable is then backed by the page cache instead of a malloc copy */
 static u8 *map_file(const char *path, size_t *len) {
   int fd = open(path, O_RDONLY); if (fd < 0) return 0; struct stat st; if (fstat(fd, &st) || !S_ISREG(st.st_mode)) { close(fd); return 0; }
@@ -72,20 +74,23 @@ int main(int argc, char **argv) {
   }
   host_set_dump(dump_every, prefix);
   for (int mi = 0; mi < nmounts; mi++) { int n = mount_dir(mounts[mi][0], mounts[mi][1], 0); if (!quiet) fprintf(stderr, "[x64run] mounted %s -> %s (%d files)\n", mounts[mi][0], mounts[mi][1], n); }   /* before load: DLLs next to the exe */
+  if (getenv("X64_TAP")) { extern const char *g_vfs_tap; g_vfs_tap = getenv("X64_TAP"); }
   if (getenv("X64_GUEST_ENV")) { extern void w32_add_env(const char *); char *ge = strdup(getenv("X64_GUEST_ENV")); for (char *t = strtok(ge, ";"); t; t = strtok(0, ";")) w32_add_env(t); }
   int rc = x64_load(bytes, len, base, cmdline);
   if (g_apitrace) { extern void w32_api_trace(int); w32_api_trace(1); }
   if (rc) { fprintf(stderr, "load failed (%d): %s", rc, x64_report()); return 3; }
   g_prof = getenv("X64_PROF") != 0;
   u64 trace_after = getenv("X64_TRACE_AFTER") ? strtoull(getenv("X64_TRACE_AFTER"), 0, 10) : 0; int trace_on = 0;
-  double t0 = host_now_ms(); int r; int ki = 0; u64 yields = 0;
+  double t0 = host_now_ms(); int r; int ki = 0; u64 yields = 0; int stdin_eof = 0;
   for (;;) {
     double el = host_now_ms() - t0;
     if (el > max_ms) { if (!quiet) { fprintf(stderr, "[x64run] time limit reached\n"); if (getenv("X64_HIST")) { extern u64 x64_rip(void); fprintf(stderr, "[x64run] rip=%llx regs: %s\n[x64run] last blocks: %s\n", (unsigned long long)x64_rip(), x64_regs(), x64_history()); unsigned char b[512]; u64 a = (x64_rip() & ~0xfull) - 256; if (x64_mem_copy(a, b, 512)) { FILE *f = fopen("/tmp/rip_tl.bin", "wb"); if (f) { fwrite(b, 1, 512, f); fclose(f); fprintf(stderr, "[x64run] dumped 512 bytes from 0x%llx to /tmp/rip_tl.bin\n", (unsigned long long)a); } } } } r = -1; break; }
     while (ki < nkeys && keys[ki].at <= el) { x64_key(keys[ki].vk, keys[ki].down); ki++; }
     if (g_prof) { extern u64 x64_rip(void); r = x64_run(20000); prof_sample(x64_rip()); } else r = x64_run(2000000);
     if (trace_after && !trace_on && x64_icount() >= trace_after) { extern void w32_api_trace(int); w32_api_trace(1); trace_on = 1; fprintf(stderr, "[x64run] apitrace enabled at %llu instructions\n", (unsigned long long)x64_icount()); }
-    if (r == RUN_YIELD && x64_wants_stdin()) { char line[4096]; if (!no_stdin && fgets(line, sizeof line, stdin)) x64_stdin_write((const u8 *)line, strlen(line)); else x64_stdin_eof(); continue; }
+    if (!no_stdin && !stdin_eof) {   /* feed host stdin as raw bytes whenever some arrive (TUIs read single key presses; never block the emulator on the terminal) */
+      struct pollfd pf = { 0, POLLIN, 0 }; if (poll(&pf, 1, 0) > 0) { unsigned char buf[4096]; ssize_t got = read(0, buf, sizeof buf); if (got > 0) x64_stdin_write(buf, (size_t)got); else if (got == 0 || (errno != EAGAIN && errno != EINTR)) { stdin_eof = 1; x64_stdin_eof(); } } }
+    if (r == RUN_YIELD && x64_wants_stdin()) { if (no_stdin || stdin_eof) { x64_stdin_eof(); continue; } struct pollfd pf = { 0, POLLIN, 0 }; if (poll(&pf, 1, 2) <= 0) { yields++; continue; } continue; }
     if (r == RUN_YIELD) { yields++; double s = x64_sleep_ms(); if (s > 0) { if (s > 16) s = 16; usleep((useconds_t)(s * 1000)); } else if (x64_has_window()) usleep(1000); continue; }
     if (r != RUN_OK) break;
   }

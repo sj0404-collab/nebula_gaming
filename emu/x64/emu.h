@@ -236,7 +236,7 @@ struct Win32 {
   union { ThreadCtx tctx; struct { THREAD_CTX_FIELDS }; };    /* current thread's state (see Thread.ctx) */
   Thread th[THREAD_MAX]; int nth, cur_th; Cpu tcpu[THREAD_MAX]; int next_tid;
   struct { u64 tmpl, tmpl_size, blk_size; } tls[MAX_TLS_IMAGES]; int ntls;   /* static TLS templates (exe + DLLs), index = slot in the TEB+0x58 array */
-  GuestModule mods[MAX_MODULES]; int nmods; u64 dll_next;
+  GuestModule mods[MAX_MODULES]; int nmods; u64 dll_next; u32 exe_exp_rva, exe_exp_size;   /* export directory of the main image (Bun exports napi_* for .node addons) */
   u32 exe_pdata_rva, exe_pdata_size;                          /* .pdata of the exe (RUNTIME_FUNCTION table) for SEH / C++ unwinding */     /* private DLLs (LoadLibrary / static imports) */
   int wake_gen;                                               /* bumped by WakeByAddress / InitOnceComplete */
   /* heap */

@@ -455,8 +455,9 @@ static int mod_load(Win32 *w, const char *name) {
   return -1;
 }
 /* export lookup by name or ordinal; follows forwarders ("KERNEL32.Foo") into the shim table */
-static u64 mod_export(Win32 *w, int mi, const char *name, u32 ordinal, int depth) {
-  GuestModule *m = &w->mods[mi]; if (!m->exp_rva || depth > 4) return 0; Cpu *c = w->cpu; u64 e = m->base + m->exp_rva;
+static u64 mod_export(Win32 *w, int mi, const char *name, u32 ordinal, int depth);
+static u64 mod_export_m(Win32 *w, GuestModule *m, const char *name, u32 ordinal, int depth) {
+  if (!m->exp_rva || depth > 4) return 0; Cpu *c = w->cpu; u64 e = m->base + m->exp_rva;
   u32 ord_base = rd32(c, e + 16), nfunc = rd32(c, e + 20), nnames = rd32(c, e + 24), funcs = rd32(c, e + 28), names = rd32(c, e + 32), ords = rd32(c, e + 36);
   u32 idx = 0xffffffffu;
   if (name) { for (u32 i = 0; i < nnames && i < 65536; i++) { const char *en = rd_str(c, m->base + rd32(c, m->base + names + 4 * i), 256); if (en && !e_strcmp(en, name)) { idx = rd16(c, m->base + ords + 2 * i); break; } } }
@@ -469,7 +470,10 @@ static u64 mod_export(Win32 *w, int mi, const char *name, u32 ordinal, int depth
     if (!pe_is_system_dll(dll)) { int o = mod_load(w, dll); if (o >= 0) return mod_export(w, o, fn[0] == '#' ? 0 : fn, fn[0] == '#' ? (u32)mod_atoi(fn + 1) : 0, depth + 1); }
     return w32_shim_slot(w, dll, fn);
   }
-  return m->base + rva;
+  return m->base + rva; }
+static u64 mod_export(Win32 *w, int mi, const char *name, u32 ordinal, int depth) { return mod_export_m(w, &w->mods[mi], name, ordinal, depth); }
+/* exports of the main executable itself: GetProcAddress(GetModuleHandle(NULL), "napi_...") — Node-API addons delay-load their host's exports */
+static u64 exe_export(Win32 *w, const char *name, u32 ordinal) { if (!w->exe_exp_rva) return 0; GuestModule m; e_memset(&m, 0, sizeof m); m.base = w->image_base; m.exp_rva = w->exe_exp_rva; m.exp_size = w->exe_exp_size; return mod_export_m(w, &m, name, ordinal, 0); 
 }
 u64 w32_resolve_import(Win32 *w, const char *dll, const char *name, u32 ordinal) {
   if (!pe_is_system_dll(dll)) { int m = mod_load(w, dll); if (m >= 0) { u64 a = mod_export(w, m, name[0] == '#' ? 0 : name, name[0] == '#' ? ordinal : 0, 0); if (a) return a; } }
@@ -506,15 +510,15 @@ static void load_library(Cpu *c, const char *n) {
   }
   RET(fake_module(n));
 }
-static void s_GetModuleHandleA(Cpu *c) { const char *n = rd_str(c, ARG(0), 260); if (!n) { RET(W->image_base); return; } int m = mod_find(W, n); if (m >= 0) { RET(W->mods[m].base); return; } if (mod_name_eq(mod_basename(n), W->exe_name)) { RET(W->image_base); return; } RET(fake_module(n)); }
-static void s_GetModuleHandleW(Cpu *c) { if (!ARG(0)) { RET(W->image_base); return; } char n[260]; wstr_to_utf8(c, ARG(0), n, sizeof n, -1); c->r[RCX] = 0; int m = mod_find(W, n); if (m >= 0) { RET(W->mods[m].base); return; } if (mod_name_eq(mod_basename(n), W->exe_name)) { RET(W->image_base); return; } RET(fake_module(n)); }
+static void s_GetModuleHandleA(Cpu *c) { const char *n = rd_str(c, ARG(0), 260); if (!n) { RET(W->image_base); return; } int m = mod_find(W, n); if (m >= 0) { RET(W->mods[m].base); return; } if ((mod_name_eq(mod_basename(n), W->exe_name) || mod_name_eq(mod_basename(n), "node.exe"))) { RET(W->image_base); return; } RET(fake_module(n)); }
+static void s_GetModuleHandleW(Cpu *c) { if (!ARG(0)) { RET(W->image_base); return; } char n[260]; wstr_to_utf8(c, ARG(0), n, sizeof n, -1); c->r[RCX] = 0; int m = mod_find(W, n); if (m >= 0) { RET(W->mods[m].base); return; } if ((mod_name_eq(mod_basename(n), W->exe_name) || mod_name_eq(mod_basename(n), "node.exe"))) { RET(W->image_base); return; } RET(fake_module(n)); }
 static void s_GetModuleHandleExW(Cpu *c) { u64 h = W->image_base; u32 flags = (u32)ARG(0);
   if (ARG(1)) { if (flags & 4) { for (int i = 0; i < W->nmods; i++) if (ARG(1) - W->mods[i].base < W->mods[i].size) h = W->mods[i].base; }   /* GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS */
-    else { char n[260]; wstr_to_utf8(c, ARG(1), n, sizeof n, -1); int m = mod_find(W, n); h = m >= 0 ? W->mods[m].base : mod_name_eq(mod_basename(n), W->exe_name) ? W->image_base : fake_module(n); } }
+    else { char n[260]; wstr_to_utf8(c, ARG(1), n, sizeof n, -1); int m = mod_find(W, n); h = m >= 0 ? W->mods[m].base : (mod_name_eq(mod_basename(n), W->exe_name) || mod_name_eq(mod_basename(n), "node.exe")) ? W->image_base : fake_module(n); } }
   if (ARG(2)) wr64(c, ARG(2), h); RET(1); }
 static void s_GetModuleHandleExA(Cpu *c) { u64 h = W->image_base; u32 flags = (u32)ARG(0);
   if (ARG(1)) { if (flags & 4) { for (int i = 0; i < W->nmods; i++) if (ARG(1) - W->mods[i].base < W->mods[i].size) h = W->mods[i].base; }
-    else { const char *n = rd_str(c, ARG(1), 260); int m = n ? mod_find(W, n) : -1; h = m >= 0 ? W->mods[m].base : (n && mod_name_eq(mod_basename(n), W->exe_name)) ? W->image_base : fake_module(n); } }
+    else { const char *n = rd_str(c, ARG(1), 260); int m = n ? mod_find(W, n) : -1; h = m >= 0 ? W->mods[m].base : (n && (mod_name_eq(mod_basename(n), W->exe_name) || mod_name_eq(mod_basename(n), "node.exe"))) ? W->image_base : fake_module(n); } }
   if (ARG(2)) wr64(c, ARG(2), h); RET(1); }
 static void s_LoadLibraryA(Cpu *c) { load_library(c, rd_str(c, ARG(0), 260)); }
 static void s_LoadLibraryW(Cpu *c) { char n[260]; wstr_to_utf8(c, ARG(0), n, sizeof n, -1); load_library(c, n); }
@@ -524,6 +528,7 @@ static void s_FreeLibrary(Cpu *c) { RET(1); }
 static void s_GetProcAddress(Cpu *c) {
   int m = mod_by_base(W, ARG(0));
   if (m >= 0) { u64 a = ARG(1) < 0x10000 ? mod_export(W, m, 0, (u32)ARG(1), 0) : mod_export(W, m, rd_str(c, ARG(1), 256), 0, 0); if (!a) W->last_error = 127; RET(a); return; }
+  if (ARG(0) == W->image_base) { u64 a = ARG(1) < 0x10000 ? exe_export(W, 0, (u32)ARG(1)) : exe_export(W, rd_str(c, ARG(1), 256), 0); if (a) { RET(a); return; } }
   const char *n = ARG(1) < 0x10000 ? ordinal_name(fake_module_name(ARG(0)), (u32)ARG(1)) : rd_str(c, ARG(1), 256);
   if (!n) { if (ARG(1) < 0x10000) { char msg[160]; e_snprintf(msg, sizeof msg, "[x64] GetProcAddress miss: %s!#%u\n", fake_module_name(ARG(0)) ? fake_module_name(ARG(0)) : "?", (u32)ARG(1)); host_write(3, msg, e_strlen(msg)); } W->last_error = 127; RET(0); return; }
   if (!w32_have_shim("", n)) { char msg[320]; e_snprintf(msg, sizeof msg, "[x64] GetProcAddress miss: %s\n", n); host_write(3, msg, e_strlen(msg)); W->last_error = 127; RET(0); return; }

@@ -155,6 +155,7 @@ static int pe_map(Win32 *w, const u8 *bytes, size_t len, const char *name, int w
       r += bsz;
     }
   }
+  if (!want_dll) { w->exe_exp_rva = h.dd[0][0]; w->exe_exp_size = h.dd[0][1]; }
   /* register before resolving imports so that circular DLL dependencies terminate */
   if (want_dll) {
     if (w->nmods >= MAX_MODULES) { w32_report(w, "%s: too many DLLs (max %d)", name, MAX_MODULES); return -7; }

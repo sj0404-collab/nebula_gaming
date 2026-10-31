@@ -276,6 +276,8 @@ s64 vfs_read(int fd, u8 *buf, u64 n) {
   u64 avail = f->pos < v->size ? v->size - f->pos : 0; u64 c = n - o < avail ? n - o : avail;
   if (c) e_memcpy(buf + o, v->data + f->pos, (size_t)c); f->pos += c; o += c; if (o == 0 && n) f->eof = 1; return (s64)o;
 }
+const char *g_vfs_tap;
+static const char *e_strstr_(const char *h, const char *nd) { size_t l = e_strlen(nd); for (; *h; h++) if (!e_strncmp(h, nd, l)) return h; return 0; }
 s64 vfs_write(int fd, const u8 *buf, u64 n) {
   FdEnt *f = vf(fd); if (!f) return -1;
   if (f->kind == FD_PIPE) return f->wend ? pipe_write(&g_pipes[f->obj], buf, n) : -1;
@@ -284,7 +286,9 @@ s64 vfs_write(int fd, const u8 *buf, u64 n) {
   if (f->append) f->pos = v->size;
   if (!grow(v, f->pos + n)) return -1;
   if (f->pos > v->size) e_memset(v->data + v->size, 0, (size_t)(f->pos - v->size));
-  e_memcpy(v->data + f->pos, buf, (size_t)n); f->pos += n; if (f->pos > v->size) v->size = f->pos; v->written = 1; return (s64)n;
+  e_memcpy(v->data + f->pos, buf, (size_t)n); f->pos += n; if (f->pos > v->size) v->size = f->pos; v->written = 1;
+  if (g_vfs_tap && e_strstr_(v->path, g_vfs_tap)) host_write(3, (const char *)buf, (size_t)n);   /* debugging aid: mirror writes to files matching X64_TAP to the emulator log */
+  return (s64)n;
 }
 s64 vfs_seek(int fd, s64 off, int whence) {
   FdEnt *f = vf(fd); if (f && f->kind == FD_NULL) return 0; if (!f || f->kind != FD_FILE || f->node < 0) return -1; VNode *v = &g_nodes[f->node];
