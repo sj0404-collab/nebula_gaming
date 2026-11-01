@@ -101,7 +101,7 @@ static int sock_assoc(Cpu *c, int si, int *port, u64 *key, int *skip) {
 static int spend_add(Cpu *c, int kind, int si, int port, u64 key, u64 ov, u64 buf, u32 len, int acc) {
   int k; for (k = 0; k < SPEND_MAX && g_spend[k].used; k++); if (k == SPEND_MAX) return -1;
   g_spend[k].used = 1; g_spend[k].kind = kind; g_spend[k].sock = si; g_spend[k].pid = W->pid; g_spend[k].port = port; g_spend[k].w = W; g_spend[k].key = key; g_spend[k].ov = ov; g_spend[k].buf = buf; g_spend[k].len = len; g_spend[k].acc = acc;
-  if (ov) { wr64(c, ov, 0x103); wr64(c, ov + 8, 0); } g_net_pending++; return k; }
+  if (ov) { ov_set(c, ov, 0x103, 0); } g_net_pending++; return k; }
 
 static void s_socket(Cpu *c) {
   int af = (int)ARG(0), type = (int)ARG(1);
@@ -157,14 +157,15 @@ static void s_getsockname(Cpu *c) { SOCK_ARG0(si); Sock *s = &g_socks[si]; u8 ip
 static void s_getpeername(Cpu *c) { SOCK_ARG0(si); Sock *s = &g_socks[si]; u8 ip[4]; int port;
   if (s->host < 0 || !host_net_name(s->host, 1, ip, &port)) { W->last_error = 10057; RET(~0ull); return; } if (ARG(2) && rd32(c, ARG(2)) >= 16) { write_sockaddr(c, ARG(1), ip, port); wr32(c, ARG(2), 16); RET(0); } else { W->last_error = 10014; RET(~0ull); } }
 /* gather WSABUF[] { u32 len; pad; u64 buf } */
-static u32 wsabuf_total(Cpu *c, u64 bufs, u32 n) { u64 t = 0; for (u32 i = 0; i < n; i++) t += rd32(c, bufs + i * 16); return t > 0x7fffffff ? 0x7fffffff : (u32)t; }
+#define WSABUF_SZ (2 * PSZ_OF(c))   /* WSABUF { ULONG len; CHAR *buf; } */
+static u32 wsabuf_total(Cpu *c, u64 bufs, u32 n) { u64 t = 0; for (u32 i = 0; i < n; i++) t += rd32(c, bufs + i * WSABUF_SZ); return t > 0x7fffffff ? 0x7fffffff : (u32)t; }
 static s64 sock_recv_into(Cpu *c, int si, u64 bufs, u32 n) {   /* non-blocking read into the first buffer with room; >0 bytes, 0 EOF, -2 would block, -3 error */
   Sock *s = &g_socks[si]; if (s->host < 0) return -3;
-  for (u32 i = 0; i < n; i++) { u32 len = rd32(c, bufs + i * 16); u64 b = rd64(c, bufs + i * 16 + 8); if (!len) continue; u8 *p = mem_ptr(c->mem, b, len, 1); if (!p) return -3; return sock_read(s, p, len); }
+  for (u32 i = 0; i < n; i++) { u32 len = rd32(c, bufs + i * WSABUF_SZ); u64 b = rdp(c, bufs + i * WSABUF_SZ + PSZ_OF(c)); if (!len) continue; u8 *p = mem_ptr(c->mem, b, len, 1); if (!p) return -3; return sock_read(s, p, len); }
   return 0; }
 static s64 sock_send_from(Cpu *c, int si, u64 bufs, u32 n) {
   Sock *s = &g_socks[si]; if (s->host < 0 || s->state != 2) return -3; u64 total = 0;
-  for (u32 i = 0; i < n; i++) { u32 len = rd32(c, bufs + i * 16); u64 b = rd64(c, bufs + i * 16 + 8); if (!len) continue; const u8 *p = mem_ptr(c->mem, b, len, 0); if (!p) return -3;
+  for (u32 i = 0; i < n; i++) { u32 len = rd32(c, bufs + i * WSABUF_SZ); u64 b = rdp(c, bufs + i * WSABUF_SZ + PSZ_OF(c)); if (!len) continue; const u8 *p = mem_ptr(c->mem, b, len, 0); if (!p) return -3;
     s64 r = sock_write(s, p, len); if (r < 0) return total ? (s64)total : -3; total += (u64)r; }
   return (s64)total; }
 /* WSARecv(s, bufs, count, &bytes, &flags, ov, routine) */
@@ -176,24 +177,24 @@ static void s_WSARecv(Cpu *c) { SOCK_ARG0(si); u64 bufs = ARG(1); u32 n = (u32)A
   u32 total = wsabuf_total(c, bufs, n);
   if (s->host < 0) { W->last_error = 10057; RET(~0ull); return; }
   if (total == 0) {   /* zero-byte read: readiness notification */
-    if (sock_readable(s)) { wr64(c, ov, 0); wr64(c, ov + 8, 0); if (bytesp) wr32(c, bytesp, 0); if (assoc && !(skip & 1)) iocp_post(port, key, ov, 0, 0); RET(0); return; }
+    if (sock_readable(s)) { ov_set(c, ov, 0, 0); if (bytesp) wr32(c, bytesp, 0); if (assoc && !(skip & 1)) iocp_post(port, key, ov, 0, 0); RET(0); return; }
     if (spend_add(c, 1, si, port, key, ov, 0, 0, 0) < 0) { W->last_error = 10055; RET(~0ull); return; } W->last_error = 997; RET(~0ull); return; }
   s64 r = sock_recv_into(c, si, bufs, n);
   if (r == -2) {   /* capture the first non-empty buffer NOW: the WSABUF array itself is often a temporary (.NET pins the data, not the array) */
-    u64 b = 0; u32 len = 0; for (u32 i = 0; i < n; i++) { len = rd32(c, bufs + i * 16); b = rd64(c, bufs + i * 16 + 8); if (len) break; }
+    u64 b = 0; u32 len = 0; for (u32 i = 0; i < n; i++) { len = rd32(c, bufs + i * WSABUF_SZ); b = rdp(c, bufs + i * WSABUF_SZ + PSZ_OF(c)); if (len) break; }
     if (spend_add(c, 2, si, port, key, ov, b, len, 0) < 0) { W->last_error = 10055; RET(~0ull); return; } W->last_error = 997; RET(~0ull); return; }
-  if (r == -3) { wr64(c, ov, 0xC000020Dull); wr64(c, ov + 8, 0); W->last_error = 10054; RET(~0ull); return; }
-  wr64(c, ov, 0); wr64(c, ov + 8, (u64)r); if (bytesp) wr32(c, bytesp, (u32)r); if (assoc && !(skip & 1)) iocp_post(port, key, ov, (u32)r, 0); RET(0); }
+  if (r == -3) { ov_set(c, ov, 0xC000020Dull, 0); W->last_error = 10054; RET(~0ull); return; }
+  ov_set(c, ov, 0, (u64)r); if (bytesp) wr32(c, bytesp, (u32)r); if (assoc && !(skip & 1)) iocp_post(port, key, ov, (u32)r, 0); RET(0); }
 /* WSASend(s, bufs, count, &bytes, flags, ov, routine): writes synchronously (host waits for socket room), completes at once */
 static void s_WSASend(Cpu *c) { SOCK_ARG0(si); u64 bufs = ARG(1); u32 n = (u32)ARG(2); u64 bytesp = ARG(3), ov = ARG(5);
   s64 r = sock_send_from(c, si, bufs, n);
-  if (r < 0) { if (ov) { wr64(c, ov, 0xC000020Dull); wr64(c, ov + 8, 0); } W->last_error = g_socks[si].state == 2 ? 10054 : 10057; RET(~0ull); return; }
+  if (r < 0) { if (ov) { ov_set(c, ov, 0xC000020Dull, 0); } W->last_error = g_socks[si].state == 2 ? 10054 : 10057; RET(~0ull); return; }
   Sock *s = &g_socks[si];
   if (ov && s->txlen > s->txoff) {   /* not everything reached the host yet: complete asynchronously when the queue has drained this far */
     int port = -1, skip = 0; u64 key = 0; sock_assoc(c, si, &port, &key, &skip);
     int k = spend_add(c, 5, si, port, key, ov, 0, (u32)r, 0); if (k < 0) { W->last_error = 10055; RET(~0ull); return; } g_spend[k].target = s->tx_total; W->last_error = 997; RET(~0ull); return; }
   if (bytesp) wr32(c, bytesp, (u32)r);
-  if (ov) { wr64(c, ov, 0); wr64(c, ov + 8, (u64)r); int port = -1, skip = 0; u64 key = 0; if (sock_assoc(c, si, &port, &key, &skip) && !(skip & 1)) iocp_post(port, key, ov, (u32)r, 0); }
+  if (ov) { ov_set(c, ov, 0, (u64)r); int port = -1, skip = 0; u64 key = 0; if (sock_assoc(c, si, &port, &key, &skip) && !(skip & 1)) iocp_post(port, key, ov, (u32)r, 0); }
   RET(0); }
 static void s_recv(Cpu *c) { SOCK_ARG0(si); u32 len = (u32)ARG(2);
   if (len == 0) { int m = sock_ready_mask(si); if (g_socks[si].state == 2) { RET(0); return; } W->last_error = (m & 4) ? (g_socks[si].err ? (u32)g_socks[si].err : 10061) : 10057; RET(~0ull); return; }   /* recv(s, NULL, 0): Bun probes connection state this way */
@@ -215,7 +216,7 @@ static void s_AcceptEx(Cpu *c) { int si = sock_of(c, ARG(0)), ai = sock_of(c, AR
   if (g_socks[si].state != 3) { W->last_error = 10022; RET(0); return; }
   if (spend_add(c, 4, si, port, key, ov, ARG(2), (u32)ARG(4) + (u32)ARG(5), ai) < 0) { W->last_error = 10055; RET(0); return; } W->last_error = 997; RET(0); }
 /* GetAcceptExSockaddrs(buf, datalen, local_len, remote_len, &local, &local_len, &remote, &remote_len) */
-static void s_GetAcceptExSockaddrs(Cpu *c) { u64 buf = ARG(0) + ARG(1); u32 ll = (u32)ARG(2); if (ARG(4)) wr64(c, ARG(4), buf); if (ARG(5)) wr32(c, ARG(5), 16); if (ARG(6)) wr64(c, ARG(6), buf + ll); if (ARG(7)) wr32(c, ARG(7), 16); RET(0); }
+static void s_GetAcceptExSockaddrs(Cpu *c) { u64 buf = ARG(0) + ARG(1); u32 ll = (u32)ARG(2); if (ARG(4)) wrp(c, ARG(4), buf); if (ARG(5)) wr32(c, ARG(5), 16); if (ARG(6)) wrp(c, ARG(6), buf + ll); if (ARG(7)) wr32(c, ARG(7), 16); RET(0); }
 static void s_DisconnectEx(Cpu *c) { int si = sock_of(c, ARG(0)); if (si >= 0) sock_shutdown(&g_socks[si], 2); RET(1); }
 /* WSAIoctl(s, code, in, inlen, out, outlen, &ret, ov, routine) */
 static void s_WSAIoctl(Cpu *c) { SOCK_ARG0(si); u32 code = (u32)ARG(1); u64 in = ARG(2), out = ARG(4); u64 retp = ARG(6);
@@ -223,17 +224,17 @@ static void s_WSAIoctl(Cpu *c) { SOCK_ARG0(si); u32 code = (u32)ARG(1); u64 in =
     u32 d1 = rd32(c, in); const char *fn = 0;
     if (d1 == 0x25a207b9) fn = "ConnectEx"; else if (d1 == 0xb5367df1) fn = "AcceptEx"; else if (d1 == 0xb5367df2) fn = "GetAcceptExSockaddrs"; else if (d1 == 0x7fda2e11) fn = "DisconnectEx"; else if (d1 == 0xb5367df0) fn = "TransmitFile";
     if (!fn) { W->last_error = 10045; RET(~0ull); return; }
-    wr64(c, out, w32_shim_slot(W, "mswsock", fn)); if (retp) wr32(c, retp, 8); RET(0); return; }
-  if (code == 0x48000022u) { wr64(c, out, ARG(0)); if (retp) wr32(c, retp, 8); RET(0); return; }   /* SIO_BASE_HANDLE */
+    wrp(c, out, w32_shim_slot(W, "mswsock", fn)); if (retp) wr32(c, retp, PSZ_OF(c)); RET(0); return; }
+  if (code == 0x48000022u) { wrp(c, out, ARG(0)); if (retp) wr32(c, retp, PSZ_OF(c)); RET(0); return; }   /* SIO_BASE_HANDLE */
   if (code == 0x98000004u || code == 0x9800000Cu || code == 0x9800000Fu) { if (retp) wr32(c, retp, 0); RET(0); return; }   /* SIO_KEEPALIVE_VALS, SIO_UDP_CONNRESET, TCP_INITIAL_RTO */
   (void)si; W->last_error = 10045; RET(~0ull); }
 static void s_WSAGetLastError(Cpu *c) { RET(W->last_error); }
 static void s_WSASetLastError(Cpu *c) { W->last_error = (u32)ARG(0); RET(0); }
 static u32 ntstatus_to_wsa(u32 st) { switch (st) { case 0xC0000236u: return 10061; case 0xC00000B5u: return 10060; case 0xC000023Du: return 10065; case 0xC000023Cu: return 10051; case 0xC000020Du: return 10054; case 0xC0000241u: return 10053; case 0xC0000120u: return 995; default: return 10054; } }
 /* WSAGetOverlappedResult(s, ov, &bytes, fWait, &flags): like GetOverlappedResult; fWait re-schedules the thread until the op completed */
-static void s_WSAGetOverlappedResult(Cpu *c) { Win32 *w = W; u64 ov = ARG(1); if (!ov) { w->sleeping = 0; w->last_error = 10014; RET(0); return; } u64 st = rd64(c, ov);
+static void s_WSAGetOverlappedResult(Cpu *c) { Win32 *w = W; u64 ov = ARG(1); if (!ov) { w->sleeping = 0; w->last_error = 10014; RET(0); return; } u64 st = rdp(c, ov);
   if (st == 0x103) { if (ARG(3)) { w->sleeping = 1; w->sleep_until_ms = host_now_ms() + 2; w->block = BLOCK_SLEEP; retry_and_yield(c, g_cur_slot); return; } w->sleeping = 0; w->last_error = 996; RET(0); return; }
-  w->sleeping = 0; if (ARG(2)) wr32(c, ARG(2), (u32)rd64(c, ov + 8)); if (ARG(4)) wr32(c, ARG(4), 0);
+  w->sleeping = 0; if (ARG(2)) wr32(c, ARG(2), (u32)rdp(c, OV_HIGH(ov))); if (ARG(4)) wr32(c, ARG(4), 0);
   if ((u32)st && ((u32)st & 0xC0000000u) == 0xC0000000u) { w->last_error = ntstatus_to_wsa((u32)st); RET(0); return; } RET(1); }
 
 /* ---- name resolution: ADDRINFO(W) { int flags, family, socktype, protocol; size_t addrlen; canonname*; addr*; next* } 48 B + sockaddr_in 16 B ---- */
@@ -252,16 +253,19 @@ static int resolve_build(Cpu *c, const char *node, const char *svc, u64 hints, u
   int types = 0; if (socktype == 1 || (socktype == 0 && proto == 6)) types = 1; else if (socktype == 2 || (socktype == 0 && proto == 17)) types = 2; else types = 1;   /* one entry per address (stream) */
   (void)wide; u64 first = 0, prev = 0;
   for (int i = 0; i < n; i++) { u64 a = w32_heap_alloc(W, 64, 1); if (!a) break;
-    wr32(c, a, 0); wr32(c, a + 4, 2); wr32(c, a + 8, types == 2 ? 2 : 1); wr32(c, a + 12, types == 2 ? 17 : 6); wr64(c, a + 16, 16); wr64(c, a + 24, 0); wr64(c, a + 32, a + 48); wr64(c, a + 40, 0);
-    write_sockaddr(c, a + 48, ips + i * 4, port); if (prev) wr64(c, prev + 40, a); else first = a; prev = a; }
-  if (!first) return 10055; wr64(c, outp, first); return 0; }
+    wr32(c, a, 0); wr32(c, a + 4, 2); wr32(c, a + 8, types == 2 ? 2 : 1); wr32(c, a + 12, types == 2 ? 17 : 6);
+    if (c->mode32) { wr32(c, a + 16, 16); wr32(c, a + 20, 0); wr32(c, a + 24, (u32)a + 32); wr32(c, a + 28, 0); write_sockaddr(c, a + 32, ips + i * 4, port); if (prev) wr32(c, prev + 28, (u32)a); }
+    else { wr64(c, a + 16, 16); wr64(c, a + 24, 0); wr64(c, a + 32, a + 48); wr64(c, a + 40, 0); write_sockaddr(c, a + 48, ips + i * 4, port); if (prev) wr64(c, prev + 40, a); }
+    if (!prev) first = a; prev = a; }
+  if (!first) return 10055; wrp(c, outp, first); return 0; }
 static void s_GetAddrInfoW(Cpu *c) { char node[256], svc[64]; const char *np = 0, *sp = 0;
   if (ARG(0)) { wstr_to_utf8(c, ARG(0), node, sizeof node, -1); np = node; } if (ARG(1)) { wstr_to_utf8(c, ARG(1), svc, sizeof svc, -1); sp = svc; }
   RET(resolve_build(c, np, sp, ARG(2), ARG(3), 1)); }
 static void s_getaddrinfo(Cpu *c) { char node[256], svc[64]; const char *np = 0, *sp = 0;
   if (ARG(0)) { const char *t = name_a(c, ARG(0)); e_snprintf(node, sizeof node, "%s", t); np = node; } if (ARG(1)) { const char *t = name_a(c, ARG(1)); e_snprintf(svc, sizeof svc, "%s", t); sp = svc; }
   RET(resolve_build(c, np, sp, ARG(2), ARG(3), 0)); }
-static void s_FreeAddrInfoW(Cpu *c) { u64 a = ARG(0); int guard = 0; while (a && guard++ < 64) { u64 nx = rd64(c, a + 40); w32_heap_free(W, a); a = nx; } RET(0); }
+#define ADDRINFO_NEXT (c->mode32 ? 28 : 40)
+static void s_FreeAddrInfoW(Cpu *c) { u64 a = ARG(0); int guard = 0; while (a && guard++ < 64) { u64 nx = rdp(c, a + ADDRINFO_NEXT); w32_heap_free(W, a); a = nx; } RET(0); }
 /* GetNameInfoW(sa, salen, host, hostlen, serv, servlen, flags): numeric forms only */
 static void s_GetNameInfoW(Cpu *c) { u8 ip[4]; int port; if (!read_sockaddr(c, ARG(0), ip, &port)) { RET(10047); return; }
   char h[32]; e_snprintf(h, sizeof h, "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]); if (ARG(2) && ARG(3) > 16) put_w(c, ARG(2), h, 0);
@@ -308,14 +312,15 @@ static int sock_ready_mask(int si) {
   return m;
 }
 static int net_select_ready(ThreadCtx *x) { for (int i = 0; i < x->nwobj; i++) if (sock_ready_mask(x->wobj_idx[i]) & x->wobj_kind[i]) return 1; return 0; }
-/* fd_set: u32 fd_count; u64 fd_array[64] */
+/* fd_set: u32 fd_count; SOCKET fd_array[64] (x64: array at +8, x86: at +4) */
+#define FDSET_OFF (PSZ_OF(c))
 static void sel_collect(Cpu *c, u64 set, int bit, int *n, int *socks, int *masks) {
   if (!set) return; u32 cnt = rd32(c, set); if (cnt > 64) cnt = 64;
-  for (u32 i = 0; i < cnt; i++) { int si = sock_of(c, rd64(c, set + 8 + 8 * i)); if (si < 0) continue; int k; for (k = 0; k < *n; k++) if (socks[k] == si) break; if (k == *n) { if (*n >= 64) return; socks[k] = si; masks[k] = 0; (*n)++; } masks[k] |= bit; }
+  for (u32 i = 0; i < cnt; i++) { int si = sock_of(c, rdp(c, set + FDSET_OFF + PSZ_OF(c) * i)); if (si < 0) continue; int k; for (k = 0; k < *n; k++) if (socks[k] == si) break; if (k == *n) { if (*n >= 64) return; socks[k] = si; masks[k] = 0; (*n)++; } masks[k] |= bit; }
 }
 static int sel_writeback(Cpu *c, u64 set, int bit) {
   if (!set) return 0; u32 cnt = rd32(c, set); if (cnt > 64) cnt = 64; u32 out = 0;
-  for (u32 i = 0; i < cnt; i++) { u64 h = rd64(c, set + 8 + 8 * i); int si = sock_of(c, h); if (si >= 0 && (sock_ready_mask(si) & bit)) wr64(c, set + 8 + 8 * out++, h); }
+  for (u32 i = 0; i < cnt; i++) { u64 h = rdp(c, set + FDSET_OFF + PSZ_OF(c) * i); int si = sock_of(c, h); if (si >= 0 && (sock_ready_mask(si) & bit)) wrp(c, set + FDSET_OFF + PSZ_OF(c) * out++, h); }
   wr32(c, set, out); return (int)out;
 }
 /* select(nfds, readfds, writefds, exceptfds, timeout) */
@@ -329,18 +334,19 @@ static void s_select(Cpu *c) {
   if (!any && !deadline_passed(dl)) { w->nwobj = n; for (int i = 0; i < n; i++) { w->wobj_idx[i] = socks[i]; w->wobj_kind[i] = masks[i]; } park(c, BLOCK_SELECT); return; }
   wait_end(w); int total = sel_writeback(c, rs, 1) + sel_writeback(c, ws, 2) + sel_writeback(c, es, 4); RET((u64)total);
 }
-static void s___WSAFDIsSet(Cpu *c) { u64 set = ARG(1); if (!set) { RET(0); return; } u32 cnt = rd32(c, set); if (cnt > 64) cnt = 64; for (u32 i = 0; i < cnt; i++) if (rd64(c, set + 8 + 8 * i) == ARG(0)) { RET(1); return; } RET(0); }
+static void s___WSAFDIsSet(Cpu *c) { u64 set = ARG(1); if (!set) { RET(0); return; } u32 cnt = rd32(c, set); if (cnt > 64) cnt = 64; for (u32 i = 0; i < cnt; i++) if (rdp(c, set + FDSET_OFF + PSZ_OF(c) * i) == ARG(0)) { RET(1); return; } RET(0); }
 /* WSAPoll(fds, n, timeout_ms): WSAPOLLFD { SOCKET fd; short events; short revents } = 16 B; POLLRDNORM 0x100 POLLWRNORM 0x10 POLLERR 1 POLLHUP 2 POLLNVAL 4 */
+#define POLLFD_SZ (2 * PSZ_OF(c))
 static void s_WSAPoll(Cpu *c) {
   Win32 *w = W; u64 fds = ARG(0); u32 nf = (u32)ARG(1); s32 to = (s32)ARG(2); if (!fds || !nf) { w->last_error = 10022; wait_end(w); RET(~0ull); return; }
   int n = 0, socks[64], masks[64], any = 0;
-  for (u32 i = 0; i < nf && n < 64; i++) { u64 h = rd64(c, fds + 16 * i); u16 ev = rd16(c, fds + 16 * i + 8); int si = sock_of(c, h); if (si < 0) { any = 1; continue; } int m = 4; if (ev & 0x300) m |= 1; if (ev & 0x10) m |= 2; socks[n] = si; masks[n] = m; n++; if (sock_ready_mask(si) & m) any = 1; }
+  for (u32 i = 0; i < nf && n < 64; i++) { u64 h = rdp(c, fds + POLLFD_SZ * i); u16 ev = rd16(c, fds + POLLFD_SZ * i + PSZ_OF(c)); int si = sock_of(c, h); if (si < 0) { any = 1; continue; } int m = 4; if (ev & 0x300) m |= 1; if (ev & 0x10) m |= 2; socks[n] = si; masks[n] = m; n++; if (sock_ready_mask(si) & m) any = 1; }
   double dl = wait_begin(c, to < 0 ? 0xffffffffu : (u32)to);
   if (!any && n && !deadline_passed(dl)) { w->nwobj = n; for (int i = 0; i < n; i++) { w->wobj_idx[i] = socks[i]; w->wobj_kind[i] = masks[i]; } park(c, BLOCK_SELECT); return; }
   wait_end(w); u32 total = 0;
-  for (u32 i = 0; i < nf; i++) { u64 h = rd64(c, fds + 16 * i); u16 ev = rd16(c, fds + 16 * i + 8), rev = 0; int si = sock_of(c, h);
+  for (u32 i = 0; i < nf; i++) { u64 h = rdp(c, fds + POLLFD_SZ * i); u16 ev = rd16(c, fds + POLLFD_SZ * i + PSZ_OF(c)), rev = 0; int si = sock_of(c, h);
     if (si < 0) rev = 4; else { int m = sock_ready_mask(si); if ((m & 1) && (ev & 0x300)) rev |= (u16)(ev & 0x300); if ((m & 2) && (ev & 0x10)) rev |= 0x10; if (m & 4) rev |= 1; }
-    wr16(c, fds + 16 * i + 10, rev); if (rev) total++; }
+    wr16(c, fds + POLLFD_SZ * i + PSZ_OF(c) + 2, rev); if (rev) total++; }
   RET(total);
 }
 static void net_drop(Win32 *w) { for (int k = 0; k < SPEND_MAX; k++) if (g_spend[k].used && g_spend[k].w == w) { g_spend[k].used = 0; g_net_pending--; } }

@@ -308,7 +308,7 @@ struct Win32 {
   int exited;
   u64 loc_c, loc_wc, sys_nerr, sys_errlist;
   int api_trace;
-  u64 veh[16]; int nveh; u64 uef; char hw_msg[160]; u32 hw_code;   /* vectored exception handlers, top-level filter, text of the last hardware fault */
+  u64 veh[16]; int nveh; u64 uef; char hw_msg[160]; u32 hw_code; u64 cxx32_obj, cxx32_ti;   /* x86: the exception being handled (for `throw;`) */   /* vectored exception handlers, top-level filter, text of the last hardware fault */
   int wndclass_registered; u64 wndclass_proc; char wndclass_name[64];
   u64 ubuf;                              /* small scratch buffer in guest memory */
   u64 rt_scratch;                        /* win32_rt.inc: zeroed block for the real msvcp140's locale-name / processing-throw pointers */

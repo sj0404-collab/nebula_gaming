@@ -6,6 +6,11 @@
 #define RET(v) (c->r[RAX] = (u64)(v))
 #define W (c->w)
 #define PSZ_OF(cpu) ((cpu)->mode32 ? 4 : 8)
+/* OVERLAPPED: Internal@0 InternalHigh@PSZ Offset@2*PSZ OffsetHigh@2*PSZ+4 hEvent@2*PSZ+8 (x64: 0/8/16/20/24, x86: 0/4/8/12/16) */
+#define OV_HIGH(ov) ((ov) + PSZ_OF(c))
+#define OV_OFFSET(ov) ((ov) + 2 * PSZ_OF(c))
+#define OV_EVENT(ov) ((ov) + 2 * PSZ_OF(c) + 8)
+static inline void ov_set(Cpu *c, u64 ov, u64 status, u64 info) { wrp(c, ov, status); wrp(c, ov + PSZ_OF(c), info); }
 #define IOB_STRIDE (c->mode32 ? 0x20 : 0x30)   /* FILE records of stdin/stdout/stderr: 32-bit msvcrt FILE is 32 bytes */
 /* extra guest environment variables ("NAME=value"), added by the host before the exe starts (x64run: X64_GUEST_ENV="A=1;B=2") */
 static char g_extra_env_buf[32][2048]; static const char *g_extra_env[32]; static int g_nextra_env;
@@ -169,13 +174,14 @@ static void cont_finish(Cpu *c, u64 rax) {
 }
 static void do_exit(Cpu *c, int code) { W->exited = 1; c->exit_code = code; c->status = RUN_EXIT; }
 static void retry_and_yield(Cpu *c, u64 slot) { cpu_push(c, c->rip); c->rip = slot; c->status = RUN_YIELD; }
-static u64 g_cur_slot;
+static u64 g_cur_slot, g_entry_eax;
 static void w32_marshal32_in(Cpu *c, ShimSlot *s); static void w32_marshal32_out(Cpu *c, ShimSlot *s);
 static int thread_cont_resume(Cpu *c, int kind, u64 rax);
 static int tp_cont_resume(Cpu *c, int kind, u64 rax);
 static int audio_cont_resume(Cpu *c, int kind, u64 rax);
 static int seh_cont_resume(Cpu *c, int kind, u64 rax);
 static int cxx_cont_resume(Cpu *c, int kind, u64 rax);
+static int seh32_cont_resume(Cpu *c, int kind, u64 rax);
 static void thread_startup(Cpu *c);
 static void s_Sleep(Cpu *c);
 
@@ -248,6 +254,7 @@ void w32_cont_resume(Cpu *c) {
   }
   if (seh_cont_resume(c, w->cont[i].kind, rax)) return;
   if (cxx_cont_resume(c, w->cont[i].kind, rax)) return;
+  if (seh32_cont_resume(c, w->cont[i].kind, rax)) return;
   if (tp_cont_resume(c, w->cont[i].kind, rax)) return;
   if (audio_cont_resume(c, w->cont[i].kind, rax)) return;
   if (thread_cont_resume(c, w->cont[i].kind, rax)) return;
@@ -287,7 +294,7 @@ int w32_dispatch(Cpu *c, u64 addr) {
     w32_report(w, "STOP: unimplemented API %s!%s%s", s->dll, s->name, pack ? " (install the DirectX pack)" : "");
     return RUN_FAULT;
   }
-  c->r[RAX] = 0;
+  g_entry_eax = c->r[RAX]; c->r[RAX] = 0;   /* x86 __CxxFrameHandler thunks pass FuncInfo in eax */
   if (w->api_trace) e_log("[api] t%d %s(%llx, %llx, %llx, %llx) @%llx\n", w->th[w->cur_th].tid, s->name, (unsigned long long)ARG(0), (unsigned long long)ARG(1), (unsigned long long)ARG(2), (unsigned long long)ARG(3), (unsigned long long)ret);
   if (c->mode32) { w32_call32(c, s, ret); if (w->api_trace) e_log("[api]   -> %llx\n", (unsigned long long)c->r[RAX]); return c->status; }
   s->fn(c);
@@ -403,6 +410,7 @@ static void s_ret0(Cpu *c); static void s_atexit(Cpu *c); static void s_setjmp(C
 #include "win32_compat.inc"
 #include "seh.inc"
 #include "cxx.inc"
+#include "seh32.inc"
 static void s_CxxFrameHandler4(Cpu *c) { seh_log("[x64] __CxxFrameHandler4 (VS2019 compressed EH tables) is not implemented: frame skipped\n"); RET(1); }
 
 /* ================= kernel32 ================= */
@@ -599,11 +607,11 @@ static void s_GetModuleHandleW(Cpu *c) { if (!ARG(0)) { RET(W->image_base); retu
 static void s_GetModuleHandleExW(Cpu *c) { u64 h = W->image_base; u32 flags = (u32)ARG(0);
   if (ARG(1)) { if (flags & 4) { for (int i = 0; i < W->nmods; i++) if (ARG(1) - W->mods[i].base < W->mods[i].size) h = W->mods[i].base; }   /* GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS */
     else { char n[260]; wstr_to_utf8(c, ARG(1), n, sizeof n, -1); int m = mod_find(W, n); h = m >= 0 ? W->mods[m].base : (mod_name_eq(mod_basename(n), W->exe_name) || mod_name_eq(mod_basename(n), "node.exe")) ? W->image_base : fake_module_gmh(W, n); } }
-  if (ARG(2)) wr64(c, ARG(2), h); RET(1); }
+  if (ARG(2)) wrp(c, ARG(2), h); RET(1); }
 static void s_GetModuleHandleExA(Cpu *c) { u64 h = W->image_base; u32 flags = (u32)ARG(0);
   if (ARG(1)) { if (flags & 4) { for (int i = 0; i < W->nmods; i++) if (ARG(1) - W->mods[i].base < W->mods[i].size) h = W->mods[i].base; }
     else { const char *n = rd_str(c, ARG(1), 260); int m = n ? mod_find(W, n) : -1; h = m >= 0 ? W->mods[m].base : (n && (mod_name_eq(mod_basename(n), W->exe_name) || mod_name_eq(mod_basename(n), "node.exe"))) ? W->image_base : fake_module_gmh(W, n); } }
-  if (ARG(2)) wr64(c, ARG(2), h); RET(1); }
+  if (ARG(2)) wrp(c, ARG(2), h); RET(1); }
 static void s_LoadLibraryA(Cpu *c) { load_library(c, rd_str(c, ARG(0), 260)); }
 static void s_LoadLibraryW(Cpu *c) { char n[260]; wstr_to_utf8(c, ARG(0), n, sizeof n, -1); load_library(c, n); }
 static void s_LoadLibraryExA(Cpu *c) { s_LoadLibraryA(c); }
@@ -635,7 +643,7 @@ static void s_GetOEMCP(Cpu *c) { RET(65001); }
 static void s_GetCPInfo(Cpu *c) { u64 a = ARG(1); wr32(c, a, 1); wr8(c, a + 4, '?'); wr8(c, a + 5, 0); for (int i = 0; i < 12; i++) wr8(c, a + 6 + i, 0); RET(1); }
 static void s_GetActiveProcessorCount(Cpu *c) { RET(1); }
 /* PROC_THREAD_ATTRIBUTE_LIST (subprocess passes handle lists): size query → ERROR_INSUFFICIENT_BUFFER, otherwise accept and ignore */
-static void s_InitializeProcThreadAttributeList(Cpu *c) { if (ARG(3)) wr64(c, ARG(3), 64 + 32 * (ARG(1) ? ARG(1) : 1)); if (!ARG(0)) { W->last_error = 122; RET(0); return; } RET(1); }
+static void s_InitializeProcThreadAttributeList(Cpu *c) { if (ARG(3)) wrp(c, ARG(3), 64 + 32 * (ARG(1) ? ARG(1) : 1)); if (!ARG(0)) { W->last_error = 122; RET(0); return; } RET(1); }
 static void s_UpdateProcThreadAttribute(Cpu *c) { RET(1); }
 static void s_DeleteProcThreadAttributeList(Cpu *c) { RET(0); }   /* one logical processor, like GetSystemInfo */
 static void s_GetSystemInfo(Cpu *c) { u64 a = ARG(0);
@@ -687,7 +695,7 @@ static void format_message(Cpu *c, int wide) {
   if (flags & 0x100) {   /* ALLOCATE_BUFFER: *buffer = LocalAlloc'd string */
     u64 a = w32_heap_alloc(w, (u64)(n + 1) * (wide ? 2 : 1), 1); if (!a) { RET(0); return; }
     for (u32 i = 0; i <= n; i++) { if (wide) wr16(c, a + 2 * i, (u8)msg[i]); else wr8(c, a + i, (u8)msg[i]); }
-    wr64(c, buf, a); RET(n); return;
+    wrp(c, buf, a); RET(n); return;
   }
   if (!buf || !size) { w->last_error = 122; RET(0); return; }
   if (n >= size) n = size - 1;
@@ -700,7 +708,7 @@ static void s_FormatMessageW(Cpu *c) { format_message(c, 1); }
 static void s_SetErrorMode(Cpu *c) { RET(0); }
 static void s_GetErrorMode(Cpu *c) { RET(0); }
 static void s_SetThreadErrorMode(Cpu *c) { RET(1); }
-static void s_GetProcessAffinityMask(Cpu *c) { wr64(c, ARG(1), 1); wr64(c, ARG(2), 1); RET(1); }
+static void s_GetProcessAffinityMask(Cpu *c) { wrp(c, ARG(1), 1); wrp(c, ARG(2), 1); RET(1); }
 static void s_SetThreadAffinityMask(Cpu *c) { RET(1); }
 static void s_SetProcessAffinityMask(Cpu *c) { RET(1); }
 static void s_GetSystemTimeAdjustment(Cpu *c) { wr32(c, ARG(0), 156250); wr32(c, ARG(1), 156250); wr32(c, ARG(2), 1); RET(1); }
@@ -868,9 +876,9 @@ static void s_SetHandleCount(Cpu *c) { RET(ARG(0)); }
 /* GetOverlappedResult(h, ov, &bytes, bWait): reads OVERLAPPED.Internal (NTSTATUS) / InternalHigh (bytes); with bWait the thread is
  * re-scheduled every 2 ms until the parked operation (pipe/file/socket) has been completed by the scheduler's I/O poll */
 static void s_GetOverlappedResult(Cpu *c) { Win32 *w = W; u64 ov = ARG(1); if (!ov) { w->sleeping = 0; w->last_error = 87; RET(0); return; }
-  u64 st = rd64(c, ov);
+  u64 st = rdp(c, ov);
   if (st == 0x103) { if (ARG(3)) { w->sleeping = 1; w->sleep_until_ms = host_now_ms() + 2; w->block = BLOCK_SLEEP; retry_and_yield(c, g_cur_slot); return; } w->sleeping = 0; w->last_error = 996; RET(0); return; }
-  w->sleeping = 0; if (ARG(2)) wr32(c, ARG(2), (u32)rd64(c, ov + 8));
+  w->sleeping = 0; if (ARG(2)) wr32(c, ARG(2), (u32)rdp(c, OV_HIGH(ov)));
   if ((u32)st == 0 || ((u32)st & 0xC0000000u) != 0xC0000000u) { RET(1); return; }
   w->last_error = nt_to_dos((u32)st); RET(0); }
 static void s_Beep(Cpu *c) { RET(1); }
@@ -891,9 +899,9 @@ static void s_msize(Cpu *c) { RET(w32_heap_size(W, ARG(0))); }
 static void s_aligned_malloc(Cpu *c) { u64 al = ARG(1); if (al < 16) al = 16; u64 a = w32_heap_alloc(W, ARG(0) + al, 0); RET((a + al - 1) & ~(al - 1)); }
 static void s_aligned_free(Cpu *c) { }
 static void s_set_new_mode(Cpu *c) { RET(0); }
-static void s_CryptAcquireContextA(Cpu *c) { if (ARG(0)) wr64(c, ARG(0), 0xC0FFEE); RET(1); }
+static void s_CryptAcquireContextA(Cpu *c) { if (ARG(0)) wrp(c, ARG(0), 0xC0FFEE); RET(1); }
 static void s_CryptGenRandom(Cpu *c) { Win32 *w = W; u64 a = ARG(2); u32 n = (u32)ARG(1); for (u32 i = 0; i < n; i++) { w->rand_state = w->rand_state * 1103515245u + 12345u; wr8(c, a + i, (u8)(w->rand_state >> 16)); } RET(1); }
-static void s_OpenProcessToken(Cpu *c) { if (ARG(2)) wr64(c, ARG(2), 0x7001); RET(1); }
+static void s_OpenProcessToken(Cpu *c) { if (ARG(2)) wrp(c, ARG(2), 0x7001); RET(1); }
 static void s_GetTokenInformation(Cpu *c) { if (ARG(4)) wr32(c, ARG(4), 0); W->last_error = 122; RET(0); }
 static void s_retm1e(Cpu *c) { RET((u64)(s64)-1); wr32(c, W->ubuf + 0x258, 2); }
 static void s_umask(Cpu *c) { RET(0); }
@@ -910,9 +918,9 @@ static void s_gethostname(Cpu *c) { const char *h = "nebula"; if ((u32)ARG(1) > 
 static void s_htons(Cpu *c) { u16 v = (u16)ARG(0); RET((u16)((v >> 8) | (v << 8))); }
 static void s_htonl(Cpu *c) { RET(__builtin_bswap32((u32)ARG(0))); }
 static void s_VerSetConditionMask(Cpu *c) { u64 mask = ARG(0); u32 type = (u32)ARG(1), cond = (u32)ARG(2) & 7; u64 shift = 0; for (u32 b = 0; b < 32; b++) if (type & (1u << b)) { shift = (u64)b * 3; break; } RET(mask | ((u64)cond << shift)); }
-static void s_InterlockedPushEntrySList(Cpu *c) { u64 head = ARG(0), e = ARG(1); u64 old = rd64(c, head); wr64(c, e, old); wr64(c, head, e); RET(old); }
-static void s_InterlockedPopEntrySList(Cpu *c) { u64 head = ARG(0); u64 e = rd64(c, head); if (e) wr64(c, head, rd64(c, e)); RET(e); }
-static void s_InterlockedFlushSList(Cpu *c) { u64 head = ARG(0); u64 e = rd64(c, head); wr64(c, head, 0); RET(e); }
+static void s_InterlockedPushEntrySList(Cpu *c) { u64 head = ARG(0), e = ARG(1); u64 old = rdp(c, head); wrp(c, e, old); wrp(c, head, e); RET(old); }
+static void s_InterlockedPopEntrySList(Cpu *c) { u64 head = ARG(0); u64 e = rdp(c, head); if (e) wrp(c, head, rdp(c, e)); RET(e); }
+static void s_InterlockedFlushSList(Cpu *c) { u64 head = ARG(0); u64 e = rdp(c, head); wrp(c, head, 0); RET(e); }
 static void s_GetUserNameW(Cpu *c) { u32 sz = rd32(c, ARG(1)); if (sz > 4) { const char *n = "user"; for (int i = 0; i < 5; i++) wr16(c, ARG(0) + i * 2, (u8)n[i]); wr32(c, ARG(1), 5); RET(1); } else RET(0); }
 static void s_GetComputerNameW(Cpu *c) { u32 sz = rd32(c, ARG(1)); if (sz > 6) { const char *n = "NEBULA"; for (int i = 0; i < 7; i++) wr16(c, ARG(0) + i * 2, (u8)n[i]); wr32(c, ARG(1), 6); RET(1); } else RET(0); }
 static void s_GetComputerNameExW(Cpu *c) { call_shim(c, s_GetComputerNameW, ARG(1), ARG(2), 0, 0); }
@@ -932,9 +940,9 @@ static void s_GetUserObjectInformationW(Cpu *c) { u32 idx = (u32)ARG(1); u64 b =
   if (idx == 1) { if (ARG(4)) wr32(c, ARG(4), 12); if (len < 12) { W->last_error = 122; RET(0); return; } wr32(c, b, 0); wr32(c, b + 4, 0); wr32(c, b + 8, 1); RET(1); return; }
   if (idx == 2) { static const char n[] = "WinSta0"; if (ARG(4)) wr32(c, ARG(4), 16); if (len < 16) { W->last_error = 122; RET(0); return; } for (int i = 0; i <= 7; i++) wr16(c, b + i * 2, (u8)n[i]); RET(1); return; }
   W->last_error = 87; RET(0); }
-static void s_AllocateAndInitializeSid(Cpu *c) { u64 sid = w32_heap_alloc(W, 68, 1); if (!sid) { RET(0); return; } wr8(c, sid, 1); wr8(c, sid + 1, (u8)ARG(1)); u8 *p = mem_ptr(c->mem, sid + 2, 6, 1); const u8 *ia = mem_ptr(c->mem, ARG(0), 6, 0); if (p && ia) e_memcpy(p, ia, 6); for (u32 i = 0; i < (ARG(1) & 0xff) && i < 8; i++) wr32(c, sid + 8 + i * 4, (u32)ARG(2 + i)); if (ARG(10)) wr64(c, ARG(10), sid); RET(1); }
+static void s_AllocateAndInitializeSid(Cpu *c) { u64 sid = w32_heap_alloc(W, 68, 1); if (!sid) { RET(0); return; } wr8(c, sid, 1); wr8(c, sid + 1, (u8)ARG(1)); u8 *p = mem_ptr(c->mem, sid + 2, 6, 1); const u8 *ia = mem_ptr(c->mem, ARG(0), 6, 0); if (p && ia) e_memcpy(p, ia, 6); for (u32 i = 0; i < (ARG(1) & 0xff) && i < 8; i++) wr32(c, sid + 8 + i * 4, (u32)ARG(2 + i)); if (ARG(10)) wrp(c, ARG(10), sid); RET(1); }
 static void s_FreeSid(Cpu *c) { w32_heap_free(W, ARG(0)); RET(0); }
-static void s_SetEntriesInAclA(Cpu *c) { if (ARG(3)) wr64(c, ARG(3), w32_heap_alloc(W, 64, 1)); RET(0); }
+static void s_SetEntriesInAclA(Cpu *c) { if (ARG(3)) wrp(c, ARG(3), w32_heap_alloc(W, 64, 1)); RET(0); }
 static void s_SetEntriesInAclW(Cpu *c) { s_SetEntriesInAclA(c); }
 static void s_RegQueryInfoKeyW(Cpu *c) { for (int i = 2; i <= 10; i++) if (ARG(i)) wr32(c, ARG(i), 0); RET(0); }
 static void s_RegGetValueW(Cpu *c) { if (ARG(5)) wr32(c, ARG(5), 0); RET(2); }
@@ -969,8 +977,8 @@ static u64 mbs_to_wcs(Cpu *c, u64 dst, u64 src, u64 n) {
   return i;
 }
 static void s_mbstowcs(Cpu *c) { RET(mbs_to_wcs(c, ARG(0), ARG(1), ARG(2))); }
-static void s_mbsrtowcs(Cpu *c) { u64 pp = ARG(1), src = pp ? rd64(c, pp) : 0; if (!src) { RET(0); return; }
-  u64 n = mbs_to_wcs(c, ARG(0), src, ARG(2)); if (ARG(0) && pp) wr64(c, pp, n < ARG(2) ? 0 : src + n); RET(n); }
+static void s_mbsrtowcs(Cpu *c) { u64 pp = ARG(1), src = pp ? rdp(c, pp) : 0; if (!src) { RET(0); return; }
+  u64 n = mbs_to_wcs(c, ARG(0), src, ARG(2)); if (ARG(0) && pp) wrp(c, pp, n < ARG(2) ? 0 : src + n); RET(n); }
 static void s_doserrno(Cpu *c) { RET(W->ubuf + 0x25c); }
 static void s_acrt_iob_func(Cpu *c) { RET(W->ubuf + (u64)(u32)ARG(0) * IOB_STRIDE); }
 static void s_iob_func(Cpu *c) { RET(W->ubuf); }
@@ -1144,7 +1152,7 @@ static u64 scan_common(Cpu *c, const char *s, const char *f, ArgSrc *as) {
     }
     int base = conv == 'd' || conv == 'u' ? 10 : conv == 'x' || conv == 'X' || conv == 'p' ? 16 : conv == 'o' ? 8 : 0;
     long long v = e_strtoll(tmp, &e, base); if (e == tmp) break; p += e - tmp;
-    if (!suppress) { u64 d = arg_next(as); if (conv == 'p' || size == 3) wr64(c, d, (u64)v); else if (size == 2 && 0) wr64(c, d, (u64)v); else if (size == 1) wr16(c, d, (u16)v); else if (size == 4) wr8(c, d, (u8)v); else wr32(c, d, (u32)v); n++; }
+    if (!suppress) { u64 d = arg_next(as); if (conv == 'p') wrp(c, d, (u64)v); else if (size == 3) wr64(c, d, (u64)v); else if (size == 2 && 0) wr64(c, d, (u64)v); else if (size == 1) wr16(c, d, (u16)v); else if (size == 4) wr8(c, d, (u8)v); else wr32(c, d, (u32)v); n++; }
   }
 done:
   return n == 0 && !*p ? ~0ull : (u64)(u32)n;
@@ -1162,13 +1170,13 @@ static void s_stdio_common_vfscanf(Cpu *c) { u64 ln = ARG(1) ? w32_heap_alloc(W,
   if (c->status) return; if (!got) { RET(~0ull); return; }
   const char *s = rd_str(c, ln, 4096); ArgSrc as = { c, 1, 0, ARG(4) }; RET(s ? scan_common(c, s, f, &as) : ~0ull); w32_heap_free(W, ln); }
 static void s_strdup(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 30); RET(s ? w32_guest_strdup(W, s) : 0); }
-static void s_strtol(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 20); if (!s) { RET(0); return; } char *e; long long v = e_strtoll(s, &e, (int)ARG(2)); if (ARG(1)) wr64(c, ARG(1), ARG(0) + (u64)(e - s)); if (v > 0x7fffffff) v = 0x7fffffff; if (v < -0x7fffffffll - 1) v = -0x7fffffffll - 1; RET((u64)v); }
-static void s_strtoul(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 20); if (!s) { RET(0); return; } char *e; long long v = e_strtoll(s, &e, (int)ARG(2)); if (ARG(1)) wr64(c, ARG(1), ARG(0) + (u64)(e - s)); RET((u64)(u32)v); }
-static void s_strtoll(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 20); if (!s) { RET(0); return; } char *e; long long v = e_strtoll(s, &e, (int)ARG(2)); if (ARG(1)) wr64(c, ARG(1), ARG(0) + (u64)(e - s)); RET((u64)v); }
+static void s_strtol(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 20); if (!s) { RET(0); return; } char *e; long long v = e_strtoll(s, &e, (int)ARG(2)); if (ARG(1)) wrp(c, ARG(1), ARG(0) + (u64)(e - s)); if (v > 0x7fffffff) v = 0x7fffffff; if (v < -0x7fffffffll - 1) v = -0x7fffffffll - 1; RET((u64)v); }
+static void s_strtoul(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 20); if (!s) { RET(0); return; } char *e; long long v = e_strtoll(s, &e, (int)ARG(2)); if (ARG(1)) wrp(c, ARG(1), ARG(0) + (u64)(e - s)); RET((u64)(u32)v); }
+static void s_strtoll(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 20); if (!s) { RET(0); return; } char *e; long long v = e_strtoll(s, &e, (int)ARG(2)); if (ARG(1)) wrp(c, ARG(1), ARG(0) + (u64)(e - s)); RET((u64)v); }
 static void s_atoi(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 20); RET(s ? (u64)(u32)e_strtoll(s, 0, 10) : 0); }
 static void s_atol(Cpu *c) { s_atoi(c); }
 static void s_atoll(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 20); RET(s ? (u64)e_strtoll(s, 0, 10) : 0); }
-static void s_strtod(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 20); if (!s) { RET(0); return; } char *e; double v = e_strtod(s, &e); if (ARG(1)) wr64(c, ARG(1), ARG(0) + (u64)(e - s)); c->x[0].f64[0] = v; }
+static void s_strtod(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 20); if (!s) { RET(0); return; } char *e; double v = e_strtod(s, &e); if (ARG(1)) wrp(c, ARG(1), ARG(0) + (u64)(e - s)); c->x[0].f64[0] = v; }
 static void s_atof(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 20); c->x[0].f64[0] = s ? e_strtod(s, 0) : 0; }
 static void s_toupper(Cpu *c) { int ch = (int)ARG(0); RET(ch >= 'a' && ch <= 'z' ? ch - 32 : ch); }
 static void s_tolower(Cpu *c) { int ch = (int)ARG(0); RET(ch >= 'A' && ch <= 'Z' ? ch + 32 : ch); }
@@ -1192,8 +1200,10 @@ static void s_qsort(Cpu *c) { u64 n = ARG(1), sz = ARG(2); if (n < 2 || !sz) ret
   qsort_step(c, 0, 0); }
 static void s_bsearch(Cpu *c) { u64 n = ARG(2); if (!n) { RET(0); return; } cont_push(c, CONT_BSEARCH); Win32 *w = W; int i = w->ncont - 1; w->cont[i].data[0] = ARG(0); w->cont[i].data[1] = ARG(1); w->cont[i].data[2] = n; w->cont[i].data[3] = ARG(3); w->cont[i].data[4] = ARG(4); w->cont[i].data[5] = 0;
   guest_call(c, ARG(4), ARG(0), ARG(1) + (n / 2) * ARG(3), 0, 0); }
-static void s_setjmp(Cpu *c) { u64 a = ARG(0); wr64(c, a, 0); wr64(c, a + 8, c->r[RBX]); wr64(c, a + 16, c->r[RSP]); wr64(c, a + 24, c->r[RBP]); wr64(c, a + 32, c->r[RSI]); wr64(c, a + 40, c->r[RDI]); wr64(c, a + 48, c->r[R12]); wr64(c, a + 56, c->r[R13]); wr64(c, a + 64, c->r[R14]); wr64(c, a + 72, c->r[R15]); wr64(c, a + 80, c->rip); for (int k = 6; k < 16; k++) { wr64(c, a + 96 + (k - 6) * 16, c->x[k].q[0]); wr64(c, a + 104 + (k - 6) * 16, c->x[k].q[1]); } RET(0); }
-static void s_longjmp(Cpu *c) { u64 a = ARG(0); u64 v = ARG(1); c->r[RBX] = rd64(c, a + 8); c->r[RSP] = rd64(c, a + 16); c->r[RBP] = rd64(c, a + 24); c->r[RSI] = rd64(c, a + 32); c->r[RDI] = rd64(c, a + 40); c->r[R12] = rd64(c, a + 48); c->r[R13] = rd64(c, a + 56); c->r[R14] = rd64(c, a + 64); c->r[R15] = rd64(c, a + 72); c->rip = rd64(c, a + 80); for (int k = 6; k < 16; k++) { c->x[k].q[0] = rd64(c, a + 96 + (k - 6) * 16); c->x[k].q[1] = rd64(c, a + 104 + (k - 6) * 16); } RET(v ? v : 1); }
+static void s_setjmp(Cpu *c) { u64 a = ARG(0);
+  if (c->mode32) { u64 reg = rd32(c, c->fs_base); wr32(c, a, (u32)c->r[RBP]); wr32(c, a + 4, (u32)c->r[RBX]); wr32(c, a + 8, (u32)c->r[RDI]); wr32(c, a + 12, (u32)c->r[RSI]); wr32(c, a + 16, (u32)c->r[RSP]); wr32(c, a + 20, (u32)c->rip); wr32(c, a + 24, (u32)reg); wr32(c, a + 28, reg != 0xffffffffu && reg ? rd32(c, reg + 12) : 0xffffffffu); wr32(c, a + 32, 0x56433230); wr32(c, a + 36, 0); RET(0); return; } wr64(c, a, 0); wr64(c, a + 8, c->r[RBX]); wr64(c, a + 16, c->r[RSP]); wr64(c, a + 24, c->r[RBP]); wr64(c, a + 32, c->r[RSI]); wr64(c, a + 40, c->r[RDI]); wr64(c, a + 48, c->r[R12]); wr64(c, a + 56, c->r[R13]); wr64(c, a + 64, c->r[R14]); wr64(c, a + 72, c->r[R15]); wr64(c, a + 80, c->rip); for (int k = 6; k < 16; k++) { wr64(c, a + 96 + (k - 6) * 16, c->x[k].q[0]); wr64(c, a + 104 + (k - 6) * 16, c->x[k].q[1]); } RET(0); }
+static void s_longjmp(Cpu *c) { u64 a = ARG(0); u64 v = ARG(1);
+  if (c->mode32) { longjmp32(c, a, v); return; } c->r[RBX] = rd64(c, a + 8); c->r[RSP] = rd64(c, a + 16); c->r[RBP] = rd64(c, a + 24); c->r[RSI] = rd64(c, a + 32); c->r[RDI] = rd64(c, a + 40); c->r[R12] = rd64(c, a + 48); c->r[R13] = rd64(c, a + 56); c->r[R14] = rd64(c, a + 64); c->r[R15] = rd64(c, a + 72); c->rip = rd64(c, a + 80); for (int k = 6; k < 16; k++) { c->x[k].q[0] = rd64(c, a + 96 + (k - 6) * 16); c->x[k].q[1] = rd64(c, a + 104 + (k - 6) * 16); } RET(v ? v : 1); }
 static void s_invalid_parameter_noinfo(Cpu *c) { cpu_fault(c, "CRT invalid parameter"); }
 static void s_div(Cpu *c) { s32 a = (s32)ARG(0), b = (s32)ARG(1); if (!b) { cpu_fault(c, "div by zero"); return; } RET(((u64)(u32)(a % b) << 32) | (u32)(a / b)); }
 static void s_abs(Cpu *c) { s32 v = (s32)ARG(0); RET((u32)(v < 0 ? -v : v)); }
@@ -1254,6 +1264,7 @@ static const ShimDef shims[] = {
   TP_SHIMS
   SEH_SHIMS
   CXX_SHIMS
+  SEH32_SHIMS
   THREAD_SHIMS
   FS_SHIMS
   NT_SHIMS

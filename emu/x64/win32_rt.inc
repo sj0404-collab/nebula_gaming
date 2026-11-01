@@ -12,7 +12,7 @@ static void s_wcsdup(Cpu *c) { u64 s = ARG(0); if (!s) { RET(0); return; } u64 n
 static void s_iswxdigit(Cpu *c) { u32 ch = (u32)ARG(0); RET(ch < 128 && ((ch >= '0' && ch <= '9') || ((ch | 32) >= 'a' && (ch | 32) <= 'f'))); }
 static void s_iswalnum(Cpu *c) { u32 ch = (u32)ARG(0); RET(ch < 128 && ((ch >= '0' && ch <= '9') || ((ch | 32) >= 'a' && (ch | 32) <= 'z'))); }
 static void s_btowc(Cpu *c) { u32 ch = (u32)ARG(0); RET(ch == 0xffffffffu ? 0xffffu : ch < 128 ? ch : 0xffffu); }
-static void s_strtof(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 20); if (!s) { c->x[0].f32[0] = 0; return; } char *e; double v = e_strtod(s, &e); if (ARG(1)) wr64(c, ARG(1), ARG(0) + (u64)(e - s)); c->x[0].f32[0] = (float)v; }
+static void s_strtof(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 20); if (!s) { c->x[0].f32[0] = 0; return; } char *e; double v = e_strtod(s, &e); if (ARG(1)) wrp(c, ARG(1), ARG(0) + (u64)(e - s)); c->x[0].f32[0] = (float)v; }
 /* wide stdio on byte streams (the STL only uses these for wfstream/wcout on narrow files) */
 static void s_fgetwc(Cpu *c) { s_fgetc(c); if (c->status != RUN_OK) return; if (c->r[RAX] == ~0ull) c->r[RAX] = 0xffff; }
 static void s_fputwc(Cpu *c) { u32 wc = (u32)ARG(0); char ch = (char)(wc < 256 ? wc : '?'); int wr = stream_write(c, ARG(1), &ch, 1); if (!wr) return; RET(wr < 0 ? 0xffffull : wc); }
@@ -49,6 +49,7 @@ static void s_statusfp2(Cpu *c) { if (ARG(0)) wr32(c, ARG(0), sw_of_mxcsr(c->mxc
    filebuf destructor dereferenced them at exit (crash in cout's filebuf). */
 static void s_get_stream_buffer_pointers(Cpu *c) { u64 f = ARG(0);
   if (!f) { RET((u64)22); return; }
+  if (c->mode32) { if (ARG(1)) wr32(c, ARG(1), (u32)f + 8); if (ARG(2)) wr32(c, ARG(2), (u32)f); if (ARG(3)) wr32(c, ARG(3), (u32)f + 4); RET(0); return; }   /* 32-bit FILE: _ptr@0 _cnt@4 _base@8 */
   if (ARG(1)) wr64(c, ARG(1), f + 0x10); if (ARG(2)) wr64(c, ARG(2), f); if (ARG(3)) wr64(c, ARG(3), f + 8); RET(0); }
 static void s_Gettnames(Cpu *c) { RET(w32_heap_alloc(W, 1024, 1)); }   /* __lc_time_data: opaque to the STL, passed back to _Strftime */
 /* _Strftime(buf, max, fmt, tm, lc_time_data) / _Wcsftime(wbuf, max, wfmt, tm, lc_time_data) */
@@ -58,7 +59,7 @@ static void s_Wcsftime(Cpu *c) { char f[512]; wstr_to_utf8(c, ARG(2), f, sizeof 
 static void s_uncaught_exceptions(Cpu *c) { RET(0); }
 /* __AdjustPointer(void *this, const PMD *pmd): this + mdisp, plus the virtual-base displacement when pdisp >= 0 */
 static void s_AdjustPointer(Cpu *c) { u64 p = ARG(0), pmd = ARG(1); if (!p) { RET(0); return; } s32 mdisp = (s32)rd32(c, pmd), pdisp = (s32)rd32(c, pmd + 4), vdisp = (s32)rd32(c, pmd + 8);
-  u64 r = p + (s64)mdisp; if (pdisp >= 0) { u64 vbtable = rd64(c, p + (s64)pdisp); r += (s64)(s32)rd32(c, vbtable + (s64)vdisp); } RET(r); }
+  u64 r = p + (s64)mdisp; if (pdisp >= 0) { u64 vbtable = rdp(c, p + (s64)pdisp); r += (s64)(s32)rd32(c, vbtable + (s64)vdisp); } RET(r); }
 /* kernel32 odds and ends imported by the runtime DLLs */
 static void s_FlushProcessWriteBuffers(Cpu *c) { RET(0); }
 /* RegisterWindowMessage(A/W): a stable id in the 0xC000..0xFFFF range derived from the name (MFC registers ~10 at start-up) */

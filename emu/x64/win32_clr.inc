@@ -4,7 +4,7 @@
 /* ---- wide CRT conversions (UCRT api-ms-win-crt-convert / time / runtime) ---- */
 static long long clr_wcstoll(Cpu *c, u64 s, u64 endp, int base, int *ok) {
   char buf[128]; wstr_to_utf8(c, s, buf, sizeof buf, 127); char *e; long long v = e_strtoll(buf, &e, base);
-  if (endp) wr64(c, endp, s + (u64)(e - buf) * 2); if (ok) *ok = e != buf; return v;
+  if (endp) wrp(c, endp, s + (u64)(e - buf) * 2); if (ok) *ok = e != buf; return v;
 }
 static void s_wcstoul(Cpu *c)  { RET((u64)(u32)clr_wcstoll(c, ARG(0), ARG(1), (int)ARG(2), 0)); }
 static void s_wcstol(Cpu *c)   { RET((u64)(s64)(s32)clr_wcstoll(c, ARG(0), ARG(1), (int)ARG(2), 0)); }
@@ -12,7 +12,7 @@ static void s_wcstoll(Cpu *c)  { RET((u64)clr_wcstoll(c, ARG(0), ARG(1), (int)AR
 static void s_wcstoull(Cpu *c) { RET((u64)clr_wcstoll(c, ARG(0), ARG(1), (int)ARG(2), 0)); }
 static void s_wtoi(Cpu *c)     { RET((u64)(s64)(s32)clr_wcstoll(c, ARG(0), 0, 10, 0)); }
 static void s_wtoi64(Cpu *c)   { RET((u64)clr_wcstoll(c, ARG(0), 0, 10, 0)); }
-static void s_wcstod(Cpu *c)   { char buf[128]; wstr_to_utf8(c, ARG(0), buf, sizeof buf, 127); char *e; double v = e_strtod(buf, &e); if (ARG(1)) wr64(c, ARG(1), ARG(0) + (u64)(e - buf) * 2); c->x[0].f64[0] = v; }
+static void s_wcstod(Cpu *c)   { char buf[128]; wstr_to_utf8(c, ARG(0), buf, sizeof buf, 127); char *e; double v = e_strtod(buf, &e); if (ARG(1)) wrp(c, ARG(1), ARG(0) + (u64)(e - buf) * 2); c->x[0].f64[0] = v; }
 /* wcsftime(buf, count, fmt, tm): format through the narrow implementation */
 static void s_wcsftime(Cpu *c) { char f[256]; wstr_to_utf8(c, ARG(2), f, sizeof f, -1); char out[512]; int n = fmt_tm(c, out, sizeof out, f, ARG(3)); if ((u64)n + 1 > ARG(1)) { RET(0); return; } put_w(c, ARG(0), out, 0); RET(n); }
 static void s_wcserror_s(Cpu *c) { put_w(c, ARG(0), errstr((int)ARG(2)), (u32)ARG(1)); RET(0); }
@@ -141,7 +141,7 @@ static void s_WinHttpFail(Cpu *c) { W->last_error = 12029; RET(0); }   /* ERROR_
 static void s_GetFileVersionInfoSizeExW(Cpu *c) { if (ARG(2)) wr32(c, ARG(2), 0); W->last_error = 1813; RET(0); }
 /* combase / WinRT: no Windows Runtime here */
 static void s_RoInitialize(Cpu *c) { RET(0); }
-static void s_RoGetActivationFactory(Cpu *c) { if (ARG(2)) wr64(c, ARG(2), 0); RET(0x80040154); }   /* REGDB_E_CLASSNOTREG */
+static void s_RoGetActivationFactory(Cpu *c) { if (ARG(2)) wrp(c, ARG(2), 0); RET(0x80040154); }   /* REGDB_E_CLASSNOTREG */
 static void s_LoadStringW(Cpu *c) { if (ARG(3)) wr16(c, ARG(2), 0); RET(0); }
 
 static void s_GetThreadIOPendingFlag(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), 0); RET(1); }   /* no outstanding I/O requests on this thread */

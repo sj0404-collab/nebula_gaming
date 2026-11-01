@@ -123,7 +123,9 @@ static void cxx_step(Cpu *c, int ci) {
   cont_finish(c, 1);   /* no catch here: ExceptionContinueSearch */
 }
 /* __CxxFrameHandler(rec, frame, ctx, dc) — HandlerData is the RVA of FuncInfo */
+static void cxx32_frame_handler(Cpu *c);
 static void s___CxxFrameHandler(Cpu *c) {
+  if (c->mode32) { cxx32_frame_handler(c); return; }
   Win32 *w = W; u64 rec = ARG(0), frame = ARG(1), ctx = ARG(2), dc = ARG(3);
   u64 base = rd64(c, dc + 8), control = rd64(c, dc), hd = rd64(c, dc + 56);
   u64 descr = base + rd32(c, hd); u32 magic = rd32(c, descr), code = rd32(c, rec), flags = rd32(c, rec + 4);

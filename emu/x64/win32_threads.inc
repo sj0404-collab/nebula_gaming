@@ -367,7 +367,7 @@ static void s_ReleaseSemaphore(Cpu *c) { KObj *k = kobj_of_handle(c, ARG(0), KO_
 /* waits */
 static void do_wait(Cpu *c, u32 n, u64 arr, u64 single, int all, u32 ms) {
   Win32 *w = W; int kinds[64], idxs[64]; if (n > 64) n = 64; if (n == 0) { w->last_error = 87; wait_end(w); RET(0xffffffffu); return; }
-  for (u32 i = 0; i < n; i++) { u64 h = arr ? rd64(c, arr + i * 8) : single; if (!wait_handle(c, h, &kinds[i], &idxs[i])) { w->last_error = 6; wait_end(w); RET(0xffffffffu); return; } }
+  for (u32 i = 0; i < n; i++) { u64 h = arr ? rdp(c, arr + i * PSZ_OF(c)) : single; if (!wait_handle(c, h, &kinds[i], &idxs[i])) { w->last_error = 6; wait_end(w); RET(0xffffffffu); return; } }
   int which = 0; int tid = (int)cur_tid(w);
   if (w->wait_active && w->wait_rip == c->rip && w->wait_granted) { which = w->wait_granted - 1; w->wait_granted = 0; wait_end(w); RET((u32)which); return; }
   w->wait_granted = 0;

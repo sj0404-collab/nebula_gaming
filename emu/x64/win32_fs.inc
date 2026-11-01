@@ -100,7 +100,7 @@ static void create_file(Cpu *c, const char *n) {
 static void s_CreateFileA(Cpu *c) { create_file(c, name_a(c, ARG(0))); }
 static void s_CreateFileW(Cpu *c) { create_file(c, name_w(c, ARG(0))); }
 /* synchronous handle + OVERLAPPED: the I/O happens at Offset/OffsetHigh (SQLite, 7-Zip and most "pread"-style code rely on this) */
-static void overlapped_seek(Cpu *c, int fd, u64 ov) { if (ov && fd >= 3) { u64 off = rd32(c, ov + 16) | ((u64)rd32(c, ov + 20) << 32); vfs_seek(fd, (s64)off, 0); } }
+static void overlapped_seek(Cpu *c, int fd, u64 ov) { if (ov && fd >= 3) { u64 off = rd32(c, OV_OFFSET(ov)) | ((u64)rd32(c, OV_OFFSET(ov) + 4) << 32); vfs_seek(fd, (s64)off, 0); } }
 static void s_ReadFile(Cpu *c) {
   int fd = handle_fd(ARG(0)); if (!fd || fd == 1 || fd == 2) { W->last_error = 6; RET(0); return; }
   if (iocp_rw(c, fd, 0, ARG(1), (u32)ARG(2), ARG(3), ARG(4))) return;
@@ -118,7 +118,7 @@ static void rw_ex(Cpu *c, int write) {
   s64 r = write ? fd_write(c, fd, ARG(1), (u32)ARG(2)) : fd_read(c, fd, ARG(1), (u32)ARG(2));
   if (r == -2) { blocked_io(c, write); return; }
   u32 err = 0; if (r == -3) { err = 109; r = 0; } else if (r < 0) { err = 5; r = 0; } else if (!write && r == 0 && (u32)ARG(2) && vfs_kind(g_last_io_fd) == FD_PIPE) err = 109;
-  if (ov) { wr64(c, ov, err ? (err == 109 ? 0xC000014Bu : 0xC0000022u) : 0); wr64(c, ov + 8, (u64)r); }
+  if (ov) { ov_set(c, ov, err ? (err == 109 ? 0xC000014Bu : 0xC0000022u) : 0, (u64)r); }
   if (cb) queue_apc(W, cb, err, (u64)r, ov);
   RET(1);
 }
@@ -131,10 +131,10 @@ static void nt_rw(Cpu *c, int write) {
   if (off && fd >= 3) { s64 o = (s64)rd64(c, off); if (o >= 0) vfs_seek(fd, o, 0); }
   s64 r = write ? fd_write(c, fd, buf, len) : fd_read(c, fd, buf, len);
   if (r == -2) { blocked_io(c, write); return; }
-  if (r == -3) { wr64(c, iosb, 0xC000014Bu); wr64(c, iosb + 8, 0); RET(0xC000014Bu); return; }   /* STATUS_PIPE_BROKEN */
-  if (r < 0) { wr64(c, iosb, 0xC0000022u); wr64(c, iosb + 8, 0); RET(0xC0000022u); return; }     /* STATUS_ACCESS_DENIED */
-  if (!write && r == 0 && len) { u32 st = vfs_kind(g_last_io_fd) == FD_PIPE ? 0xC000014Bu : 0xC0000011u; wr64(c, iosb, st); wr64(c, iosb + 8, 0); RET(st); return; }   /* STATUS_END_OF_FILE */
-  wr64(c, iosb, 0); wr64(c, iosb + 8, (u64)r); RET(0);
+  if (r == -3) { ov_set(c, iosb, 0xC000014Bu, 0); RET(0xC000014Bu); return; }   /* STATUS_PIPE_BROKEN */
+  if (r < 0) { ov_set(c, iosb, 0xC0000022u, 0); RET(0xC0000022u); return; }     /* STATUS_ACCESS_DENIED */
+  if (!write && r == 0 && len) { u32 st = vfs_kind(g_last_io_fd) == FD_PIPE ? 0xC000014Bu : 0xC0000011u; ov_set(c, iosb, st, 0); RET(st); return; }   /* STATUS_END_OF_FILE */
+  ov_set(c, iosb, 0, (u64)r); RET(0);
 }
 static void s_NtReadFile(Cpu *c) { nt_rw(c, 0); }
 static void s_NtWriteFile(Cpu *c) { nt_rw(c, 1); }
@@ -212,7 +212,7 @@ static void s_GetCurrentDirectoryA(Cpu *c) { const char *d = vfs_cwd(); size_t l
 static void s_GetCurrentDirectoryW(Cpu *c) { const char *d = vfs_cwd(); size_t l = e_strlen(d); if ((u32)ARG(0) > l) put_w(c, ARG(1), d, 0); RET((u32)ARG(0) > l ? l : l + 1); }
 static void s_SetCurrentDirectoryA(Cpu *c) { if (vfs_chdir(name_a(c, ARG(0)))) RET(1); else { W->last_error = 2; RET(0); } }
 static void s_SetCurrentDirectoryW(Cpu *c) { if (vfs_chdir(name_w(c, ARG(0)))) RET(1); else { W->last_error = 2; RET(0); } }
-static void full_path(Cpu *c, const char *n, int wide) { char out[1024]; vfs_normalize(n, out, sizeof out); size_t l = e_strlen(out); u32 cap = (u32)ARG(1); if (cap <= l) { RET(l + 1); return; } if (wide) put_w(c, ARG(2), out, 0); else put_a(c, ARG(2), out, 0); if (ARG(3)) { size_t b = l; while (b > 0 && out[b - 1] != '\\') b--; wr64(c, ARG(3), ARG(2) + (wide ? b * 2 : b)); } RET(l); }
+static void full_path(Cpu *c, const char *n, int wide) { char out[1024]; vfs_normalize(n, out, sizeof out); size_t l = e_strlen(out); u32 cap = (u32)ARG(1); if (cap <= l) { RET(l + 1); return; } if (wide) put_w(c, ARG(2), out, 0); else put_a(c, ARG(2), out, 0); if (ARG(3)) { size_t b = l; while (b > 0 && out[b - 1] != '\\') b--; wrp(c, ARG(3), ARG(2) + (wide ? b * 2 : b)); } RET(l); }
 /* GetFinalPathNameByHandle(h, buf, cap, flags): the normalised path of the open file; VOLUME_NAME_DOS (0) gets the \\?\ prefix */
 static void final_path(Cpu *c, int wide) {
   int fd = handle_fd(ARG(0)); if (fd < 3) { W->last_error = 6; RET(0); return; }
@@ -263,7 +263,7 @@ static void s_PathCchSkipRoot(Cpu *c) { u64 p = ARG(0), i = 0; u16 a = rd16(c, p
   else if (b == ':') { i = 2; if (rd16(c, p + 4) == '\\') i = 3; }
   else if (a == '\\') i = 1;
   else { RET(0x80070057u); return; }
-  wr64(c, ARG(1), p + 2 * i); RET(0); }
+  wrp(c, ARG(1), p + 2 * i); RET(0); }
 static void s_GetFullPathNameA(Cpu *c) { full_path(c, name_a(c, ARG(0)), 0); }
 static void s_GetFullPathNameW(Cpu *c) { full_path(c, name_w(c, ARG(0)), 1); }
 static void s_GetTempPathA(Cpu *c) { const char *d = "C:\\tmp\\"; size_t l = e_strlen(d); if ((u32)ARG(0) > l) put_a(c, ARG(1), d, 0); RET(l); }

@@ -160,7 +160,8 @@ static void s_NtQuerySystemInformation(Cpu *c) {
 static void s_NtQueryInformationProcess(Cpu *c) {
   u32 cls = (u32)ARG(1); u64 buf = ARG(2); u32 len = (u32)ARG(3); u64 rl = ARG(4); u32 st = 0, need = 0;
   switch (cls) {
-  case 0: need = 48; if (len < need) { st = NT_BUFFER_TOO_SMALL; break; } wr64(c, buf, 0x103); wr64(c, buf + 8, W->peb); wr64(c, buf + 16, 1); wr64(c, buf + 24, 8); wr64(c, buf + 32, (u64)W->pid); wr64(c, buf + 40, (u64)W->ppid); break;
+  case 0: if (c->mode32) { need = 24; if (len < need) { st = NT_BUFFER_TOO_SMALL; break; } wr32(c, buf, 0x103); wr32(c, buf + 4, (u32)W->peb); wr32(c, buf + 8, 1); wr32(c, buf + 12, 8); wr32(c, buf + 16, (u32)W->pid); wr32(c, buf + 20, (u32)W->ppid); break; }
+    need = 48; if (len < need) { st = NT_BUFFER_TOO_SMALL; break; } wr64(c, buf, 0x103); wr64(c, buf + 8, W->peb); wr64(c, buf + 16, 1); wr64(c, buf + 24, 8); wr64(c, buf + 32, (u64)W->pid); wr64(c, buf + 40, (u64)W->ppid); break;
   case 26: need = 8; if (len < need) { st = NT_BUFFER_TOO_SMALL; break; } wr64(c, buf, 0); break;
   case 7: /* ProcessDebugPort */ need = 8; if (len < need) { st = NT_BUFFER_TOO_SMALL; break; } wr64(c, buf, 0); break;
   default: st = NT_NOT_IMPLEMENTED; break;
