@@ -45,3 +45,4 @@ emu/tests/*.lib
 emu/third_party/
 frame_*.ppm
 public/x64/sys32/
+public/x64/dotnet/
