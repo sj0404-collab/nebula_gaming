@@ -243,13 +243,17 @@ export default function X64App() {
     try {
       const total = man.files.reduce((a, f) => a + f.size, 0);
       if (!rt.reserve(total + (total >> 4) + (1 << 20))) throw new Error(`cannot grow guest memory by ${(total / 1048576).toFixed(0)} MB`);   // one memory.grow, not one per file
-      const queue = man.files.slice(); const PAR = 6; const t0 = performance.now();
-      const worker = async () => { for (;;) { const f = queue.shift(); if (!f) return;
-        const b = await fetchGz(DOTNET_URL + f.gz); if (b.length !== f.size) throw new Error(`${f.path}: ${b.length} bytes, expected ${f.size}`);
-        if (!rt.vfsAdd(DOTNET_DIR + f.path, b)) throw new Error(`${f.path}: virtual disk refused the file`);
-        bytes += b.length; done++;
+      const queue = man.files.slice(); const PAR = 6; const t0 = performance.now(); const inflight = new Set<string>(); let failed = false;
+      const label = () => `installing .NET pack: ${done}/${man.files.length}, ${(bytes / 1048576).toFixed(1)} MB` + (done + inflight.size >= man.files.length ? ` — waiting for ${[...inflight].join(', ')}` : '');
+      const worker = async () => { for (;;) { const f = queue.shift(); if (!f || failed) return; inflight.add(f.gz.slice(f.gz.lastIndexOf('/') + 1));
+        let b: Uint8Array;
+        try { b = await fetchGz(DOTNET_URL + f.gz); } catch (e) { failed = true; throw e; }
+        if (failed) return;   // another worker failed meanwhile: do not touch the state again (it already says 'available' + the error)
+        if (b.length !== f.size) { failed = true; throw new Error(`${f.path}: ${b.length} bytes, expected ${f.size}`); }
+        if (!rt.vfsAdd(DOTNET_DIR + f.path, b)) { failed = true; throw new Error(`${f.path}: virtual disk refused the file`); }
+        bytes += b.length; done++; inflight.delete(f.gz.slice(f.gz.lastIndexOf('/') + 1));
         if (done % 50 === 0) setLog(l => [...l, `.NET pack: ${done}/${man.files.length} files, ${(bytes / 1048576).toFixed(1)} MB in ${((performance.now() - t0) / 1000).toFixed(1)} s`]);
-        setDotnet({ status: 'installing', manifest: man, done }); setFetching(`installing .NET pack: ${done}/${man.files.length}, ${(bytes / 1048576).toFixed(1)} MB`); } };
+        setDotnet({ status: 'installing', manifest: man, done }); setFetching(label()); } };
       await Promise.all(Array.from({ length: PAR }, worker));
     } catch (e) { setFetching(null); setDotnet({ status: 'available', manifest: man, note: String(e) }); setLog(l => [...l, '.NET PACK: ' + String(e)]); return false; }
     setFetching(null); setDotnet({ status: 'installed', manifest: man, done }); setFiles(rt.vfsList());
@@ -326,7 +330,7 @@ export default function X64App() {
           className={`hidden items-center gap-1 rounded border px-2 py-1 sm:flex ${pack.status === 'installed' ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : 'border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-40'}`}>
           <Download size={11} /> {pack.status === 'installed' ? 'VC++ runtime ✓' : pack.status === 'installing' ? `VC++ runtime ${pack.done}/${pack.manifest?.files.length}` : pack.status === 'unavailable' ? 'VC++ runtime n/a' : 'VC++ runtime'}
         </button>
-        <button data-x64-dotnet={dotnet.status} disabled={dotnet.status !== 'available' || !!running || !!fetching} onClick={() => { const rt = rtRef.current; if (rt) void installDotnet(rt); }}
+        <button data-x64-dotnet={dotnet.status} data-x64-dotnet-note={dotnet.note ?? ''} disabled={dotnet.status !== 'available' || !!running || !!fetching} onClick={() => { const rt = rtRef.current; if (rt) void installDotnet(rt); }}
           title={dotnet.status === 'installed' ? `.NET pack installed in C:\\Program Files\\dotnet (${dotnet.done} files, ${dotnet.manifest?.pack})` : dotnet.status === 'available' ? `Install the official Microsoft .NET Runtime ${dotnet.manifest?.version} (win-x64; ${dotnet.manifest?.files.length} files, ${((dotnet.manifest?.files.reduce((a, f) => a + f.gzsize, 0) ?? 0) / 1048576).toFixed(1)} MB download) into C:\\Program Files\\dotnet — also happens automatically when a .NET program is started` : dotnet.status === 'unavailable' ? '.NET pack not available: ' + dotnet.note : '.NET pack…'}
           className={`hidden items-center gap-1 rounded border px-2 py-1 sm:flex ${dotnet.status === 'installed' ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : 'border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-50'}`}>
           <Download size={11} /> {dotnet.status === 'installed' ? '.NET 10 ✓' : dotnet.status === 'installing' ? `.NET 10 ${dotnet.done}/${dotnet.manifest?.files.length}` : dotnet.status === 'unavailable' ? '.NET n/a' : '.NET 10'}

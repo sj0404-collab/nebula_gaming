@@ -290,16 +290,32 @@ await test('x64: .NET pack — the OFFICIAL Microsoft .NET Runtime 10 is install
     await page.waitForFunction(() => /could not be installed|runtime pack/.test(document.body.innerText), null, { timeout: 30_000 });
     await closeAll(); return;
   }
-  try { await page.waitForFunction(() => /^(exited|fault)$/.test(document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') ?? ''), null, { timeout: 240_000 }); }
+  try { await page.waitForFunction(() => /^(exited|fault)$/.test(document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') ?? '') || !!document.querySelector('[data-x64-dotnet]')?.getAttribute('data-x64-dotnet-note'), null, { timeout: 240_000 }); }
   catch (e) { await page.screenshot({ path: resolve(SHOTS, 'x64-dotnet-timeout.png') }); throw e; }
   finally {   // diagnostics for CI: what the guest printed and what the loader/emulator logged
     const status = await page.evaluate(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status'));
+    await w.locator('[data-x64-tab="console"]').click().catch(() => {}); await sleep(200);
     const conTxt = await w.locator('[data-x64-console]').innerText().catch(() => '');
     await w.locator('[data-x64-tab="report"]').click().catch(() => {});
     const rep = await w.locator('[data-x64-report]').innerText().catch(() => '');
-    if (status !== 'exited') console.log(`      status=${status} dotnet=${await st()} toolbar=${JSON.stringify((await w.innerText().catch(() => '')).slice(0, 300))}\n      console: ${JSON.stringify(conTxt.slice(-600))}\n      report: ${JSON.stringify(rep.slice(0, 2500))}`);
+    if (status !== 'exited') {
+      console.log(`      status=${status} dotnet=${await st()} toolbar=${JSON.stringify((await w.innerText().catch(() => '')).slice(0, 300))}\n      console: ${JSON.stringify(conTxt.slice(-600))}\n      report: ${JSON.stringify(rep.slice(0, 1200))}`);
+      try {   // which pack files never arrived?
+        const man = await (await fetch(url + '/x64/dotnet/manifest.json')).json();
+        await w.locator('[data-x64-tab="files"]').click(); await sleep(300);
+        const have = await w.locator('[data-x64-files]').innerText();
+        const missing = man.files.filter(f => !have.includes(f.path.split('\\').pop())).map(f => `${f.path} (${f.size} B, gz ${f.gzsize} B)`);
+        console.log(`      pack files missing on the virtual disk (${missing.length}): ${missing.slice(0, 10).join('; ')}`);
+        for (const f of man.files.slice(0, 3).concat(missing.length ? man.files.filter(f => missing[0].startsWith(f.path)) : [])) {
+          const r = await fetch(url + '/x64/dotnet/' + f.gz); const b = new Uint8Array(await r.arrayBuffer());
+          console.log(`      GET ${f.gz}: ${r.status} ct=${r.headers.get('content-type')} ce=${r.headers.get('content-encoding')} cl=${r.headers.get('content-length')} got=${b.length} magic=${b[0]},${b[1]}`);
+        }
+      } catch (e) { console.log('      (diagnostics failed: ' + String(e) + ')'); }
+    }
     await w.locator('[data-x64-tab="console"]').click().catch(() => {});
   }
+  const note = await w.locator('[data-x64-dotnet]').getAttribute('data-x64-dotnet-note');
+  expect(!note, '.NET pack installation failed: ' + note);
   const con = await w.locator('[data-x64-console]').innerText();
   expect((await st()) === 'installed', '.NET pack should be installed after running a managed exe: ' + await st());
   expect(/primes 303/.test(con), 'LINQ primes missing: ' + con.slice(0, 400));
