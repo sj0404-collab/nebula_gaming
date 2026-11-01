@@ -136,6 +136,7 @@ static void do_exit(Cpu *c, int code) { W->exited = 1; c->exit_code = code; c->s
 static void retry_and_yield(Cpu *c, u64 slot) { cpu_push(c, c->rip); c->rip = slot; c->status = RUN_YIELD; }
 static u64 g_cur_slot;
 static int thread_cont_resume(Cpu *c, int kind, u64 rax);
+static int tp_cont_resume(Cpu *c, int kind, u64 rax);
 static int seh_cont_resume(Cpu *c, int kind, u64 rax);
 static int cxx_cont_resume(Cpu *c, int kind, u64 rax);
 static void thread_startup(Cpu *c);
@@ -210,6 +211,7 @@ void w32_cont_resume(Cpu *c) {
   }
   if (seh_cont_resume(c, w->cont[i].kind, rax)) return;
   if (cxx_cont_resume(c, w->cont[i].kind, rax)) return;
+  if (tp_cont_resume(c, w->cont[i].kind, rax)) return;
   if (thread_cont_resume(c, w->cont[i].kind, rax)) return;
   extern void gdi_cont_resume(Cpu *c, int kind, u64 rax);
   gdi_cont_resume(c, w->cont[i].kind, rax);
@@ -338,6 +340,7 @@ static void iocp_handle_closed(int pid, int fd); static void iocp_kobj_closed(in
 #include "win32_iocp.inc"
 #include "win32_net.inc"
 #include "win32_node.inc"
+#include "win32_tp.inc"
 #include "win32_bun.inc"
 #include "d3d11.inc"
 static void s_CancelIo(Cpu *c) { sock_cancel_io(c, ARG(0)); RET(1); }   /* pipes: parked ReadFile/WriteFile stay (libuv cancels those only on close) */
@@ -1177,6 +1180,7 @@ static const ShimDef shims[] = {
   COMPAT_SHIMS
   RT_SHIMS
   MATH_SHIMS
+  TP_SHIMS
   SEH_SHIMS
   CXX_SHIMS
   THREAD_SHIMS

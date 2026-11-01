@@ -52,7 +52,8 @@ const TOUCH_KEYS: { label: string; vk: number }[] = [
 type PackManifest = { pack: string; files: { name: string; size: number; version: string }[] };
 type PackState = { status: 'probing' | 'available' | 'installing' | 'installed' | 'unavailable'; manifest?: PackManifest; done?: number; note?: string };
 const PACK_URL = '/x64/sys32/';
-const exeWantsPack = (dlls: string[] | undefined, man: PackManifest | undefined) => !!man && !!dlls && dlls.some(d => man.files.some(f => f.name.toLowerCase() === d.toLowerCase()));
+const PACK_BUILTIN = new Set(['vcruntime140.dll']);   // shipped in the pack for completeness, but the emulator always uses its own implementation (pe_dll_native_ok)
+const exeWantsPack = (dlls: string[] | undefined, man: PackManifest | undefined) => !!man && !!dlls && dlls.some(d => !PACK_BUILTIN.has(d.toLowerCase()) && man.files.some(f => f.name.toLowerCase() === d.toLowerCase()));
 
 export default function X64App() {
   const rtRef = useRef<X64Runtime | null>(null);

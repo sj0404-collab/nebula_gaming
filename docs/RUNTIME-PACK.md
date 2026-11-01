@@ -39,6 +39,10 @@ run and the other jobs download the artifact before `npm run build`, so the depl
 
 ## Verified
 
+All 26 DLLs of the pack load from `C:\Windows\System32` and run their `DllMain`/static initialisers to completion
+(`emu/tests/run.sh` section `[5z]`, `msvcp.exe <dll>`): concrt140, mfc140, mfc140u, mfcm140(u), the 10 MFC language
+DLLs, msvcp140(_1/_2/_atomic_wait/_codecvt_ids), vcamp140, vccorlib140, vcomp140, vcruntime140(_1/_threads).
+
 ```bash
 ./emu/tools/runtime-pack.sh                                   # → public/x64/sys32
 cd emu && ./tests/run.sh                                      # [5x] msvcp.exe: real msvcp140 → "42 3.25", "MSVCP OK"
@@ -55,6 +59,6 @@ sizes its kernels from CPUID leaves 2/4/0x80000006, numpy's dispatcher requires 
 
 * **.NET Framework / .NET (Core)** is not emulated — a CLR (JIT, GC, BCL) is a project of its own; `.NET` programs stop at `mscoree.dll!_CorExeMain`.
 * **DirectX redistributables** (`d3dx9_43`, `d3dcompiler_43`, XAudio2): the loader policy already prefers real files, but the emulator implements only a Direct3D 11 subset (see `docs/D3D11-X64.md`); Direct3D 9/10/12 and audio are not implemented.
-* The kernel32 **thread-pool API** (`CreateThreadpoolWork/Submit/Wait/Close`, `*Timer`, `*Wait`) imported by `concrt140`/`msvcp140_atomic_wait` is not implemented yet — a program that calls it stops with the API name.
+* The kernel32 **thread-pool API** is implemented (`emu/x64/win32_tp.inc`: work, timers, waits, simple callbacks, instance helpers, pools, cleanup groups — `emu/tests/tpool.c` 14/14) **except thread-pool I/O** (`CreateThreadpoolIo` → stops with the API name). Cancelling a pending `SetThreadpoolWait` cannot interrupt the parked helper until its handle signals; cleanup groups do not track members.
 * `fetestexcept` only sees the MXCSR flags the interpreter raises (few), so numpy's "divide by zero" runtime warnings are mostly silent.
 * MFC GUI applications also need USER32 dialog resources and common controls that the emulator does not have.

@@ -61,6 +61,55 @@ static void s_AdjustPointer(Cpu *c) { u64 p = ARG(0), pmd = ARG(1); if (!p) { RE
   u64 r = p + (s64)mdisp; if (pdisp >= 0) { u64 vbtable = rd64(c, p + (s64)pdisp); r += (s64)(s32)rd32(c, vbtable + (s64)vdisp); } RET(r); }
 /* kernel32 odds and ends imported by the runtime DLLs */
 static void s_FlushProcessWriteBuffers(Cpu *c) { RET(0); }
+/* RegisterWindowMessage(A/W): a stable id in the 0xC000..0xFFFF range derived from the name (MFC registers ~10 at start-up) */
+/* win.ini profile API (MFC start-up reads a few ints): no win.ini → defaults */
+static void s_GetProfileIntW(Cpu *c) { RET((u32)ARG(2)); }
+static void s_GetProfileStringW(Cpu *c) { u64 def = ARG(2), out = ARG(3), cap = ARG(4); u32 n = 0; if (out && cap) { if (def) { for (; n + 1 < cap; n++) { u16 ch = rd16(c, def + n * 2); if (!ch) break; wr16(c, out + n * 2, ch); } } wr16(c, out + n * 2, 0); } RET(n); }
+static void s_WriteProfileStringW(Cpu *c) { RET(1); }
+/* LocalReAlloc / GlobalReAlloc(hMem, bytes, flags): LMEM_ZEROINIT 0x40, LMEM_MOVEABLE 0x02 (our handles are pointers) */
+static void s_LocalReAlloc(Cpu *c) { RET(heap_realloc(W, ARG(0), ARG(1), !!(ARG(2) & 0x40))); }
+/* _mbs* multibyte string family (ANSI MFC): single-byte semantics — the emulated ANSI code page is 1252/UTF-8 without lead bytes */
+static void s_strncat_s(Cpu *c) { const char *d = gstr(c, ARG(0)); size_t dl = e_strlen(d); const char *s = gstr(c, ARG(2)); size_t l = e_strlen(s); u64 n = ARG(3); if (n != ~0ull && l > n) l = n; if (dl + l + 1 > ARG(1)) { RET(34); return; } u8 *p = mem_ptr(c->mem, ARG(0) + dl, l + 1, 1); if (p) { e_memmove(p, s, l); p[l] = 0; } RET(0); }
+static void s_mbsinc(Cpu *c) { RET(ARG(0) + (rd8(c, ARG(0)) ? 1 : 0)); }
+static void s_mbsdec(Cpu *c) { RET(ARG(1) > ARG(0) ? ARG(1) - 1 : 0); }
+static void s_mbsnbcnt(Cpu *c) { u64 n = 0, m = ARG(1); while (n < m && rd8(c, ARG(0) + n)) n++; RET(n); }
+static void s_mbclen(Cpu *c) { RET(1); }
+static void s_ismbblead(Cpu *c) { RET(0); }
+static void s_ismbbtrail(Cpu *c) { RET(0); }
+static void s_mbsnbcmp(Cpu *c) { s_strncmp(c); }
+static void s_mbsnbicmp(Cpu *c) { s_strnicmp(c); }
+static void s_mbsnbcpy_s(Cpu *c) { s_strncpy_s(c); }
+static void s_mbsnbcat_s(Cpu *c) { s_strncat_s(c); }
+static void s_mbsnbcpy(Cpu *c) { u64 n = ARG(2), i = 0; for (; i < n; i++) { u8 ch = rd8(c, ARG(1) + i); wr8(c, ARG(0) + i, ch); if (!ch) break; } RET(ARG(0)); }
+static void s_mbsnbcat(Cpu *c) { const char *d = gstr(c, ARG(0)); size_t dl = e_strlen(d); u64 n = ARG(2), i = 0; for (; i < n; i++) { u8 ch = rd8(c, ARG(1) + i); wr8(c, ARG(0) + dl + i, ch); if (!ch) break; } if (i == n) wr8(c, ARG(0) + dl + n, 0); RET(ARG(0)); }
+static void s_mbsspn(Cpu *c) { const char *str = gstr(c, ARG(0)), *set = gstr(c, ARG(1)); u64 n = 0; for (; str[n]; n++) { int in = 0; for (const char *q = set; *q; q++) if (*q == str[n]) { in = 1; break; } if (!in) break; } RET(n); }
+static void s_mbscspn(Cpu *c) { const char *str = gstr(c, ARG(0)), *set = gstr(c, ARG(1)); u64 n = 0; for (; str[n]; n++) { int in = 0; for (const char *q = set; *q; q++) if (*q == str[n]) { in = 1; break; } if (in) break; } RET(n); }
+static void s_mbspbrk(Cpu *c) { s_mbscspn(c); u64 n = c->r[RAX]; RET(rd8(c, ARG(0) + n) ? ARG(0) + n : 0); }
+static void s_mbsrev(Cpu *c) { u64 a = ARG(0); const char *str = gstr(c, a); size_t n = e_strlen(str); for (size_t i = 0; i < n / 2; i++) { u8 x = rd8(c, a + i), y = rd8(c, a + n - 1 - i); wr8(c, a + i, y); wr8(c, a + n - 1 - i, x); } RET(a); }
+static void s_mbstok_s(Cpu *c) { cpu_fault(c, "_mbstok_s: not implemented"); }
+/* SHLWAPI path helpers on UTF-16 strings (pointers into the caller's buffer) */
+static u32 wlen16(Cpu *c, u64 a) { u32 n = 0; while (rd16(c, a + n * 2) && n < 32768) n++; return n; }
+static void s_PathFindExtensionW(Cpu *c) { u64 a = ARG(0); u32 n = wlen16(c, a); u64 r = a + n * 2; for (u32 i = n; i-- > 0;) { u16 ch = rd16(c, a + i * 2); if (ch == '.') { r = a + i * 2; break; } if (ch == '\\' || ch == '/' || ch == ':') break; } RET(r); }
+static void s_PathFindFileNameW(Cpu *c) { u64 a = ARG(0); u32 n = wlen16(c, a); u64 r = a; for (u32 i = 0; i + 1 < n; i++) { u16 ch = rd16(c, a + i * 2); if (ch == '\\' || ch == '/' || ch == ':') r = a + (i + 1) * 2; } RET(r); }
+static void s_PathRemoveExtensionW(Cpu *c) { s_PathFindExtensionW(c); wr16(c, c->r[RAX], 0); }
+static void s_PathIsUNCW(Cpu *c) { u64 a = ARG(0); RET(rd16(c, a) == '\\' && rd16(c, a + 2) == '\\' ? 1 : 0); }
+static void s_PathStripPathW(Cpu *c) { u64 a = ARG(0); s_PathFindFileNameW(c); u64 f = c->r[RAX]; if (f != a) { u32 n = wlen16(c, f); for (u32 i = 0; i <= n; i++) wr16(c, a + i * 2, rd16(c, f + i * 2)); } }
+static void s_PathAddBackslashW(Cpu *c) { u64 a = ARG(0); u32 n = wlen16(c, a); if (n && rd16(c, a + (n - 1) * 2) != '\\') { wr16(c, a + n * 2, '\\'); wr16(c, a + (n + 1) * 2, 0); n++; } RET(a + n * 2); }
+static void s_PathRemoveBackslashW(Cpu *c) { u64 a = ARG(0); u32 n = wlen16(c, a); if (n > 1 && rd16(c, a + (n - 1) * 2) == '\\') { wr16(c, a + (n - 1) * 2, 0); n--; } RET(a + n * 2); }
+static void s_PathRemoveFileSpecW(Cpu *c) { u64 a = ARG(0); s_PathFindFileNameW(c); u64 f = c->r[RAX]; if (f == a) { RET(0); return; } u64 cut = f - 2; if (cut > a + 2 && rd16(c, cut) == '\\' && rd16(c, cut - 2) != ':') wr16(c, cut, 0); else wr16(c, f, 0); RET(1); }
+static void s_PathFileExistsW(Cpu *c) { RET(vfs_stat(name_w(c, ARG(0)), 0) != 0); }
+static void s_PathIsDirectoryW(Cpu *c) { RET(vfs_stat(name_w(c, ARG(0)), 0) == 2 ? 0x10 : 0); }
+/* ANSI twins */
+static void s_PathFindExtensionA(Cpu *c) { u64 a = ARG(0); const char *str = gstr(c, a); size_t n = e_strlen(str); u64 r = a + n; for (size_t i = n; i-- > 0;) { char ch = str[i]; if (ch == '.') { r = a + i; break; } if (ch == '\\' || ch == '/' || ch == ':') break; } RET(r); }
+static void s_PathFindFileNameA(Cpu *c) { u64 a = ARG(0); const char *str = gstr(c, a); size_t n = e_strlen(str); u64 r = a; for (size_t i = 0; i + 1 < n; i++) { char ch = str[i]; if (ch == '\\' || ch == '/' || ch == ':') r = a + i + 1; } RET(r); }
+static void s_PathRemoveExtensionA(Cpu *c) { s_PathFindExtensionA(c); wr8(c, c->r[RAX], 0); }
+static void s_PathIsUNCA(Cpu *c) { u64 a = ARG(0); RET(rd8(c, a) == '\\' && rd8(c, a + 1) == '\\' ? 1 : 0); }
+static void s_PathStripPathA(Cpu *c) { u64 a = ARG(0); s_PathFindFileNameA(c); u64 f = c->r[RAX]; if (f != a) { const char *str = gstr(c, f); size_t n = e_strlen(str); for (size_t i = 0; i <= n; i++) wr8(c, a + i, (u8)str[i]); } }
+static void s_PathFileExistsA(Cpu *c) { RET(vfs_stat(name_a(c, ARG(0)), 0) != 0); }
+static void s_StrCmpIW(Cpu *c) { u64 a = ARG(0), b = ARG(1); for (u32 i = 0;; i++) { u16 x = rd16(c, a + i * 2), y = rd16(c, b + i * 2); if (x >= 'A' && x <= 'Z') x += 32; if (y >= 'A' && y <= 'Z') y += 32; if (x != y) { RET((u64)(s64)((int)x - (int)y)); return; } if (!x) { RET(0); return; } } }
+static void s_StrCmpNIW(Cpu *c) { u64 a = ARG(0), b = ARG(1); u32 n = (u32)ARG(2); for (u32 i = 0; i < n; i++) { u16 x = rd16(c, a + i * 2), y = rd16(c, b + i * 2); if (x >= 'A' && x <= 'Z') x += 32; if (y >= 'A' && y <= 'Z') y += 32; if (x != y) { RET((u64)(s64)((int)x - (int)y)); return; } if (!x) break; } RET(0); }
+static void s_RegisterWindowMessageW(Cpu *c) { const char *n = name_w(c, ARG(0)); u32 h = 2166136261u; for (const char *p = n; *p; p++) h = (h ^ (u8)*p) * 16777619u; RET(0xC000u + (h % 0x3FFFu)); }
+static void s_RegisterWindowMessageA(Cpu *c) { const char *n = name_a(c, ARG(0)); u32 h = 2166136261u; for (const char *p = n; *p; p++) h = (h ^ (u8)*p) * 16777619u; RET(0xC000u + (h % 0x3FFFu)); }
 static void s_lstrcmpiW(Cpu *c) { char a[1024], b[1024]; wstr_to_utf8(c, ARG(0), a, sizeof a, -1); wstr_to_utf8(c, ARG(1), b, sizeof b, -1); int r = e_stricmp(a, b); RET((u64)(s64)(r < 0 ? -1 : r > 0 ? 1 : 0)); }
 static void s_GetStringTypeExW(Cpu *c) { c->r[RCX] = ARG(1); c->r[RDX] = ARG(2); c->r[R8] = ARG(3); c->r[R9] = ARG(4); s_GetStringTypeW(c); }   /* (locale, type, src, n, out) → GetStringTypeW(type, src, n, out) */
 static void s_GetThreadPreferredUILanguages(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), 0); if (ARG(3)) { u32 need = rd32(c, ARG(3)); if (ARG(2) && need >= 1) wr16(c, ARG(2), 0); wr32(c, ARG(3), 1); } RET(1); }
@@ -69,4 +118,4 @@ static void s_GetThreadPreferredUILanguages(Cpu *c) { if (ARG(1)) wr32(c, ARG(1)
   SA("__strncnt", strncnt), SA("_wcsdup", wcsdup), S(iswxdigit), S(iswalnum), S(btowc), S(strtof), S(fgetwc), S(fputwc), S(ungetwc), \
   SA("_Getdays", Getdays), SA("_Getmonths", Getmonths), SA("_W_Getdays", W_Getdays), SA("_W_Getmonths", W_Getmonths), SA("_Gettnames", Gettnames), S(fetestexcept), S(feclearexcept), S(feraiseexcept), S(fegetexceptflag), S(fesetexceptflag), S(fegetround), S(fesetround), S(fegetenv), S(fesetenv), S(feholdexcept), S(feupdateenv), SA("_statusfp", statusfp), SA("_clearfp", clearfp), SA("_statusfp2", statusfp2), SA("_get_stream_buffer_pointers", get_stream_buffer_pointers), SA("_W_Gettnames", Gettnames), SA("_Strftime", Strftime), SA("_Wcsftime", Wcsftime), SA("_ldclass", dclass), \
   SA("__uncaught_exceptions", uncaught_exceptions), SA("__uncaught_exception", uncaught_exceptions), SA("__std_terminate", cxx_terminate), SA("__AdjustPointer", AdjustPointer), \
-  S(FlushProcessWriteBuffers), SA("FreeLibraryWhenCallbackReturns", ret0), S(lstrcmpiW), S(GetStringTypeExW), S(GetThreadPreferredUILanguages), SA("SetThreadPreferredUILanguages", ret1),
+  S(FlushProcessWriteBuffers), S(RegisterWindowMessageW), S(RegisterWindowMessageA), SA("RegisterClipboardFormatW", RegisterWindowMessageW), SA("RegisterClipboardFormatA", RegisterWindowMessageA), S(LocalReAlloc), SA("GlobalReAlloc", LocalReAlloc), S(strncat_s), SA("_mbsinc", mbsinc), SA("_mbsdec", mbsdec), SA("_mbsnbcnt", mbsnbcnt), SA("_mbsnccnt", mbsnbcnt), SA("_mbclen", mbclen), SA("_ismbblead", ismbblead), SA("_ismbbtrail", ismbbtrail), SA("_ismbslead", ismbblead), SA("_ismbstrail", ismbblead), SA("_mbsnbcmp", mbsnbcmp), SA("_mbsnbicmp", mbsnbicmp), SA("_mbsncmp", mbsnbcmp), SA("_mbsnicmp", mbsnbicmp), SA("_mbsnbcpy_s", mbsnbcpy_s), SA("_mbsnbcat_s", mbsnbcat_s), SA("_mbsncpy_s", mbsnbcpy_s), SA("_mbsnbcpy", mbsnbcpy), SA("_mbsnbcat", mbsnbcat), SA("_mbsncpy", mbsnbcpy), SA("_mbsspn", mbsspn), SA("_mbscspn", mbscspn), SA("_mbspbrk", mbspbrk), SA("_mbsrev", mbsrev), SA("_mbstok_s", mbstok_s), SA("_mbscmp", strcmp), SA("_mbsicmp", stricmp), SA("_mbslen", strlen), SA("_mbschr", strchr), SA("_mbsrchr", strrchr), SA("_mbsstr", strstr), SA("_mbscpy_s", strcpy_s), SA("_mbscat_s", strcat_s), SA("_mbslwr", strlwr), SA("_mbsupr", strupr), SA("_mbslwr_s", ret0), SA("_mbsupr_s", ret0), SA("_mbsnlen", strnlen), SA("_mbsnbset_s", ret0), SA("_mbsnset_s", ret0), S(PathFindExtensionA), S(PathFindFileNameA), S(PathRemoveExtensionA), S(PathIsUNCA), S(PathStripPathA), S(PathFileExistsA), S(PathFindExtensionW), S(PathFindFileNameW), S(PathRemoveExtensionW), S(PathIsUNCW), S(PathStripPathW), S(PathAddBackslashW), S(PathRemoveBackslashW), S(PathRemoveFileSpecW), S(PathFileExistsW), S(PathIsDirectoryW), S(StrCmpIW), S(StrCmpNIW), SA("StrCmpW", wcscmp), S(GetProfileIntW), SA("GetProfileIntA", GetProfileIntW), S(GetProfileStringW), SA("WriteProfileStringW", WriteProfileStringW), SA("WriteProfileStringA", WriteProfileStringW), SA("_SetWinRTOutOfMemoryExceptionCallback", ret0), S(lstrcmpiW), S(GetStringTypeExW), S(GetThreadPreferredUILanguages), SA("SetThreadPreferredUILanguages", ret1),

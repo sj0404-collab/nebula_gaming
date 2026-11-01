@@ -251,6 +251,23 @@ if [ -f ../public/x64/sys32/msvcp140.dll ]; then
 else
   echo "  skip (run emu/tools/runtime-pack.sh first)"
 fi
+echo "[5y] tpool.exe (kernel32 thread pool: work items, periodic/one-shot timers, waits, simple callbacks, *WhenCallbackReturns)"
+out=$($X --quiet --no-stdin tests/tpool.exe 2>&1 || true)
+check "24 work callbacks"      "24 work callbacks ran, sum 48000" "$out"
+check "periodic timer"         "periodic timer fired 4..8 times" "$out"
+check "timer cancel"           "no ticks after cancel" "$out"
+check "one-shot timer"         "one-shot timer fired exactly once" "$out"
+check "wait object"            "wait callback ran with WAIT_OBJECT_0" "$out"
+check "wait timeout"           "wait callback got WAIT_TIMEOUT" "$out"
+check "simple callback"        "simple callback ran" "$out"
+check "all"                    "threadpool 14/14" "$out"
+if [ -f ../public/x64/sys32/msvcp140.dll ]; then
+  echo "[5z] every runtime-pack DLL loads and runs its DllMain (LoadLibrary from C:\\Windows\\System32)"
+  for d in $(ls ../public/x64/sys32/*.dll | xargs -n1 basename); do
+    out=$($X --quiet --no-stdin --mount '../public/x64/sys32=C:\Windows\System32' tests/msvcp.exe "$d" 2>&1 || true)
+    case "$out" in *"exports missing"*|*"MSVCP OK"*) echo "  ok   $d";; *) echo "  FAIL $d: $(printf '%s' "$out" | head -3)"; fail=1;; esac
+  done
+fi
 echo "[6] honest rejections"
 check "32-bit PE"   '"verdict":"unsupported"' "$(printf 'MZ' | head -c 2 > /tmp/pe32.bin; python3 - <<'PY'
 import struct
