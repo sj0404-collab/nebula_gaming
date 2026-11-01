@@ -109,7 +109,13 @@ static void check_timers(Win32 *w) {
   double now = host_now_ms();
   for (int i = 0; i < timers_n; i++) if (now >= timers[i].next) { timers[i].next = now + timers[i].ms; post_msg(w, 0x113, timers[i].id, timers[i].proc); }
 }
-static void write_msg(Cpu *c, u64 a, GuestMsg *m) { wr64(c, a, m->hwnd); wr32(c, a + 8, m->msg); wr32(c, a + 12, 0); wr64(c, a + 16, m->wparam); wr64(c, a + 24, m->lparam); wr32(c, a + 32, m->time); wr32(c, a + 36, (u32)g_mouse_x); wr32(c, a + 40, (u32)g_mouse_y); wr32(c, a + 44, 0); }
+/* MSG: x64 hwnd@0 message@8 wParam@16 lParam@24 time@32 pt@36 (48 B); x86 hwnd@0 message@4 wParam@8 lParam@12 time@16 pt@20 (28 B) */
+#define MSG_MSG(a) ((a) + (c->mode32 ? 4 : 8))
+#define MSG_WP(a) ((a) + (c->mode32 ? 8 : 16))
+#define MSG_LP(a) ((a) + (c->mode32 ? 12 : 24))
+static void write_msg(Cpu *c, u64 a, GuestMsg *m) {
+  if (c->mode32) { wr32(c, a, (u32)m->hwnd); wr32(c, a + 4, m->msg); wr32(c, a + 8, (u32)m->wparam); wr32(c, a + 12, (u32)m->lparam); wr32(c, a + 16, m->time); wr32(c, a + 20, (u32)g_mouse_x); wr32(c, a + 24, (u32)g_mouse_y); return; }
+  wr64(c, a, m->hwnd); wr32(c, a + 8, m->msg); wr32(c, a + 12, 0); wr64(c, a + 16, m->wparam); wr64(c, a + 24, m->lparam); wr32(c, a + 32, m->time); wr32(c, a + 36, (u32)g_mouse_x); wr32(c, a + 40, (u32)g_mouse_y); wr32(c, a + 44, 0); }
 static int next_message(Cpu *c, GuestMsg *out, int remove) {
   Win32 *w = W; check_timers(w);
   if (w->msg_head != w->msg_tail) { *out = w->msgs[w->msg_head]; if (remove) w->msg_head = (w->msg_head + 1) % MAX_MSGS; return 1; }
@@ -128,10 +134,10 @@ static void s_GetMessageA(Cpu *c) {
   W->blits_since_yield = 0; w32_retry_yield(c);
 }
 static void s_TranslateMessage(Cpu *c) {
-  u64 a = ARG(0); u32 msg = rd32(c, a + 8); u64 vk = rd64(c, a + 16);
+  u64 a = ARG(0); u32 msg = rd32(c, MSG_MSG(a)); u64 vk = rdp(c, MSG_WP(a));
   if (msg == 0x100) { int shift = W->key_state[0x10]; u32 ch = 0;
     if (vk >= 'A' && vk <= 'Z') ch = shift ? (u32)vk : (u32)vk + 32; else if (vk >= '0' && vk <= '9') ch = (u32)vk; else if (vk == 0x20 || vk == 0x0D || vk == 0x08 || vk == 0x1B || vk == 0x09) ch = (u32)vk; else if (vk >= 0x60 && vk <= 0x69) ch = '0' + (u32)vk - 0x60;
-    if (ch) post_msg(W, 0x102, ch, rd64(c, a + 24)); RET(1); return; }
+    if (ch) post_msg(W, 0x102, ch, rdp(c, MSG_LP(a))); RET(1); return; }
   RET(0);
 }
 static void dispatch_to_wndproc(Cpu *c, u64 hwnd, u32 msg, u64 wp, u64 lp) {
@@ -140,7 +146,7 @@ static void dispatch_to_wndproc(Cpu *c, u64 hwnd, u32 msg, u64 wp, u64 lp) {
   if (hwnd != HWND_MAIN || !w->win.wndproc) { RET(0); return; }
   w32_push_cont(c, CONT_RET_RAX, 0); w32_guest_call(c, w->win.wndproc, hwnd, msg, wp, lp);
 }
-static void s_DispatchMessageA(Cpu *c) { u64 a = ARG(0); dispatch_to_wndproc(c, rd64(c, a), rd32(c, a + 8), rd64(c, a + 16), rd64(c, a + 24)); }
+static void s_DispatchMessageA(Cpu *c) { u64 a = ARG(0); dispatch_to_wndproc(c, rdp(c, a), rd32(c, MSG_MSG(a)), rdp(c, MSG_WP(a)), rdp(c, MSG_LP(a))); }
 static void s_SendMessageA(Cpu *c) { dispatch_to_wndproc(c, ARG(0), (u32)ARG(1), ARG(2), ARG(3)); }
 static void s_PostMessageA(Cpu *c) { if (ARG(0) == HWND_MAIN || ARG(0) == 0) post_msg(W, (u32)ARG(1), ARG(2), ARG(3)); RET(1); }
 static void s_PostQuitMessage(Cpu *c) { W->quit_posted = 1; c->exit_code = (int)ARG(0); }
@@ -150,8 +156,11 @@ static void s_MsgWaitForMultipleObjects(Cpu *c) { Win32 *w = W; if (w->msg_head 
 static void s_WaitMessage(Cpu *c) { s_MsgWaitForMultipleObjects(c); }
 
 /* ---------- window ---------- */
-static void s_RegisterClassA(Cpu *c) { Win32 *w = W; u64 a = ARG(0); w->wndclass_proc = rd64(c, a + 8); w->wndclass_registered = 1; const char *n = rd_str(c, rd64(c, a + 64), 63); e_snprintf(w->wndclass_name, sizeof w->wndclass_name, "%s", n ? n : "?"); w->win.brush = rd64(c, a + 48); RET(0xC001); }
-static void s_RegisterClassExA(Cpu *c) { Win32 *w = W; u64 a = ARG(0); w->wndclass_proc = rd64(c, a + 16); w->wndclass_registered = 1; const char *n = rd_str(c, rd64(c, a + 72), 63); e_snprintf(w->wndclass_name, sizeof w->wndclass_name, "%s", n ? n : "?"); w->win.brush = rd64(c, a + 56); RET(0xC001); }
+/* WNDCLASS(EX): x64 proc@8(16) brush@48(56) name@64(72); x86 proc@4(8) brush@28(32) name@36(40) */
+static void register_class(Cpu *c, u64 a, int ex) { Win32 *w = W; int m = c->mode32; u64 off = ex ? (m ? 4 : 8) : 0;
+  w->wndclass_proc = rdp(c, a + off + (m ? 4 : 8)); w->wndclass_registered = 1; const char *n = rd_str(c, rdp(c, a + off + (m ? 36 : 64)), 63); e_snprintf(w->wndclass_name, sizeof w->wndclass_name, "%s", n ? n : "?"); w->win.brush = rdp(c, a + off + (m ? 28 : 48)); RET(0xC001); }
+static void s_RegisterClassA(Cpu *c) { register_class(c, ARG(0), 0); }
+static void s_RegisterClassExA(Cpu *c) { register_class(c, ARG(0), 1); }
 static void s_RegisterClassW(Cpu *c) { s_RegisterClassA(c); }
 static void s_RegisterClassExW(Cpu *c) { s_RegisterClassExA(c); }
 static void s_UnregisterClassA(Cpu *c) { RET(1); }
@@ -169,7 +178,9 @@ static void create_window(Cpu *c, u64 title_a, int wide, u32 style, int x, int y
   else { const char *t = rd_str(c, title_a, 127); e_snprintf(w->win.title, sizeof w->win.title, "%s", t ? t : ""); }
   w->screen_w = cw; w->screen_h = ch; w->screen = emu_alloc((size_t)cw * ch * 4); w->dirty = 1;
   /* CREATESTRUCT for WM_CREATE */
-  u64 cs = w32_heap_alloc(w, 80, 1); wr64(c, cs, param); wr64(c, cs + 8, w->image_base); wr64(c, cs + 32, HWND_MAIN); wr32(c, cs + 40, ch); wr32(c, cs + 44, cw); wr32(c, cs + 48, 64); wr32(c, cs + 52, 64); wr32(c, cs + 56, style); wr64(c, cs + 64, title_a);
+  u64 cs = w32_heap_alloc(w, 80, 1);
+  if (c->mode32) { wr32(c, cs, (u32)param); wr32(c, cs + 4, (u32)w->image_base); wr32(c, cs + 12, HWND_MAIN); wr32(c, cs + 16, ch); wr32(c, cs + 20, cw); wr32(c, cs + 24, 64); wr32(c, cs + 28, 64); wr32(c, cs + 32, style); wr32(c, cs + 36, (u32)title_a); }   /* CREATESTRUCT32 */
+  else { wr64(c, cs, param); wr64(c, cs + 8, w->image_base); wr64(c, cs + 32, HWND_MAIN); wr32(c, cs + 40, ch); wr32(c, cs + 44, cw); wr32(c, cs + 48, 64); wr32(c, cs + 52, 64); wr32(c, cs + 56, style); wr64(c, cs + 64, title_a); }
   w32_push_cont(c, CONT_CREATEWND, 0);
   w32_guest_call(c, w->win.wndproc, HWND_MAIN, 0x0001 /* WM_CREATE */, 0, cs);
 }
@@ -196,7 +207,7 @@ static void s_ValidateRect(Cpu *c) { W->win.style &= ~0x40000000u; RET(1); }
 static void s_RedrawWindow(Cpu *c) { W->win.style |= 0x40000000u; RET(1); }
 static void s_GetClientRect(Cpu *c) { u64 r = ARG(1); wr32(c, r, 0); wr32(c, r + 4, 0); wr32(c, r + 8, (u32)W->win.w); wr32(c, r + 12, (u32)W->win.h); RET(1); }
 static void s_GetWindowRect(Cpu *c) { u64 r = ARG(1); wr32(c, r, 64); wr32(c, r + 4, 64); wr32(c, r + 8, 64 + (u32)W->win.w); wr32(c, r + 12, 64 + (u32)W->win.h); RET(1); }
-static void s_BeginPaint(Cpu *c) { Win32 *w = W; u64 ps = ARG(1); w->win.style &= ~0x40000000u; wr64(c, ps, window_dc); wr32(c, ps + 8, 0); wr32(c, ps + 12, 0); wr32(c, ps + 16, 0); wr32(c, ps + 20, (u32)w->win.w); wr32(c, ps + 24, (u32)w->win.h); RET(window_dc); }
+static void s_BeginPaint(Cpu *c) { Win32 *w = W; u64 ps = ARG(1); w->win.style &= ~0x40000000u; u64 r = ps + (c->mode32 ? 8 : 12); wrp(c, ps, window_dc); wr32(c, ps + (c->mode32 ? 4 : 8), 0); wr32(c, r, 0); wr32(c, r + 4, 0); wr32(c, r + 8, (u32)w->win.w); wr32(c, r + 12, (u32)w->win.h); RET(window_dc); }
 static void s_EndPaint(Cpu *c) { W->dirty = 1; W->blits_since_yield++; RET(1); }
 static void s_GetDC(Cpu *c) { RET(window_dc); }
 static void s_GetWindowDC(Cpu *c) { RET(window_dc); }
@@ -276,7 +287,7 @@ static u64 make_bitmap(Cpu *c, int bw, int bh, int bottom_up, u64 *bits_out) {
 }
 static void s_CreateDIBSection(Cpu *c) { u64 bmi = ARG(1); s32 bw = (s32)rd32(c, bmi + 4), bh = (s32)rd32(c, bmi + 8); u16 bpp = rd16(c, bmi + 14); u32 comp = rd32(c, bmi + 16);
   if (bpp != 32 || (comp != 0 && comp != 3)) w32_report(W, "CreateDIBSection: %u bpp (compression %u) treated as 32 bpp — colours will be wrong", bpp, comp);
-  int bottom_up = bh > 0; if (bh < 0) bh = -bh; u64 bits = 0; u64 h = make_bitmap(c, bw, bh, bottom_up, &bits); if (ARG(3)) wr64(c, ARG(3), bits); RET(h); }
+  int bottom_up = bh > 0; if (bh < 0) bh = -bh; u64 bits = 0; u64 h = make_bitmap(c, bw, bh, bottom_up, &bits); if (ARG(3)) wrp(c, ARG(3), bits); RET(h); }
 static void s_CreateCompatibleBitmap(Cpu *c) { RET(make_bitmap(c, (int)ARG(1), (int)ARG(2), 0, 0)); }
 static void s_CreateBitmap(Cpu *c) { u64 bits; u64 h = make_bitmap(c, (int)ARG(0), (int)ARG(1), 0, &bits); if (ARG(4) && h) { u32 bpp = (u32)ARG(3) * (u32)ARG(2); if (bpp == 32) { u64 n = (u64)(int)ARG(0) * (int)ARG(1) * 4; u8 *s = mem_ptr(c->mem, ARG(4), n, 0), *d = mem_ptr(c->mem, bits, n, 1); if (s && d) e_memcpy(d, s, (size_t)n); } } RET(h); }
 static void s_DeleteObject(Cpu *c) { GdiObj *o = gdi_get(W, ARG(0)); if (!o) { RET(0); return; } for (int i = 0; i < 20; i++) if (stock[i] == ARG(0)) { RET(1); return; } o->kind = 0; RET(1); }
@@ -312,8 +323,8 @@ static void s_SetViewportOrgEx(Cpu *c) { RET(1); }
 static void s_SetWindowOrgEx(Cpu *c) { RET(1); }
 static void s_GetDeviceCaps(Cpu *c) { int i = (int)ARG(1); RET(i == 8 ? W->screen_w : i == 10 ? W->screen_h : i == 12 ? 32 : i == 14 ? 1 : i == 88 ? 96 : i == 90 ? 96 : i == 116 ? 60 : i == 4 ? 1 : i == 24 ? 0x4000000 : i == 2 ? 0x4000 : 0); }
 static void s_GetObjectA(Cpu *c) { GdiObj *o = gdi_get(W, ARG(0)); if (!o) { RET(0); return; } u64 a = ARG(2);
-  if (o->kind == K_BITMAP) { if (!a) { RET(32); return; } wr32(c, a, 0); wr32(c, a + 4, (u32)o->bw); wr32(c, a + 8, (u32)o->bh); wr32(c, a + 12, (u32)o->bw * 4); wr16(c, a + 16, 1); wr16(c, a + 18, 32); wr64(c, a + 24, o->bits); RET(32); return; }
-  if (o->kind == K_BRUSH) { if (a) { wr32(c, a, 0); wr32(c, a + 4, px2cr(o->color)); wr64(c, a + 8, 0); } RET(16); return; }
+  if (o->kind == K_BITMAP) { if (!a) { RET(32); return; } wr32(c, a, 0); wr32(c, a + 4, (u32)o->bw); wr32(c, a + 8, (u32)o->bh); wr32(c, a + 12, (u32)o->bw * 4); wr16(c, a + 16, 1); wr16(c, a + 18, 32); if (c->mode32) { wr32(c, a + 20, (u32)o->bits); RET(24); return; } wr64(c, a + 24, o->bits); RET(32); return; }
+  if (o->kind == K_BRUSH) { if (a) { wr32(c, a, 0); wr32(c, a + 4, px2cr(o->color)); wrp(c, a + 8, 0); } RET(c->mode32 ? 12 : 16); return; }
   if (o->kind == K_PEN) { if (a) { wr32(c, a, 0); wr32(c, a + 4, (u32)o->pen_width); wr32(c, a + 12, px2cr(o->color)); } RET(16); return; }
   if (o->kind == K_FONT) { if (a) { u8 *p = mem_ptr(c->mem, a, 92, 1); if (p) e_memset(p, 0, 92); wr32(c, a, (u32)-o->font_h); wr32(c, a + 16, o->font_bold ? 700 : 400); } RET(92); return; }
   RET(0); }

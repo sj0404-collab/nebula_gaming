@@ -315,11 +315,32 @@ PY
 echo "  $wavinfo"
 case "$wavinfo" in wav*) n=$(printf '%s' "$wavinfo" | sed -E 's/.*, ([0-9]+) loud.*/\1/'); if [ "$n" -ge 100 ]; then echo "  ok   the mix really contains sound (≥1 s of tone across the five tests)"; else echo "  FAIL too little sound in the mix"; fail=1; fi;; *) echo "  FAIL $wavinfo"; fail=1;; esac
 echo "[6] honest rejections"
-check "32-bit PE"   '"verdict":"unsupported"' "$(printf 'MZ' | head -c 2 > /tmp/pe32.bin; python3 - <<'PY'
+check "ARM64 PE"   '"verdict":"unsupported"' "$(python3 - <<'PY'
 import struct
-b=bytearray(0x200); b[0:2]=b'MZ'; struct.pack_into('<I',b,0x3c,0x80); b[0x80:0x84]=b'PE\0\0'; struct.pack_into('<H',b,0x84,0x14c); struct.pack_into('<H',b,0x94,0xe0); struct.pack_into('<H',b,0x98,0x10b)
-open('/tmp/pe32.exe','wb').write(b)
+b=bytearray(0x200); b[0:2]=b'MZ'; struct.pack_into('<I',b,0x3c,0x80); b[0x80:0x84]=b'PE\0\0'; struct.pack_into('<H',b,0x84,0xaa64); struct.pack_into('<H',b,0x94,0xf0); struct.pack_into('<H',b,0x98,0x20b)
+open('/tmp/pearm.exe','wb').write(b)
 PY
-$X --inspect /tmp/pe32.exe 2>&1)"
+$X --inspect /tmp/pearm.exe 2>&1 || true)"
 check "not a PE"    '"ok":false' "$($X --inspect tests/run.sh 2>&1 || true)"
+echo "[18] x86 32-bit processes (PE32: IA-32 mode, fs:[0] SEH chain, stdcall/cdecl shims, 32-bit layouts)"
+check "inspector verdict"         '"arch":"x86 (32-bit)"'                       "$($X --inspect tests/hello32.exe 2>&1 || true)"
+check "inspector not rejected"    '"verdict":"likely"'                            "$($X --inspect tests/hello32.exe 2>&1 || true)"
+h32=$($X --quiet --max-ms 30000 tests/hello32.exe a b 2>&1 || true)
+check "hello32: argv/env/files"   "argc=3 sizeof(void.)=4"                  "$h32"
+check "hello32: threads + TLS"    "tid ok=1 tick ok=1"                           "$h32"
+rc=0; $X --quiet --max-ms 30000 tests/hello32.exe >/dev/null 2>&1 || rc=$?
+check "hello32: exit code"        "rc=42"                                        "rc=$rc"
+check "seh32: 9 checks"           "seh32: 9 checks, 0 failed"                    "$($X --quiet --max-ms 30000 tests/seh32.exe 2>&1 || true)"
+check "C++ EH (gcc ABI, 32-bit)"  "caught std::exception: value too large: 7"    "$($X --quiet --max-ms 30000 tests/cxxexc32.exe 2>&1 || true)"
+check "pthreads32"                "9 checks, 0 failed"                           "$($X --quiet --no-stdin --max-ms 60000 tests/pthreads32.exe 2>&1 || true)"
+check "netloop32 (Winsock x86)"   "netloop: 23 checks, 0 failed"                 "$($X --quiet --no-stdin --max-ms 60000 tests/netloop32.exe 2>&1 | tail -1 || true)"
+out=$($X --max-ms 2000 --key 0x25@300:400 --key 0x20@500:1200 tests/NebulaStrike32.exe 2>&1 || true)
+frames=$(printf '%s' "$out" | sed -n 's/.* = \([0-9.]*\) MIPS, \([0-9]*\) frames.*/\2/p')
+check "NebulaStrike32 (GDI game, x86) frames" "yes" "$([ "${frames:-0}" -ge 60 ] && echo yes || echo "no ($frames frames)")"
+Z7=tests/7za32; W32=/tmp/w32test; rm -rf $W32; mkdir -p $W32/src; head -c 300000 /dev/urandom > $W32/src/rand.bin; seq 1 20000 > $W32/src/nums.txt
+check "7za.exe x86 (real MSVC build): help" "7-Zip (a) 25.01 (x86)" "$($X --quiet --max-ms 30000 $Z7/7za.exe 2>&1 | head -2 || true)"
+check "7za.exe x86: compress (LZMA2, threads)" "Everything is Ok" "$($X --quiet --max-ms 120000 --mount-rw $W32='C:\w' $Z7/7za.exe a -mx5 'C:\w\out.7z' 'C:\w\src' 2>&1 | tail -1 || true)"
+check "7za.exe x86: extract"      "Everything is Ok"                             "$($X --quiet --max-ms 120000 --mount-rw $W32='C:\w' $Z7/7za.exe x -y '-oC:\w\out' 'C:\w\out.7z' 2>&1 | grep -m1 'Everything' || true)"
+check "7za.exe x86: round-trip identical" "same" "$(cmp -s $W32/src/rand.bin $W32/out/src/rand.bin && cmp -s $W32/src/nums.txt $W32/out/src/nums.txt && echo same || echo different)"
+check "7za.exe x86: error path = MSVC C++ throw/catch (__CxxFrameHandler)" "System ERROR:" "$($X --quiet --max-ms 30000 --mount-rw $W32='C:\w' $Z7/7za.exe x '-oC:\w\o2' 'C:\w\nope.7z' 2>&1 || true)"
 [ $fail = 0 ] && echo "ALL OK" || { echo "FAILURES"; exit 1; }

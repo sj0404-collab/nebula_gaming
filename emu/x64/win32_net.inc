@@ -277,7 +277,7 @@ static void s_inet_ntop(Cpu *c) { if ((int)ARG(0) != 2) { RET(0); return; } char
 /* ---- scheduler hook: finish parked socket operations ---- */
 static void spend_finish(SockOp *o, u32 status, u32 bytes, u32 err) {
   u8 *ovp = o->ov ? mem_ptr(o->w->mem, o->ov, 16, 1) : 0;
-  if (ovp) { u64 st = status, by = bytes; for (int i = 0; i < 8; i++) { ovp[i] = (u8)(st >> (8 * i)); ovp[8 + i] = (u8)(by >> (8 * i)); } }
+  if (ovp) { int ps = o->w->mode32 ? 4 : 8; u64 st = status, by = bytes; for (int i = 0; i < ps; i++) { ovp[i] = (u8)(st >> (8 * i)); ovp[ps + i] = (u8)(by >> (8 * i)); } }   /* OVERLAPPED.Internal / InternalHigh are pointer-sized */
   iocp_post(o->port, o->key, o->ov, bytes, err); o->used = 0; g_net_pending--; }
 static void net_poll(void) {
   net_pump_all();

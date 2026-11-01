@@ -288,7 +288,8 @@ int pe_inspect(const u8 *bytes, size_t len, char *out, size_t out_sz) {
   else if (is_clr && (h.machine == 0x8664 || il_only)) { verdict = "likely"; why = ".NET assembly — runs on the official .NET runtime (the .NET pack, installed on demand); classic .NET Framework console apps run on it in compatibility mode"; }
   else if (is_clr) { verdict = "unsupported"; why = "mixed-mode .NET image (native + managed) — not supported"; }
   else if (mk == 2) { verdict = "likely"; why = ".NET apphost launcher — starts <name>.dll next to it on the official .NET runtime (the .NET pack, installed on demand)"; }
-  else if (h.machine != 0x8664) { verdict = "unsupported"; why = "only x86-64 (PE32+) code is emulated; 32-bit/ARM binaries are rejected"; }
+  else if (h.machine != 0x8664 && h.machine != 0x14c) { verdict = "unsupported"; why = "only x86-64 (PE32+) and x86 (PE32) code is emulated; ARM binaries are rejected"; }
+  else if (h.machine == 0x14c && h.magic != 0x10b) { verdict = "unsupported"; why = "malformed PE32 header"; }
   else if (is_dll) { verdict = "unsupported"; why = "DLL, not an executable"; }
   else {
     int heavy = 0, d3d11 = 0; for (int i = 0; i < x.ndll; i++) { const char *d = x.dlls[i];
