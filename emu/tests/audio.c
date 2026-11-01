@@ -34,7 +34,7 @@ static int test_waveout(void) {
   while (done < N && GetTickCount() - t0 < 3000) { WaitForSingleObject(ev, 200); done = 0; for (int i = 0; i < N; i++) if (hd[i].dwFlags & WHDR_DONE) done++; }
   MMTIME mt; mt.wType = TIME_SAMPLES; waveOutGetPosition(h, &mt, sizeof mt);
   printf("  event callback: %d/%d buffers done in %lu ms, position %lu samples\n", done, N, (unsigned long)(GetTickCount() - t0), (unsigned long)mt.u.sample);
-  CHECK(done == N, "buffers not completed"); CHECK(mt.u.sample >= FR * N, "position did not advance"); CHECK(GetTickCount() - t0 >= 300, "4 x 100 ms finished too fast (%lu ms): the clock is not real", (unsigned long)(GetTickCount() - t0));
+  CHECK(done == N, "buffers not completed"); CHECK(mt.u.sample >= FR * N, "position did not advance"); CHECK(GetTickCount() - t0 >= 250, "4 x 100 ms finished too fast (%lu ms): the clock is not real (buffers complete when the mixer consumes them, ~100 ms ahead of the speaker)", (unsigned long)(GetTickCount() - t0));
   for (int i = 0; i < N; i++) waveOutUnprepareHeader(h, &hd[i], sizeof hd[i]);
   CHECK(waveOutClose(h) == 0, "close");
   /* function callback: WOM_OPEN, N x WOM_DONE, WOM_CLOSE on a helper thread */
@@ -73,7 +73,7 @@ static int test_dsound(void) {
   CHECK(WaitForSingleObject(evh, 2000) == WAIT_OBJECT_0, "half-way notification never fired");
   DWORD play = 0, wr = 0; IDirectSoundBuffer_GetCurrentPosition(b, &play, &wr); printf("  half-way notification after %lu ms, play cursor %lu, write cursor %lu\n", (unsigned long)(GetTickCount() - t0), (unsigned long)play, (unsigned long)wr);
   CHECK(WaitForSingleObject(eve, 2000) == WAIT_OBJECT_0, "stop notification never fired"); IDirectSoundBuffer_GetStatus(b, &st);
-  printf("  finished after %lu ms (status %#lx)\n", (unsigned long)(GetTickCount() - t0), (unsigned long)st); CHECK(!(st & DSBSTATUS_PLAYING), "still playing after the end"); CHECK(GetTickCount() - t0 >= 400, "a 500 ms buffer ended after %lu ms", (unsigned long)(GetTickCount() - t0));
+  printf("  finished after %lu ms (status %#lx)\n", (unsigned long)(GetTickCount() - t0), (unsigned long)st); CHECK(!(st & DSBSTATUS_PLAYING), "still playing after the end"); CHECK(GetTickCount() - t0 >= 350, "a 500 ms buffer ended after %lu ms", (unsigned long)(GetTickCount() - t0));
   LPDIRECTSOUNDBUFFER dup = 0; CHECK(IDirectSound8_DuplicateSoundBuffer(ds, b, &dup) == DS_OK && dup, "DuplicateSoundBuffer"); CHECK(IDirectSoundBuffer_Play(dup, 0, 0, DSBPLAY_LOOPING) == DS_OK, "Play looping"); Sleep(150); IDirectSoundBuffer_GetStatus(dup, &st); CHECK((st & (DSBSTATUS_PLAYING | DSBSTATUS_LOOPING)) == (DSBSTATUS_PLAYING | DSBSTATUS_LOOPING), "looping status %#lx", (unsigned long)st); IDirectSoundBuffer_Stop(dup);
   IDirectSoundBuffer_Release(dup); IDirectSoundNotify_Release(nf); IDirectSoundBuffer_Release(b); IDirectSoundBuffer_Release(prim); IDirectSound8_Release(ds);
   printf("  DirectSound OK\n"); return 0;

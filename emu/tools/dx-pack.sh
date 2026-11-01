@@ -3,9 +3,10 @@
 #
 # Contents: the x64 DLLs of the official Microsoft DirectX End-User Runtimes (June 2010) that are pure user-mode code and
 # therefore run on the emulator as-is: the HLSL shader compilers D3DCompiler_33…43, the D3DX helper libraries d3dx9_24…43,
-# d3dx10_33…43, d3dx11_42/43, the compute helpers d3dcsx_42/43 and X3DAudio1_3…7.  NOT included (they need device
-# subsystems that have no wasm64 implementation here and would only fail later): XAudio2/XACT/XAPOFX (audio devices) and
-# xinput1_x (HID enumeration — the emulator answers XInput itself: "no controller connected").
+# d3dx10_33…43, d3dx11_42/43, the compute helpers d3dcsx_42/43, X3DAudio1_3…7 and — since v1.19 — the audio engines
+# XAudio2_0…7, XAPOFX1_0…5 and xactengine3_0…7 (they sit on top of the emulator's WASAPI/mmdevapi layer, which plays through
+# the device's sound output).  NOT included: xactengine2_x (XACT 2, DirectSound-era, no users) and xinput1_x (HID
+# enumeration — the emulator answers XInput itself: "no controller connected").
 # Nothing is modified: the cabinets inside directx_Jun2010_redist.exe are extracted with cabextract, every DLL is gzipped
 # per file (the browser inflates with DecompressionStream) and listed in manifest.json {pack, source, bundle_sha256, built,
 # guest_dir, encoding, files:[{path,size,gz,gzsize,sha256,version}]} — the same layout as the .NET pack.
@@ -22,14 +23,14 @@ cabextract -q -d "$work/s1" "$work/redist.exe"
 mkdir -p "$work/dll"
 for cab in "$work"/s1/*_x64.cab; do
   case "$(basename "$cab")" in
-    *D3DCompiler_*|*d3dx9_*|*d3dx10_*|*d3dx11_*|*d3dcsx_*|*X3DAudio_*) cabextract -q -d "$work/dll" "$cab" 2>/dev/null || true ;;
+    *D3DCompiler_*|*d3dx9_*|*d3dx10_*|*d3dx11_*|*d3dcsx_*|*X3DAudio_*|*XAudio_*|*XACT_*|*xact_*) cabextract -q -d "$work/dll" "$cab" 2>/dev/null || true ;;
   esac
 done
 rm -rf "$OUT"; mkdir -p "$OUT"; [ -n "$PLAIN" ] && mkdir -p "$PLAIN"
 n=0
 for f in "$work"/dll/*.dll; do
   b=$(basename "$f")
-  case "$b" in d3dcompiler_*.dll) ;; esac   # (lower-case d3dcompiler_33..41 and upper-case D3DCompiler_42/43 are both in the redist)
+  case "$b" in xactengine2_*.dll|xinput*.dll) continue ;; esac   # XACT2 / XInput stay out (see the header)
   gzip -9 -n -c "$f" > "$OUT/$b.gz"; [ -n "$PLAIN" ] && cp "$f" "$PLAIN/$b"; n=$((n + 1))
 done
 [ "$n" -gt 0 ] || { echo "dx-pack: no x64 DLLs found in the redistributable" >&2; exit 1; }
@@ -46,7 +47,7 @@ def file_version(data):
     return ''
 files = []
 for name in sorted(os.listdir(plain), key=str.lower):
-    if not name.lower().endswith('.dll'): continue
+    if not name.lower().endswith('.dll') or not os.path.exists(os.path.join(out, name + '.gz')): continue
     d = open(os.path.join(plain, name), 'rb').read(); gz = os.path.getsize(os.path.join(out, name + '.gz'))
     files.append({ 'path': name, 'size': len(d), 'gz': name + '.gz', 'gzsize': gz, 'sha256': hashlib.sha256(d).hexdigest(), 'version': file_version(d) })
 man = { 'pack': 'Microsoft DirectX End-User Runtimes (June 2010), x64 user-mode DLLs', 'source': url, 'bundle_sha256': hashlib.sha256(open(bundle, 'rb').read()).hexdigest(),

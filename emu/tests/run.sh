@@ -293,6 +293,27 @@ if [ -f "$DXP/D3DCompiler_43.dll" ]; then
 else
   echo "  skip (run emu/tools/dx-pack.sh public/x64/dx /var/tmp/dx/pack first)"
 fi
+echo "[5au] sound: waveOut / DirectSound 8 / WASAPI / PlaySound → host audio output (X64_AUDIO_WAV dump of the mix)"
+rm -f /tmp/x64audio.wav
+if [ -f "$DXP/XAudio2_7.dll" ]; then out=$(X64_AUDIO_WAV=/tmp/x64audio.wav $X --quiet --no-stdin --max-ms 120000 --mount "$DXP=C:\\Windows\\System32" tests/audio.exe 2>&1 || true)
+else out=$(X64_AUDIO_WAV=/tmp/x64audio.wav $X --quiet --no-stdin --max-ms 120000 tests/audio.exe 2>&1 || true); fi
+check "waveOut"                 "waveOut OK" "$out"
+check "DirectSound"             "DirectSound OK" "$out"
+check "WASAPI"                  "WASAPI OK" "$out"
+check "PlaySound"               "PlaySound OK" "$out"
+if [ -f "$DXP/XAudio2_7.dll" ]; then check "real XAudio2_7.dll"      "XAudio2 OK" "$out"; else echo "  skip XAudio2 (no DirectX pack)"; fi
+check "audio all"               "audio: 0 failure(s)" "$out"
+wavinfo=$(python3 - <<'PY'
+import array, math
+try: d = open('/tmp/x64audio.wav', 'rb').read()
+except OSError: print('no wav'); raise SystemExit
+a = array.array('f'); a.frombytes(d[44:44 + ((len(d) - 44) // 8) * 8]); L = a[0::2]; blk = 480
+rms = [math.sqrt(sum(x * x for x in L[i:i + blk]) / blk) for i in range(0, len(L) - blk, blk)]
+loud = sum(1 for r in rms if r > 0.02); print(f'wav {len(L) / 48000:.2f}s, {loud} loud 10ms blocks of {len(rms)}, peak {max(L):.2f}')
+PY
+)
+echo "  $wavinfo"
+case "$wavinfo" in wav*) n=$(printf '%s' "$wavinfo" | sed -E 's/.*, ([0-9]+) loud.*/\1/'); if [ "$n" -ge 100 ]; then echo "  ok   the mix really contains sound (≥1 s of tone across the five tests)"; else echo "  FAIL too little sound in the mix"; fail=1; fi;; *) echo "  FAIL $wavinfo"; fail=1;; esac
 echo "[6] honest rejections"
 check "32-bit PE"   '"verdict":"unsupported"' "$(printf 'MZ' | head -c 2 > /tmp/pe32.bin; python3 - <<'PY'
 import struct

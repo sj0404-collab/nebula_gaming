@@ -23,18 +23,20 @@ on every run (artifact `dx-pack`); the web build, the desktop/Android builds and
 | `d3dx10`, `d3dx10_33…43` | 12 | D3DX for Direct3D 10 | loads and runs its `DllMain`; no D3D10 device |
 | `d3dx11_42/43` | 2 | D3DX for Direct3D 11 (`D3DX11CompileFromMemory/File`, texture loaders) | **works** on top of the compiler + the D3D11 layer (`D3DX11CompileFromMemory` → 444 B DXBC in the test) |
 | `d3dcsx_42/43` | 2 | DirectCompute helpers (FFT, scan) | loads; compute shaders are not translated to WebGL2 (no compute in WebGL2), so `D3DX11CreateFFT` fails honestly |
-| `x3daudio1_2`, `X3DAudio1_3…1_7` | 6 | 3-D audio math (`X3DAudioInitialize`, `X3DAudioCalculate`) | **works** (emitter at +x → `left 0.000 right 1.000`) |
+| `x3daudio1_0…1_2`, `X3DAudio1_3…1_7` | 8 | 3-D audio math (`X3DAudioInitialize`, `X3DAudioCalculate`) | **works** (emitter at +x → `left 0.000 right 1.000`) |
+| `XAudio2_0…2_7` (v1.19) | 8 | the XAudio2 engine (COM, `CoCreateInstance(CLSID_XAudio2)`) | **works** on top of the emulator's mmdevapi/WASAPI layer → the device's sound output; `audio.exe` plays a tone through the real `XAudio2_7.dll` (see [AUDIO-X64.md](AUDIO-X64.md)) |
+| `XAPOFX1_0…1_5` (v1.19) | 6 | XAudio2 effects (reverb, EQ, echo) | load and run their `DllMain`; used by XAudio2 |
+| `xactengine3_0…3_7` (v1.19) | 8 | XACT 3 (wave/sound banks on XAudio2) | load and run their `DllMain`; not exercised by a test yet |
 
-Total: **53 DLLs, 116.3 MB (49.5 MB gzipped)**. Everything is installed with one click (**DirectX** button in x64
+Total: **77 DLLs, 122.0 MB (52.3 MB gzipped)**. Everything is installed with one click (**DirectX** button in x64
 Runner) or automatically when a program's import table names one of these DLLs; the files land in
 `C:\Windows\System32` of the virtual disk and are found by `LoadLibrary`/the loader through the normal Windows search
 order (exe directory → `System32` → cwd → `PATH`).
 
 ### Deliberately NOT shipped
 
-* **XAudio2_0…2_7, xactengine2/3, XAPOFX1** — they create audio devices through MMDevice/WASAPI; the emulator has no
-  audio device, so they would only fail later and less clearly. Not shipped; the honest answer at `XAudio2Create` is
-  *unimplemented API … install the DirectX pack* → no.
+* **xactengine2_0…2_10** — XACT 2 (2006–2007, DirectSound era); nothing targets it any more. XAudio2/XACT3/XAPOFX **are**
+  shipped since v1.19 (the emulator now has an audio device: mmdevapi/WASAPI → the host's sound output).
 * **xinput1_1…1_3, xinput9_1_0** — the real DLLs enumerate HID devices through `SetupAPI`; there is no game pad in a
   browser tab the way Windows sees it. The emulator answers XInput **itself**: `XInputGetState` → `ERROR_DEVICE_NOT_CONNECTED`
   (1167) for every slot, `XInputEnable` → ok, everything else → 1167. Games that poll XInput keep running with keyboard
@@ -81,10 +83,10 @@ cd emu && DX_PACK=/var/tmp/dx/pack ./tests/run.sh
 
 ## Honest limits
 
-* No Direct3D 9 / 10 device, no DirectDraw, no DirectInput, no DirectSound/XAudio: only **Direct3D 11 (feature level
-  11.0 subset) → WebGL2** exists. A DX9 game will load `d3dx9_43.dll` fine and then stop at `Direct3DCreate9` —
+* No Direct3D 9 / 10 device, no DirectDraw, no DirectInput: only **Direct3D 11 (feature level
+  11.0 subset) → WebGL2** exists. Sound (DirectSound, waveOut, WASAPI, XAudio2) **does** exist since v1.19 — see [AUDIO-X64.md](AUDIO-X64.md). A DX9 game will load `d3dx9_43.dll` fine and then stop at `Direct3DCreate9` —
   the log says so.
-* The pack is downloaded into the virtual disk each session (49.5 MB; the browser's HTTP cache makes the second time
+* The pack is downloaded into the virtual disk each session (52.3 MB; the browser's HTTP cache makes the second time
   fast) — it is not persisted in IndexedDB yet.
 * Only the June 2010 versions are included (the last release of the redistributable). Programs asking for a newer
   `d3dcompiler_47` are told honestly.

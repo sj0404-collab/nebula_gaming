@@ -56,7 +56,7 @@ async function test(name, fn) {
 const expect = (cond, msg) => { if (!cond) throw new Error(msg); };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-const browser = await chromium.launch();
+const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });   // Web Audio may start without a tap (the audio test also passes when it stays suspended)
 const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
 page = await ctx.newPage();
 page.on('pageerror', e => errors.push(`pageerror: ${e.message}`));
@@ -324,6 +324,17 @@ await test('x64: DirectX pack — the REAL D3DCompiler_43.dll (DirectX End-User 
   expect(/XInputGetState\(0\) = 1167/.test(con), 'XInput should answer ERROR_DEVICE_NOT_CONNECTED: ' + con.slice(-500));
   expect(/dxpack: 0 failure\(s\)/.test(con), 'dxpack reported failures: ' + con.slice(-500));
   await page.screenshot({ path: resolve(SHOTS, 'x64-dx-dxpack.png') });
+  // third program: sound — waveOut, DirectSound 8, WASAPI, PlaySound and the REAL XAudio2_7.dll from the pack, mixed into the device output (Web Audio)
+  await w.locator('[data-x64-exe="audio.exe"]').click();
+  await w.locator('[data-x64-run]').click();
+  await page.waitForFunction(() => /^(exited|fault)$/.test(document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') ?? ''), null, { timeout: 120_000 });
+  con = await w.locator('[data-x64-console]').innerText();
+  for (const s of ['waveOut OK', 'DirectSound OK', 'WASAPI OK', 'PlaySound OK', 'XAudio2 OK']) expect(con.includes(s), `audio.exe: "${s}" missing: ` + con.slice(-700));
+  expect(/audio: 0 failure\(s\)/.test(con), 'audio.exe reported failures: ' + con.slice(-700));
+  const log = await w.locator('[data-x64-report]').innerText().catch(() => '');
+  const frames = await page.evaluate(() => Number(document.querySelector('[data-x64-audio]')?.getAttribute('data-x64-audio') ?? '0'));
+  expect(frames > 48000, 'the mixer should have produced more than 1 s of audio for the host, got frames=' + frames + ' ' + log.slice(-300));
+  await page.screenshot({ path: resolve(SHOTS, 'x64-audio.png') });
   await closeAll();
 });
 await test('x64: .NET pack — the OFFICIAL Microsoft .NET Runtime 10 is installed into C:\\Program Files\\dotnet on demand and a C# app (apphost + dll) runs on CoreCLR: LINQ, exceptions, hardware NRE, JSON, reflection, Regex, GC', async () => {

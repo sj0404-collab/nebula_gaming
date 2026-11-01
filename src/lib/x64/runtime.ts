@@ -1,4 +1,5 @@
 import { WebGLGfx } from './gfx';
+import { HostAudio } from './audio';
 // Nebula x64 — JS host for the wasm64 x86-64 emulator (emu/x64).  Pointers/sizes cross the boundary as BigInt (memory64).
 export type RunStatus = 'idle' | 'running' | 'waiting-stdin' | 'exited' | 'fault' | 'break' | 'stopped';
 export interface VfsEntry { path: string; size: number; dir: boolean; written: boolean }
@@ -18,6 +19,10 @@ export interface RunStats {
   /** live guest processes (root + children spawned through CreateProcess/_spawn) */
   procs: number;
   threads: number;
+  /** stereo frames mixed for the host audio output (0 = the program has not opened a sound device) */
+  audioFrames: number;
+  /** 'running' | 'suspended' (waiting for a user gesture — the sound is dropped meanwhile, the program keeps running) | 'none' */
+  audio: string;
 }
 
 type Exports = {
@@ -25,7 +30,7 @@ type Exports = {
   x64_alloc(n: bigint): bigint; x64_inspect(p: bigint, n: bigint): bigint; x64_load(p: bigint, n: bigint, name: bigint, cmd: bigint): number;
   x64_reserve(n: bigint): number; x64_run(budget: bigint): number; x64_key(vk: number, down: number): void; x64_mouse(x: number, y: number, ev: number): void;
   x64_icount(): bigint; x64_exit_code(): number; x64_error(): bigint; x64_error_rip(): bigint; x64_rip(): bigint; x64_report(): bigint; x64_console(): bigint;
-  x64_screen_w(): number; x64_screen_h(): number; x64_screen(): bigint; x64_title(): bigint; x64_subsystem(): number; x64_sleep_ms(): number; x64_mem_used(): bigint; x64_has_window(): number; x64_proc_count(): number; x64_thread_count(): number;
+  x64_screen_w(): number; x64_screen_h(): number; x64_screen(): bigint; x64_title(): bigint; x64_subsystem(): number; x64_sleep_ms(): number; x64_mem_used(): bigint; x64_has_window(): number; x64_proc_count(): number; x64_thread_count(): number; x64_audio_frames(): bigint;
   x64_api_stats(): bigint; x64_error_bytes(): bigint;
   x64_vfs_add(path: bigint, data: bigint, n: bigint): number; x64_vfs_mkdir(path: bigint): number; x64_vfs_remove(path: bigint): number;
   x64_vfs_size(path: bigint): bigint; x64_vfs_data(path: bigint): bigint; x64_vfs_list(): bigint;
@@ -46,7 +51,9 @@ const MATH = [Math.sin, Math.cos, Math.tan, Math.exp, Math.log, Math.pow, Math.a
 export class X64Runtime {
   private ex: Exports | null = null;
   private dec = new TextDecoder(); private enc = new TextEncoder();
-  private t0 = 0; private frames = 0; private raf = 0; private running = false;
+  private t0 = 0; private frames = 0; private raf = 0; private timer = 0; private running = false;
+  /** the device's sound output (Web Audio); the guest's waveOut/DirectSound/WASAPI/XAudio2 streams end up here */
+  readonly audio = new HostAudio();
   status: RunStatus = 'idle';
   moduleBytes = 0;
   onConsole: ((fd: number, text: string) => void) | null = null;
@@ -86,6 +93,10 @@ export class X64Runtime {
         host_gfx_draw: (cmd: bigint) => this.gfx.draw(new Uint32Array(this.ex!.memory.buffer, Number(cmd), 160)),
         host_gfx_readback: (id: number, out: bigint) => { const t = this.gfx.size(id); if (t) this.gfx.readback(id, this.bytesAt(out, t.w * t.h * 4)); },
         host_gfx_free: (id: number) => this.gfx.free(id),
+        // sound → the device's audio output (src/lib/x64/audio.ts)
+        host_audio_open: (rate: number) => { this.audio.log = (t) => this.onLog?.(t); return this.audio.open(rate); },
+        host_audio_write: (lr: bigint, frames: number) => this.audio.write(new Float32Array(this.ex!.memory.buffer, Number(lr), frames * 2)),
+        host_audio_queued: () => this.audio.queued(),
       },
     };
     const { instance } = await WebAssembly.instantiate(bytes, imports);
@@ -123,7 +134,10 @@ export class X64Runtime {
     return null;
   }
 
-  private schedule() { this.raf = requestAnimationFrame(() => this.frame()); }
+  private schedule() {
+    if (this.audio.active()) { this.timer = window.setTimeout(() => this.frame(), document.hidden ? 4 : 2); return; }   /* rAF stops in hidden tabs; audible tabs keep their timers */
+    this.raf = requestAnimationFrame(() => this.frame());
+  }
   /** one host frame: run guest code for up to ~12 ms or until it yields for a presented frame / sleep */
   private frame() {
     if (!this.running || !this.ex) return;
@@ -145,7 +159,7 @@ export class X64Runtime {
     this.schedule();
   }
 
-  stop() { if (this.running) { this.running = false; this.status = 'stopped'; cancelAnimationFrame(this.raf); if (this.waitingStdin) { this.waitingStdin = false; this.onStdinWait?.(false); } } }
+  stop() { if (this.running) { this.running = false; this.status = 'stopped'; cancelAnimationFrame(this.raf); clearTimeout(this.timer); this.audio.flush(); if (this.waitingStdin) { this.waitingStdin = false; this.onStdinWait?.(false); } } }
 
   private resumeFromStdin() { if (this.waitingStdin && this.running) { this.waitingStdin = false; this.status = 'running'; this.onStdinWait?.(false); this.schedule(); } }
   /** feed text to the guest's stdin (a trailing newline is what line-oriented programs expect) */
@@ -169,12 +183,12 @@ export class X64Runtime {
   mouse(x: number, y: number, ev: number) { if (this.running) this.ex!.x64_mouse(x | 0, y | 0, ev); }
 
   stats(): RunStats {
-    const ex = this.ex; if (!ex) return { status: this.status, icount: 0, mips: 0, frames: 0, elapsedMs: 0, exitCode: 0, error: '', errorRip: '', errorBytes: '', report: '', title: '', subsystem: 0, hasWindow: false, memMB: 0, procs: 0, threads: 0 };
+    const ex = this.ex; if (!ex) return { status: this.status, icount: 0, mips: 0, frames: 0, elapsedMs: 0, exitCode: 0, error: '', errorRip: '', errorBytes: '', report: '', title: '', subsystem: 0, hasWindow: false, memMB: 0, procs: 0, threads: 0, audioFrames: 0, audio: 'none' };
     const el = Math.max(1, performance.now() - this.t0); const ic = Number(ex.x64_icount());
     return {
       status: this.status, icount: ic, mips: ic / el / 1000, frames: this.frames, elapsedMs: el, exitCode: ex.x64_exit_code(),
       error: this.cstr(ex.x64_error()), errorRip: '0x' + ex.x64_error_rip().toString(16), errorBytes: this.cstr(ex.x64_error_bytes()), report: this.cstr(ex.x64_report()),
-      title: this.cstr(ex.x64_title()), subsystem: ex.x64_subsystem(), hasWindow: !!ex.x64_has_window(), memMB: Number(ex.x64_mem_used()) / 1048576, procs: ex.x64_proc_count(), threads: ex.x64_thread_count ? ex.x64_thread_count() : 0,
+      title: this.cstr(ex.x64_title()), subsystem: ex.x64_subsystem(), hasWindow: !!ex.x64_has_window(), memMB: Number(ex.x64_mem_used()) / 1048576, procs: ex.x64_proc_count(), threads: ex.x64_thread_count ? ex.x64_thread_count() : 0, audioFrames: ex.x64_audio_frames ? Number(ex.x64_audio_frames()) : 0, audio: this.audio.state(),
     };
   }
   apiStats(): string { return this.ex ? this.cstr(this.ex.x64_api_stats()) : ''; }

@@ -63,7 +63,7 @@ int pe_managed_kind(const u8 *bytes, size_t len) {
 int pe_is_system_dll(const char *dll) {
   static const char *sys[] = { "kernel32", "kernelbase", "ntdll", "user32", "gdi32", "msvcrt", "ucrtbase", "vcruntime140", "vcruntime140_1", "msvcp140", "msvcp140_1", "msvcp140_2", "msvcp140_atomic_wait", "msvcp140_codecvt_ids", "concrt140",
     "advapi32", "shell32", "ole32", "oleaut32", "ws2_32", "wsock32", "comctl32", "comdlg32", "shlwapi", "psapi", "winmm", "imm32", "version", "crypt32", "secur32", "bcrypt", "setupapi", "dbghelp", "iphlpapi", "userenv", "uxtheme", "dwmapi",
-    "dxgi", "opengl32", "glu32", "dinput8", "dsound", "wininet", "winhttp", "mpr", "netapi32", "rpcrt4", "wintrust", "powrprof", "hid", "cfgmgr32", "normaliz", "msimg32", "winspool", "avrt", "ncrypt", "wtsapi32", "propsys", "shcore", "api-ms", "ext-ms", "d3d", "xinput", "xaudio2", "gdiplus", "msvcr", "msvcp", "libgcc_s_seh-1", "libstdc++-6", "libwinpthread-1", 0 };
+    "dxgi", "opengl32", "glu32", "dinput8", "dsound", "wininet", "winhttp", "mpr", "netapi32", "rpcrt4", "wintrust", "powrprof", "hid", "cfgmgr32", "normaliz", "msimg32", "winspool", "avrt", "mmdevapi", "msacm32", "ncrypt", "wtsapi32", "propsys", "shcore", "api-ms", "ext-ms", "d3d", "xinput", "xaudio2", "gdiplus", "msvcr", "msvcp", "libgcc_s_seh-1", "libstdc++-6", "libwinpthread-1", 0 };
   char b[64]; int n = 0; for (const char *p = dll; *p && n < 63; p++) { char ch = *p; if (ch >= 'A' && ch <= 'Z') ch += 32; b[n++] = ch; } b[n] = 0;
   if (n > 4 && !e_strcmp(b + n - 4, ".dll")) b[n - 4] = 0; if (n > 4 && !e_strcmp(b + n - 4, ".drv")) b[n - 4] = 0;
   for (int i = 0; sys[i]; i++) { size_t l = e_strlen(sys[i]); if (!e_strcmp(b, sys[i])) return 1; if ((!e_strcmp(sys[i], "api-ms") || !e_strcmp(sys[i], "ext-ms") || !e_strcmp(sys[i], "d3d") || !e_strcmp(sys[i], "xinput") || !e_strcmp(sys[i], "xaudio2") || !e_strcmp(sys[i], "msvcr") || !e_strcmp(sys[i], "msvcp")) && !e_strncmp(b, sys[i], l)) return 1; }
@@ -76,7 +76,7 @@ int pe_is_system_dll(const char *dll) {
  * mingw runtime DLLs, GDI+ and the Direct3D shader compilers. Core OS DLLs (kernel32, ntdll, user32, ws2_32, ucrtbase,
  * vcruntime140, api-ms-*, d3d11/dxgi …) are always the emulator's own. */
 int pe_dll_native_ok(const char *dll) {
-  static const char *pref[] = { "msvcp", "msvcr", "concrt", "vcomp", "vcamp", "vccorlib", "mfc", "vcruntime140_1", "vcruntime140_threads", "libgcc_s", "libstdc++", "libwinpthread", "gdiplus", "d3dcompiler_", "d3dx9_", "d3dx10_", "d3dx11_", "d3dcsx", "x3daudio", 0 };
+  static const char *pref[] = { "msvcp", "msvcr", "concrt", "vcomp", "vcamp", "vccorlib", "mfc", "vcruntime140_1", "vcruntime140_threads", "libgcc_s", "libstdc++", "libwinpthread", "gdiplus", "d3dcompiler_", "d3dx9_", "d3dx10_", "d3dx11_", "d3dcsx", "x3daudio", "xaudio2_", "xapofx", "xactengine", 0 };
   char b[64]; int n = 0; for (const char *p = dll; *p && n < 63; p++) { char ch = *p; if (ch >= 'A' && ch <= 'Z') ch += 32; b[n++] = ch; } b[n] = 0;
   for (int i = 0; pref[i]; i++) if (!e_strncmp(b, pref[i], e_strlen(pref[i]))) return 1;
   return 0;
@@ -86,7 +86,7 @@ int pe_dll_native_ok(const char *dll) {
  * Runtime ("DirectX pack", installed on demand into C:\Windows\System32). The emulator has no shims for them, so without
  * the file LoadLibrary fails with ERROR_MOD_NOT_FOUND instead of handing out a module whose every GetProcAddress is NULL. */
 int pe_dll_native_only(const char *dll) {
-  static const char *pref[] = { "d3dcompiler_", "d3dx9_", "d3dx10_", "d3dx11_", "d3dcsx", "x3daudio", 0 };
+  static const char *pref[] = { "d3dcompiler_", "d3dx9_", "d3dx10_", "d3dx11_", "d3dcsx", "x3daudio", "xaudio2_", "xapofx", "xactengine", 0 };
   char b[64]; int n = 0; for (const char *p = dll; *p && n < 63; p++) { char ch = *p; if (ch >= 'A' && ch <= 'Z') ch += 32; b[n++] = ch; } b[n] = 0;
   for (int i = 0; pref[i]; i++) if (!e_strncmp(b, pref[i], e_strlen(pref[i]))) return 1;
   return 0;
