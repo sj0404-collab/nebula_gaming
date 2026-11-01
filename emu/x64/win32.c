@@ -21,6 +21,7 @@ enum { SLOT_STARTUP = 0, SLOT_CONT = 1, SLOT_FIRST = 2 };
 #define STR_OFF   0x16000
 
 static u64 g_a32[16]; static int g_a32_n;
+static const char *shim_canonical(const char *dll, const char *name);
 static const char *sig32_lookup(const char *name); static int clean32_of(const char *name, const char *sig);
 u64 w32_arg(Cpu *c, int n) {
   if (c->mode32) { if (n < g_a32_n) return g_a32[n]; return rd32(c, c->r[RSP] + 4u * (u32)n); }   /* 32-bit: all arguments on the stack, esp → first argument (the return address was popped by the dispatcher) */
@@ -50,6 +51,7 @@ void w32_report(Win32 *w, const char *fmt, ...) {
 #define HB_FREE  0x46524545u
 static int heap_grow(Win32 *w, u64 need) {
   u64 sz = need > (16ull << 20) ? ((need + 0xffff) & ~0xffffull) : (16ull << 20);
+  if (w->mode32 && w->heap_end + sz > 0x48000000ull) return 0;   /* 32-bit process: the heap ends where reservations begin */
   if (!mem_map(w->mem, w->heap_end, sz, "heap")) return 0;
   w->heap_end += sz; return 1;
 }
@@ -105,7 +107,7 @@ u64 w32_shim_slot(Win32 *w, const char *dll, const char *name) {
   int i = w->nslots++;
   size_t ln = e_strlen(name) + 1, ld = e_strlen(dll) + 1; char *n = emu_alloc(ln + ld); e_memcpy(n, name, ln); e_memcpy(n + ln, dll, ld);
   w->slots[i].name = n; w->slots[i].dll = n + ln; w->slots[i].fn = find_shim(dll, name); w->slots[i].calls = 0;
-  w->slots[i].sig32 = sig32_lookup(name); w->slots[i].clean32 = (u16)clean32_of(name, w->slots[i].sig32);
+  { const char *cn = shim_canonical(dll, name); w->slots[i].sig32 = sig32_lookup(cn); w->slots[i].clean32 = (u16)clean32_of(cn, w->slots[i].sig32); }
   return SLOT_ADDR(i);
 }
 
@@ -207,7 +209,7 @@ static void qsort_step(Cpu *c, int have_result, u64 rax) {
 void w32_cont_resume(Cpu *c) {
   Win32 *w = W; while (w->ncont && w->cont[w->ncont - 1].rsp < c->r[RSP]) w->ncont--;
   if (!w->ncont) { cpu_fault(c, "stray continuation"); return; }
-  int i = w->ncont - 1; u64 rax = c->r[RAX];
+  int i = w->ncont - 1; u64 rax = c->mode32 ? (u32)c->r[RAX] : c->r[RAX];   /* 32-bit callbacks return in eax */
   c->r[RSP] = w->cont[i].rsp;   /* every callback of one continuation starts from the same stack pointer (qsort with 10^6 comparisons must not drift) */
   switch (w->cont[i].kind) {
     case CONT_STARTUP:
@@ -217,7 +219,7 @@ void w32_cont_resume(Cpu *c) {
       do_exit(c, (int)rax); return;
     case CONT_INITTERM: {
       if (w->cont[i].data[2] && (int)rax != 0) { cont_finish(c, rax); return; }
-      while (w->cont[i].data[0] < w->cont[i].data[1]) { u64 fn = rd64(c, w->cont[i].data[0]); w->cont[i].data[0] += 8; if (fn) { guest_call(c, fn, 0, 0, 0, 0); return; } }
+      while (w->cont[i].data[0] < w->cont[i].data[1]) { u64 fn = rdp(c, w->cont[i].data[0]); w->cont[i].data[0] += PSZ; if (fn) { guest_call(c, fn, 0, 0, 0, 0); return; } }
       cont_finish(c, 0); return; }
     case CONT_ATEXIT:
       if (w->n_at_exit > 0) { u64 fn = w->at_exit[--w->n_at_exit]; guest_call(c, fn, 0, 0, 0, 0); return; }
@@ -486,7 +488,9 @@ static void s_GetCommandLineA(Cpu *c) { RET(W->cmdline_a); }
 static void s_GetCommandLineW(Cpu *c) { RET(W->cmdline_w); }
 static void s_FreeEnvironmentStringsW(Cpu *c) { RET(1); }
 static void s_FreeEnvironmentStringsA(Cpu *c) { RET(1); }
-static void s_GetStartupInfoA(Cpu *c) { u64 a = ARG(0); u8 *p = mem_ptr(c->mem, a, 104, 1); if (p) { e_memset(p, 0, 104); wr32(c, a, 104); wr64(c, a + 80, 0x10); wr64(c, a + 88, 0x11); wr64(c, a + 96, 0x12); } }
+static void s_GetStartupInfoA(Cpu *c) { u64 a = ARG(0);
+  if (c->mode32) { u8 *p = mem_ptr(c->mem, a, 68, 1); if (p) { e_memset(p, 0, 68); wr32(c, a, 68); wr32(c, a + 56, 0x10); wr32(c, a + 60, 0x11); wr32(c, a + 64, 0x12); } return; }   /* STARTUPINFO32: 68 bytes, hStdInput @56 */
+  u8 *p = mem_ptr(c->mem, a, 104, 1); if (p) { e_memset(p, 0, 104); wr32(c, a, 104); wr64(c, a + 80, 0x10); wr64(c, a + 88, 0x11); wr64(c, a + 96, 0x12); } }
 static void s_GetStartupInfoW(Cpu *c) { s_GetStartupInfoA(c); }
 /* ---------- modules: private DLLs loaded from the virtual disk ---------- */
 static u32 mod_atoi(const char *p) { u32 v = 0; while (*p >= '0' && *p <= '9') v = v * 10 + (u32)(*p++ - '0'); return v; }
@@ -563,10 +567,11 @@ static int attach_next_module(Cpu *c) {
 static char g_fake_names[64][40]; static int g_nfake;
 static void fake_key(const char *n, char *out, size_t cap) { const char *b = n; for (const char *p = n; *p; p++) if (*p == '\\' || *p == '/') b = p + 1; size_t o = 0; for (; b[o] && o + 1 < cap; o++) out[o] = (b[o] >= 'A' && b[o] <= 'Z') ? (char)(b[o] + 32) : b[o]; out[o] = 0; if (o > 4 && !e_stricmp(out + o - 4, ".dll")) out[o - 4] = 0; }
 static u64 fake_module(const char *n) { char k[40]; fake_key(n && n[0] ? n : "?", k, sizeof k);
-  for (int i = 0; i < g_nfake; i++) if (!e_stricmp(g_fake_names[i], k)) return 0x7ff00000000ull + ((u64)(i + 1) << 12);
-  if (g_nfake < 64) { e_snprintf(g_fake_names[g_nfake], sizeof g_fake_names[0], "%s", k); g_nfake++; return 0x7ff00000000ull + ((u64)g_nfake << 12); }
-  return 0x7ff00000000ull + (1ull << 12); }
-static const char *fake_module_name(u64 h) { if ((h >> 32) != 0x7ff || (h & 0xfff)) return 0; u64 i = (h >> 12) & 0xfffff; return i >= 1 && i <= (u64)g_nfake ? g_fake_names[i - 1] : 0; }
+  u64 base = (g_fs_w && g_fs_w->mode32) ? 0x7f000000ull : 0x7ff00000000ull;   /* a 32-bit process needs handles below 4 GB */
+  for (int i = 0; i < g_nfake; i++) if (!e_stricmp(g_fake_names[i], k)) return base + ((u64)(i + 1) << 12);
+  if (g_nfake < 64) { e_snprintf(g_fake_names[g_nfake], sizeof g_fake_names[0], "%s", k); g_nfake++; return base + ((u64)g_nfake << 12); }
+  return base + (1ull << 12); }
+static const char *fake_module_name(u64 h) { if (((h >> 32) != 0x7ff && (h >> 20) != 0x7f0) || (h & 0xfff)) return 0; u64 i = (h >> 12) & 0xff; return i >= 1 && i <= (u64)g_nfake ? g_fake_names[i - 1] : 0; }
 /* export ordinals of the DLLs that are still imported by number (delay-loaded WSOCK32 in Bun, OLEAUT32 everywhere) */
 static const char *ordinal_name(const char *dll, u32 ord) {
   if (dll && !e_strnicmp_(dll, "xinput", 6)) { switch (ord) { case 100: return "XInputGetStateEx"; case 101: return "XInputWaitForGuideButton"; case 102: return "XInputCancelGuideButtonWait"; case 103: return "XInputPowerOffController"; default: return 0; } }   /* hidden exports used by Steam Input / SDL */
@@ -633,8 +638,10 @@ static void s_GetActiveProcessorCount(Cpu *c) { RET(1); }
 static void s_InitializeProcThreadAttributeList(Cpu *c) { if (ARG(3)) wr64(c, ARG(3), 64 + 32 * (ARG(1) ? ARG(1) : 1)); if (!ARG(0)) { W->last_error = 122; RET(0); return; } RET(1); }
 static void s_UpdateProcThreadAttribute(Cpu *c) { RET(1); }
 static void s_DeleteProcThreadAttributeList(Cpu *c) { RET(0); }   /* one logical processor, like GetSystemInfo */
-static void s_GetSystemInfo(Cpu *c) { u64 a = ARG(0); u8 *p = mem_ptr(c->mem, a, 48, 1); if (!p) return; e_memset(p, 0, 48); wr16(c, a, 9); wr32(c, a + 4, 4096); wr64(c, a + 8, 0x10000); wr64(c, a + 16, 0x7ffffffeffff); wr64(c, a + 24, 1); wr32(c, a + 32, 1); wr32(c, a + 36, 586); wr32(c, a + 40, 0x10000); }
-static void s_GetNativeSystemInfo(Cpu *c) { s_GetSystemInfo(c); }
+static void s_GetSystemInfo(Cpu *c) { u64 a = ARG(0);
+  if (c->mode32) { u8 *p = mem_ptr(c->mem, a, 36, 1); if (!p) return; e_memset(p, 0, 36); wr16(c, a, 0); wr32(c, a + 4, 4096); wr32(c, a + 8, 0x10000); wr32(c, a + 12, 0x7ffeffff); wr32(c, a + 16, 1); wr32(c, a + 20, 1); wr32(c, a + 24, 586); wr32(c, a + 28, 0x10000); return; }   /* SYSTEM_INFO32 (WOW64 view: PROCESSOR_ARCHITECTURE_INTEL) */
+  u8 *p = mem_ptr(c->mem, a, 48, 1); if (!p) return; e_memset(p, 0, 48); wr16(c, a, 9); wr32(c, a + 4, 4096); wr64(c, a + 8, 0x10000); wr64(c, a + 16, 0x7ffffffeffff); wr64(c, a + 24, 1); wr32(c, a + 32, 1); wr32(c, a + 36, 586); wr32(c, a + 40, 0x10000); }
+static void s_GetNativeSystemInfo(Cpu *c) { s_GetSystemInfo(c); if (c->mode32) wr16(c, ARG(0), 9); }   /* the native machine is x64 */
 static void s_GlobalMemoryStatusEx(Cpu *c) { u64 a = ARG(0); wr32(c, a + 4, 30); wr64(c, a + 8, 4ull << 30); wr64(c, a + 16, 3ull << 30); wr64(c, a + 24, 4ull << 30); wr64(c, a + 32, 3ull << 30); wr64(c, a + 40, 8ull << 40); wr64(c, a + 48, 8ull << 40); RET(1); }
 static void s_RtlAddFunctionTable(Cpu *c) { RET(1); }
 static void s_RtlAddGrowableFunctionTable(Cpu *c) { if (ARG(0)) wr64(c, ARG(0), 0x4747); RET(0); }   /* V8 registers JIT unwind data; we never unwind through JIT frames */
@@ -729,6 +736,7 @@ static void s_LocalFree(Cpu *c) { w32_heap_free(W, ARG(0)); RET(0); }
 #define VM_MAX 2048
 static struct { u64 base, size, heap; int released, mapped; } g_vm[VM_MAX]; static int g_nvm;   /* heap: backing heap block (small), mapped: own region (large) */
 static u64 g_vm_cursor = 0x600000000ull;   /* where large anonymous reservations are placed */
+static u64 g_vm_cursor32 = 0x48000000ull;  /* 32-bit process: reservations between the heap (0x20000000+) and the DLL area (0x60000000) */
 static int vm_find(u64 a) { int rel = -1; for (int i = 0; i < g_nvm; i++) if (a - g_vm[i].base < g_vm[i].size) { if (!g_vm[i].released) return i; rel = i; } return rel; }
 static int vm_range_free(Mem *m, u64 a, u64 size) { for (int i = 0; i < m->n; i++) { Region *r = &m->r[i]; if (a < r->base + r->size && r->base < a + size) return 0; } return 1; }
 static void vm_recycle(Win32 *w); static void vm_discard(Cpu *c, u64 addr, u64 size);
@@ -750,8 +758,9 @@ static void s_VirtualAlloc(Cpu *c) { u64 addr = ARG(0), size = ARG(1);
   vm_recycle(W);
   size = (size + 0xffff) & ~0xffffull;
   if (size >= (1ull << 20) && c->mem->n < MAX_REGIONS - 8) {   /* large reservation (V8 heap / code range): own region, pages untouched until used (host zero pages stay lazy) */
-    u64 base = g_vm_cursor; int tries = 0; while (!vm_range_free(c->mem, base, size) && tries++ < 4096) base += (size + 0xffffff) & ~0xffffffull;
-    if (tries < 4096) { int vi2 = vm_add(base, size, 0); if (vi2 >= 0 && mem_map(c->mem, base, size, "vm")) { g_vm[vi2].mapped = 1; g_vm_cursor = base + ((size + 0xffffff) & ~0xffffffull); RET(base); return; } if (vi2 >= 0) g_nvm--; }
+    u64 base = c->mode32 ? g_vm_cursor32 : g_vm_cursor; int tries = 0; while (!vm_range_free(c->mem, base, size) && tries++ < 4096) base += (size + 0xffffff) & ~0xffffffull;
+    if (c->mode32 && base + size > 0x60000000ull) tries = 4096;   /* no room below the DLL area: fall through to the heap (which fails cleanly when full) */
+    if (tries < 4096) { int vi2 = vm_add(base, size, 0); if (vi2 >= 0 && mem_map(c->mem, base, size, "vm")) { g_vm[vi2].mapped = 1; if (c->mode32) g_vm_cursor32 = base + ((size + 0xffffff) & ~0xffffffull); else g_vm_cursor = base + ((size + 0xffffff) & ~0xffffffull); RET(base); return; } if (vi2 >= 0) g_nvm--; }
   }
   u64 a = w32_heap_alloc(W, size + 0x10000, 1); if (!a) { e_log("[x64] VirtualAlloc(NULL, %llu) failed: regions=%d vm=%d\n", (unsigned long long)size, c->mem->n, g_nvm); W->last_error = 8; RET(0); return; }
   u64 r = (a + 0xffff) & ~0xffffull; if (vm_add(r, size, a) < 0) e_log("[x64] VM table full (%d)\n", g_nvm);
@@ -1312,13 +1321,18 @@ static const ShimDef shims[] = {
 /* OLEAUT32 exports most of its API by ordinal only */
 static int oleaut_dll(const char *d) { const char *k = "oleaut32"; for (int i = 0; k[i]; i++) { char ch = d[i]; if (ch >= 'A' && ch <= 'Z') ch += 32; if (ch != k[i]) return 0; } return 1; }
 static const char *oleaut_ordinal(u32 o) { switch (o) { case 2: return "SysAllocString"; case 4: return "SysAllocStringLen"; case 6: return "SysFreeString"; case 7: return "SysStringLen"; case 5: return "SysReAllocStringLen"; case 8: return "VariantInit"; case 9: return "VariantClear"; case 10: return "VariantCopy"; case 149: return "SysStringByteLen"; case 150: return "SysAllocStringByteLen"; default: return 0; } }
-static ShimFn find_shim(const char *dll, const char *name) {
+/* ordinal imports ("#n") of ws2_32 / oleaut32 → export name */
+static const char *shim_canonical(const char *dll, const char *name) {
   if (name[0] == '#' && dll && (e_stricmp(dll, "ws2_32.dll") == 0 || e_stricmp(dll, "ws2_32") == 0 || e_stricmp(dll, "wsock32.dll") == 0)) {   /* ws2_32 is imported by ordinal: map to the export name */
     static const struct { int ord; const char *n; } ws2[] = { {1,"accept"},{2,"bind"},{3,"closesocket"},{4,"connect"},{5,"getpeername"},{6,"getsockname"},{7,"getsockopt"},{8,"htonl"},{9,"htons"},{10,"ioctlsocket"},{11,"inet_addr"},{12,"inet_ntoa"},{13,"listen"},{14,"ntohl"},{15,"ntohs"},{16,"recv"},{17,"recvfrom"},{18,"select"},{19,"send"},{20,"sendto"},{21,"setsockopt"},{22,"shutdown"},{23,"socket"},{51,"gethostbyaddr"},{52,"gethostbyname"},{53,"getprotobyname"},{54,"getprotobynumber"},{55,"getservbyname"},{56,"getservbyport"},{57,"gethostname"},{111,"WSAGetLastError"},{112,"WSASetLastError"},{115,"WSAStartup"},{116,"WSACleanup"},{151,"__WSAFDIsSet"} };
     int o = 0; for (const char *q = name + 1; *q >= '0' && *q <= '9'; q++) o = o * 10 + (*q - '0');
     for (size_t k = 0; k < sizeof ws2 / sizeof ws2[0]; k++) if (ws2[k].ord == o) { name = ws2[k].n; break; }
   }
   if (name[0] == '#' && dll && (dll[0] == 'O' || dll[0] == 'o') && oleaut_dll(dll)) { u32 o = 0; for (const char *p = name + 1; *p >= '0' && *p <= '9'; p++) o = o * 10 + (u32)(*p - '0'); const char *n = oleaut_ordinal(o); if (n) name = n; }
+  return name;
+}
+static ShimFn find_shim(const char *dll, const char *name) {
+  name = shim_canonical(dll, name);
   for (size_t i = 0; i < sizeof shims / sizeof shims[0]; i++) if (!e_strcmp(shims[i].name, name)) return shims[i].fn; extern ShimFn gdi_find_shim(const char *name); return gdi_find_shim(name); }
 void w32_api_trace(int on) { g_fs_w->api_trace = on; }
 int w32_have_shim(const char *dll, const char *name) { return find_shim(dll, name) != 0; }

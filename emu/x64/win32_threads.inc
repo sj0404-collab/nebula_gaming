@@ -82,9 +82,9 @@ static int ctx_runnable(Win32 *w, ThreadCtx *x, int tid) {
     case BLOCK_PIPE_W: return !vfs_pipe_would_block(x->block_pipe, 1);
     case BLOCK_SLEEP: return !(x->sleeping && x->sleep_until_ms > host_now_ms());
     case BLOCK_OBJ: { if (x->wait_granted || deadline_passed(x->wait_deadline)) return 1; int which; return wait_check(w->pid, tid, x->wobj_kind, x->wobj_idx, x->nwobj, x->wait_all, 0, &which); }
-    case BLOCK_CS: { if (deadline_passed(x->wait_deadline)) return 1; u64 owner = gm_rd(w, x->block_addr + 16, 8); return owner == 0 || owner == (u64)(u32)tid; }
-    case BLOCK_SRW: { if (deadline_passed(x->wait_deadline)) return 1; u64 v = gm_rd(w, x->block_addr, 8); return x->block_flag ? v == 0 : !(v & 1); }
-    case BLOCK_CV: return deadline_passed(x->wait_deadline) || gm_rd(w, x->block_addr, 8) != x->block_val;
+    case BLOCK_CS: { if (deadline_passed(x->wait_deadline)) return 1; u64 owner = w->mode32 ? gm_rd(w, x->block_addr + 12, 4) : gm_rd(w, x->block_addr + 16, 8); return owner == 0 || owner == (u64)(u32)tid; }
+    case BLOCK_SRW: { if (deadline_passed(x->wait_deadline)) return 1; u64 v = gm_rd(w, x->block_addr, w->mode32 ? 4 : 8); return x->block_flag ? v == 0 : !(v & 1); }
+    case BLOCK_CV: return deadline_passed(x->wait_deadline) || gm_rd(w, x->block_addr, w->mode32 ? 4 : 8) != x->block_val;
     case BLOCK_ADDR: return deadline_passed(x->wait_deadline) || gm_rd(w, x->block_addr, x->block_flag) != x->block_val || w->wake_gen != x->wake_snap;
   }
   return 1;
@@ -221,53 +221,58 @@ static void s_FlsGetValue(Cpu *c) { s_TlsGetValue(c); }
 static void s_FlsSetValue(Cpu *c) { s_TlsSetValue(c); }
 
 /* CRITICAL_SECTION on the real RTL_CRITICAL_SECTION layout: LockCount +8 (-1 free), RecursionCount +12, OwningThread +16, SpinCount +32 */
-static void cs_init(Cpu *c, u64 a) { u8 *p = mem_ptr(c->mem, a, 40, 1); if (p) { e_memset(p, 0, 40); wr32(c, a + 8, (u32)-1); } }
+/* CRITICAL_SECTION field offsets: x64 LockCount@8 RecursionCount@12 OwningThread@16 SpinCount@32 (40 bytes); 32-bit @4 @8 @12 @20 (24 bytes) */
+#define CS_LOCK (c->mode32 ? 4 : 8)
+#define CS_REC (c->mode32 ? 8 : 12)
+#define CS_OWNER (c->mode32 ? 12 : 16)
+#define CS_SPIN (c->mode32 ? 20 : 32)
+static void cs_init(Cpu *c, u64 a) { u32 sz = c->mode32 ? 24 : 40; u8 *p = mem_ptr(c->mem, a, sz, 1); if (p) { e_memset(p, 0, sz); wr32(c, a + CS_LOCK, (u32)-1); } }
 static void s_InitializeCriticalSection(Cpu *c) { cs_init(c, ARG(0)); }
-static void s_InitializeCriticalSectionAndSpinCount(Cpu *c) { cs_init(c, ARG(0)); wr64(c, ARG(0) + 32, ARG(1)); RET(1); }
-static void s_InitializeCriticalSectionEx(Cpu *c) { cs_init(c, ARG(0)); wr64(c, ARG(0) + 32, ARG(1)); RET(1); }
+static void s_InitializeCriticalSectionAndSpinCount(Cpu *c) { cs_init(c, ARG(0)); wrp(c, ARG(0) + CS_SPIN, ARG(1)); RET(1); }
+static void s_InitializeCriticalSectionEx(Cpu *c) { cs_init(c, ARG(0)); wrp(c, ARG(0) + CS_SPIN, ARG(1)); RET(1); }
 static void s_DeleteCriticalSection(Cpu *c) { cs_init(c, ARG(0)); }
-static void s_SetCriticalSectionSpinCount(Cpu *c) { u64 a = ARG(0); u64 prev = rd64(c, a + 32); wr64(c, a + 32, ARG(1)); RET((u32)prev); }
+static void s_SetCriticalSectionSpinCount(Cpu *c) { u64 a = ARG(0); u64 prev = rdp(c, a + CS_SPIN); wrp(c, a + CS_SPIN, ARG(1)); RET((u32)prev); }
 static int cs_try(Cpu *c, u64 a) {
-  u64 owner = rd64(c, a + 16); u32 me = cur_tid(W);
-  if (owner == me) { wr32(c, a + 12, rd32(c, a + 12) + 1); wr32(c, a + 8, rd32(c, a + 8) + 1); return 1; }
-  if (owner == 0) { wr64(c, a + 16, me); wr32(c, a + 12, 1); wr32(c, a + 8, 0); return 1; }
+  u64 owner = rdp(c, a + CS_OWNER); u32 me = cur_tid(W);
+  if (owner == me) { wr32(c, a + CS_REC, rd32(c, a + CS_REC) + 1); wr32(c, a + CS_LOCK, rd32(c, a + CS_LOCK) + 1); return 1; }
+  if (owner == 0) { wrp(c, a + CS_OWNER, me); wr32(c, a + CS_REC, 1); wr32(c, a + CS_LOCK, 0); return 1; }
   return 0;
 }
 static void s_EnterCriticalSection(Cpu *c) { u64 a = ARG(0); if (cs_try(c, a)) { wait_end(W); return; } W->block_addr = a; W->wait_deadline = -1; park(c, BLOCK_CS); }
 static void s_TryEnterCriticalSection(Cpu *c) { RET(cs_try(c, ARG(0)) ? 1 : 0); }
-static void s_LeaveCriticalSection(Cpu *c) { u64 a = ARG(0); if (rd64(c, a + 16) != cur_tid(W)) return; int rec = (int)rd32(c, a + 12) - 1; if (rec <= 0) { wr32(c, a + 12, 0); wr64(c, a + 16, 0); wr32(c, a + 8, (u32)-1); } else { wr32(c, a + 12, (u32)rec); wr32(c, a + 8, rd32(c, a + 8) - 1); } }
+static void s_LeaveCriticalSection(Cpu *c) { u64 a = ARG(0); if (rdp(c, a + CS_OWNER) != cur_tid(W)) return; int rec = (int)rd32(c, a + CS_REC) - 1; if (rec <= 0) { wr32(c, a + CS_REC, 0); wrp(c, a + CS_OWNER, 0); wr32(c, a + CS_LOCK, (u32)-1); } else { wr32(c, a + CS_REC, (u32)rec); wr32(c, a + CS_LOCK, rd32(c, a + CS_LOCK) - 1); } }
 
 /* SRW lock: one 64-bit word — bit 0 exclusive, shared holders counted from bit 4 */
-static void s_InitializeSRWLock(Cpu *c) { wr64(c, ARG(0), 0); }
-static void s_AcquireSRWLockExclusive(Cpu *c) { u64 a = ARG(0); if (rd64(c, a) == 0) { wr64(c, a, 1); wait_end(W); return; } W->block_addr = a; W->block_flag = 1; W->wait_deadline = -1; park(c, BLOCK_SRW); }
-static void s_AcquireSRWLockShared(Cpu *c) { u64 a = ARG(0); u64 v = rd64(c, a); if (!(v & 1)) { wr64(c, a, v + 16); wait_end(W); return; } W->block_addr = a; W->block_flag = 0; W->wait_deadline = -1; park(c, BLOCK_SRW); }
-static void s_ReleaseSRWLockExclusive(Cpu *c) { wr64(c, ARG(0), 0); }
-static void s_ReleaseSRWLockShared(Cpu *c) { u64 a = ARG(0); u64 v = rd64(c, a); wr64(c, a, v >= 16 ? v - 16 : 0); }
-static void s_TryAcquireSRWLockExclusive(Cpu *c) { u64 a = ARG(0); if (rd64(c, a) == 0) { wr64(c, a, 1); RET(1); } else RET(0); }
-static void s_TryAcquireSRWLockShared(Cpu *c) { u64 a = ARG(0); u64 v = rd64(c, a); if (!(v & 1)) { wr64(c, a, v + 16); RET(1); } else RET(0); }
+static void s_InitializeSRWLock(Cpu *c) { wrp(c, ARG(0), 0); }
+static void s_AcquireSRWLockExclusive(Cpu *c) { u64 a = ARG(0); if (rdp(c, a) == 0) { wrp(c, a, 1); wait_end(W); return; } W->block_addr = a; W->block_flag = 1; W->wait_deadline = -1; park(c, BLOCK_SRW); }
+static void s_AcquireSRWLockShared(Cpu *c) { u64 a = ARG(0); u64 v = rdp(c, a); if (!(v & 1)) { wrp(c, a, v + 16); wait_end(W); return; } W->block_addr = a; W->block_flag = 0; W->wait_deadline = -1; park(c, BLOCK_SRW); }
+static void s_ReleaseSRWLockExclusive(Cpu *c) { wrp(c, ARG(0), 0); }
+static void s_ReleaseSRWLockShared(Cpu *c) { u64 a = ARG(0); u64 v = rdp(c, a); wrp(c, a, v >= 16 ? v - 16 : 0); }
+static void s_TryAcquireSRWLockExclusive(Cpu *c) { u64 a = ARG(0); if (rdp(c, a) == 0) { wrp(c, a, 1); RET(1); } else RET(0); }
+static void s_TryAcquireSRWLockShared(Cpu *c) { u64 a = ARG(0); u64 v = rdp(c, a); if (!(v & 1)) { wrp(c, a, v + 16); RET(1); } else RET(0); }
 
 /* condition variables: the word is a generation counter; sleepers wake when it changes (spurious wake-ups are allowed by the API) */
-static void s_InitializeConditionVariable(Cpu *c) { wr64(c, ARG(0), 0); }
-static void s_WakeConditionVariable(Cpu *c) { u64 a = ARG(0); wr64(c, a, rd64(c, a) + 1); }
+static void s_InitializeConditionVariable(Cpu *c) { wrp(c, ARG(0), 0); }
+static void s_WakeConditionVariable(Cpu *c) { u64 a = ARG(0); wrp(c, a, rdp(c, a) + 1); }
 static void s_WakeAllConditionVariable(Cpu *c) { s_WakeConditionVariable(c); }
 /* lock_kind 0: critical section, 1: SRW exclusive, 2: SRW shared */
 static void cv_sleep(Cpu *c, u64 cv, u64 lock, u32 ms, int lock_kind) {
   Win32 *w = W; int retry = w->wait_active && w->wait_rip == c->rip;
   if (!retry) {
-    w->block_val = rd64(c, cv); w->block_addr = cv; wait_begin(c, ms); w->wake_snap = 0;   /* wake_snap: 0 sleeping, 1 woken, 2 timed out */
-    if (lock_kind == 0) { wr32(c, lock + 12, 0); wr64(c, lock + 16, 0); wr32(c, lock + 8, (u32)-1); }
-    else if (lock_kind == 1) wr64(c, lock, 0); else { u64 v = rd64(c, lock); wr64(c, lock, v >= 16 ? v - 16 : 0); }
+    w->block_val = rdp(c, cv); w->block_addr = cv; wait_begin(c, ms); w->wake_snap = 0;   /* wake_snap: 0 sleeping, 1 woken, 2 timed out */
+    if (lock_kind == 0) { wr32(c, lock + CS_REC, 0); wrp(c, lock + CS_OWNER, 0); wr32(c, lock + CS_LOCK, (u32)-1); }
+    else if (lock_kind == 1) wrp(c, lock, 0); else { u64 v = rdp(c, lock); wrp(c, lock, v >= 16 ? v - 16 : 0); }
     park(c, BLOCK_CV); return;
   }
   if (w->wake_snap == 0) {
-    int woken = rd64(c, cv) != w->block_val, expired = deadline_passed(w->wait_deadline);
+    int woken = rdp(c, cv) != w->block_val, expired = deadline_passed(w->wait_deadline);
     if (!woken && !expired) { w->block_addr = cv; park(c, BLOCK_CV); return; }
     w->wake_snap = woken ? 1 : 2; w->wait_deadline = -1;
   }
   /* re-acquire the lock before returning (may park again on the lock; the retry comes back here) */
   if (lock_kind == 0) { if (!cs_try(c, lock)) { w->block_addr = lock; w->block_flag = 0; park(c, BLOCK_CS); return; } }
-  else if (lock_kind == 1) { if (rd64(c, lock) != 0) { w->block_addr = lock; w->block_flag = 1; park(c, BLOCK_SRW); return; } wr64(c, lock, 1); }
-  else { u64 v = rd64(c, lock); if (v & 1) { w->block_addr = lock; w->block_flag = 0; park(c, BLOCK_SRW); return; } wr64(c, lock, v + 16); }
+  else if (lock_kind == 1) { if (rdp(c, lock) != 0) { w->block_addr = lock; w->block_flag = 1; park(c, BLOCK_SRW); return; } wrp(c, lock, 1); }
+  else { u64 v = rdp(c, lock); if (v & 1) { w->block_addr = lock; w->block_flag = 0; park(c, BLOCK_SRW); return; } wrp(c, lock, v + 16); }
   int woken = w->wake_snap == 1; wait_end(w);
   if (woken) RET(1); else { w->last_error = 258; RET(0); }
 }
@@ -276,20 +281,20 @@ static void s_SleepConditionVariableSRW(Cpu *c) { cv_sleep(c, ARG(0), ARG(1), (u
 
 /* one-time initialisation: 0 untouched, 2 in progress (others wait), 1 done */
 static void s_InitOnceExecuteOnce(Cpu *c) {
-  u64 once = ARG(0); u64 v = rd64(c, once);
+  u64 once = ARG(0); u64 v = rdp(c, once);
   if (v == 1) { RET(1); return; }
-  if (v == 2) { W->block_addr = once; W->block_val = 2; W->block_flag = 8; W->wake_snap = W->wake_gen; W->wait_deadline = -1; park(c, BLOCK_ADDR); return; }
-  wr64(c, once, 2); int i = cont_push(c, CONT_ONCE); if (i < 0) return; W->cont[i].data[0] = once; guest_call(c, ARG(1), once, ARG(2), ARG(3), 0);
+  if (v == 2) { W->block_addr = once; W->block_val = 2; W->block_flag = PSZ; W->wake_snap = W->wake_gen; W->wait_deadline = -1; park(c, BLOCK_ADDR); return; }
+  wrp(c, once, 2); int i = cont_push(c, CONT_ONCE); if (i < 0) return; W->cont[i].data[0] = once; guest_call(c, ARG(1), once, ARG(2), ARG(3), 0);
 }
 static void s_InitOnceBeginInitialize(Cpu *c) {
-  u64 once = ARG(0); u64 v = rd64(c, once); u32 flags = (u32)ARG(1);
+  u64 once = ARG(0); u64 v = rdp(c, once); u32 flags = (u32)ARG(1);
   if (v == 1) { if (ARG(2)) wr32(c, ARG(2), 0); RET(1); return; }
   if (flags & 1) { RET(0); return; }   /* INIT_ONCE_CHECK_ONLY */
-  if (v == 2) { W->block_addr = once; W->block_val = 2; W->block_flag = 8; W->wake_snap = W->wake_gen; W->wait_deadline = -1; park(c, BLOCK_ADDR); return; }
-  wr64(c, once, 2); if (ARG(2)) wr32(c, ARG(2), 1); RET(1);
+  if (v == 2) { W->block_addr = once; W->block_val = 2; W->block_flag = PSZ; W->wake_snap = W->wake_gen; W->wait_deadline = -1; park(c, BLOCK_ADDR); return; }
+  wrp(c, once, 2); if (ARG(2)) wr32(c, ARG(2), 1); RET(1);
 }
-static void s_InitOnceComplete(Cpu *c) { wr64(c, ARG(0), ((u32)ARG(1) & 4) ? 0 : 1); W->wake_gen++; RET(1); }
-static void s_InitOnceInitialize(Cpu *c) { wr64(c, ARG(0), 0); }
+static void s_InitOnceComplete(Cpu *c) { wrp(c, ARG(0), ((u32)ARG(1) & 4) ? 0 : 1); W->wake_gen++; RET(1); }
+static void s_InitOnceInitialize(Cpu *c) { wrp(c, ARG(0), 0); }
 
 /* WaitOnAddress / WakeByAddress */
 static void s_WaitOnAddress(Cpu *c) {

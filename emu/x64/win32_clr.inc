@@ -45,6 +45,11 @@ static int clr_stack_of(Win32 *w, u64 addr, u64 *lo, u64 *hi) {
 }
 static void s_VirtualQuery(Cpu *c) {
   u64 addr = ARG(0), mbi = ARG(1), lo, hi; u8 *p = mem_ptr(c->mem, mbi, 48, 1); if (!p) { RET(0); return; } e_memset(p, 0, 48);
+  if (c->mode32) {   /* MEMORY_BASIC_INFORMATION32: BaseAddress@0 AllocationBase@4 AllocationProtect@8 RegionSize@12 State@16 Protect@20 Type@24 (28 bytes) */
+    u64 page = addr & ~0xfffull; Region *r = mem_region(c->mem, addr);
+    if (!r) { wr32(c, mbi, (u32)page); wr32(c, mbi + 12, 0x1000); wr32(c, mbi + 16, 0x10000); wr32(c, mbi + 20, 1); RET(28); return; }
+    wr32(c, mbi, (u32)page); wr32(c, mbi + 4, (u32)r->base); wr32(c, mbi + 8, 0x40); wr32(c, mbi + 12, (u32)(r->base + r->size - page)); wr32(c, mbi + 16, 0x1000); wr32(c, mbi + 20, 0x40); wr32(c, mbi + 24, r->base == W->image_base ? 0x1000000 : 0x20000); RET(28); return;
+  }
   if (clr_stack_of(W, addr, &lo, &hi)) {
     u64 page = addr & ~0xfffull; int guard = page < lo + 0x2000;
     wr64(c, mbi, page); wr64(c, mbi + 8, lo); wr32(c, mbi + 16, 4); wr64(c, mbi + 24, guard ? lo + 0x2000 - page : hi - page); wr32(c, mbi + 32, 0x1000); wr32(c, mbi + 36, guard ? 0x104 : 4); wr32(c, mbi + 40, 0x20000); RET(48); return;
