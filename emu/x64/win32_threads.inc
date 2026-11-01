@@ -206,8 +206,6 @@ static void s_ResumeThread(Cpu *c) { Thread *t = thread_of_handle(c, ARG(0)); if
 static void s_SuspendThread(Cpu *c) { Thread *t = ARG(0) == ~1ull ? cur_thread(W) : thread_of_handle(c, ARG(0)); if (!t) { W->last_error = 6; RET(~0ull); return; } int prev = t->suspend++; RET((u32)prev); if (t == cur_thread(W)) { W->block = BLOCK_NONE; c->status = RUN_YIELD; } }
 static void s_TerminateThread(Cpu *c) { Thread *t = ARG(0) == ~1ull ? cur_thread(W) : thread_of_handle(c, ARG(0)); if (!t) { W->last_error = 6; RET(0); return; } if (t == cur_thread(W)) { thread_finish(c, (u32)ARG(1)); return; } thread_mark_exited(W, (int)(t - W->th), (u32)ARG(1)); RET(1); }
 static void s_SwitchToThread(Cpu *c) { c->r[RCX] = 0; s_Sleep(c); if (c->status != RUN_YIELD) RET(1); }
-static void s_GetThreadContext(Cpu *c) { W->last_error = 5; RET(0); }
-static void s_SetThreadContext(Cpu *c) { W->last_error = 5; RET(0); }
 static void s_SetThreadDescription(Cpu *c) { RET(0); }
 static void s_GetThreadDescription(Cpu *c) { RET(0x80070057u); }
 static void s_GetCurrentThreadStackLimits(Cpu *c) { Thread *t = cur_thread(W); u64 lo = t->stack ? t->stack : G_STACK_BASE, hi = t->stack ? t->stack + t->stack_size : G_STACK_BASE + G_STACK_SIZE; if (ARG(0)) wr64(c, ARG(0), lo); if (ARG(1)) wr64(c, ARG(1), hi); }

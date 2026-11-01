@@ -79,7 +79,11 @@ static int seh_in_epilog(Cpu *c, u64 pc, UCtx *x) {
   x->rip = rd64(c, x->rsp); x->rsp += 8; return 1;
 }
 /* RtlVirtualUnwind: returns the language handler if (flags & type) and pc is in the body, updates *x to the caller's frame */
-static u64 seh_virtual_unwind(Cpu *c, u32 type, u64 base, u64 pc, u64 fe, UCtx *x, u64 *handler_data, u64 *establisher) {
+/* cp: guest KNONVOLATILE_CONTEXT_POINTERS (0 = none) — Xmm0..15 slots at +0, Rax..R15 at +128; the CLR's GC reads them to find
+   where callee-saved registers were spilled so it can report/update object references in those stack slots */
+static u64 seh_virtual_unwind_cp(Cpu *c, u32 type, u64 base, u64 pc, u64 fe, UCtx *x, u64 *handler_data, u64 *establisher, u64 cp);
+static u64 seh_virtual_unwind(Cpu *c, u32 type, u64 base, u64 pc, u64 fe, UCtx *x, u64 *handler_data, u64 *establisher) { return seh_virtual_unwind_cp(c, type, base, pc, fe, x, handler_data, establisher, 0); }
+static u64 seh_virtual_unwind_cp(Cpu *c, u32 type, u64 base, u64 pc, u64 fe, UCtx *x, u64 *handler_data, u64 *establisher, u64 cp) {
   *handler_data = 0; u64 est = x->rsp; int machframe = 0, in_prolog = 0, first = 1; u64 handler = 0;
   u32 begin = rd32(c, fe), uinfo = rd32(c, fe + 8);
   u32 pcoff = (u32)(pc - (base + begin));
@@ -98,16 +102,16 @@ static u64 seh_virtual_unwind(Cpu *c, u32 type, u64 base, u64 pc, u64 fe, UCtx *
       u8 off = rd8(c, codes + 2 * i), op = rd8(c, codes + 2 * i + 1) & 15, info = rd8(c, codes + 2 * i + 1) >> 4;
       int skip = first && in_prolog && off > pcoff;
       switch (op) {
-        case 0: if (!skip) { x->r[info] = rd64(c, x->rsp); x->rsp += 8; } i += 1; break;                      /* PUSH_NONVOL */
+        case 0: if (!skip) { if (cp) wr64(c, cp + 128 + 8 * info, x->rsp); x->r[info] = rd64(c, x->rsp); x->rsp += 8; } i += 1; break;                      /* PUSH_NONVOL */
         case 1: { u64 sz; if (info == 0) { sz = 8ull * rd16(c, codes + 2 * (i + 1)); i += 2; } else { sz = rd32(c, codes + 2 * (i + 1)); i += 3; } if (!skip) x->rsp += sz; break; }
         case 2: if (!skip) x->rsp += 8ull * info + 8; i += 1; break;                                            /* ALLOC_SMALL */
         case 3: if (!skip) x->rsp = x->r[fr] - 16ull * foff; i += 1; break;                                      /* SET_FPREG */
-        case 4: { u64 o = 8ull * rd16(c, codes + 2 * (i + 1)); if (!skip) x->r[info] = rd64(c, est + o); i += 2; break; }
-        case 5: { u64 o = rd32(c, codes + 2 * (i + 1)); if (!skip) x->r[info] = rd64(c, est + o); i += 3; break; }
+        case 4: { u64 o = 8ull * rd16(c, codes + 2 * (i + 1)); if (!skip) { x->r[info] = rd64(c, est + o); if (cp) wr64(c, cp + 128 + 8 * info, est + o); } i += 2; break; }
+        case 5: { u64 o = rd32(c, codes + 2 * (i + 1)); if (!skip) { x->r[info] = rd64(c, est + o); if (cp) wr64(c, cp + 128 + 8 * info, est + o); } i += 3; break; }
         case 6: i += ver == 1 ? 2 : 1; break;                                                                    /* v1 SAVE_XMM (deprecated) / v2 EPILOG */
         case 7: i += ver == 1 ? 3 : 2; break;
-        case 8: { u64 o = 16ull * rd16(c, codes + 2 * (i + 1)); if (!skip) { x->x[info].q[0] = rd64(c, est + o); x->x[info].q[1] = rd64(c, est + o + 8); } i += 2; break; }
-        case 9: { u64 o = rd32(c, codes + 2 * (i + 1)); if (!skip) { x->x[info].q[0] = rd64(c, est + o); x->x[info].q[1] = rd64(c, est + o + 8); } i += 3; break; }
+        case 8: { u64 o = 16ull * rd16(c, codes + 2 * (i + 1)); if (!skip) { x->x[info].q[0] = rd64(c, est + o); x->x[info].q[1] = rd64(c, est + o + 8); if (cp) wr64(c, cp + 8 * info, est + o); } i += 2; break; }
+        case 9: { u64 o = rd32(c, codes + 2 * (i + 1)); if (!skip) { x->x[info].q[0] = rd64(c, est + o); x->x[info].q[1] = rd64(c, est + o + 8); if (cp) wr64(c, cp + 8 * info, est + o); } i += 3; break; }
         case 10: if (!skip) { if (info) x->rsp += 8; x->rip = rd64(c, x->rsp); x->rsp = rd64(c, x->rsp + 24); machframe = 1; } i += 1; break;
         default: i = count; break;
       }
@@ -291,7 +295,7 @@ static void s_RtlCaptureContext(Cpu *c) { ctx_capture(c, ARG(0)); }
 /* RtlVirtualUnwind(HandlerType, ImageBase, ControlPc, FunctionEntry, ContextRecord, HandlerData*, EstablisherFrame*, ContextPointers) */
 static void s_RtlVirtualUnwind(Cpu *c) {
   u64 ctx = ARG(4); UCtx x; uctx_read(c, ctx, &x); u64 hd = 0, est = 0;
-  u64 h = seh_virtual_unwind(c, (u32)ARG(0), ARG(1), ARG(2), ARG(3), &x, &hd, &est);
+  u64 h = seh_virtual_unwind_cp(c, (u32)ARG(0), ARG(1), ARG(2), ARG(3), &x, &hd, &est, ARG(7));
   uctx_write(c, ctx, &x); if (ARG(5)) wr64(c, ARG(5), hd); if (ARG(6)) wr64(c, ARG(6), est); RET(h);
 }
 

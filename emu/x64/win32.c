@@ -717,10 +717,7 @@ static void s_VirtualFree(Cpu *c) { u64 addr = ARG(0), size = ARG(1); u32 type =
 static void s_VirtualProtect(Cpu *c) { if (ARG(3)) wr32(c, ARG(3), 0x40); RET(1); }
 static void s_VirtualLock(Cpu *c) { RET(1); }
 static void s_VirtualUnlock(Cpu *c) { RET(1); }
-static void s_VirtualQuery(Cpu *c) { u64 addr = ARG(0), mbi = ARG(1); Region *r = mem_region(c->mem, addr);
-  u8 *p = mem_ptr(c->mem, mbi, 48, 1); if (!p) { RET(0); return; } e_memset(p, 0, 48);
-  if (!r) { wr64(c, mbi, addr & ~0xfffull); wr64(c, mbi + 24, 0x1000); wr32(c, mbi + 32, 0x10000); wr32(c, mbi + 36, 1); RET(48); return; }
-  wr64(c, mbi, addr & ~0xfffull); wr64(c, mbi + 8, r->base); wr32(c, mbi + 16, 0x40); wr64(c, mbi + 24, r->base + r->size - (addr & ~0xfffull)); wr32(c, mbi + 32, 0x1000); wr32(c, mbi + 36, 0x40); wr32(c, mbi + 40, r->base == W->image_base ? 0x1000000 : 0x20000); RET(48); }
+/* VirtualQuery: see win32_clr.inc (stack-aware) */
 static void s_FlushInstructionCache(Cpu *c) { RET(1); }
 static void s_CreateTimerQueue(Cpu *c) { RET(0); }
 static void s_GetThreadLocale(Cpu *c) { RET(0x409); }
@@ -1317,7 +1314,7 @@ void w32_start(Win32 *w, const char *cmdline) {
   static const char *base_envs[] = { "PATH=C:\\Windows\\System32;C:\\Windows\\System32\\WindowsPowerShell\\v1.0", "SYSTEMROOT=C:\\Windows", "TEMP=C:\\tmp", "TMP=C:\\tmp", "USERPROFILE=C:\\Users\\user", "HOMEPATH=\\Users\\user", "USERNAME=user", "COMPUTERNAME=NEBULA", "OS=Windows_NT", "NEBULA_X64=1", "BUN_JSC_useConcurrentGC=false", "BUN_JSC_useConcurrentJIT=false", "PROCESSOR_ARCHITECTURE=AMD64", "PROCESSOR_IDENTIFIER=Intel64 Family 6 Model 158 Stepping 10, GenuineIntel", "PROCESSOR_LEVEL=6", "PROCESSOR_REVISION=9e0a", "NUMBER_OF_PROCESSORS=1", "PATHEXT=.COM;.EXE;.BAT;.CMD", "HOMEDRIVE=C:", "WINDIR=C:\\Windows", "COMSPEC=C:\\Windows\\System32\\cmd.exe", 0 };
   /* defaults for the official .NET runtime (CoreCLR) — overridable with --env: no W^X double mapping (we have no MapViewOfFile3 aliasing),
      GC regions in a fixed 768 MB reservation, invariant globalization (no ICU on the virtual disk), no telemetry/first-run noise */
-  static const char *dotnet_envs[] = { "DOTNET_EnableWriteXorExecute=0", "DOTNET_GCRegionRange=0x30000000", "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1", "DOTNET_CLI_TELEMETRY_OPTOUT=1", "DOTNET_NOLOGO=1", "DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1", "DOTNET_TieredPGO=0", "DOTNET_ROOT=C:\\Program Files\\dotnet", 0 };
+  static const char *dotnet_envs[] = { "DOTNET_EnableWriteXorExecute=0", "DOTNET_GCRegionRange=0x30000000", "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1", "DOTNET_SYSTEM_GLOBALIZATION_PREDEFINED_CULTURES_ONLY=0", "DOTNET_CLI_TELEMETRY_OPTOUT=1", "DOTNET_NOLOGO=1", "DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1", "DOTNET_TieredPGO=0", "DOTNET_ROOT=C:\\Program Files\\dotnet", 0 };
   const char *envs[128]; int ne = 0; for (int i = 0; base_envs[i] && ne < 64; i++) envs[ne++] = base_envs[i];
   for (int i = 0; dotnet_envs[i] && ne < 90; i++) { const char *eq = dotnet_envs[i]; size_t nl = 0; while (eq[nl] && eq[nl] != '=') nl++; int dup = 0; for (int k = 0; k < g_nextra_env; k++) if (e_strncmp(g_extra_env[k], dotnet_envs[i], nl) == 0 && g_extra_env[k][nl] == '=') dup = 1; if (!dup) envs[ne++] = dotnet_envs[i]; }
   for (int i = 0; i < g_nextra_env && ne < 127; i++) envs[ne++] = g_extra_env[i]; envs[ne] = 0;
