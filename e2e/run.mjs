@@ -598,6 +598,8 @@ await test('opencode window: DEMO mode when bridge is offline', async () => {
 
 const bridgeUp = await fetch(`${url}/api/opencode/bridge`).then(r => r.ok).catch(() => false);
 if (bridgeUp || process.env.E2E_BRIDGE) {
+  // the free opencode/big-pickle model answered in 225 s on 2026-11-01 (bridge.test.ts) — give the real agent the same budget the bun test has
+  const AGENT_TIMEOUT = 330_000;
   await test('opencode window: LIVE mode — real agent answers and runs a tool', async () => {
     await openFromDesktop('opencode');
     await page.waitForSelector('text=live · v', { timeout: 15_000 });
@@ -605,7 +607,7 @@ if (bridgeUp || process.env.E2E_BRIDGE) {
     const input = oc.locator('input').last();
     await input.fill('Reply with exactly the two words: PICKLE LIVE, then run `ls opencode` with your bash tool.');
     await input.press('Enter');
-    await page.waitForFunction(() => document.body.innerText.includes('PICKLE LIVE') && !document.querySelector('input[placeholder*="working"]'), null, { timeout: 120_000 });
+    await page.waitForFunction(() => document.body.innerText.includes('PICKLE LIVE') && !document.querySelector('input[placeholder*="working"]'), null, { timeout: AGENT_TIMEOUT });
     const txt = await oc.innerText();
     expect(/bridge\.ts/.test(txt), 'tool output (ls opencode) not rendered');
     expect(/tokens/.test(txt), 'token counter missing');
@@ -629,7 +631,7 @@ if (bridgeUp || process.env.E2E_BRIDGE) {
     await p6.waitForFunction(() => {
       const t = document.querySelector('[data-window="opencode"]')?.textContent ?? '';
       return /write/.test(t) && /completed/i.test(t) && !document.querySelector('input[placeholder*="working"]');
-    }, null, { timeout: 120_000 });
+    }, null, { timeout: AGENT_TIMEOUT });
     const txt = await oc.innerText();
     expect(!/FreeUsageLimit|error:/i.test(txt), `agent error: ${txt.slice(0, 200)}`);
     expect(/tokens/.test(txt), 'token counter missing');
