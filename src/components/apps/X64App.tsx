@@ -9,10 +9,11 @@ interface ExeEntry { id: number; name: string; bytes: Uint8Array; info: PeInfo; 
 
 const SAMPLE_DATA = ['demo.sql', 'demo.json', 'demo.lua', 'demo.txt', 'demo.py', 'demo.bat'];   // small inputs for the real apps, placed in C:\nebula
 const PY_FILES = ['python312.dll', 'python312.zip', 'python312._pth', '_sqlite3.pyd', 'sqlite3.dll', '_decimal.pyd', '_ctypes.pyd', 'libffi-8.dll', '_bz2.pyd', '_lzma.pyd', 'pyexpat.pyd', '_elementtree.pyd', 'unicodedata.pyd', '_queue.pyd', '_socket.pyd', 'select.pyd', '_asyncio.pyd', '_zoneinfo.pyd', '_uuid.pyd', '_multiprocessing.pyd'];
-const SAMPLES: { name: string; href: string; desc: string; args?: string; files?: string[]; lazy?: boolean }[] = [
+const SAMPLES: { name: string; href: string; desc: string; args?: string; files?: string[]; lazy?: boolean; needsPack?: boolean }[] = [
   { name: 'NebulaStrike.exe', href: '/downloads/NebulaStrike.exe', desc: 'Win32 GDI game, PE32+ x64 (light GUI exe)' },
   { name: 'd3d11tri.exe', href: '/x64/samples/d3d11tri.exe', desc: 'Direct3D 11 → WebGL2: device + swap chain, vertex/index/constant buffers, input layout, precompiled DXBC vertex/pixel shaders translated to GLSL, Draw + DrawIndexed + Present (3 frames). Args: number of frames', args: '3' },
   { name: 'd3d11clear.exe', href: '/x64/samples/d3d11clear.exe', desc: 'Direct3D 11: D3D11CreateDeviceAndSwapChain, GetBuffer, CreateRenderTargetView, ClearRenderTargetView + Present in three colours' },
+  { name: 'msvcp.exe', href: '/x64/samples/msvcp.exe', needsPack: true, desc: 'Runtime pack test: loads the REAL msvcp140.dll (Microsoft Visual C++ 2015–2022 Redistributable, served from /x64/sys32 as C:\\Windows\\System32) and drives std::cout through its exports — static init, locale facets and iostream output of a vendor runtime DLL on top of the emulator\'s UCRT' },
   { name: 'hello.exe', href: '/x64/samples/hello.exe', desc: 'UCRT console: printf/qsort/malloc/math (light console exe)' },
   { name: 'cmd.exe', href: '/x64/apps/cmd.exe', desc: 'Command Prompt: the emulator\'s own cmd.exe (52 KB, kernel32 only; the same binary is embedded at C:\\Windows\\System32\\cmd.exe so system(), _popen and subprocess(shell=True) work). Default args run demo.bat and then stay interactive — type dir, echo, set, if, for, pipes and redirections into the console, or start any program on the virtual disk (jq.exe, python.exe …). Try: /c "dir /b | sort /r" · /c "python.exe -c print(42) | findstr 42"', args: '/k demo.bat' },
   { name: 'powershell.exe', href: '/x64/apps/powershell.exe', desc: 'Windows PowerShell subset: the emulator\'s own powershell.exe (91 KB, kernel32 only; embedded at C:\\Windows\\System32\\WindowsPowerShell\\v1.0 so installers that shell out to PowerShell work — opencode unpacks ripgrep with Expand-Archive through it). Cmdlets: Expand-Archive / [IO.Compression.ZipFile]::ExtractToDirectory (deflate + stored), Get-FileHash, Get-ChildItem, Get/Set-Content, Select-String, Where/Select/Measure-Object, Test-Path, Join-Path, New/Copy/Remove-Item, $env:, -f, -join, try/catch, if/foreach/while, & external programs, exit N. Not implemented: objects/properties beyond strings and numbers, modules, classes, .NET beyond ZipFile/Path.', args: '-NoProfile -File demo.ps1' },
@@ -44,6 +45,14 @@ const VERDICT: Record<string, { label: string; cls: string; Icon: typeof CheckCi
 const TOUCH_KEYS: { label: string; vk: number }[] = [
   { label: '◀', vk: 0x25 }, { label: '▶', vk: 0x27 }, { label: '▲', vk: 0x26 }, { label: '▼', vk: 0x28 }, { label: 'SPACE', vk: 0x20 }, { label: 'R', vk: 0x52 }, { label: 'ENTER', vk: 0x0d }, { label: 'ESC', vk: 0x1b },
 ];
+
+/* Runtime pack: the x64 DLLs of the VC++ 2015–2022 Redistributable, built by emu/tools/runtime-pack.sh into public/x64/sys32/
+   at build time and installed on demand into C:\Windows\System32 of the virtual disk (the emulator prefers these real
+   vendor-runtime DLLs over its built-in shims; core OS DLLs stay built-in). */
+type PackManifest = { pack: string; files: { name: string; size: number; version: string }[] };
+type PackState = { status: 'probing' | 'available' | 'installing' | 'installed' | 'unavailable'; manifest?: PackManifest; done?: number; note?: string };
+const PACK_URL = '/x64/sys32/';
+const exeWantsPack = (dlls: string[] | undefined, man: PackManifest | undefined) => !!man && !!dlls && dlls.some(d => man.files.some(f => f.name.toLowerCase() === d.toLowerCase()));
 
 export default function X64App() {
   const rtRef = useRef<X64Runtime | null>(null);
@@ -178,6 +187,28 @@ export default function X64App() {
   const running = stats?.status === 'running' || stats?.status === 'waiting-stdin';
 
   const [fetching, setFetching] = useState<string | null>(null);
+  const [pack, setPack] = useState<PackState>({ status: 'probing' });
+  useEffect(() => { let alive = true; (async () => {
+    try { const r = await fetch(PACK_URL + 'manifest.json'); if (!r.ok) throw new Error('HTTP ' + r.status); const man = await r.json() as PackManifest; if (alive) setPack({ status: 'available', manifest: man }); }
+    catch (e) { if (alive) setPack({ status: 'unavailable', note: 'not built into this deployment (' + String(e) + ')' }); }
+  })(); return () => { alive = false; }; }, []);
+  const installPack = useCallback(async (rt: X64Runtime): Promise<boolean> => {
+    if (pack.status === 'installed') return true;
+    if (pack.status !== 'available' || !pack.manifest) { setLog(l => [...l, 'RUNTIME PACK: ' + (pack.note ?? pack.status)]); return false; }
+    const man = pack.manifest; let done = 0, bytes = 0;
+    setPack({ status: 'installing', manifest: man, done: 0 }); setFetching(`installing runtime pack (${man.files.length} DLLs)…`);
+    try {
+      for (const f of man.files) {
+        const r = await fetch(PACK_URL + f.name); if (!r.ok) throw new Error(`${f.name}: HTTP ${r.status}`);
+        const b = new Uint8Array(await r.arrayBuffer()); bytes += b.length; done++;
+        rt.vfsAdd('C:\\Windows\\System32\\' + f.name, b);
+        setPack({ status: 'installing', manifest: man, done }); setFetching(`installing runtime pack: ${done}/${man.files.length}, ${(bytes / 1048576).toFixed(1)} MB`);
+      }
+    } catch (e) { setFetching(null); setPack({ status: 'available', manifest: man, note: String(e) }); setLog(l => [...l, 'RUNTIME PACK: ' + String(e)]); return false; }
+    setFetching(null); setPack({ status: 'installed', manifest: man, done }); setFiles(rt.vfsList());
+    setLog(l => [...l, `runtime pack installed: ${done} DLLs, ${(bytes / 1048576).toFixed(1)} MB → C:\\Windows\\System32 (${man.pack})`]);
+    return true;
+  }, [pack]);
   const run = useCallback(async () => {
     const rt = rtRef.current; if (!rt || !current) return;
     consoleBuf.current = ''; setConsoleText(''); setLog([]); setFrames(0); setWaitingStdin(false);
@@ -196,13 +227,15 @@ export default function X64App() {
       } catch (e) { setFetching(null); setLog(l => [...l, 'DOWNLOAD: ' + String(e)]); setTab('report'); return; }
       setFetching(null);
     }
+    const sample = current.source === 'sample' ? SAMPLES.find(x => x.name === current.name) : undefined;
+    if (pack.status !== 'installed' && (sample?.needsPack || exeWantsPack(current.info.dlls, pack.manifest))) await installPack(rt);   // the program imports a vendor-runtime DLL we ship
     const base = current.name.split('\\').pop() || current.name;
     const err = rt.start(current.bytes, base, args.trim() ? `${base} ${args.trim()}` : base);
     if (err) { setLog(l => [...l, 'LOADER: ' + err]); setStats(rt.stats()); setTab('report'); return; }
     setStats(rt.stats()); setFiles(rt.vfsList());
     setTab(current.info.subsystem === 'GUI' ? 'screen' : 'console');
     setTimeout(() => screenRef.current?.focus(), 50);
-  }, [current, args]);
+  }, [current, args, pack, installPack]);
   const stop = useCallback(() => { const rt = rtRef.current; if (!rt) return; rt.stop(); setStats(rt.stats()); setFiles(rt.vfsList()); }, []);
 
   // keyboard → guest
@@ -238,6 +271,11 @@ export default function X64App() {
         <input value={args} onChange={e => setArgs(e.target.value)} placeholder="arguments" className="w-32 rounded border border-slate-300 px-2 py-1 text-[11px] outline-none focus:border-indigo-400" />
         <button data-x64-run disabled={!current || ready !== 'ready' || !!running || !!fetching} onClick={() => { void run(); }} className="flex items-center gap-1 rounded bg-indigo-600 px-3 py-1 font-semibold text-white disabled:opacity-40 hover:bg-indigo-700"><Play size={12} /> Run</button>
         <button data-x64-stop disabled={!running} onClick={stop} className="flex items-center gap-1 rounded border border-slate-300 bg-white px-2 py-1 disabled:opacity-40 hover:bg-slate-50"><Square size={11} /> Stop</button>
+        <button data-x64-pack={pack.status} disabled={pack.status !== 'available' || !!running || !!fetching} onClick={() => { const rt = rtRef.current; if (rt) void installPack(rt); }}
+          title={pack.status === 'installed' ? `Runtime pack installed in C:\\Windows\\System32 (${pack.done} DLLs)` : pack.status === 'available' ? `Install the VC++ 2015–2022 runtime DLLs (${pack.manifest?.files.length} files, ${((pack.manifest?.files.reduce((a, f) => a + f.size, 0) ?? 0) / 1048576).toFixed(1)} MB) into C:\\Windows\\System32 — also happens automatically when a program needs them` : pack.status === 'unavailable' ? 'Runtime pack not available: ' + pack.note : 'Runtime pack…'}
+          className={`hidden items-center gap-1 rounded border px-2 py-1 sm:flex ${pack.status === 'installed' ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : 'border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-40'}`}>
+          <Download size={11} /> {pack.status === 'installed' ? 'VC++ runtime ✓' : pack.status === 'installing' ? `VC++ runtime ${pack.done}/${pack.manifest?.files.length}` : pack.status === 'unavailable' ? 'VC++ runtime n/a' : 'VC++ runtime'}
+        </button>
         <div className="ml-auto flex items-center gap-1 rounded bg-slate-100 p-0.5">
           {(['screen', 'console', 'files', 'report'] as const).map(t => (
             <button key={t} data-x64-tab={t} onClick={() => setTab(t)} className={`flex items-center gap-1 rounded px-2 py-1 capitalize ${tab === t ? 'bg-white shadow-sm font-semibold' : 'text-slate-500 hover:text-slate-800'}`}>
@@ -319,7 +357,7 @@ export default function X64App() {
                   <tbody>
                     {files.map(f => (
                       <tr key={f.path} data-x64-vfs={f.path} className="border-b border-slate-100 hover:bg-indigo-50/40">
-                        <td className="px-3 py-1 font-mono">{f.dir ? '📁 ' : ''}{f.path}{f.written && !f.dir && <span className="ml-2 rounded bg-emerald-100 px-1 text-[9px] font-semibold text-emerald-800">written</span>}</td>
+                        <td className="px-3 py-1 font-mono">{f.dir ? '📁 ' : ''}{f.path}{!!f.written && !f.dir && <span className="ml-2 rounded bg-emerald-100 px-1 text-[9px] font-semibold text-emerald-800">written</span>}</td>
                         <td className="px-2 py-1 text-right text-slate-500">{f.dir ? '' : f.size.toLocaleString() + ' B'}</td>
                         <td className="px-2 py-1 text-right whitespace-nowrap">
                           {!f.dir && <button title="download" data-x64-download onClick={() => downloadFile(f.path)} className="rounded p-0.5 text-slate-500 hover:bg-white hover:text-indigo-700"><Download size={13} /></button>}

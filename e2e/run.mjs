@@ -249,6 +249,26 @@ await test('x64: hello.exe (UCRT console, printf/qsort/malloc/math) runs to exit
   await page.screenshot({ path: resolve(SHOTS, 'x64-hello.png') });
   await closeAll();
 });
+await test('x64: runtime pack — the REAL msvcp140.dll (VC++ 2015–2022 Redistributable) is installed into C:\\Windows\\System32 on demand and std::cout works through it', async () => {
+  const w = await x64Open();
+  const packStatus = async () => w.locator('[data-x64-pack]').getAttribute('data-x64-pack');
+  await page.waitForFunction(() => { const s = document.querySelector('[data-x64-pack]')?.getAttribute('data-x64-pack'); return s && s !== 'probing'; }, null, { timeout: 15_000 });
+  const before = await packStatus();
+  if (before === 'unavailable') { console.log('      (runtime pack not built into this deployment — run emu/tools/runtime-pack.sh; checking the honest path only)'); }
+  await w.locator('[data-x64-exe="msvcp.exe"]').click();
+  await w.locator('[data-x64-run]').click();
+  await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout: 90_000 });
+  const con = await w.locator('[data-x64-console]').innerText();
+  if (before === 'unavailable') { expect(/exports missing/.test(con), 'without the pack LoadLibrary must fall back to the built-in shim and the test must say so: ' + con.slice(0, 200)); await closeAll(); return; }
+  expect((await packStatus()) === 'installed', 'pack should be installed after running an exe that needs it: ' + await packStatus());
+  expect(/42 3\.25/.test(con), 'cout << int << double wrong: ' + con.slice(0, 300));
+  expect(/msvcp140 says hello/.test(con), 'cout put/flush output missing');
+  expect(/MSVCP OK/.test(con), 'test did not finish');
+  const files = await w.locator('[data-x64-tab="files"]').click().then(() => w.innerText());
+  expect(/msvcp140\.dll/.test(files), 'msvcp140.dll should be listed on the virtual disk');
+  await page.screenshot({ path: resolve(SHOTS, 'x64-runtime-pack.png') });
+  await closeAll();
+});
 await test('x64: NebulaStrike.exe (real Win32 GDI PE32+) renders frames through WebGL and reacts to keys', async () => {
   const w = await x64Open();
   await w.locator('[data-x64-exe="NebulaStrike.exe"]').click();

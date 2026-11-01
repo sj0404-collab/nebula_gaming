@@ -240,6 +240,17 @@ rc=0; $PSX "powershell -NoProfile -File C:\\nebula\\t_ps.ps1" >/dev/null 2>&1 ||
 check "script exit code"        "rc=3" "rc=$rc"
 check "unknown cmdlet"          "The term 'Get-Nonsense' is not recognized" "$($PSX "powershell -Command Get-Nonsense" 2>&1 || true)"
 rm -f tests/t_ps.ps1 tests/t_zip.ps1 tests/t_pw.bat
+echo "[5x] msvcp.exe (REAL msvcp140.dll from the VC++ redistributable — needs the runtime pack in public/x64/sys32)"
+if [ -f ../public/x64/sys32/msvcp140.dll ]; then
+  out=$($X --quiet --no-stdin --mount '../public/x64/sys32=C:\Windows\System32' tests/msvcp.exe 2>&1 || true)
+  check "cout << int/double"  "42 3.25" "$out"
+  check "cout put/flush"      "msvcp140 says hello" "$out"
+  check "done"                "MSVCP OK" "$out"
+  out=$($X --quiet --no-stdin tests/msvcp.exe 2>&1 || true)
+  check "no pack → honest"    "exports missing" "$out"
+else
+  echo "  skip (run emu/tools/runtime-pack.sh first)"
+fi
 echo "[6] honest rejections"
 check "32-bit PE"   '"verdict":"unsupported"' "$(printf 'MZ' | head -c 2 > /tmp/pe32.bin; python3 - <<'PY'
 import struct

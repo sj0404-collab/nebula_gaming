@@ -44,3 +44,4 @@ emu/tests/*.pdb
 emu/tests/*.lib
 emu/third_party/
 frame_*.ppm
+public/x64/sys32/

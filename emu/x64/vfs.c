@@ -352,6 +352,12 @@ static int glob_match(const char *pat, const char *s) {
   if (*pat == '?' || lc(*pat) == lc(*s)) return glob_match(pat + 1, s + 1);
   return 0;
 }
+/* Win32 rule: a trailing ".*" also matches names without any dot ("*.*" lists everything, "setup.*" matches "setup") */
+static int win_match(const char *pat, const char *s) {
+  if (glob_match(pat, s)) return 1;
+  size_t l = e_strlen(pat); if (l >= 2 && pat[l - 1] == '*' && pat[l - 2] == '.' && !e_strchr(s, '.')) { char p2[VFS_PATH]; if (l - 2 < sizeof p2) { e_memcpy(p2, pat, l - 2); p2[l - 2] = 0; return glob_match(p2, s); } }
+  return 0;
+}
 static const char *basename_of(const char *p) { const char *b = p; for (const char *q = p; *q; q++) if (*q == '\\') b = q + 1; return b; }
 static int dir_of(const char *norm, char *dir, size_t cap) { const char *b = basename_of(norm); size_t l = (size_t)(b - norm); if (l > 0 && norm[l - 1] == '\\' && l > 3) l--; if (l >= cap) l = cap - 1; e_memcpy(dir, norm, l); dir[l] = 0; return 1; }
 static int in_dir(const char *path, const char *dir) {   /* path's parent == dir ? */
@@ -379,7 +385,7 @@ int vfs_find_next(int h, char *name, size_t cap, u64 *size, int *is_dir) {
   if (f->dots > 0) { e_snprintf(name, cap, f->dots == 2 ? "." : ".."); *size = 0; *is_dir = 1; f->dots--; return 1; }
   for (; f->cursor < g_ncap; f->cursor++) {
     VNode *v = &g_nodes[f->cursor]; if (!v->used || !in_dir(v->path, f->dir)) continue;
-    const char *b = basename_of(v->path); if (!glob_match(f->pat, b)) continue;
+    const char *b = basename_of(v->path); if (!win_match(f->pat, b)) continue;
     e_snprintf(name, cap, "%s", b); *size = v->size; *is_dir = v->is_dir; f->cursor++; return 1;
   }
   return 0;

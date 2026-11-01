@@ -1,0 +1,72 @@
+/* Shims needed by the REAL Visual C++ runtime DLLs (msvcp140*.dll, vcruntime140_1.dll, concrt140, vcomp140 from the
+ * VC++ redistributable) when they run on top of the emulator's kernel32/ucrt. These are UCRT/vcruntime internals the
+ * STL binary imports: locale locks, the _Getdays/_Getmonths/_Gettnames time tables, _Strftime/_Wcsftime, wide stdio,
+ * __AdjustPointer, __uncaught_exceptions … Only the C++ library itself calls them. */
+static void s_lock_locales(Cpu *c) { RET(0); }
+static u64 rt_scratch(Win32 *w) { if (!w->rt_scratch) w->rt_scratch = w32_heap_alloc(w, 256, 1); return w->rt_scratch; }   /* zeroed guest block: ___lc_locale_name (6 x wchar_t* = NULL → "C"), __processing_throw counter */
+static void s_lc_locale_name_func(Cpu *c) { RET(rt_scratch(W)); }
+static void s_processing_throw(Cpu *c) { RET(rt_scratch(W) + 64); }
+static void s_invoke_watson(Cpu *c) { con_out(W, 2, "_invoke_watson: invalid parameter\n", 34); do_exit(c, 3); }
+static void s_strncnt(Cpu *c) { u64 n = ARG(1), i = 0; while (i < n && rd8(c, ARG(0) + i)) i++; RET(i); }
+static void s_wcsdup(Cpu *c) { u64 s = ARG(0); if (!s) { RET(0); return; } u64 n = 0; while (rd16(c, s + n * 2)) n++; u64 a = w32_heap_alloc(W, (n + 1) * 2, 0); for (u64 i = 0; i <= n; i++) wr16(c, a + i * 2, rd16(c, s + i * 2)); RET(a); }
+static void s_iswxdigit(Cpu *c) { u32 ch = (u32)ARG(0); RET(ch < 128 && ((ch >= '0' && ch <= '9') || ((ch | 32) >= 'a' && (ch | 32) <= 'f'))); }
+static void s_iswalnum(Cpu *c) { u32 ch = (u32)ARG(0); RET(ch < 128 && ((ch >= '0' && ch <= '9') || ((ch | 32) >= 'a' && (ch | 32) <= 'z'))); }
+static void s_btowc(Cpu *c) { u32 ch = (u32)ARG(0); RET(ch == 0xffffffffu ? 0xffffu : ch < 128 ? ch : 0xffffu); }
+static void s_strtof(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 20); if (!s) { c->x[0].f32[0] = 0; return; } char *e; double v = e_strtod(s, &e); if (ARG(1)) wr64(c, ARG(1), ARG(0) + (u64)(e - s)); c->x[0].f32[0] = (float)v; }
+/* wide stdio on byte streams (the STL only uses these for wfstream/wcout on narrow files) */
+static void s_fgetwc(Cpu *c) { s_fgetc(c); if (c->status != RUN_OK) return; if (c->r[RAX] == ~0ull) c->r[RAX] = 0xffff; }
+static void s_fputwc(Cpu *c) { u32 wc = (u32)ARG(0); char ch = (char)(wc < 256 ? wc : '?'); int wr = stream_write(c, ARG(1), &ch, 1); if (!wr) return; RET(wr < 0 ? 0xffffull : wc); }
+static void s_ungetwc(Cpu *c) { s_ungetc(c); if (c->r[RAX] == ~0ull) c->r[RAX] = 0xffff; }
+/* time tables of the "C" locale, malloc'd (the STL frees them with free()) */
+static const char *const rt_days = ":Sun:Sunday:Mon:Monday:Tue:Tuesday:Wed:Wednesday:Thu:Thursday:Fri:Friday:Sat:Saturday";
+static const char *const rt_months = ":Jan:January:Feb:February:Mar:March:Apr:April:May:May:Jun:June:Jul:July:Aug:August:Sep:September:Oct:October:Nov:November:Dec:December";
+static void s_Getdays(Cpu *c) { RET(w32_guest_strdup(W, rt_days)); }
+static void s_Getmonths(Cpu *c) { RET(w32_guest_strdup(W, rt_months)); }
+static u64 rt_wide_dup(Cpu *c, const char *s) { size_t n = e_strlen(s); u64 a = w32_heap_alloc(W, (n + 1) * 2, 0); for (size_t i = 0; i <= n; i++) wr16(c, a + i * 2, (u8)s[i]); return a; }
+static void s_W_Getdays(Cpu *c) { RET(rt_wide_dup(c, rt_days)); }
+static void s_W_Getmonths(Cpu *c) { RET(rt_wide_dup(c, rt_months)); }
+/* <fenv.h> over the emulated MXCSR (MSVC's FE_* flag bits equal the MXCSR exception bits; rounding = MXCSR.RC << 5 → 0x000/0x100/0x200/0x300).
+   fenv_t is { unsigned long _Fe_ctl, _Fe_stat }.  Only flags the emulated SSE/x87 units actually raise are visible (honest limit:
+   the interpreter sets few of them, so numpy-style "divide by zero" warnings are mostly silent). */
+static void s_fetestexcept(Cpu *c) { RET(c->mxcsr & (u32)ARG(0) & 0x3f); }
+static void s_feclearexcept(Cpu *c) { c->mxcsr &= ~((u32)ARG(0) & 0x3f); RET(0); }
+static void s_feraiseexcept(Cpu *c) { c->mxcsr |= (u32)ARG(0) & 0x3f; RET(0); }
+static void s_fegetexceptflag(Cpu *c) { if (ARG(0)) wr32(c, ARG(0), c->mxcsr & (u32)ARG(1) & 0x3f); RET(0); }
+static void s_fesetexceptflag(Cpu *c) { u32 m = (u32)ARG(1) & 0x3f; c->mxcsr = (c->mxcsr & ~m) | (rd32(c, ARG(0)) & m); RET(0); }
+static void s_fegetround(Cpu *c) { RET((c->mxcsr >> 5) & 0x300); }
+static void s_fesetround(Cpu *c) { u32 r = (u32)ARG(0); if (r & ~0x300u) { RET(1); return; } c->mxcsr = (c->mxcsr & ~0x6000u) | (r << 5); c->fpu_cw = (u16)((c->fpu_cw & ~0xc00u) | (r << 2)); RET(0); }
+static void s_fegetenv(Cpu *c) { if (ARG(0)) { wr32(c, ARG(0), c->mxcsr & ~0x3fu); wr32(c, ARG(0) + 4, c->mxcsr & 0x3f); } RET(0); }
+static void s_fesetenv(Cpu *c) { if (ARG(0)) c->mxcsr = (rd32(c, ARG(0)) & ~0x3fu) | (rd32(c, ARG(0) + 4) & 0x3f); RET(0); }
+static void s_feholdexcept(Cpu *c) { s_fegetenv(c); c->mxcsr = (c->mxcsr & ~0x3fu) | 0x1f80; RET(0); }
+static void s_feupdateenv(Cpu *c) { u32 fl = c->mxcsr & 0x3f; s_fesetenv(c); c->mxcsr |= fl; RET(0); }
+static u32 sw_of_mxcsr(u32 m) { return ((m & 0x20) ? 0x1 : 0) | ((m & 0x10) ? 0x2 : 0) | ((m & 0x8) ? 0x4 : 0) | ((m & 0x4) ? 0x8 : 0) | ((m & 0x1) ? 0x10 : 0) | ((m & 0x2) ? 0x80000 : 0); }
+static void s_statusfp(Cpu *c) { RET(sw_of_mxcsr(c->mxcsr)); }
+static void s_clearfp(Cpu *c) { RET(sw_of_mxcsr(c->mxcsr)); c->mxcsr &= ~0x3fu; }
+static void s_statusfp2(Cpu *c) { if (ARG(0)) wr32(c, ARG(0), sw_of_mxcsr(c->mxcsr)); if (ARG(1)) wr32(c, ARG(1), sw_of_mxcsr(c->mxcsr)); RET(0); }
+/* _get_stream_buffer_pointers(FILE*, char ***base, char ***ptr, int **cnt): the STL's basic_filebuf points its get/put
+   areas straight into the FILE (_base @0x10, _ptr @0x0, _cnt @0x8 — the classic msvcrt layout our FILE slots keep zeroed,
+   so the filebuf sees "no buffer" and falls back to fgetc/fputc).  The old ret0 stub left the out-pointers NULL and the
+   filebuf destructor dereferenced them at exit (crash in cout's filebuf). */
+static void s_get_stream_buffer_pointers(Cpu *c) { u64 f = ARG(0);
+  if (!f) { RET((u64)22); return; }
+  if (ARG(1)) wr64(c, ARG(1), f + 0x10); if (ARG(2)) wr64(c, ARG(2), f); if (ARG(3)) wr64(c, ARG(3), f + 8); RET(0); }
+static void s_Gettnames(Cpu *c) { RET(w32_heap_alloc(W, 1024, 1)); }   /* __lc_time_data: opaque to the STL, passed back to _Strftime */
+/* _Strftime(buf, max, fmt, tm, lc_time_data) / _Wcsftime(wbuf, max, wfmt, tm, lc_time_data) */
+static void s_Strftime(Cpu *c) { s_strftime(c); }
+static void s_Wcsftime(Cpu *c) { char f[512]; wstr_to_utf8(c, ARG(2), f, sizeof f, -1); char out[1024]; int n = fmt_tm(c, out, sizeof out, f, ARG(3)); if ((u64)n + 1 > ARG(1)) { RET(0); return; } for (int i = 0; i <= n; i++) wr16(c, ARG(0) + (u64)i * 2, (u8)out[i]); RET((u64)n); }
+/* vcruntime internals */
+static void s_uncaught_exceptions(Cpu *c) { RET(0); }
+/* __AdjustPointer(void *this, const PMD *pmd): this + mdisp, plus the virtual-base displacement when pdisp >= 0 */
+static void s_AdjustPointer(Cpu *c) { u64 p = ARG(0), pmd = ARG(1); if (!p) { RET(0); return; } s32 mdisp = (s32)rd32(c, pmd), pdisp = (s32)rd32(c, pmd + 4), vdisp = (s32)rd32(c, pmd + 8);
+  u64 r = p + (s64)mdisp; if (pdisp >= 0) { u64 vbtable = rd64(c, p + (s64)pdisp); r += (s64)(s32)rd32(c, vbtable + (s64)vdisp); } RET(r); }
+/* kernel32 odds and ends imported by the runtime DLLs */
+static void s_FlushProcessWriteBuffers(Cpu *c) { RET(0); }
+static void s_lstrcmpiW(Cpu *c) { char a[1024], b[1024]; wstr_to_utf8(c, ARG(0), a, sizeof a, -1); wstr_to_utf8(c, ARG(1), b, sizeof b, -1); int r = e_stricmp(a, b); RET((u64)(s64)(r < 0 ? -1 : r > 0 ? 1 : 0)); }
+static void s_GetStringTypeExW(Cpu *c) { c->r[RCX] = ARG(1); c->r[RDX] = ARG(2); c->r[R8] = ARG(3); c->r[R9] = ARG(4); s_GetStringTypeW(c); }   /* (locale, type, src, n, out) → GetStringTypeW(type, src, n, out) */
+static void s_GetThreadPreferredUILanguages(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), 0); if (ARG(3)) { u32 need = rd32(c, ARG(3)); if (ARG(2) && need >= 1) wr16(c, ARG(2), 0); wr32(c, ARG(3), 1); } RET(1); }
+#define RT_SHIMS \
+  SA("_lock_locales", lock_locales), SA("_unlock_locales", lock_locales), SA("___lc_locale_name_func", lc_locale_name_func), SA("__processing_throw", processing_throw), SA("_invoke_watson", invoke_watson), \
+  SA("__strncnt", strncnt), SA("_wcsdup", wcsdup), S(iswxdigit), S(iswalnum), S(btowc), S(strtof), S(fgetwc), S(fputwc), S(ungetwc), \
+  SA("_Getdays", Getdays), SA("_Getmonths", Getmonths), SA("_W_Getdays", W_Getdays), SA("_W_Getmonths", W_Getmonths), SA("_Gettnames", Gettnames), S(fetestexcept), S(feclearexcept), S(feraiseexcept), S(fegetexceptflag), S(fesetexceptflag), S(fegetround), S(fesetround), S(fegetenv), S(fesetenv), S(feholdexcept), S(feupdateenv), SA("_statusfp", statusfp), SA("_clearfp", clearfp), SA("_statusfp2", statusfp2), SA("_get_stream_buffer_pointers", get_stream_buffer_pointers), SA("_W_Gettnames", Gettnames), SA("_Strftime", Strftime), SA("_Wcsftime", Wcsftime), SA("_ldclass", dclass), \
+  SA("__uncaught_exceptions", uncaught_exceptions), SA("__uncaught_exception", uncaught_exceptions), SA("__std_terminate", cxx_terminate), SA("__AdjustPointer", AdjustPointer), \
+  S(FlushProcessWriteBuffers), SA("FreeLibraryWhenCallbackReturns", ret0), S(lstrcmpiW), S(GetStringTypeExW), S(GetThreadPreferredUILanguages), SA("SetThreadPreferredUILanguages", ret1),

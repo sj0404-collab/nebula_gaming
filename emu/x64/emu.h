@@ -261,6 +261,7 @@ struct Win32 {
   Mem *mem;
   ShimSlot slots[MAX_SHIMS]; int nslots;
   u64 image_base; u64 image_size; u64 entry; int subsystem;   /* 2 GUI, 3 console */
+  char dll_dirs[8][260]; int ndll_dirs;   /* AddDllDirectory / SetDllDirectory: extra DLL search directories (delvewheel, Qt, game launchers) */
   char exe_name[260]; char exe_path[600]; char cmdline[1024];   /* exe_path: full guest path of the image (GetModuleFileName(NULL), PEB ImagePathName) */
   u64 teb, peb, cmdline_a, cmdline_w, env_w, env_a;           /* teb: main thread's TEB */
   union { ThreadCtx tctx; struct { THREAD_CTX_FIELDS }; };    /* current thread's state (see Thread.ctx) */
@@ -294,6 +295,7 @@ struct Win32 {
   u64 veh[16]; int nveh; u64 uef; char hw_msg[160]; u32 hw_code;   /* vectored exception handlers, top-level filter, text of the last hardware fault */
   int wndclass_registered; u64 wndclass_proc; char wndclass_name[64];
   u64 ubuf;                              /* small scratch buffer in guest memory */
+  u64 rt_scratch;                        /* win32_rt.inc: zeroed block for the real msvcp140's locale-name / processing-throw pointers */
   int quit_posted;
   /* x87 / misc */
   u32 rand_state;
@@ -332,6 +334,7 @@ int  pe_load(Win32 *w, const u8 *bytes, size_t len, const char *name);
 int  pe_load_dll(Win32 *w, const u8 *bytes, size_t len, const char *name);   /* → module index or -1 */
 void pe_tls_thread_init(Win32 *w, int th);
 int  pe_is_system_dll(const char *dll);
+int  pe_dll_native_ok(const char *dll);   /* system DLL that may be replaced by a real file on the virtual disk (msvcp140, msvcr120, d3dcompiler …) */
 /* static inspection (no execution): fills a JSON-ish report of arch/subsystem/imports and supported ratio */
 int  pe_inspect(const u8 *bytes, size_t len, char *out, size_t out_sz);
 

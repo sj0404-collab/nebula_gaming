@@ -442,10 +442,22 @@ static int mod_name_eq(const char *a, const char *b) {   /* case-insensitive, ".
 static int mod_find(Win32 *w, const char *name) { const char *bn = mod_basename(name); for (int i = 0; i < w->nmods; i++) if (mod_name_eq(w->mods[i].name, bn)) return i; return -1; }
 static int mod_by_base(Win32 *w, u64 base) { for (int i = 0; i < w->nmods; i++) if (w->mods[i].base == base) return i; return -1; }
 /* find a DLL file on the virtual disk: as given, next to the exe (cwd), C:\nebula */
+/* AddDllDirectory(PCWSTR) → opaque cookie; SetDllDirectory replaces slot 0 */
+static void dll_dir_add(Win32 *w, const char *d, int set) { if (!d || !d[0]) { if (set) w->dll_dirs[0][0] = 0; return; } int i = set ? 0 : (w->ndll_dirs < 8 ? w->ndll_dirs : 7); e_snprintf(w->dll_dirs[i], sizeof w->dll_dirs[i], "%s", d); size_t l = e_strlen(w->dll_dirs[i]); if (l > 1 && w->dll_dirs[i][l - 1] == '\\') w->dll_dirs[i][l - 1] = 0; if (!set && w->ndll_dirs < 8) w->ndll_dirs++; else if (set && w->ndll_dirs == 0) w->ndll_dirs = 1; }
+static void s_AddDllDirectory(Cpu *c) { char d[600]; wstr_to_utf8(c, ARG(0), d, sizeof d, -1); dll_dir_add(W, d, 0); RET(0x1000 + W->ndll_dirs); }
+static void s_SetDllDirectoryW(Cpu *c) { char d[600]; if (ARG(0)) wstr_to_utf8(c, ARG(0), d, sizeof d, -1); else d[0] = 0; dll_dir_add(W, d, 1); RET(1); }
+static void s_SetDllDirectoryA(Cpu *c) { const char *d = ARG(0) ? rd_str(c, ARG(0), 260) : 0; dll_dir_add(W, d ? d : "", 1); RET(1); }
+/* search order (Windows "safe DLL search"): as given, the exe's directory, the AddDllDirectory/SetDllDirectory directories, C:\Windows\System32, cwd, C:\nebula, then PATH */
+static const char *env_get(const char *name);   /* win32_fs.inc */
 static int mod_load(Win32 *w, const char *name) {
   int m = mod_find(w, name); if (m >= 0) return m;
-  char path[600]; const char *cands[3]; int nc = 0; cands[nc++] = name;
-  char p1[600], p2[600]; e_snprintf(p1, sizeof p1, "%s\\%s", vfs_cwd(), mod_basename(name)); cands[nc++] = p1; e_snprintf(p2, sizeof p2, "C:\\nebula\\%s", mod_basename(name)); cands[nc++] = p2;
+  char path[600]; const char *cands[24]; int nc = 0; cands[nc++] = name; const char *bn = mod_basename(name);
+  char p0[600], p1[600], p2[600], p3[600]; char pbuf[8][600]; int np = 0;
+  if (w->exe_path[0]) { e_snprintf(p0, sizeof p0, "%s", w->exe_path); char *sl = 0; for (char *q = p0; *q; q++) if (*q == '\\' || *q == '/') sl = q; if (sl) { size_t l = (size_t)(sl + 1 - p0); e_snprintf(p0 + l, sizeof p0 - l, "%s", bn); cands[nc++] = p0; } }
+  char pd[8][600]; for (int i = 0; i < w->ndll_dirs && i < 8; i++) if (w->dll_dirs[i][0]) { e_snprintf(pd[i], sizeof pd[i], "%s\\%s", w->dll_dirs[i], bn); cands[nc++] = pd[i]; }
+  e_snprintf(p3, sizeof p3, "C:\\Windows\\System32\\%s", bn); cands[nc++] = p3;
+  e_snprintf(p1, sizeof p1, "%s\\%s", vfs_cwd(), bn); cands[nc++] = p1; e_snprintf(p2, sizeof p2, "C:\\nebula\\%s", bn); cands[nc++] = p2;
+  { const char *pv = env_get("PATH"); while (pv && *pv && np < 8) { const char *e = pv; while (*e && *e != ';') e++; size_t l = (size_t)(e - pv); if (l && l < 500) { e_memcpy(pbuf[np], pv, l); if (pbuf[np][l - 1] == '\\') l--; e_snprintf(pbuf[np] + l, sizeof pbuf[np] - l, "\\%s", bn); cands[nc++] = pbuf[np]; np++; } pv = *e ? e + 1 : e; } }
   for (int k = 0; k < nc; k++) {
     e_snprintf(path, sizeof path, "%s", cands[k]);
     int node = vfs_find_node(path); if (node < 0) { size_t l = e_strlen(path); if (l + 4 < sizeof path && e_stricmp(path + (l > 4 ? l - 4 : 0), ".dll")) { e_memcpy(path + l, ".dll", 5); node = vfs_find_node(path); } }
@@ -470,7 +482,7 @@ static u64 mod_export_m(Win32 *w, GuestModule *m, const char *name, u32 ordinal,
   if (rva >= m->exp_rva && rva < m->exp_rva + m->exp_size) {   /* forwarder */
     const char *fw = rd_str(c, m->base + rva, 256); if (!fw) return 0; char dll[80]; int k = 0; while (fw[k] && fw[k] != '.' && k < 70) { dll[k] = fw[k]; k++; } dll[k] = 0;
     if (fw[k] != '.') return 0; const char *fn = fw + k + 1; e_memcpy(dll + k, ".dll", 5);
-    if (!pe_is_system_dll(dll)) { int o = mod_load(w, dll); if (o >= 0) return mod_export(w, o, fn[0] == '#' ? 0 : fn, fn[0] == '#' ? (u32)mod_atoi(fn + 1) : 0, depth + 1); }
+    if (!pe_is_system_dll(dll) || pe_dll_native_ok(dll)) { int o = mod_load(w, dll); if (o >= 0) return mod_export(w, o, fn[0] == '#' ? 0 : fn, fn[0] == '#' ? (u32)mod_atoi(fn + 1) : 0, depth + 1); }
     return w32_shim_slot(w, dll, fn);
   }
   return m->base + rva; }
@@ -479,7 +491,7 @@ static u64 mod_export(Win32 *w, int mi, const char *name, u32 ordinal, int depth
 static u64 exe_export(Win32 *w, const char *name, u32 ordinal) { if (!w->exe_exp_rva) return 0; GuestModule m; e_memset(&m, 0, sizeof m); m.base = w->image_base; m.exp_rva = w->exe_exp_rva; m.exp_size = w->exe_exp_size; return mod_export_m(w, &m, name, ordinal, 0); 
 }
 u64 w32_resolve_import(Win32 *w, const char *dll, const char *name, u32 ordinal) {
-  if (!pe_is_system_dll(dll)) { int m = mod_load(w, dll); if (m >= 0) { u64 a = mod_export(w, m, name[0] == '#' ? 0 : name, name[0] == '#' ? ordinal : 0, 0); if (a) return a; } }
+  if (!pe_is_system_dll(dll) || pe_dll_native_ok(dll)) { int m = mod_load(w, dll); if (m >= 0) { u64 a = mod_export(w, m, name[0] == '#' ? 0 : name, name[0] == '#' ? ordinal : 0, 0); if (a) return a; } }
   return w32_shim_slot(w, dll, name);
 }
 /* DllMain(base, DLL_PROCESS_ATTACH, 0) for every module not yet attached (one per continuation round trip) */
@@ -505,11 +517,11 @@ static const char *ordinal_name(const char *dll, u32 ord) {
   return 0; }
 static void load_library(Cpu *c, const char *n) {
   if (!n || !n[0]) { W->last_error = 87; RET(0); return; }
-  if (!pe_is_system_dll(n)) {
+  if (!pe_is_system_dll(n) || pe_dll_native_ok(n)) {
     int m = mod_load(W, n);
     if (m >= 0) { u64 base = W->mods[m].base; if (!W->mods[m].attached || W->nmods > m + 1) { int i = cont_push(c, CONT_DLLMAIN); if (i < 0) return; W->cont[i].data[0] = base; w32_cont_resume(c); return; } RET(base); return; }
     /* not on the virtual disk: behave like a system DLL (shims by name); a real miss shows up as "unimplemented API dll!name" */
-    char msg[400]; e_snprintf(msg, sizeof msg, "[x64] LoadLibrary(%s): not found on the virtual disk, using shims\n", n); host_write(3, msg, e_strlen(msg));
+    if (!pe_is_system_dll(n)) { char msg[400]; e_snprintf(msg, sizeof msg, "[x64] LoadLibrary(%s): not found on the virtual disk, using shims\n", n); host_write(3, msg, e_strlen(msg)); }
   }
   RET(fake_module(n));
 }
@@ -1025,9 +1037,8 @@ static void s_strrchr(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 30); if (
 static void s_strstr(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 30), *n = rd_str(c, ARG(1), 1 << 30); if (!s || !n) { RET(0); return; } size_t nl = e_strlen(n); for (const char *p = s; *p; p++) if (!e_strncmp(p, n, nl)) { RET(ARG(0) + (u64)(p - s)); return; } RET(nl ? 0 : ARG(0)); }
 /* sscanf subset: %d %i %u %x %o %p %s %c %[ %f/%g with h/l/ll/I64/z sizes, width, '*' suppression, literals and whitespace */
 static int scan_isspace(int ch) { return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f' || ch == '\v'; }
-static void s_sscanf(Cpu *c) {
-  const char *s = rd_str(c, ARG(0), 1 << 20), *f = rd_str(c, ARG(1), 65536); if (!s || !f) { RET(~0ull); return; }
-  int argi = 2, n = 0; const char *p = s;
+static u64 scan_common(Cpu *c, const char *s, const char *f, ArgSrc *as) {
+  int n = 0; const char *p = s;
   while (*f) {
     if (scan_isspace(*f)) { while (scan_isspace(*p)) p++; f++; continue; }
     if (*f != '%') { if (*p != *f) break; p++; f++; continue; }
@@ -1040,8 +1051,8 @@ static void s_sscanf(Cpu *c) {
     else if (*f == 'z' || *f == 'j' || *f == 't') { size = 3; f++; }
     char conv = *f++; if (!conv) break;
     if (conv == '%') { if (*p != '%') break; p++; continue; }
-    if (conv == 'n') { if (!suppress) wr32(c, ARG(argi++), (u32)(p - s)); continue; }
-    if (conv == 'c') { int w = width ? width : 1; for (int k = 0; k < w; k++) if (!p[k]) goto done; if (!suppress) { u64 d = ARG(argi++); for (int k = 0; k < w; k++) wr8(c, d + (u64)k, (u8)p[k]); n++; } p += w; continue; }
+    if (conv == 'n') { if (!suppress) wr32(c, arg_next(as), (u32)(p - s)); continue; }
+    if (conv == 'c') { int w = width ? width : 1; for (int k = 0; k < w; k++) if (!p[k]) goto done; if (!suppress) { u64 d = arg_next(as); for (int k = 0; k < w; k++) wr8(c, d + (u64)k, (u8)p[k]); n++; } p += w; continue; }
     if (conv == 's' || conv == '[') {
       char set[256]; int neg = 0; e_memset(set, 0, sizeof set);
       if (conv == '[') { if (*f == '^') { neg = 1; f++; } if (*f == ']') { set[(u8)']'] = 1; f++; } while (*f && *f != ']') { if (f[1] == '-' && f[2] && f[2] != ']') { for (int ch = (u8)f[0]; ch <= (u8)f[2]; ch++) set[ch] = 1; f += 3; } else set[(u8)*f++] = 1; } if (*f == ']') f++; }
@@ -1049,7 +1060,7 @@ static void s_sscanf(Cpu *c) {
       const char *st = p; int w = width ? width : 0x7fffffff;
       while (*p && (p - st) < w) { int in = conv == 's' ? !scan_isspace(*p) : (set[(u8)*p] != neg); if (!in) break; p++; }
       if (p == st) break;
-      if (!suppress) { u64 d = ARG(argi++); for (const char *q = st; q < p; q++) wr8(c, d + (u64)(q - st), (u8)*q); wr8(c, d + (u64)(p - st), 0); n++; }
+      if (!suppress) { u64 d = arg_next(as); for (const char *q = st; q < p; q++) wr8(c, d + (u64)(q - st), (u8)*q); wr8(c, d + (u64)(p - st), 0); n++; }
       continue;
     }
     while (scan_isspace(*p)) p++;
@@ -1058,16 +1069,28 @@ static void s_sscanf(Cpu *c) {
     char *e = tmp;
     if (conv == 'f' || conv == 'g' || conv == 'e' || conv == 'a' || conv == 'F' || conv == 'G' || conv == 'E') {
       double v = e_strtod(tmp, &e); if (e == tmp) break; p += e - tmp;
-      if (!suppress) { u64 d = ARG(argi++); if (size >= 2) { u64 bits; e_memcpy(&bits, &v, 8); wr64(c, d, bits); } else { float fv = (float)v; u32 bits; e_memcpy(&bits, &fv, 4); wr32(c, d, bits); } n++; }
+      if (!suppress) { u64 d = arg_next(as); if (size >= 2) { u64 bits; e_memcpy(&bits, &v, 8); wr64(c, d, bits); } else { float fv = (float)v; u32 bits; e_memcpy(&bits, &fv, 4); wr32(c, d, bits); } n++; }
       continue;
     }
     int base = conv == 'd' || conv == 'u' ? 10 : conv == 'x' || conv == 'X' || conv == 'p' ? 16 : conv == 'o' ? 8 : 0;
     long long v = e_strtoll(tmp, &e, base); if (e == tmp) break; p += e - tmp;
-    if (!suppress) { u64 d = ARG(argi++); if (conv == 'p' || size == 3) wr64(c, d, (u64)v); else if (size == 2 && 0) wr64(c, d, (u64)v); else if (size == 1) wr16(c, d, (u16)v); else if (size == 4) wr8(c, d, (u8)v); else wr32(c, d, (u32)v); n++; }
+    if (!suppress) { u64 d = arg_next(as); if (conv == 'p' || size == 3) wr64(c, d, (u64)v); else if (size == 2 && 0) wr64(c, d, (u64)v); else if (size == 1) wr16(c, d, (u16)v); else if (size == 4) wr8(c, d, (u8)v); else wr32(c, d, (u32)v); n++; }
   }
 done:
-  RET(n == 0 && !*p ? ~0ull : (u64)(u32)n);
+  return n == 0 && !*p ? ~0ull : (u64)(u32)n;
 }
+static void s_sscanf(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 20), *f = rd_str(c, ARG(1), 65536); if (!s || !f) { RET(~0ull); return; } ArgSrc as = { c, 0, 2, 0 }; RET(scan_common(c, s, f, &as)); }
+/* UCRT: __stdio_common_vsscanf(options, buffer, len, format, locale, va_list) — the va_list is a pointer to the packed args */
+static void s_stdio_common_vsscanf(Cpu *c) { const char *s = rd_str(c, ARG(1), 1 << 20), *f = rd_str(c, ARG(3), 65536); if (!s || !f) { RET(~0ull); return; }
+  u64 len = ARG(2); static char lim[1 << 16]; if (len < sizeof lim - 1 && e_strlen(s) > len) { e_memcpy(lim, s, len); lim[len] = 0; s = lim; }
+  ArgSrc as = { c, 1, 0, ARG(5) }; RET(scan_common(c, s, f, &as)); }
+/* __stdio_common_vfscanf(options, FILE*, format, locale, va_list): read one line from the stream and scan it (enough for the
+   "fscanf(stdin, "%d")"-style use real programs make of it) */
+static void s_stdio_common_vfscanf(Cpu *c) { u64 ln = ARG(1) ? w32_heap_alloc(W, 4096, 1) : 0; if (!ln) { RET(~0ull); return; }
+  const char *f = rd_str(c, ARG(2), 65536); if (!f) { RET(~0ull); return; }
+  u64 sv0 = c->r[RCX], sv1 = c->r[RDX], sv2 = c->r[R8]; c->r[RCX] = ln; c->r[RDX] = 4095; c->r[R8] = ARG(1); s_fgets(c); u64 got = c->r[RAX]; c->r[RCX] = sv0; c->r[RDX] = sv1; c->r[R8] = sv2;
+  if (c->status) return; if (!got) { RET(~0ull); return; }
+  const char *s = rd_str(c, ln, 4096); ArgSrc as = { c, 1, 0, ARG(4) }; RET(s ? scan_common(c, s, f, &as) : ~0ull); w32_heap_free(W, ln); }
 static void s_strdup(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 30); RET(s ? w32_guest_strdup(W, s) : 0); }
 static void s_strtol(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 20); if (!s) { RET(0); return; } char *e; long long v = e_strtoll(s, &e, (int)ARG(2)); if (ARG(1)) wr64(c, ARG(1), ARG(0) + (u64)(e - s)); if (v > 0x7fffffff) v = 0x7fffffff; if (v < -0x7fffffffll - 1) v = -0x7fffffffll - 1; RET((u64)v); }
 static void s_strtoul(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 20); if (!s) { RET(0); return; } char *e; long long v = e_strtoll(s, &e, (int)ARG(2)); if (ARG(1)) wr64(c, ARG(1), ARG(0) + (u64)(e - s)); RET((u64)(u32)v); }
@@ -1145,11 +1168,15 @@ static void s_dclass(Cpu *c) { double v = c->x[0].f64[0]; union { double d; u64 
 static void s_fdclass(Cpu *c) { c->x[0].f64[0] = (double)c->x[0].f32[0]; s_dclass(c); }
 static void s_dsign(Cpu *c) { RET(c->x[0].f64[0] < 0 ? 1 : 0); }
 
+#include "win32_rt.inc"
+#include "win32_math.inc"
 /* ---------- table ---------- */
 #define S(n) { "", #n, s_##n }
 #define SA(api, fn) { "", api, s_##fn }
 static const ShimDef shims[] = {
   COMPAT_SHIMS
+  RT_SHIMS
+  MATH_SHIMS
   SEH_SHIMS
   CXX_SHIMS
   THREAD_SHIMS
@@ -1205,8 +1232,8 @@ static const ShimDef shims[] = {
   SA("_configure_narrow_argv", ret0), SA("_configure_wide_argv", ret0), SA("_initialize_narrow_environment", ret0), SA("_initialize_wide_environment", ret0), SA("_set_invalid_parameter_handler", ret0), SA("_set_thread_local_invalid_parameter_handler", ret0), SA("_seh_filter_exe", ret0), SA("_seh_filter_dll", ret0), SA("_configthreadlocale", ret0), SA("__lconv_init", ret0), SA("_setmode", ret0), SA("_set_abort_behavior", ret0), SA("_set_error_mode", ret0), SA("_set_printf_count_output", ret0), SA("_get_osfhandle", retm1), SA("_crt_debugger_hook", ret0), SA("_invalid_parameter_noinfo", invalid_parameter_noinfo), SA("_invalid_parameter_noinfo_noreturn", invalid_parameter_noinfo), SA("_beginthreadex", ret0), SA("_beginthread", retm1), SA("_endthreadex", _exit), SA("__threadid", ret0), SA("_lock", ret0), SA("_unlock", ret0), SA("__pctype_func", pctype_func), SA("___mb_cur_max_func", ret1), SA("___lc_codepage_func", ret0), SA("___lc_handle_func", ret0), SA("___lc_collate_cp_func", ret0), SA("_create_locale", ret0), SA("_free_locale", ret0), SA("_get_current_locale", ret0), S(setlocale), S(_wsetlocale), S(localeconv), SA("_setlocale", setlocale),
   SA("__stdio_common_vfprintf", stdio_common_vfprintf), SA("__stdio_common_vfprintf_s", stdio_common_vfprintf), SA("__stdio_common_vfwprintf", stdio_common_vfwprintf), SA("__stdio_common_vsprintf", stdio_common_vsprintf), SA("__stdio_common_vsprintf_s", stdio_common_vsprintf_s), SA("__stdio_common_vsnprintf_s", stdio_common_vsnprintf_s), SA("__stdio_common_vswprintf", stdio_common_vswprintf), SA("__stdio_common_vswprintf_s", stdio_common_vswprintf_s), SA("__stdio_common_vsprintf_p", stdio_common_vsprintf),
   SA("_vscprintf", vscprintf), SA("_vscwprintf", vscwprintf), S(printf), S(wprintf), S(vprintf), S(fprintf), S(vfprintf), S(sprintf), SA("_snprintf", snprintf), S(snprintf), SA("_vsnprintf", vsnprintf), S(vsnprintf), S(vsprintf), SA("__mingw_vfprintf", vfprintf), SA("__mingw_vprintf", vprintf), SA("__mingw_vsprintf", vsprintf), SA("__mingw_vsnprintf", vsnprintf), SA("__mingw_printf", printf), SA("__mingw_fprintf", fprintf), SA("__mingw_sprintf", sprintf), SA("__mingw_snprintf", snprintf), SA("__ms_vsnprintf", vsnprintf),
-  S(puts), SA("_putws", putws), S(fputs), S(putchar), S(fputc), SA("putc", fputc), S(fwrite), S(fflush), S(setvbuf), S(fopen), S(fopen_s), S(fclose), S(fgets), S(fread), S(getchar), S(fgetc), S(getc), S(feof), S(ferror), SA("_fileno", fileno), SA("_isatty", isatty), SA("_write", write), SA("_read", read), SA("_open", open), SA("_close", close), SA("_fdopen", ret0), SA("_wfopen", ret0), SA("_lseek", retm1), SA("_lseeki64", retm1), SA("_stat64", retm1), SA("_fstat64", retm1), SA("_wstat64", retm1), SA("_access", retm1), SA("_chsize", retm1), SA("_unlink", retm1), SA("remove", retm1), SA("rename", retm1), SA("_mkdir", retm1), SA("_getcwd", ret0), SA("_dup", retm1), SA("_dup2", retm1), SA("_pipe", retm1), SA("_commit", ret0), SA("_locking", ret0), SA("_filelengthi64", retm1), SA("_get_stream_buffer_pointers", ret0), SA("ungetc", retm1),
-  SA("_time64", time64), SA("time", time64), S(clock), SA("_localtime64", localtime64), SA("_gmtime64", gmtime64), SA("_localtime64_s", localtime64_s), SA("_gmtime64_s", localtime64_s), SA("_wcsicmp", wcsicmp), S(wcsncpy_s), S(wcscpy_s), S(wcscat_s), SA("DisableThreadLibraryCalls", ret1), S(GetActiveProcessorCount), S(InitializeProcThreadAttributeList), S(UpdateProcThreadAttribute), S(DeleteProcThreadAttributeList), SA("GetMaximumProcessorCount", GetActiveProcessorCount), SA("GetActiveProcessorGroupCount", ret1), S(wcsncmp), SA("__fpe_flt_rounds", ret1), S(wcschr), S(wcsrchr), S(wcstombs), SA("AddDllDirectory", ret1), SA("RemoveDllDirectory", ret1), SA("CancelIoEx", ret1), SA("SetNamedPipeHandleState", ret1), SA("GetFileVersionInfoSizeW", ret0), SA("GetFileVersionInfoW", ret0), SA("VerQueryValueW", ret0), SA("PssQuerySnapshot", ret1), SA("LookupPrivilegeValueA", ret0), SA("CreateSymbolicLinkW", ret0), SA("ConvertStringSecurityDescriptorToSecurityDescriptorW", ret0), SA("_mktime64", mktime64), S(strftime), SA("_tzset", tzset), SA("__timezone", timezone), SA("__daylight", daylight), SA("__tzname", tzname), SA("_get_timezone", ret0), SA("_ftime64", ret0), SA("_difftime64", ret0),
+  S(puts), SA("_putws", putws), S(fputs), S(putchar), S(fputc), SA("putc", fputc), S(fwrite), S(fflush), S(setvbuf), S(fopen), S(fopen_s), S(fclose), S(fgets), S(fread), S(getchar), S(fgetc), S(getc), S(feof), S(ferror), SA("_fileno", fileno), SA("_isatty", isatty), SA("_write", write), SA("_read", read), SA("_open", open), SA("_close", close), SA("_fdopen", ret0), SA("_wfopen", ret0), SA("_lseek", retm1), SA("_lseeki64", retm1), SA("_stat64", retm1), SA("_fstat64", retm1), SA("_wstat64", retm1), SA("_access", retm1), SA("_chsize", retm1), SA("_unlink", retm1), SA("remove", retm1), SA("rename", retm1), SA("_mkdir", retm1), SA("_getcwd", ret0), SA("_dup", retm1), SA("_dup2", retm1), SA("_pipe", retm1), SA("_commit", ret0), SA("_locking", ret0), SA("_filelengthi64", retm1), SA("ungetc", retm1),
+  SA("_time64", time64), SA("time", time64), S(clock), SA("_localtime64", localtime64), SA("_gmtime64", gmtime64), SA("_localtime64_s", localtime64_s), SA("_gmtime64_s", localtime64_s), SA("_wcsicmp", wcsicmp), S(wcsncpy_s), S(wcscpy_s), S(wcscat_s), SA("DisableThreadLibraryCalls", ret1), S(GetActiveProcessorCount), S(InitializeProcThreadAttributeList), S(UpdateProcThreadAttribute), S(DeleteProcThreadAttributeList), SA("GetMaximumProcessorCount", GetActiveProcessorCount), SA("GetActiveProcessorGroupCount", ret1), S(wcsncmp), SA("__fpe_flt_rounds", ret1), S(wcschr), S(wcsrchr), S(wcstombs), S(AddDllDirectory), SA("RemoveDllDirectory", ret1), S(SetDllDirectoryW), S(SetDllDirectoryA), SA("CancelIoEx", ret1), SA("SetNamedPipeHandleState", ret1), SA("GetFileVersionInfoSizeW", ret0), SA("GetFileVersionInfoW", ret0), SA("VerQueryValueW", ret0), SA("PssQuerySnapshot", ret1), SA("LookupPrivilegeValueA", ret0), SA("CreateSymbolicLinkW", ret0), SA("ConvertStringSecurityDescriptorToSecurityDescriptorW", ret0), SA("_mktime64", mktime64), S(strftime), SA("_tzset", tzset), SA("__timezone", timezone), SA("__daylight", daylight), SA("__tzname", tzname), SA("_get_timezone", ret0), SA("_ftime64", ret0), SA("_difftime64", ret0),
   S(getenv), S(getenv_s), SA("_dupenv_s", ret0), SA("_putenv", ret0), S(system), S(rand), S(srand), SA("rand_s", ret0),
   S(sscanf), S(strlen), S(wcslen), S(strnlen), S(strcmp), SA("_stricmp", stricmp), SA("_strcmpi", stricmp), SA("stricmp", stricmp), S(strncmp), SA("_strnicmp", strnicmp), S(wcscmp), S(strcpy), S(strncpy), S(strcat), S(strchr), S(strrchr), S(strstr), SA("_strdup", strdup), S(strdup), S(strtol), S(strtoul), S(strtoll), SA("_strtoi64", strtoll), SA("_strtoui64", strtoll), SA("strtoull", strtoll), S(atoi), S(atol), S(atoll), SA("_atoi64", atoll), S(strtod), S(atof), S(toupper), S(tolower), S(isdigit), S(isalpha), S(isalnum), S(isspace), S(isupper), S(islower), S(isprint), S(isxdigit), S(ispunct), SA("iscntrl", ret0), SA("isgraph", isprint), SA("iswspace", isspace), SA("iswdigit", isdigit), SA("iswalpha", isalpha), SA("towupper", toupper), SA("towlower", tolower), SA("_isctype", ret0), SA("strerror", ret0), SA("_strerror", ret0), SA("strerror_s", ret0), SA("strcpy_s", ret0), SA("strcat_s", ret0), SA("strncpy_s", ret0), SA("memcpy_s", ret0), SA("memmove_s", ret0), SA("strtok", ret0), SA("strtok_s", ret0), SA("strspn", ret0), SA("strcspn", ret0), SA("strpbrk", ret0), SA("_strlwr", ret0), SA("_strupr", ret0), SA("_strrev", ret0), SA("strcoll", strcmp), SA("_itoa", ret0), SA("_ltoa", ret0), SA("_ultoa", ret0), SA("_i64toa", ret0), SA("_ui64toa", ret0),
   S(memcpy), SA("memmove", memcpy), S(memset), S(memcmp), S(memchr), S(qsort), SA("qsort_s", qsort), S(bsearch), SA("_setjmp", setjmp), SA("_setjmpex", setjmp), S(longjmp), S(div), SA("ldiv", div), S(abs), S(labs), SA("_abs64", llabs), S(llabs),

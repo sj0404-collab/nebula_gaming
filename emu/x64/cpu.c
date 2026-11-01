@@ -613,8 +613,16 @@ static void exec_0f(Ins *i, Cpu *c) {
         case 0: c->r[RAX] = 7; c->r[RBX] = 0x756e6547; c->r[RDX] = 0x49656e69; c->r[RCX] = 0x6c65746e; break;
         case 1: c->r[RAX] = 0x000306a9; c->r[RBX] = 0x00100800; c->r[RCX] = (1u << 0) | (1u << 1) | (1u << 9) | (1u << 13) | (1u << 19) | (1u << 20) | (1u << 23); c->r[RDX] = 0x078bfbff; break; /* fpu..sse2 + SSE3/PCLMULQDQ/SSSE3/CX16/SSE4.1/SSE4.2/POPCNT; no AES, no AVX/OSXSAVE */
         case 7: c->r[RAX] = c->r[RBX] = c->r[RCX] = c->r[RDX] = 0; break;
-        case 0x80000000: c->r[RAX] = 0x80000004; c->r[RBX] = c->r[RCX] = c->r[RDX] = 0; break;
-        case 0x80000001: c->r[RAX] = c->r[RBX] = c->r[RCX] = 0; c->r[RDX] = 1u << 29; break;   /* LM */
+        case 2: c->r[RAX] = 0x80302C01; c->r[RBX] = c->r[RCX] = c->r[RDX] = 0; break;   /* cache descriptors: 2C L1D 32K, 30 L1I 32K, 80 L2 512K */
+        case 4: { u32 sub = (u32)c->r[RCX]; /* deterministic cache parameters: 32K L1D, 32K L1I, 256K L2, 8M L3 (OpenBLAS and game engines size their blocking from these) */
+          static const u32 cp[4][3] = { { 0x121, 63u | (7u << 22), 63 }, { 0x122, 63u | (7u << 22), 63 }, { 0x143, 63u | (7u << 22), 511 }, { 0x163, 63u | (15u << 22), 8191 } };
+          if (sub < 4) { c->r[RAX] = cp[sub][0]; c->r[RBX] = cp[sub][1]; c->r[RCX] = cp[sub][2]; c->r[RDX] = 0; } else c->r[RAX] = c->r[RBX] = c->r[RCX] = c->r[RDX] = 0; break; }
+        case 0x80000000: c->r[RAX] = 0x80000008; c->r[RBX] = c->r[RCX] = c->r[RDX] = 0; break;
+        case 0x80000002: case 0x80000003: case 0x80000004: { static const char brand[48] = "Nebula x86-64 (wasm64 emulated CPU)"; const u32 *b = (const u32 *)(const void *)(brand + (leaf - 0x80000002) * 16); c->r[RAX] = b[0]; c->r[RBX] = b[1]; c->r[RCX] = b[2]; c->r[RDX] = b[3]; break; }
+        case 0x80000005: c->r[RAX] = 0; c->r[RBX] = 0; c->r[RCX] = 0x20080140; c->r[RDX] = 0x20080140; break;   /* L1D/L1I 32K, 8-way, 64 B lines */
+        case 0x80000006: c->r[RAX] = c->r[RBX] = 0; c->r[RCX] = (256u << 16) | (6u << 12) | 64u; c->r[RDX] = (8192u << 18) | (6u << 12) | 64u; break;   /* L2 256 KB 8-way 64 B (OpenBLAS get_L2_size), L3 8 MB */
+        case 0x80000008: c->r[RAX] = 0x3030; c->r[RBX] = c->r[RCX] = c->r[RDX] = 0; break;   /* 48-bit physical/virtual */
+        case 0x80000001: c->r[RAX] = c->r[RBX] = 0; c->r[RCX] = 1u << 0; c->r[RDX] = (1u << 29) | (1u << 20) | (1u << 11); break;   /* LAHF_LM (x86-64-v2 needs it), LM, NX, SYSCALL */
         default: c->r[RAX] = c->r[RBX] = c->r[RCX] = c->r[RDX] = 0;
       }
       c->r[RAX] &= 0xffffffff; c->r[RBX] &= 0xffffffff; c->r[RCX] &= 0xffffffff; c->r[RDX] &= 0xffffffff; return; }

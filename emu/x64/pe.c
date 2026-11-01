@@ -59,6 +59,18 @@ int pe_is_system_dll(const char *dll) {
   for (int i = 0; sys[i]; i++) { size_t l = e_strlen(sys[i]); if (!e_strcmp(b, sys[i])) return 1; if ((!e_strcmp(sys[i], "api-ms") || !e_strcmp(sys[i], "ext-ms") || !e_strcmp(sys[i], "d3d") || !e_strcmp(sys[i], "xinput") || !e_strcmp(sys[i], "xaudio2") || !e_strcmp(sys[i], "msvcr") || !e_strcmp(sys[i], "msvcp")) && !e_strncmp(b, sys[i], l)) return 1; }
   return 0;
 }
+/* "Native over builtin" (the Wine notion): for these system DLLs a real file on the virtual disk (next to the exe, in the
+ * DLL search path or in C:\Windows\System32 — e.g. from the VC++ redistributable) is preferred over the shims, because
+ * they are pure user-mode libraries that run fine on top of kernel32/ucrt shims: the C++ standard library (msvcp140*),
+ * the older CRTs (msvcr100/110/120 + msvcp100/110/120), concrt/vcomp/mfc, vcruntime140_1 (__CxxFrameHandler4), the
+ * mingw runtime DLLs, GDI+ and the Direct3D shader compilers. Core OS DLLs (kernel32, ntdll, user32, ws2_32, ucrtbase,
+ * vcruntime140, api-ms-*, d3d11/dxgi …) are always the emulator's own. */
+int pe_dll_native_ok(const char *dll) {
+  static const char *pref[] = { "msvcp", "msvcr", "concrt", "vcomp", "vcamp", "vccorlib", "mfc", "vcruntime140_1", "vcruntime140_threads", "libgcc_s", "libstdc++", "libwinpthread", "gdiplus", "d3dcompiler_", "d3dx9_", "d3dx10_", "d3dx11_", "d3dcsx", "xinput1_3", "x3daudio", 0 };
+  char b[64]; int n = 0; for (const char *p = dll; *p && n < 63; p++) { char ch = *p; if (ch >= 'A' && ch <= 'Z') ch += 32; b[n++] = ch; } b[n] = 0;
+  for (int i = 0; pref[i]; i++) if (!e_strncmp(b, pref[i], e_strlen(pref[i]))) return 1;
+  return 0;
+}
 
 /* ---------- import helper shared by loader and inspector ---------- */
 typedef void (*ImportCb)(void *ctx, const char *dll, const char *name, u32 ordinal, u32 iat_rva);
