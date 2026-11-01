@@ -124,6 +124,7 @@ struct Cpu {
   Xmm  x[16];
   u32  mxcsr;
   u64  fs_base, gs_base;
+  u8   mode32;                        /* 1 = IA-32 compatibility mode (PE32 process): 32-bit operand/address/stack size, no REX, fs: = TEB32 */
   u16  fpu_cw;                        /* x87 control word */
   u16  fsw; u8 ftop, ftag;            /* x87 status word (C0-C3), stack top, tag bits (1 = valid) */
   double fp[8];                       /* x87 stack as doubles (53-bit precision, see x87.inc) */
@@ -152,16 +153,21 @@ u64  cpu_pop(Cpu *c);
 
 /* memory accessors with fault handling (return 0 / set cpu->status on fault) */
 u8  rd8 (Cpu *c, u64 a); u16 rd16(Cpu *c, u64 a); u32 rd32(Cpu *c, u64 a); u64 rd64(Cpu *c, u64 a);
+/* pointer-sized guest accesses (8 bytes, 4 in a 32-bit process) for pointer arrays and pointer fields of Win32 structures */
+static inline u64 rdp(Cpu *c, u64 a) { return c->mode32 ? rd32(c, a) : rd64(c, a); }
+#define PSZ (c->mode32 ? 4 : 8)
 void wr8(Cpu *c, u64 a, u8 v); void wr16(Cpu *c, u64 a, u16 v); void wr32(Cpu *c, u64 a, u32 v); void wr64(Cpu *c, u64 a, u64 v);
+static inline void wrp(Cpu *c, u64 a, u64 v) { if (c->mode32) wr32(c, a, (u32)v); else wr64(c, a, v); }
 const char *rd_str(Cpu *c, u64 a, size_t max);     /* NUL-terminated guest string → host pointer (NULL if unmapped) */
 
 /* ---------- Win32 shims ---------- */
 typedef void (*ShimFn)(Cpu *c);
+void call_shim(Cpu *c, ShimFn fn, u64 a0, u64 a1, u64 a2, u64 a3);   /* call a shim from another shim with explicit arguments (register ABI / 32-bit override) */
 typedef struct { const char *dll; const char *name; ShimFn fn; } ShimDef;
 
 #define SHIM_SLOT_SIZE 16
 #define MAX_SHIMS 2048
-typedef struct { const char *dll; const char *name; ShimFn fn; int calls; } ShimSlot;
+typedef struct { const char *dll; const char *name; ShimFn fn; int calls; u16 clean32; const char *sig32; } ShimSlot;   /* clean32: stack bytes removed by the callee in 32-bit mode (stdcall); sig32: "ret:args" for shims needing argument marshaling (win32_x86.inc) */
 
 /* guest layout */
 #define G_SHIM_BASE   0x0000000000200000ull    /* import trampolines, TEB/PEB, strings  (2 MB) */
@@ -246,7 +252,7 @@ int  proc_enum(int idx, int *pid, int *ppid, const char **name);   /* 1 if idx v
 #define THREAD_MAX 64
 #define THREAD_CTX_FIELDS \
   u64 last_error; \
-  struct { int kind; u64 ret_addr, rsp, data[16]; int idx; } cont[64]; int ncont;   /* continuation stack for guest callbacks */ \
+  struct { int kind; u64 ret_addr, rsp, data[16]; int idx; u32 clean32; } cont[64]; int ncont;   /* continuation stack for guest callbacks (clean32: 32-bit stdcall bytes popped when the shim finally returns) */ \
   int sleeping; double sleep_until_ms; \
   int block; int block_pids[8]; int nblock_pids; int block_pipe; \
   u64 block_addr, block_val; int block_flag;                                       /* CS / SRW / CV / WaitOnAddress waits */ \
@@ -273,6 +279,7 @@ struct Win32 {
   char dll_dirs[8][260]; int ndll_dirs;   /* AddDllDirectory / SetDllDirectory: extra DLL search directories (delvewheel, Qt, game launchers) */
   char exe_name[260]; char exe_path[600]; char cmdline[1024];   /* exe_path: full guest path of the image (GetModuleFileName(NULL), PEB ImagePathName) */
   u64 teb, peb, cmdline_a, cmdline_w, env_w, env_a;           /* teb: main thread's TEB */
+  int mode32; u64 dll_next32;                                 /* PE32 process: every thread's Cpu runs in 32-bit mode, DLLs are mapped below 2 GB */
   union { ThreadCtx tctx; struct { THREAD_CTX_FIELDS }; };    /* current thread's state (see Thread.ctx) */
   Thread th[THREAD_MAX]; int nth, cur_th; Cpu tcpu[THREAD_MAX]; int next_tid;
   struct { u64 tmpl, tmpl_size, blk_size; } tls[MAX_TLS_IMAGES]; int ntls;   /* static TLS templates (exe + DLLs), index = slot in the TEB+0x58 array */

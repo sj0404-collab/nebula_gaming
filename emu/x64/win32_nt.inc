@@ -169,7 +169,7 @@ static void s_NtQueryInformationProcess(Cpu *c) {
 
 /* NtDeviceIoControlFile(h, event, apc, ctx, iosb, code, in, inlen, out, outlen): no AFD/pipe FSCTLs yet */
 static void s_NtDeviceIoControlFile(Cpu *c) { nt_iosb(c, ARG(4), NT_NOT_SUPPORTED, 0); RET(NT_NOT_SUPPORTED); }
-static void s_NtClose(Cpu *c) { c->r[RCX] = ARG(0); s_CloseHandle(c); RET(0); }
+static void s_NtClose(Cpu *c) { call_shim(c, s_CloseHandle, ARG(0), 0, 0, 0); RET(0); }
 static void s_NtQueryObject(Cpu *c) { if (ARG(4)) wr32(c, ARG(4), 0); RET(NT_NOT_IMPLEMENTED); }
 static void s_NtSetInformationThread(Cpu *c) { RET(0); }
 static void s_NtQueryInformationThread(Cpu *c) { if (ARG(4)) wr32(c, ARG(4), 0); RET(NT_NOT_IMPLEMENTED); }

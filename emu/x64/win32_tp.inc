@@ -72,12 +72,11 @@ static void s_nebula_tp_thunk(Cpu *c) {
 static int tp_cont_resume(Cpu *c, int kind, u64 rax) {
   (void)rax; if (kind != CONT_TP) return 0;
   Win32 *w = W; int i = w->ncont - 1; u64 job = w->cont[i].data[0];
-  u64 inst = job + 64; u64 sv[3] = { c->r[RCX], c->r[RDX], c->r[R8] };
-  if (rd64(c, inst)) { c->r[RCX] = rd64(c, inst); s_SetEvent(c); }
-  if (rd64(c, inst + 8)) { c->r[RCX] = rd64(c, inst + 8); c->r[RDX] = rd64(c, inst + 16); c->r[R8] = 0; s_ReleaseSemaphore(c); }
-  if (rd64(c, inst + 24)) { c->r[RCX] = rd64(c, inst + 24); s_ReleaseMutex(c); }
-  if (rd64(c, inst + 32)) { c->r[RCX] = rd64(c, inst + 32); s_LeaveCriticalSection(c); }
-  c->r[RCX] = sv[0]; c->r[RDX] = sv[1]; c->r[R8] = sv[2];
+  u64 inst = job + 64;
+  if (rd64(c, inst)) call_shim(c, s_SetEvent, rd64(c, inst), 0, 0, 0);
+  if (rd64(c, inst + 8)) call_shim(c, s_ReleaseSemaphore, rd64(c, inst + 8), rd64(c, inst + 16), 0, 0);
+  if (rd64(c, inst + 24)) call_shim(c, s_ReleaseMutex, rd64(c, inst + 24), 0, 0, 0);
+  if (rd64(c, inst + 32)) call_shim(c, s_LeaveCriticalSection, rd64(c, inst + 32), 0, 0, 0);
   u64 o = rd64(c, job); int jk = (int)rd64(c, job + 8); u32 period = rd32(c, job + 112);
   if (o && rd32(c, o) == TP_MAGIC) { u32 r = rd32(c, o + 56); if (r) wr32(c, o + 56, r - 1); }
   if (jk == TP_TIMER && period && o && rd32(c, o) == TP_MAGIC && rd32(c, job + 16) == rd32(c, o + 40) && !rd32(c, o + 48)) {

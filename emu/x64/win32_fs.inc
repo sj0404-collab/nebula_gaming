@@ -15,7 +15,7 @@ static int handle_fd(u64 h) { if (h == 0x11 || h == 0x12) return (int)(h - 0x10)
 #define H_OF(fd) (H_FILE_BASE + (u64)(fd))
 static void block_on(Cpu *c, int reason, int arg) { W->block = reason; W->nblock_pids = 0; W->block_pipe = -1; if (reason == BLOCK_PROC) { W->block_pids[0] = arg; W->nblock_pids = 1; } if (reason == BLOCK_PIPE_R || reason == BLOCK_PIPE_W) W->block_pipe = arg; retry_and_yield(c, g_cur_slot); }
 /* guest FILE* → fd (std streams live in ubuf; file streams are 48-byte heap blocks with a magic) */
-static int file_fd(Cpu *c, u64 f) { u64 iob = W->ubuf; if (f == iob + 0x30) return 1; if (f == iob + 0x60) return 2; if (f == iob) return -1; if (f < 0x10000) return 0; if (rd32(c, f + 32) == FILE_MAGIC) { int fd = (int)rd32(c, f + 28); return vfs_is_open(fd) ? fd : 0; } return 0; }
+static int file_fd(Cpu *c, u64 f) { u64 iob = W->ubuf, st = IOB_STRIDE; if (f == iob + st) return 1; if (f == iob + 2 * st) return 2; if (f == iob) return -1; if (f < 0x10000) return 0; if (rd32(c, f + 32) == FILE_MAGIC) { int fd = (int)rd32(c, f + 28); return vfs_is_open(fd) ? fd : 0; } return 0; }
 static u64 make_file(Cpu *c, int fd) { u64 f = w32_heap_alloc(W, 48, 1); wr32(c, f + 28, (u32)fd); wr32(c, f + 32, FILE_MAGIC); wr32(c, f + 24, 1); return f; }
 static void put_a(Cpu *c, u64 dst, const char *s, u32 cap) { size_t l = e_strlen(s); if (cap && l + 1 > cap) l = cap - 1; u8 *p = mem_ptr(c->mem, dst, l + 1, 1); if (p) { e_memcpy(p, s, l); p[l] = 0; } }
 static void put_w(Cpu *c, u64 dst, const char *s, u32 cap) { size_t l = e_strlen(s); if (cap && l + 1 > cap) l = cap - 1; for (size_t i = 0; i < l; i++) wr16(c, dst + i * 2, (u8)s[i]); wr16(c, dst + l * 2, 0); }
@@ -306,7 +306,7 @@ static void s_filbuf(Cpu *c) {
   wr64(c, f, b + 1); wr32(c, f + 8, (u32)(r - 1)); RET(p[0]);
 }
 static void s_flsbuf(Cpu *c) { int fd = file_fd(c, ARG(1)); u8 ch = (u8)ARG(0); if (!fd) { RET(~0ull); return; } int r = out_write(c, fd, &ch, 1); if (!r) return; if (r < 0) { RET(~0ull); return; } RET(ch); }
-static void s_fdopen(Cpu *c) { int fd = (int)ARG(0); if (fd == 0) { RET(W->ubuf); return; } if (fd == 1 || fd == 2) { RET(W->ubuf + 0x30 * fd); return; } if (!vfs_is_open(fd)) { set_errno(c, 9); RET(0); return; } RET(make_file(c, fd)); }
+static void s_fdopen(Cpu *c) { int fd = (int)ARG(0); if (fd == 0) { RET(W->ubuf); return; } if (fd == 1 || fd == 2) { RET(W->ubuf + IOB_STRIDE * fd); return; } if (!vfs_is_open(fd)) { set_errno(c, 9); RET(0); return; } RET(make_file(c, fd)); }
 /* ---- CRT ---- */
 static int parse_mode(const char *m, int *acc, int *disp, int *append) {
   *append = 0; char k = m[0]; int plus = e_strchr(m, '+') != 0;
@@ -454,7 +454,7 @@ static void spawn_common(Cpu *c, int mode, u64 path, u64 argv, u64 envp) {
   int std[3] = { -2, -2, -2 }; views_flush_all(c);
   int pid = proc_spawn(W, cand, cmd[0] ? cmd : cand, std);
   if (pid < 0) { set_errno(c, pid == -8 ? 12 : 2); RET(~0ull); return; }
-  if (envp) { ProcFs *child = proc_fs(pid), *save = vfs_P; if (child) { vfs_use(child); vfs_P->nenv = 0; for (int i = 0; i < 4096; i++) { u64 sp = rd64(c, envp + (u64)i * 8); if (!sp) break; const char *s = rd_str(c, sp, 32767); if (s && e_strchr(s, '=')) env_put(s); } vfs_use(save); } }
+  if (envp) { ProcFs *child = proc_fs(pid), *save = vfs_P; if (child) { vfs_use(child); vfs_P->nenv = 0; for (int i = 0; i < 4096; i++) { u64 sp = rdp(c, envp + (u64)i * PSZ); if (!sp) break; const char *s = rd_str(c, sp, 32767); if (s && e_strchr(s, '=')) env_put(s); } vfs_use(save); } }
   int h = vfs_proc_handle(pid);
   if (mode == 0 || mode == 2) { W->spawn_wait_pid = pid; W->spawn_wait_mode = mode; proc_handle_ref(pid, 1); if (h >= 0) { vfs_close(h); } block_on(c, BLOCK_PROC, pid); return; }
   if (mode == 3 || mode == 4) { if (h >= 0) vfs_close(h); RET(0); return; }
@@ -588,7 +588,7 @@ static void s_GetNumberOfConsoleInputEvents(Cpu *c) { int fd = fd_of_handle(ARG(
   if (ARG(1)) wr32(c, ARG(1), vfs_stdin_available() ? 1 : 0); RET(1); }
 static void s_kbhit(Cpu *c) { RET(vfs_stdin_available() ? 1 : 0); }
 static void s_getch(Cpu *c) { u8 ch; g_last_io_fd = -1; s64 r = vfs_stdin_read(&ch, 1); if (r == -2) { blocked_io(c, 0); return; } RET(r == 1 ? ch : ~0ull); }
-static void s_gets_s(Cpu *c) { c->r[R8] = c->r[RCX]; c->r[RCX] = ARG(0); /* reuse fgets: (buf, n, stdin) */ u64 buf = ARG(0); int n = (int)ARG(1); u8 tmp[4096]; g_last_io_fd = -1; s64 r = vfs_stdin_read(tmp, (u64)(n - 1) < sizeof tmp ? (u64)(n - 1) : sizeof tmp); if (r == -2) { blocked_io(c, 0); return; } if (r <= 0) { RET(0); return; } while (r > 0 && (tmp[r - 1] == '\n' || tmp[r - 1] == '\r')) r--; u8 *p = mem_ptr(c->mem, buf, (u64)r + 1, 1); if (p) { e_memcpy(p, tmp, (size_t)r); p[r] = 0; } RET(buf); }
+static void s_gets_s(Cpu *c) { /* reuse fgets: (buf, n, stdin) */ u64 buf = ARG(0); int n = (int)ARG(1); u8 tmp[4096]; g_last_io_fd = -1; s64 r = vfs_stdin_read(tmp, (u64)(n - 1) < sizeof tmp ? (u64)(n - 1) : sizeof tmp); if (r == -2) { blocked_io(c, 0); return; } if (r <= 0) { RET(0); return; } while (r > 0 && (tmp[r - 1] == '\n' || tmp[r - 1] == '\r')) r--; u8 *p = mem_ptr(c->mem, buf, (u64)r + 1, 1); if (p) { e_memcpy(p, tmp, (size_t)r); p[r] = 0; } RET(buf); }
 
 
 /* console input records (INPUT_RECORD = 20 bytes): one KEY_EVENT (key down) per stdin byte; '\n' → VK_RETURN '\r' */
@@ -642,8 +642,8 @@ static void env_sync(Cpu *c) {   /* rebuild guest envp[], narrow block and wide 
   if (!g_env_dirty) return; g_env_dirty = 0; Win32 *w = W;
   size_t total = 1; for (int i = 0; i < g_nenv; i++) total += e_strlen(g_env[i]) + 1;
   u64 envp = w32_heap_alloc(w, 8 * (size_t)(g_nenv + 1), 1), wenvp = w32_heap_alloc(w, 8 * (size_t)(g_nenv + 1), 1), blk = w32_heap_alloc(w, total, 1), wblk = w32_heap_alloc(w, total * 2, 1); u64 o = 0;
-  for (int i = 0; i < g_nenv; i++) { size_t l = e_strlen(g_env[i]) + 1; put_a(c, blk + o, g_env[i], 0); for (size_t k = 0; k < l; k++) wr16(c, wblk + (o + k) * 2, (u8)g_env[i][k]); wr64(c, envp + i * 8, blk + o); wr64(c, wenvp + i * 8, wblk + o * 2); o += l; }
-  wr8(c, blk + o, 0); wr16(c, wblk + o * 2, 0); wr64(c, envp + g_nenv * 8, 0); wr64(c, wenvp + g_nenv * 8, 0);
+  for (int i = 0; i < g_nenv; i++) { size_t l = e_strlen(g_env[i]) + 1; put_a(c, blk + o, g_env[i], 0); for (size_t k = 0; k < l; k++) wr16(c, wblk + (o + k) * 2, (u8)g_env[i][k]); wrp(c, envp + i * PSZ, blk + o); wrp(c, wenvp + i * PSZ, wblk + o * 2); o += l; }
+  wr8(c, blk + o, 0); wr16(c, wblk + o * 2, 0); wrp(c, envp + g_nenv * PSZ, 0); wrp(c, wenvp + g_nenv * PSZ, 0);
   w->env_a = blk; w->env_w = wblk; wr64(c, w->ubuf + 0x228, envp); wr64(c, w->ubuf + 0x230, wenvp);   /* _environ and _wenviron */
 }
 static void s_getenv(Cpu *c) { const char *v = env_get(gstr(c, ARG(0))); if (!v) { RET(0); return; } env_sync(c); /* return pointer inside the guest block so it stays valid */ u64 blk = W->env_a; const char *n = gstr(c, ARG(0)); size_t nl = e_strlen(n); u64 p = blk; for (int i = 0; i < g_nenv; i++) { size_t l = e_strlen(g_env[i]) + 1; if (env_find(n, nl) == i) { RET(p + nl + 1); return; } p += l; } RET(0); }
@@ -667,7 +667,7 @@ static void s_p__environ(Cpu *c) { env_sync(c); RET(W->ubuf + 0x228); }
 static void s_p__wenviron(Cpu *c) { env_sync(c); RET(W->ubuf + 0x230); }
 static void s_get_initial_wide_environment(Cpu *c) { env_sync(c); RET(rd64(c, W->ubuf + 0x230)); }
 static void s_get_initial_narrow_environment(Cpu *c) { env_sync(c); RET(rd64(c, W->ubuf + 0x228)); }
-static void s_getmainargs(Cpu *c) { env_sync(c); wr32(c, ARG(0), rd32(c, W->ubuf + 0x200)); wr64(c, ARG(1), rd64(c, W->ubuf + 0x208)); wr64(c, ARG(2), rd64(c, W->ubuf + 0x228)); RET(0); }
+static void s_getmainargs(Cpu *c) { env_sync(c); wr32(c, ARG(0), rd32(c, W->ubuf + 0x200)); wrp(c, ARG(1), rd64(c, W->ubuf + 0x208)); wrp(c, ARG(2), rd64(c, W->ubuf + 0x228)); RET(0); }
 /* ---- string helpers that were ret0 stubs ---- */
 static int in_set(const char *set, char ch) { for (; *set; set++) if (*set == ch) return 1; return 0; }
 static void s_strspn(Cpu *c) { const char *s = gstr(c, ARG(0)); const char *set = gstr(c, ARG(1)); u64 n = 0; while (s[n] && in_set(set, s[n])) n++; RET(n); }

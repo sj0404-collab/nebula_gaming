@@ -50,9 +50,9 @@ static void s_fmaf(Cpu *c) { MF0 = (float)((double)MF0 * MF1 + c->x[2].f32[0]); 
 static void s_copysignf(Cpu *c) { MF0 = (float)mm_copysign(MF0, MF1); }
 static void s_nextafterf(Cpu *c) { MF0 = mm_nextafterf(MF0, MF1); }
 static void s_hypotf(Cpu *c) { MF0 = (float)mm_hypot(MF0, MF1); }
-static void s_modff(Cpu *c) { float v = MF0; float ip = (float)__builtin_trunc((double)v); u32 bits; e_memcpy(&bits, &ip, 4); if (c->r[RDX]) wr32(c, c->r[RDX], bits); MF0 = v - ip; }
-static void s_frexpf(Cpu *c) { double v = MF0; int e = 0; if (v != 0 && v == v && v - v == 0) { double a = v < 0 ? -v : v; while (a >= 1) { a /= 2; e++; } while (a < 0.5) { a *= 2; e--; } v = v < 0 ? -a : a; } if (c->r[RDX]) wr32(c, c->r[RDX], (u32)e); MF0 = (float)v; }
-static void s_ldexpf(Cpu *c) { double v = MF0; int e = (int)c->r[RDX]; while (e > 0) { v *= 2; e--; } while (e < 0) { v /= 2; e++; } MF0 = (float)v; }
+static void s_modff(Cpu *c) { float v = MF0; float ip = (float)__builtin_trunc((double)v); u32 bits; e_memcpy(&bits, &ip, 4); if (ARG(1)) wr32(c, ARG(1), bits); MF0 = v - ip; }
+static void s_frexpf(Cpu *c) { double v = MF0; int e = 0; if (v != 0 && v == v && v - v == 0) { double a = v < 0 ? -v : v; while (a >= 1) { a /= 2; e++; } while (a < 0.5) { a *= 2; e--; } v = v < 0 ? -a : a; } if (ARG(1)) wr32(c, ARG(1), (u32)e); MF0 = (float)v; }
+static void s_ldexpf(Cpu *c) { double v = MF0; int e = (int)ARG(1); while (e > 0) { v *= 2; e--; } while (e < 0) { v /= 2; e++; } MF0 = (float)v; }
 static void s_remainderf(Cpu *c) { double a = MF0, b = MF1; if (b == 0) { MF0 = (float)(0.0 / 0.0); return; } double q = a / b; double n = q < 0 ? -e_floor(-q + 0.5) : e_floor(q + 0.5); MF0 = (float)(a - n * b); }
 static void s_lroundf(Cpu *c) { double v = MF0; RET((u64)(s64)(v < 0 ? -e_floor(-v + 0.5) : e_floor(v + 0.5))); }
 static void s_logbf(Cpu *c) { double x = MF0; if (x == 0) { MF0 = (float)(-1.0 / 0.0); return; } if (x < 0) x = -x; int e = 0; while (x >= 2) { x /= 2; e++; } while (x < 1) { x *= 2; e--; } MF0 = (float)e; }
@@ -60,7 +60,7 @@ static void s_ilogbf(Cpu *c) { double x = MF0; if (x == 0) { RET((u64)(u32)(int)
 static void s_scalbnf(Cpu *c) { s_ldexpf(c); }
 /* double versions of a few that were missing or only had float/long siblings */
 static void s_rint2(Cpu *c) { MD0 = mm_rint(MD0); }
-static void s_scalbn(Cpu *c) { double v = MD0; int e = (int)c->r[RDX]; while (e > 0) { v *= 2; e--; } while (e < 0) { v /= 2; e++; } MD0 = v; }
+static void s_scalbn(Cpu *c) { double v = MD0; int e = (int)ARG(1); while (e > 0) { v *= 2; e--; } while (e < 0) { v /= 2; e++; } MD0 = v; }
 static void s_ilogb(Cpu *c) { double x = MD0; if (x == 0) { RET((u64)(u32)(int)0x80000000); return; } if (x < 0) x = -x; int e = 0; while (x >= 2) { x /= 2; e++; } while (x < 1) { x *= 2; e--; } RET((u64)(u32)e); }
 /* _dpcomp / _fdpcomp: _FP_LT 1, _FP_EQ 2, _FP_GT 4, 0 when unordered */
 static void s_dpcomp(Cpu *c) { double a = MD0, b = MD1; RET(a != a || b != b ? 0 : a < b ? 1 : a > b ? 4 : 2); }

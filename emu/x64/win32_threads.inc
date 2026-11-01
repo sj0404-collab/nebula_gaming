@@ -127,11 +127,10 @@ static u64 thread_create(Cpu *c, u64 start, u64 param, u64 stack_size, int suspe
   if (!t->teb) { W->last_error = 8; return 0; }
   { u8 *p = mem_ptr(w->mem, t->teb, TEB_SIZE, 1); if (p) e_memset(p, 0, TEB_SIZE); }
   int tid = g_next_tid; g_next_tid += 4;
-  wr64(c, t->teb + 0x08, t->stack + sz); wr64(c, t->teb + 0x10, t->stack); wr64(c, t->teb + 0x30, t->teb); wr64(c, t->teb + 0x40, (u64)w->pid); wr64(c, t->teb + 0x48, (u64)tid); wr64(c, t->teb + 0x60, w->peb);
   /* static TLS: a private copy of the template block, reachable through TEB+0x58 → array[_tls_index = 0] */
   u64 arr = w32_heap_alloc(w, 8 * MAX_TLS_IMAGES, 1); e_memset(t->tls_blk, 0, sizeof t->tls_blk);
-  wr64(c, t->teb + 0x58, arr); t->tls_arr = arr; pe_tls_thread_init(w, k);
-  Cpu *tc = &w->tcpu[k]; cpu_reset(tc); tc->mem = w->mem; tc->w = w; tc->fs_base = tc->gs_base = t->teb; tc->trace = c->trace;
+  teb_init(w, c, t->teb, t->stack, t->stack + sz, (u32)w->pid, (u32)tid, arr); t->tls_arr = arr; pe_tls_thread_init(w, k);
+  Cpu *tc = &w->tcpu[k]; cpu_reset(tc); tc->mem = w->mem; tc->w = w; tc->fs_base = tc->gs_base = t->teb; tc->trace = c->trace; tc->mode32 = (u8)w->mode32;
   tc->r[RSP] = t->stack + sz - 0x100; tc->rip = SLOT_ADDR(SLOT_STARTUP); cpu_push(tc, 0);
   t->cpu = tc; t->used = 1; t->state = 1; t->tid = tid; t->suspend = suspended ? 1 : 0; t->exit_code = STILL_ACTIVE_; t->start = start; t->param = param;
   e_memset(&t->ctx, 0, sizeof t->ctx); t->ctx.wait_deadline = -1;
@@ -205,17 +204,17 @@ static void s_OpenThread(Cpu *c) { u32 tid = (u32)ARG(2); for (int i = 0; i < KO
 static void s_ResumeThread(Cpu *c) { Thread *t = thread_of_handle(c, ARG(0)); if (!t) { W->last_error = 6; RET(~0ull); return; } int prev = t->suspend; if (t->suspend > 0) t->suspend--; RET((u32)prev); }
 static void s_SuspendThread(Cpu *c) { Thread *t = ARG(0) == ~1ull ? cur_thread(W) : thread_of_handle(c, ARG(0)); if (!t) { W->last_error = 6; RET(~0ull); return; } int prev = t->suspend++; RET((u32)prev); if (t == cur_thread(W)) { W->block = BLOCK_NONE; c->status = RUN_YIELD; } }
 static void s_TerminateThread(Cpu *c) { Thread *t = ARG(0) == ~1ull ? cur_thread(W) : thread_of_handle(c, ARG(0)); if (!t) { W->last_error = 6; RET(0); return; } if (t == cur_thread(W)) { thread_finish(c, (u32)ARG(1)); return; } thread_mark_exited(W, (int)(t - W->th), (u32)ARG(1)); RET(1); }
-static void s_SwitchToThread(Cpu *c) { c->r[RCX] = 0; s_Sleep(c); if (c->status != RUN_YIELD) RET(1); }
+static void s_SwitchToThread(Cpu *c) { call_shim(c, s_Sleep, 0, 0, 0, 0); if (c->status != RUN_YIELD) RET(1); }
 static void s_SetThreadDescription(Cpu *c) { RET(0); }
 static void s_GetThreadDescription(Cpu *c) { RET(0x80070057u); }
 static void s_GetCurrentThreadStackLimits(Cpu *c) { Thread *t = cur_thread(W); u64 lo = t->stack ? t->stack : G_STACK_BASE, hi = t->stack ? t->stack + t->stack_size : G_STACK_BASE + G_STACK_SIZE; if (ARG(0)) wr64(c, ARG(0), lo); if (ARG(1)) wr64(c, ARG(1), hi); }
 static void s_SetThreadStackGuarantee(Cpu *c) { if (ARG(0)) wr32(c, ARG(0), 0); RET(1); }
 
 /* TLS: slot bitmap is per process, values live in each thread's TEB (TlsSlots at +0x1480) */
-static void s_TlsAlloc(Cpu *c) { Win32 *w = W; for (u32 i = 1; i < 64; i++) if (!w->tls_slots[i]) { w->tls_slots[i] = 1; for (int t = 0; t < THREAD_MAX; t++) if (w->th[t].used) wr64(c, w->th[t].teb + 0x1480 + i * 8, 0); RET(i); return; } W->last_error = 8; RET(0xffffffffu); }
+static void s_TlsAlloc(Cpu *c) { Win32 *w = W; for (u32 i = 1; i < 64; i++) if (!w->tls_slots[i]) { w->tls_slots[i] = 1; for (int t = 0; t < THREAD_MAX; t++) if (w->th[t].used) wrp(c, tls_slot_addr(c, w->th[t].teb, i), 0); RET(i); return; } W->last_error = 8; RET(0xffffffffu); }
 static void s_TlsFree(Cpu *c) { u32 i = (u32)ARG(0); if (i < 64) W->tls_slots[i] = 0; RET(1); }
-static void s_TlsGetValue(Cpu *c) { u32 i = (u32)ARG(0); W->last_error = 0; RET(i < 64 ? rd64(c, c->gs_base + 0x1480 + i * 8) : 0); }
-static void s_TlsSetValue(Cpu *c) { u32 i = (u32)ARG(0); if (i >= 64) { W->last_error = 87; RET(0); return; } wr64(c, c->gs_base + 0x1480 + i * 8, ARG(1)); RET(1); }
+static void s_TlsGetValue(Cpu *c) { u32 i = (u32)ARG(0); W->last_error = 0; RET(i < 64 ? rdp(c, tls_slot_addr(c, c->gs_base, i)) : 0); }
+static void s_TlsSetValue(Cpu *c) { u32 i = (u32)ARG(0); if (i >= 64) { W->last_error = 87; RET(0); return; } wrp(c, tls_slot_addr(c, c->gs_base, i), ARG(1)); RET(1); }
 static void s_FlsAlloc(Cpu *c) { s_TlsAlloc(c); }
 static void s_FlsFree(Cpu *c) { s_TlsFree(c); }
 static void s_FlsGetValue(Cpu *c) { s_TlsGetValue(c); }

@@ -48,7 +48,7 @@ static void s_NtCreateFile(Cpu *c) {
 static void s_NtOpenFile(Cpu *c) { u64 a0 = ARG(0), a1 = ARG(1), a2 = ARG(2), a3 = ARG(3), opts = ARG(5);
   u64 *sp = (u64 *)mem_ptr(c->mem, c->r[RSP], 0x60, 1); if (!sp) { RET(NT_INVALID_PARAMETER); return; }
   sp[4] = a0; sp[5] = a1; sp[6] = a2; sp[7] = a3; sp[8] = 0; sp[9] = 0; sp[10] = 0; sp[11] = 1; sp[12] = opts; sp[13] = 0; sp[14] = 0;   /* rebuild the 11-argument frame (ARG(n>=4) reads [rsp+8+8n]) */
-  c->r[RCX] = a0; c->r[RDX] = a1; c->r[R8] = a2; c->r[R9] = a3; s_NtCreateFile(c); }
+  call_shim(c, s_NtCreateFile, a0, a1, a2, a3); }
 /* NtQueryAttributesFile(oa, FILE_BASIC_INFORMATION*) */
 static void s_NtQueryAttributesFile(Cpu *c) { char path[1024]; if (!nt_object_path(c, ARG(0), path, sizeof path)) { RET(0xC0000033u); return; }
   u64 size = 0; int st = vfs_stat(path, &size); if (!st) { RET(0xC0000034u); return; }
@@ -71,23 +71,25 @@ static void s_RtlExitUserProcess(Cpu *c) { do_exit(c, (int)ARG(0)); }
 static void s_RtlFillMemory(Cpu *c) { u8 *p = mem_ptr(c->mem, ARG(0), ARG(1), 1); if (p) e_memset(p, (int)(ARG(2) & 0xff), (size_t)ARG(1)); RET(0); }
 /* RtlWaitOnAddress(addr, cmp, size, timeout*) — like WaitOnAddress but the timeout is a LARGE_INTEGER* (negative = relative 100 ns) and the result is NTSTATUS */
 static void s_RtlWaitOnAddress(Cpu *c) { int retry = W->wait_active && W->wait_rip == c->rip;
-  if (!retry) { u64 tp = ARG(3); u32 ms = 0xffffffffu; if (tp) { s64 t = (s64)rd64(c, tp); ms = t >= 0 ? 0 : (u32)((-t) / 10000); } c->r[R9] = ms; }   /* re-executed after a park: R9 already holds the ms */
-  s_WaitOnAddress(c); if (W->block != BLOCK_NONE) return; c->r[RAX] = c->r[RAX] ? 0 : 0x102; }   /* 0x102 = STATUS_TIMEOUT */
+  u64 tp = ARG(3); u32 ms = 0xffffffffu; if (tp) { s64 t = (s64)rd64(c, tp); ms = t >= 0 ? 0 : (u32)((-t) / 10000); }
+  if (c->mode32) call_shim(c, s_WaitOnAddress, ARG(0), ARG(1), ARG(2), ms);
+  else { if (!retry) c->r[R9] = ms; s_WaitOnAddress(c); }   /* re-executed after a park: R9 already holds the ms */
+   if (W->block != BLOCK_NONE) return; c->r[RAX] = c->r[RAX] ? 0 : 0x102; }   /* 0x102 = STATUS_TIMEOUT */
 /* Zig's std.os.windows (OpenTUI's native DLL) calls the Nt* memory functions directly */
 static void s_VirtualAlloc(Cpu *c); static void s_VirtualFree(Cpu *c); static void s_VirtualQuery(Cpu *c);
 /* NtAllocateVirtualMemory(process, PVOID *base, zerobits, SIZE_T *size, type, protect) */
 static void s_NtAllocateVirtualMemory(Cpu *c) { u64 bp = ARG(1), sp = ARG(3); u32 type = (u32)ARG(4), prot = (u32)ARG(5);
   u64 base = bp ? rd64(c, bp) : 0, size = sp ? rd64(c, sp) : 0; if (!size) { RET(NT_INVALID_PARAMETER); return; }
-  c->r[RCX] = base; c->r[RDX] = size; c->r[R8] = type; c->r[R9] = prot; s_VirtualAlloc(c); u64 r = c->r[RAX];
+  call_shim(c, s_VirtualAlloc, base, size, type, prot); u64 r = c->r[RAX];
   if (!r) { RET(W->last_error == 487 ? 0xC0000018u : 0xC0000017u); return; }   /* CONFLICTING_ADDRESSES / NO_MEMORY */
   if (bp) wr64(c, bp, r); if (sp) wr64(c, sp, (size + 4095) & ~4095ull); RET(0); }
 /* NtFreeVirtualMemory(process, PVOID *base, SIZE_T *size, type) */
 static void s_NtFreeVirtualMemory(Cpu *c) { u64 bp = ARG(1), sp = ARG(2); u32 type = (u32)ARG(3); u64 base = bp ? rd64(c, bp) : 0, size = sp ? rd64(c, sp) : 0;
-  c->r[RCX] = base; c->r[RDX] = type == 0x8000 ? 0 : size; c->r[R8] = type; s_VirtualFree(c); RET(c->r[RAX] ? 0 : 0xC000009Au); }
+  call_shim(c, s_VirtualFree, base, type == 0x8000 ? 0 : size, type, 0); RET(c->r[RAX] ? 0 : 0xC000009Au); }
 static void s_NtProtectVirtualMemory(Cpu *c) { if (ARG(4)) wr32(c, ARG(4), 0x40); RET(0); }
 /* NtQueryVirtualMemory(process, addr, class, buf, len, *retlen): MemoryBasicInformation only */
 static void s_NtQueryVirtualMemory(Cpu *c) { if ((u32)ARG(2) != 0) { RET(NT_INVALID_INFO_CLS); return; } u64 addr = ARG(1), buf = ARG(3), rl = ARG(5);
-  c->r[RCX] = addr; c->r[RDX] = buf; c->r[R8] = 48; s_VirtualQuery(c); if (rl) wr64(c, rl, 48); RET(c->r[RAX] ? 0 : 0xC000000Du); }
+  call_shim(c, s_VirtualQuery, addr, buf, 48, 0); if (rl) wr64(c, rl, 48); RET(c->r[RAX] ? 0 : 0xC000000Du); }
 /* RtlGetFullPathName_U(name, cap_bytes, buf, *filepart) → bytes written (without NUL); GetFullPathNameW's full_path() counts characters */
 static void s_RtlGetFullPathName_U(Cpu *c) { char out[1024]; vfs_normalize(name_w(c, ARG(0)), out, sizeof out); size_t l = e_strlen(out); u32 cap = (u32)ARG(1) / 2;
   if (cap <= l) { RET((l + 1) * 2); return; } put_w(c, ARG(2), out, 0); if (ARG(3)) { size_t b = l; while (b > 0 && out[b - 1] != '\\') b--; wr64(c, ARG(3), ARG(2) + b * 2); } RET(l * 2); }
@@ -115,8 +117,8 @@ static void s_GetHostNameW(Cpu *c) { static const char h[] = "nebula"; if ((u32)
 static void s_GlobalSize(Cpu *c) { RET(w32_heap_size(W, ARG(0))); }
 static void s_IsProcessInJob(Cpu *c) { if (ARG(2)) wr32(c, ARG(2), 0); RET(1); }
 static void s_QueryDosDeviceW(Cpu *c) { W->last_error = 2; RET(0); }
-static void s_K32GetModuleFileNameExW(Cpu *c) { c->r[RCX] = ARG(1); c->r[RDX] = ARG(2); c->r[R8] = ARG(3); s_GetModuleFileNameW(c); }
-static void s_CreateDirectoryExW(Cpu *c) { c->r[RCX] = ARG(1); c->r[RDX] = ARG(2); s_CreateDirectoryW(c); }
+static void s_K32GetModuleFileNameExW(Cpu *c) { call_shim(c, s_GetModuleFileNameW, ARG(1), ARG(2), ARG(3), 0); }
+static void s_CreateDirectoryExW(Cpu *c) { call_shim(c, s_CreateDirectoryW, ARG(1), ARG(2), 0, 0); }
 static void s_CreatePseudoConsole(Cpu *c) { RET(0x80004001u); }   /* E_NOTIMPL: Bun falls back to pipes */
 static void s_ResizePseudoConsole(Cpu *c) { RET(0x80004001u); }
 static void s_ClosePseudoConsole(Cpu *c) { RET(0); }

@@ -111,7 +111,7 @@ static void s_StrCmpNIW(Cpu *c) { u64 a = ARG(0), b = ARG(1); u32 n = (u32)ARG(2
 static void s_RegisterWindowMessageW(Cpu *c) { const char *n = name_w(c, ARG(0)); u32 h = 2166136261u; for (const char *p = n; *p; p++) h = (h ^ (u8)*p) * 16777619u; RET(0xC000u + (h % 0x3FFFu)); }
 static void s_RegisterWindowMessageA(Cpu *c) { const char *n = name_a(c, ARG(0)); u32 h = 2166136261u; for (const char *p = n; *p; p++) h = (h ^ (u8)*p) * 16777619u; RET(0xC000u + (h % 0x3FFFu)); }
 static void s_lstrcmpiW(Cpu *c) { char a[1024], b[1024]; wstr_to_utf8(c, ARG(0), a, sizeof a, -1); wstr_to_utf8(c, ARG(1), b, sizeof b, -1); int r = e_stricmp(a, b); RET((u64)(s64)(r < 0 ? -1 : r > 0 ? 1 : 0)); }
-static void s_GetStringTypeExW(Cpu *c) { c->r[RCX] = ARG(1); c->r[RDX] = ARG(2); c->r[R8] = ARG(3); c->r[R9] = ARG(4); s_GetStringTypeW(c); }   /* (locale, type, src, n, out) → GetStringTypeW(type, src, n, out) */
+static void s_GetStringTypeExW(Cpu *c) { call_shim(c, s_GetStringTypeW, ARG(1), ARG(2), ARG(3), ARG(4)); }   /* (locale, type, src, n, out) → GetStringTypeW(type, src, n, out) */
 static void s_GetThreadPreferredUILanguages(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), 0); if (ARG(3)) { u32 need = rd32(c, ARG(3)); if (ARG(2) && need >= 1) wr16(c, ARG(2), 0); wr32(c, ARG(3), 1); } RET(1); }
 #define RT_SHIMS \
   SA("_lock_locales", lock_locales), SA("_unlock_locales", lock_locales), SA("___lc_locale_name_func", lc_locale_name_func), SA("__processing_throw", processing_throw), SA("_invoke_watson", invoke_watson), \

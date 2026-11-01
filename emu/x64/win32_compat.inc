@@ -56,8 +56,8 @@ static void s_SysStringByteLen(Cpu *c) { RET(ARG(0) ? rd32(c, ARG(0) - 4) : 0); 
 static void s_SysReAllocStringLen(Cpu *c) { u64 pb = ARG(0); u64 nb = bstr_alloc(c, 0, ARG(1), (u32)ARG(2)); if (!nb) { RET(0); return; } u64 old = rd64(c, pb); if (old) w32_heap_free(W, old - 4); wr64(c, pb, nb); RET(1); }
 static void s_VariantInit(Cpu *c) { u8 *p = mem_ptr(c->mem, ARG(0), 24, 1); if (p) e_memset(p, 0, 24); }
 static void s_VariantClear(Cpu *c) { u64 v = ARG(0); u16 vt = rd16(c, v); if (vt == 8) { u64 b = rd64(c, v + 8); if (b) w32_heap_free(W, b - 4); } u8 *p = mem_ptr(c->mem, v, 24, 1); if (p) e_memset(p, 0, 24); RET(0); }
-static void s_VariantCopy(Cpu *c) { u64 d = ARG(0), s = ARG(1); if (d == s) { RET(0); return; } c->r[RCX] = d; s_VariantClear(c); u8 *sp = mem_ptr(c->mem, s, 24, 0), *dp = mem_ptr(c->mem, d, 24, 1); if (sp && dp) e_memcpy(dp, sp, 24);
-  if (rd16(c, s) == 8) { c->r[RCX] = rd64(c, s + 8); s_SysAllocString(c); wr64(c, d + 8, c->r[RAX]); } RET(0); }
+static void s_VariantCopy(Cpu *c) { u64 d = ARG(0), s = ARG(1); if (d == s) { RET(0); return; } call_shim(c, s_VariantClear, d, 0, 0, 0); u8 *sp = mem_ptr(c->mem, s, 24, 0), *dp = mem_ptr(c->mem, d, 24, 1); if (sp && dp) e_memcpy(dp, sp, 24);
+  if (rd16(c, s) == 8) { call_shim(c, s_SysAllocString, rdp(c, s + 8), 0, 0, 0); wrp(c, d + 8, c->r[RAX]); } RET(0); }
 
 /* ---------- ADVAPI32: privileges / security / registry → "not available", never a crash ---------- */
 static void s_LookupPrivilegeValueW(Cpu *c) { W->last_error = 1313; RET(0); }      /* ERROR_NO_SUCH_PRIVILEGE */

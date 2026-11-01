@@ -125,7 +125,7 @@ static void load_import(void *ctx, const char *dll, const char *name, u32 ordina
   LoadCtx *lc = ctx; char tmp[32]; const char *n = name;
   if (!n) { e_snprintf(tmp, sizeof tmp, "#%u", ordinal); n = tmp; }
   u64 slot = w32_data_import(lc->w, n); if (!slot) slot = w32_resolve_import(lc->w, dll, n, ordinal);
-  u8 *p = lc->img + iat_rva; p[0] = slot; p[1] = slot >> 8; p[2] = slot >> 16; p[3] = slot >> 24; p[4] = slot >> 32; p[5] = slot >> 40; p[6] = slot >> 48; p[7] = slot >> 56;
+  u8 *p = lc->img + iat_rva; p[0] = slot; p[1] = slot >> 8; p[2] = slot >> 16; p[3] = slot >> 24; if (!lc->w->mode32) { p[4] = slot >> 32; p[5] = slot >> 40; p[6] = slot >> 48; p[7] = slot >> 56; }
 }
 
 /* static TLS: one slot per image in the per-thread pointer array (TEB+0x58 → arr[idx]); every live thread gets its own block */
@@ -135,7 +135,7 @@ void pe_tls_thread_init(Win32 *w, int th) {
     if (w->th[th].tls_blk[i]) continue;
     u64 blk = w32_heap_alloc(w, w->tls[i].blk_size, 1); if (!blk) return;
     if (w->tls[i].tmpl_size) { const u8 *src = mem_ptr(w->mem, w->tls[i].tmpl, w->tls[i].tmpl_size, 0); u8 *dst = mem_ptr(w->mem, blk, w->tls[i].tmpl_size, 1); if (src && dst) e_memcpy(dst, src, (size_t)w->tls[i].tmpl_size); }
-    wr64(c, arr + 8 * i, blk); w->th[th].tls_blk[i] = blk;
+    wrp(c, arr + (w->mode32 ? 4 : 8) * i, blk); w->th[th].tls_blk[i] = blk;
   }
 }
 static int pe_tls_register(Win32 *w, u64 raw_start, u64 raw_end, u32 zero, u64 idx_addr) {
@@ -154,8 +154,14 @@ static int pe_map(Win32 *w, const u8 *bytes, size_t len, const char *name, int w
      the mapped image: x64 PE32+ assemblies and AnyCPU (x86 PE32, IL-only) assemblies; their entry stub is never executed */
   int managed = h.dd[14][1] != 0, il_only = 0;
   if (managed) { const u8 *ch = pe_rva(&h, h.dd[14][0], 24); if (ch) il_only = le32(ch + 16) & 1; }
-  if (h.machine != 0x8664 && !(managed && il_only && h.machine == 0x14c)) { w32_report(w, "%s: unsupported machine 0x%x (only x86-64 / PE32+ is emulated)", name, h.machine); return -2; }
-  if (h.magic != 0x20b && !(managed && il_only && h.magic == 0x10b)) { w32_report(w, "%s: not PE32+", name); return -2; }
+  int is32 = h.machine == 0x14c && h.magic == 0x10b;
+  if (!want_dll && is32 && !managed) { extern void w32_enter_mode32(Win32 *w); w32_enter_mode32(w); }   /* 32-bit executable → 32-bit process */
+  if (w->mode32) {
+    if (!is32) { w32_report(w, "%s: a 32-bit process cannot load this %s image", name, h.machine == 0x8664 ? "x86-64" : "non-x86"); return -2; }
+  } else {
+    if (h.machine != 0x8664 && !(managed && il_only && h.machine == 0x14c)) { w32_report(w, "%s: unsupported machine 0x%x (x86-64 and x86 executables are emulated; this one is neither)", name, h.machine); return -2; }
+    if (h.magic != 0x20b && !(managed && il_only && h.magic == 0x10b)) { w32_report(w, "%s: not PE32+", name); return -2; }
+  }
   if (!want_dll && (h.chars & 0x2000)) { w32_report(w, "file is a DLL, not an executable"); return -3; }
   if (want_dll && !(h.chars & 0x2000) && !managed) { w32_report(w, "%s: not a DLL", name); return -3; }
   if (managed && !want_dll) { w32_report(w, "%s: .NET assembly — start it through the .NET runtime (dotnet.exe)", name); return -4; }
@@ -166,7 +172,11 @@ static int pe_map(Win32 *w, const u8 *bytes, size_t len, const char *name, int w
   if (managed && want_dll) collide = 1;
   if (base == 0 || collide) {
     if (!h.dd[5][1] && !(h.dllchars & 0x40) && !managed) { w32_report(w, "%s: image base 0x%llx collides and the file has no relocations", name, (unsigned long long)base); return -5; }
-    if (!want_dll) { base = 0x0000000140000000ull; if (base < G_HEAP_BASE + 0x40000000ull) base = 0x0000000180000000ull; }
+    if (w->mode32) {   /* everything below 2 GB: exe at 0x00400000 (or next free), DLLs from 0x60000000 upward (0x10000000 is our stack) */
+      if (!want_dll) { base = 0x00400000; while (base + size <= 0x10000000 && mem_region(w->mem, base)) base += 0x100000; }
+      else { if (!w->dll_next32) w->dll_next32 = 0x60000000ull; base = w->dll_next32; w->dll_next32 += size + 0x10000; }
+    }
+    else if (!want_dll) { base = 0x0000000140000000ull; if (base < G_HEAP_BASE + 0x40000000ull) base = 0x0000000180000000ull; }
     else { if (!w->dll_next) w->dll_next = 0x0000000190000000ull; base = w->dll_next; w->dll_next += size + 0x10000; }
   }
   u8 *img = mem_map(w->mem, base, size, want_dll ? "dll" : "image");
@@ -211,7 +221,7 @@ int pe_load_dll(Win32 *w, const u8 *bytes, size_t len, const char *name) {
   if (pe_map(w, bytes, len, name, 1, &h, &base, &size)) return -1;
   if (h.dd[9][0] && h.dd[9][0] + 40 <= size) {   /* DLL static TLS: register a slot (mingw DLLs carry one, MSVC DLLs with thread_local too) */
     const u8 *t = mem_ptr(w->mem, base + h.dd[9][0], 40, 0);
-    if (t) { u64 rs = le64(t), re = le64(t + 8), idx_addr = le64(t + 16); u32 zero = le32(t + 32); if (pe_tls_register(w, rs, re, zero, idx_addr) < 0) w32_report(w, "%s: too many images with static TLS (max %d)", name, MAX_TLS_IMAGES); }
+    if (t) { u64 rs, re, idx_addr; u32 zero; if (w->mode32) { rs = le32(t); re = le32(t + 4); idx_addr = le32(t + 8); zero = le32(t + 16); } else { rs = le64(t); re = le64(t + 8); idx_addr = le64(t + 16); zero = le32(t + 32); } if (pe_tls_register(w, rs, re, zero, idx_addr) < 0) w32_report(w, "%s: too many images with static TLS (max %d)", name, MAX_TLS_IMAGES); }
   }
   return before;   /* index of the module registered by pe_map */
 }
@@ -224,12 +234,14 @@ int pe_load(Win32 *w, const u8 *bytes, size_t len, const char *name) {
   Cpu *c = w->cpu;
   if (h.dd[9][0] && h.dd[9][0] + 40 <= size) {
     const u8 *t = img + h.dd[9][0];
-    u64 raw_start = le64(t), raw_end = le64(t + 8), idx_addr = le64(t + 16), cb_addr = le64(t + 24); u32 zero = le32(t + 32);
+    u64 raw_start, raw_end, idx_addr, cb_addr; u32 zero;
+    if (w->mode32) { raw_start = le32(t); raw_end = le32(t + 4); idx_addr = le32(t + 8); cb_addr = le32(t + 12); zero = le32(t + 16); }
+    else { raw_start = le64(t); raw_end = le64(t + 8); idx_addr = le64(t + 16); cb_addr = le64(t + 24); zero = le32(t + 32); }
     pe_tls_register(w, raw_start, raw_end, zero, idx_addr);
     /* callbacks: stored for the start-up sequence */
-    if (cb_addr) { for (int k = 0; k < 16; k++) { u64 fn = rd64(c, cb_addr + k * 8); if (!fn) break; w->tls_callbacks[w->n_tls_cb++] = fn; } }
+    if (cb_addr) { for (int k = 0; k < 16; k++) { u64 fn = rdp(c, cb_addr + k * PSZ); if (!fn) break; w->tls_callbacks[w->n_tls_cb++] = fn; } }
   }
-  wr64(c, w->peb + 0x10, base);
+  if (w->mode32) wr32(c, w->peb + 0x08, (u32)base); else wr64(c, w->peb + 0x10, base);
   return 0;
 }
 

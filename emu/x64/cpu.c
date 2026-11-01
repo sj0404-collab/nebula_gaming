@@ -27,8 +27,8 @@ const char *rd_str(Cpu *c, u64 a, size_t max) {
 }
 static u64 rdn(Cpu *c, u64 a, int n) { switch (n) { case 1: return rd8(c, a); case 2: return rd16(c, a); case 4: return rd32(c, a); default: return rd64(c, a); } }
 static void wrn(Cpu *c, u64 a, int n, u64 v) { switch (n) { case 1: wr8(c, a, (u8)v); break; case 2: wr16(c, a, (u16)v); break; case 4: wr32(c, a, (u32)v); break; default: wr64(c, a, v); } }
-void cpu_push(Cpu *c, u64 v) { c->r[RSP] -= 8; wr64(c, c->r[RSP], v); }
-u64 cpu_pop(Cpu *c) { u64 v = rd64(c, c->r[RSP]); c->r[RSP] += 8; return v; }
+void cpu_push(Cpu *c, u64 v) { if (c->mode32) { c->r[RSP] = (u32)(c->r[RSP] - 4); wr32(c, c->r[RSP], (u32)v); return; } c->r[RSP] -= 8; wr64(c, c->r[RSP], v); }
+u64 cpu_pop(Cpu *c) { if (c->mode32) { u32 v = rd32(c, c->r[RSP]); c->r[RSP] = (u32)(c->r[RSP] + 4); return v; } u64 v = rd64(c, c->r[RSP]); c->r[RSP] += 8; return v; }
 
 void cpu_reset(Cpu *c) {
   for (int i = 0; i < 16; i++) { c->r[i] = 0; c->x[i].q[0] = c->x[i].q[1] = 0; }
@@ -46,7 +46,7 @@ typedef struct {
   u8 len, hdr, mr_end, op;             /* length, offset after the first opcode byte, offset after ModRM/SIB/disp */
   u8 rex, rexw, rexr, rexx, rexb, p66, p67, rep, seg, lock;
   u8 modrm, mod, reg, rm, scale, riprel; s8 base, idx;   /* base/idx -1 = none */
-  u8 fast, op2;                        /* fast handler class (0 = generic path), second opcode byte for 0F forms */
+  u8 fast, op2, m32;                   /* fast handler class (0 = generic path), second opcode byte for 0F forms, decoded in 32-bit mode */
   const u8 *code; Mem *mem; u32 gen;   /* host pointer to the bytes, valid while mem/gen match (saves the TLB lookup) */
 } Dc;
 enum { FK_NONE, FK_MOV_RM_R, FK_MOV_R_RM, FK_LEA, FK_ALU_RM_IMM8, FK_ALU_RM_IMM32, FK_TEST_RR, FK_ALU_RM_R, FK_ALU_R_RM, FK_JCC8, FK_JCC32, FK_JMP8, FK_JMP32,
@@ -102,7 +102,7 @@ static void decode_modrm(Ins *i) {
     if (e->mod == 3) return;
     if (e->riprel) { i->ea = (u64)(s64)e->disp; i->ea_valid = 2; return; }
     u64 ea = (u64)(s64)e->disp; if (e->base >= 0) ea += i->c->r[(int)e->base]; if (e->idx >= 0) ea += i->c->r[(int)e->idx] << e->scale;
-    if (i->p67) ea &= 0xffffffffull;
+    if (i->p67 || i->c->mode32) ea &= 0xffffffffull;
     if (i->seg == 1) ea += i->c->fs_base; else if (i->seg == 2) ea += i->c->gs_base;
     i->ea = ea; i->ea_valid = 1; return;
   }
@@ -116,13 +116,14 @@ static void decode_modrm(Ins *i) {
     if (idx != 4) { ea += i->c->r[idx] << scale; i->idx = (s8)idx; i->scale = scale; }
     if ((sib & 7) == 5 && i->mod == 0) { s32 d = (s32)fetch32(i); ea += (u64)(s64)d; i->disp = d; }
     else { ea += i->c->r[base]; i->base = (s8)base; }
-  } else if (rmlow == 5 && i->mod == 0) {
+  } else if (rmlow == 5 && i->mod == 0 && i->c->mode32) { s32 d = (s32)fetch32(i); i->disp = d; ea = (u32)d; }   /* 32-bit mode: absolute disp32 */
+  else if (rmlow == 5 && i->mod == 0) {
     s32 d = (s32)fetch32(i); i->disp = d; i->riprel = 1; i->mr_end = (int)(i->ip - i->start);   /* rip-relative: resolved after full decode (needs end ip) → store marker */
     i->ea_valid = 2; i->ea = (u64)(s64)d; return;
   } else { ea += i->c->r[i->rm]; i->base = (s8)i->rm; }
   if (i->mod == 1) { s32 d = (s8)fetch8(i); ea += (u64)(s64)d; i->disp = d; } else if (i->mod == 2) { s32 d = (s32)fetch32(i); ea += (u64)(s64)d; i->disp = d; }
   i->mr_end = (int)(i->ip - i->start);
-  if (i->p67) ea &= 0xffffffffull;
+  if (i->p67 || i->c->mode32) ea &= 0xffffffffull;
   if (i->seg == 1) ea += i->c->fs_base; else if (i->seg == 2) ea += i->c->gs_base;
   i->ea = ea; i->ea_valid = 1;
 }
@@ -312,6 +313,7 @@ static int string_op(Ins *i, int op, int sz) {
     if ((op == 0xA6 || op == 0xAE)) { int z = !!(c->rflags & F_ZF); if (i->rep == 0xF3 && !z) break; if (i->rep == 0xF2 && z) break; }
     if (++iter > 1u << 26) { cpu_fault(c, "runaway rep string op"); return 0; }
   }
+  if (c->mode32) { c->r[RSI] &= 0xffffffffull; c->r[RDI] &= 0xffffffffull; c->r[RCX] &= 0xffffffffull; }
   return 1;
 }
 
@@ -328,6 +330,7 @@ static void exec_0f(Ins *i, Cpu *c);
 static u8 dc_classify(const Dc *e) {
   if (e->seg || e->p67 || e->lock) return FK_NONE;
   u8 op = e->op; int osz = e->rexw ? 8 : 4;
+  if (e->m32 && (op == 0xFF || op == 0x63 || op == 0xC7 || (op >= 0xB8 && op <= 0xBF))) return FK_NONE;   /* 32-bit mode: psz-dependent / no movsxd / moffs forms take the generic path */
   if (op == 0x0F && e->len > e->hdr) {   /* SSE forms take 66/F2/F3 as mandatory prefixes */
     u8 op2 = e->op2;
     if (op2 == 0x10 || op2 == 0x11 || op2 == 0x28 || op2 == 0x29) return (e->p66 && e->rep) ? FK_NONE : FK_SSE_MOV;
@@ -359,7 +362,7 @@ static u8 dc_classify(const Dc *e) {
 }
 static inline u64 fast_ea(Cpu *c, const Dc *e, u64 start) {
   if (e->riprel) return start + e->len + (u64)(s64)e->disp;
-  u64 ea = (u64)(s64)e->disp; if (e->base >= 0) ea += c->r[(int)e->base]; if (e->idx >= 0) ea += c->r[(int)e->idx] << e->scale; return ea;
+  u64 ea = (u64)(s64)e->disp; if (e->base >= 0) ea += c->r[(int)e->base]; if (e->idx >= 0) ea += c->r[(int)e->idx] << e->scale; return c->mode32 ? (u32)ea : ea;
 }
 static inline u64 fast_rm_get(Cpu *c, const Dc *e, u64 start, int sz) { if (e->mod == 3) return sz == 8 ? c->r[e->rm] : (u32)c->r[e->rm]; u64 a = fast_ea(c, e, start); return sz == 8 ? rd64(c, a) : rd32(c, a); }
 static inline void fast_rm_set(Cpu *c, const Dc *e, u64 start, int sz, u64 v) { if (e->mod == 3) { if (sz == 8) c->r[e->rm] = v; else c->r[e->rm] = (u32)v; return; } u64 a = fast_ea(c, e, start); if (sz == 8) wr64(c, a, v); else wr32(c, a, (u32)v); }
@@ -441,7 +444,7 @@ static inline u64 fast_exec(Cpu *c, const Dc *e, const u8 *code, u64 start) {
     case FK_MOVSX8: { u64 v = fast_rm8_get(c, e, start); if (c->status == RUN_OK) fast_reg_set(c, e->reg, sz, (u64)(s64)(s8)v); return next; }
     case FK_MOVSX16: { u64 v = e->mod == 3 ? c->r[e->rm] & 0xffff : rd16(c, fast_ea(c, e, start)); if (c->status == RUN_OK) fast_reg_set(c, e->reg, sz, (u64)(s64)(s16)v); return next; }
     case FK_NOP: return next;
-    case FK_RET_N: { u64 ra = cpu_pop(c); if (c->status != RUN_OK) return next; c->r[RSP] += (u16)(code[e->hdr] | (code[e->hdr + 1] << 8)); return ra; }
+    case FK_RET_N: { u64 ra = cpu_pop(c); if (c->status != RUN_OK) return next; c->r[RSP] += (u16)(code[e->hdr] | (code[e->hdr + 1] << 8)); if (c->mode32) c->r[RSP] &= 0xffffffffull; return ra; }
     case FK_SSE_MOV: { u8 op2 = e->op2; Xmm v;
       if (op2 == 0x28 || op2 == 0x29) { if (op2 == 0x28) { fast_xmm_load(c, e, start, &v, 16); if (c->status == RUN_OK) c->x[e->reg] = v; } else fast_xmm_store(c, e, start, &c->x[e->reg], 16); return next; }
       int bytes = e->rep == 0xF3 ? 4 : e->rep == 0xF2 ? 8 : 16;
@@ -476,7 +479,7 @@ static void exec_one(Ins *i) {
     if (op == 0x66) i->p66 = 1; else if (op == 0x67) i->p67 = 1; else if (op == 0xF2 || op == 0xF3) i->rep = op;
     else if (op == 0x64) i->seg = 1; else if (op == 0x65) i->seg = 2; else if (op == 0xF0) i->lock = 1;
     else if (op == 0x2E || op == 0x3E || op == 0x26 || op == 0x36) { /* cs/ds/es/ss: ignored (branch hints) */ }
-    else if ((op & 0xF0) == 0x40) { i->rex = 1; i->rexw = (op >> 3) & 1; i->rexr = (op >> 2) & 1; i->rexx = (op >> 1) & 1; i->rexb = op & 1; op = fetch8(i); break; }
+    else if ((op & 0xF0) == 0x40 && !c->mode32) { i->rex = 1; i->rexw = (op >> 3) & 1; i->rexr = (op >> 2) & 1; i->rexx = (op >> 1) & 1; i->rexb = op & 1; op = fetch8(i); break; }
     else break;
   }
   if (c->status) return;
@@ -501,7 +504,15 @@ static void exec_body(Ins *i, u8 op) {
   switch (op) {
     case 0x50: case 0x51: case 0x52: case 0x53: case 0x54: case 0x55: case 0x56: case 0x57: { int r = (op & 7) | (i->rexb << 3); u64 v = c->r[r]; if (i->p66) { c->r[RSP] -= 2; wr16(c, c->r[RSP], (u16)v); } else cpu_push(c, v); return; }
     case 0x58: case 0x59: case 0x5A: case 0x5B: case 0x5C: case 0x5D: case 0x5E: case 0x5F: { int r = (op & 7) | (i->rexb << 3); if (i->p66) { u16 v = rd16(c, c->r[RSP]); c->r[RSP] += 2; set_reg(i, r, 2, v); } else { u64 v = cpu_pop(c); c->r[r] = v; } return; }
-    case 0x63: { decode_modrm(i); u64 v = rm_get(i, 4); set_reg(i, i->reg, osz, osz == 8 ? sext(v, 4) : v); return; }   /* movsxd */
+    case 0x63: { if (c->mode32) UNSUP("arpl"); decode_modrm(i); u64 v = rm_get(i, 4); set_reg(i, i->reg, osz, osz == 8 ? sext(v, 4) : v); return; }   /* movsxd */
+    case 0x40: case 0x41: case 0x42: case 0x43: case 0x44: case 0x45: case 0x46: case 0x47: { int r = op & 7; u64 v = get_reg(i, r, osz), res = (v + 1) & mask(osz); u64 cf = c->rflags & F_CF; flags_add(c, v, 1, res, osz); c->rflags = (c->rflags & ~(u64)F_CF) | cf; set_reg(i, r, osz, res); return; }   /* 32-bit mode: inc r */
+    case 0x48: case 0x49: case 0x4A: case 0x4B: case 0x4C: case 0x4D: case 0x4E: case 0x4F: { int r = op & 7; u64 v = get_reg(i, r, osz), res = (v - 1) & mask(osz); u64 cf = c->rflags & F_CF; flags_sub(c, v, 1, res, osz); c->rflags = (c->rflags & ~(u64)F_CF) | cf; set_reg(i, r, osz, res); return; }   /* dec r */
+    case 0x60: { if (!c->mode32) UNSUP("pusha outside 32-bit mode"); u64 sp = c->r[RSP]; for (int r = 0; r < 8; r++) cpu_push(c, r == RSP ? sp : c->r[r]); return; }
+    case 0x61: { if (!c->mode32) UNSUP("popa outside 32-bit mode"); for (int r = 7; r >= 0; r--) { u64 v = cpu_pop(c); if (r != RSP) c->r[r] = v; } return; }
+    case 0xE0: case 0xE1: case 0xE2: case 0xE3: { s64 d = fetch_s8(i); int asz = (i->p67 ^ (c->mode32 ? 1 : 0)) ? 4 : 8; if (c->mode32 && i->p67) asz = 2;
+      if (op == 0xE3) { if (!(get_reg(i, RCX, asz))) i->ip += d; return; }
+      u64 n = (get_reg(i, RCX, asz) - 1) & mask(asz); set_reg(i, RCX, asz, n); int z = !!(c->rflags & F_ZF);
+      if (n && (op == 0xE2 || (op == 0xE1 && z) || (op == 0xE0 && !z))) i->ip += d; return; }   /* loopne / loope / loop / jecxz */
     case 0x68: { u64 v = sext(fetch32(i), 4); cpu_push(c, v); return; }
     case 0x6A: { u64 v = (u64)fetch_s8(i); cpu_push(c, v); return; }
     case 0x69: case 0x6B: { decode_modrm(i); fix_rip_rel(i, op == 0x6B ? 1 : (osz == 2 ? 2 : 4)); s64 a = (s64)sext(rm_get(i, osz), osz); s64 b = op == 0x6B ? fetch_s8(i) : (osz == 2 ? (s64)(s16)fetch16(i) : fetch_s32(i));
@@ -515,7 +526,7 @@ static void exec_body(Ins *i, u8 op) {
     case 0x88: case 0x89: { int sz = op & 1 ? osz : 1; decode_modrm(i); rm_set(i, sz, get_reg(i, i->reg, sz)); return; }
     case 0x8A: case 0x8B: { int sz = op & 1 ? osz : 1; decode_modrm(i); set_reg(i, i->reg, sz, rm_get(i, sz)); return; }
     case 0x8D: { decode_modrm(i); if (i->mod == 3) UNSUP("lea with register operand"); set_reg(i, i->reg, osz, EA(i)); return; }
-    case 0x8F: { u64 v = cpu_pop(c); decode_modrm(i); fix_rip_rel(i, 0); rm_set(i, 8, v); return; }   /* pop r/m64: an rsp-based address is computed AFTER the increment (V8 tail calls rely on `pop [rsp+x]`) */
+    case 0x8F: { u64 v = cpu_pop(c); decode_modrm(i); fix_rip_rel(i, 0); rm_set(i, c->mode32 ? 4 : 8, v); return; }   /* pop r/m64: an rsp-based address is computed AFTER the increment (V8 tail calls rely on `pop [rsp+x]`) */
     case 0x90: if (i->rexb) { u64 t = c->r[RAX]; c->r[RAX] = c->r[R8]; c->r[R8] = t; } return;   /* nop / pause / xchg r8,rax */
     case 0x91: case 0x92: case 0x93: case 0x94: case 0x95: case 0x96: case 0x97: { int r = (op & 7) | (i->rexb << 3); u64 a = get_reg(i, RAX, osz), b = get_reg(i, r, osz); set_reg(i, RAX, osz, b); set_reg(i, r, osz, a); return; }
     case 0x98: if (osz == 8) c->r[RAX] = sext(c->r[RAX], 4); else if (osz == 4) c->r[RAX] = sext(c->r[RAX], 2) & 0xffffffff; else set_reg(i, RAX, 2, sext(c->r[RAX], 1)); return;
@@ -526,7 +537,7 @@ static void exec_body(Ins *i, u8 op) {
     case 0x9F: c->r[RAX] = (c->r[RAX] & ~0xff00ull) | (((c->rflags & 0xd5) | 2) << 8); return;
     case 0xA4: case 0xA5: case 0xAA: case 0xAB: case 0xAC: case 0xAD: case 0xA6: case 0xA7: case 0xAE: case 0xAF: string_op(i, op & ~1, op & 1 ? osz : 1); return;
     case 0xA0: case 0xA1: case 0xA2: case 0xA3: {                                   /* mov al/eax/rax <-> moffs (movabs) */
-      u64 a = i->p67 ? (u64)fetch32(i) : fetch64(i); if (i->seg == 1) a += c->fs_base; else if (i->seg == 2) a += c->gs_base;
+      u64 a = c->mode32 ? (i->p67 ? (u64)fetch16(i) : (u64)fetch32(i)) : i->p67 ? (u64)fetch32(i) : fetch64(i); if (i->seg == 1) a += c->fs_base; else if (i->seg == 2) a += c->gs_base;
       int sz = (op & 1) ? osz : 1;
       if (op & 2) wrn(c, a, sz, get_reg(i, RAX, sz)); else { u64 v = rdn(c, a, sz); if (c->status != RUN_OK) return; set_reg(i, RAX, sz, v); }
       return; }
@@ -535,10 +546,10 @@ static void exec_body(Ins *i, u8 op) {
     case 0xB0: case 0xB1: case 0xB2: case 0xB3: case 0xB4: case 0xB5: case 0xB6: case 0xB7: set_reg(i, (op & 7) | (i->rexb << 3), 1, fetch8(i)); return;
     case 0xB8: case 0xB9: case 0xBA: case 0xBB: case 0xBC: case 0xBD: case 0xBE: case 0xBF: { int r = (op & 7) | (i->rexb << 3); if (osz == 8) c->r[r] = fetch64(i); else if (osz == 2) set_reg(i, r, 2, fetch16(i)); else c->r[r] = fetch32(i); return; }
     case 0xC0: case 0xC1: case 0xD0: case 0xD1: case 0xD2: case 0xD3: { int sz = op & 1 ? osz : 1; decode_modrm(i); fix_rip_rel(i, op <= 0xC1 ? 1 : 0); int cnt = op <= 0xC1 ? fetch8(i) : op <= 0xD1 ? 1 : (int)(c->r[RCX] & 0xff); u64 v = rm_get(i, sz); rm_set(i, sz, shift(c, i->reg & 7, v, cnt, sz)); return; }
-    case 0xC2: { u16 n = fetch16(i); u64 ra = cpu_pop(c); c->r[RSP] += n; i->ip = ra; return; }
+    case 0xC2: { u16 n = fetch16(i); u64 ra = cpu_pop(c); c->r[RSP] += n; if (c->mode32) c->r[RSP] &= 0xffffffffull; i->ip = ra; return; }
     case 0xC3: i->ip = cpu_pop(c); return;
     case 0xC6: case 0xC7: { int sz = op & 1 ? osz : 1; decode_modrm(i); fix_rip_rel(i, sz == 1 ? 1 : sz == 2 ? 2 : 4); u64 v = sz == 1 ? fetch8(i) : sz == 2 ? fetch16(i) : sext(fetch32(i), 4); rm_set(i, sz, v); return; }
-    case 0xC9: c->r[RSP] = c->r[RBP]; c->r[RBP] = cpu_pop(c); return;
+    case 0xC9: c->r[RSP] = c->mode32 ? (u32)c->r[RBP] : c->r[RBP]; c->r[RBP] = cpu_pop(c); return;
     case 0xCC: c->status = RUN_BREAK; c->rip = i->ip; return;
     case 0xE8: { s64 d = fetch_s32(i); cpu_push(c, i->ip); i->ip += d; return; }
     case 0xE9: { s64 d = fetch_s32(i); i->ip += d; return; }
@@ -581,13 +592,13 @@ static void exec_body(Ins *i, u8 op) {
       switch (sub) {
         case 0: { u64 v = rm_get(i, sz), r = (v + 1) & mask(sz); u64 cf = c->rflags & F_CF; flags_add(c, v, 1, r, sz); c->rflags = (c->rflags & ~(u64)F_CF) | cf; rm_set(i, sz, r); return; }
         case 1: { u64 v = rm_get(i, sz), r = (v - 1) & mask(sz); u64 cf = c->rflags & F_CF; flags_sub(c, v, 1, r, sz); c->rflags = (c->rflags & ~(u64)F_CF) | cf; rm_set(i, sz, r); return; }
-        case 2: { u64 t = rm_get(i, 8); cpu_push(c, i->ip); i->ip = t; return; }
-        case 4: { i->ip = rm_get(i, 8); return; }
-        case 6: { u64 v = rm_get(i, 8); cpu_push(c, v); return; }
+        case 2: { u64 t = rm_get(i, c->mode32 ? 4 : 8); cpu_push(c, i->ip); i->ip = t; return; }
+        case 4: { i->ip = rm_get(i, c->mode32 ? 4 : 8); return; }
+        case 6: { u64 v = rm_get(i, c->mode32 ? 4 : 8); cpu_push(c, v); return; }
         default: UNSUP("FF /%d unsupported", sub);
       }
     }
-    case 0xC8: { u16 size = fetch16(i); u8 lvl = fetch8(i); (void)lvl; cpu_push(c, c->r[RBP]); c->r[RBP] = c->r[RSP]; c->r[RSP] -= size; return; }
+    case 0xC8: { u16 size = fetch16(i); u8 lvl = fetch8(i); (void)lvl; cpu_push(c, c->r[RBP]); c->r[RBP] = c->r[RSP]; c->r[RSP] -= size; if (c->mode32) c->r[RSP] &= 0xffffffffull; return; }
     case 0xCD: { u8 n = fetch8(i); UNSUP("int 0x%02x", n); }
     case 0x9B: return; /* fwait */
     case 0xD8: case 0xD9: case 0xDA: case 0xDB: case 0xDC: case 0xDD: case 0xDE: case 0xDF: exec_x87(i, c, op); return;
@@ -819,7 +830,7 @@ int cpu_run(Cpu *c, u64 max_insns) {
     Dc *e = DC_SLOT(c->rip); u64 w0 = 0, w1 = 0;
     const u8 *code = (e->rip == c->rip && e->mem == c->mem && e->gen == c->mem->gen) ? e->code : mem_ptr_fast(c->mem, c->rip, 16, 0);
     if (code) { __builtin_memcpy(&w0, code, 8); __builtin_memcpy(&w1, code + 8, 8); }
-    int hit = e->rip == c->rip && code && (w0 & e->m0) == e->b0 && (w1 & e->m1) == e->b1;
+    int hit = e->rip == c->rip && code && (w0 & e->m0) == e->b0 && (w1 & e->m1) == e->b1 && e->m32 == c->mode32;
     if (hit && e->fast) {   /* specialised handler: no Ins at all */
       u64 start = c->rip, nx = fast_exec(c, e, code, start);
       if (nx) { if (c->status != RUN_OK) { c->hist[c->hist_i++ & 4095] = start; if (c->status == RUN_FAULT) { c->err_rip = start; if (c->exc_code) { c->rip = start; if (w32_hw_exception(c)) continue; } } return c->status; }
@@ -847,7 +858,7 @@ int cpu_run(Cpu *c, u64 max_insns) {
           e->b0 = w0 & e->m0; e->b1 = w1 & e->m1;
           e->rex = in.rex; e->rexw = in.rexw; e->rexr = in.rexr; e->rexx = in.rexx; e->rexb = in.rexb; e->p66 = in.p66; e->p67 = in.p67; e->rep = in.rep; e->seg = in.seg; e->lock = in.lock;
           e->modrm = in.modrm; e->mod = in.mod; e->reg = in.reg; e->rm = in.rm; e->scale = (u8)in.scale; e->riprel = (u8)in.riprel; e->base = in.base; e->idx = in.idx; e->disp = in.disp;
-          e->op = code[in.hdr - 1]; e->op2 = code[in.hdr]; e->code = code; e->mem = c->mem; e->gen = mem_gen(c->mem); e->fast = dc_classify(e);
+          e->op = code[in.hdr - 1]; e->op2 = code[in.hdr]; e->code = code; e->mem = c->mem; e->gen = mem_gen(c->mem); e->m32 = c->mode32; e->fast = dc_classify(e);
         }
       }
     }
@@ -855,7 +866,7 @@ int cpu_run(Cpu *c, u64 max_insns) {
       if (c->status == RUN_FAULT) { c->err_rip = in.start; if (c->exc_code) { c->rip = in.start; if (w32_hw_exception(c)) continue; } }
       return c->status;
     }
-    c->rip = in.ip; c->icount++;
+    c->rip = c->mode32 ? (u32)in.ip : in.ip; c->icount++;
     if (c->trace) e_log("%llx\n", (unsigned long long)c->rip);
   }
   return RUN_OK;

@@ -53,7 +53,7 @@ static void s_VirtualQuery(Cpu *c) {
   if (!r) { wr64(c, mbi, addr & ~0xfffull); wr64(c, mbi + 24, 0x1000); wr32(c, mbi + 32, 0x10000); wr32(c, mbi + 36, 1); RET(48); return; }
   wr64(c, mbi, addr & ~0xfffull); wr64(c, mbi + 8, r->base); wr32(c, mbi + 16, 0x40); wr64(c, mbi + 24, r->base + r->size - (addr & ~0xfffull)); wr32(c, mbi + 32, 0x1000); wr32(c, mbi + 36, 0x40); wr32(c, mbi + 40, r->base == W->image_base ? 0x1000000 : 0x20000); RET(48);
 }
-static void s_VirtualQueryEx_clr(Cpu *c) { c->r[RCX] = ARG(1); c->r[RDX] = ARG(2); s_VirtualQuery(c); }
+static void s_VirtualQueryEx_clr(Cpu *c) { call_shim(c, s_VirtualQuery, ARG(1), ARG(2), ARG(3), 0); }
 /* ---- processor groups / NUMA: one group, one node ---- */
 static void s_GetMaximumProcessorGroupCount(Cpu *c) { RET(1); }
 static void s_GetCurrentProcessorNumberEx(Cpu *c) { if (ARG(0)) { wr16(c, ARG(0), 0); wr8(c, ARG(0) + 2, 0); } RET(0); }
