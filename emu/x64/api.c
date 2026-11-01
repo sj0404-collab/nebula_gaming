@@ -43,10 +43,43 @@ int proc_main_thread_kobj(int pid) { Proc *p = proc_find(pid); return p ? p->w32
 #define HOST_PID 1000
 int proc_enum(int idx, int *pid, int *ppid, const char **name) { if (idx == 0) { *pid = HOST_PID; *ppid = 4; *name = "explorer.exe"; return 1; } idx--; int k = 0; for (int i = 0; i < PROC_MAX; i++) { Proc *p = g_procs[i]; if (!p || !p->used || p->state == 2) continue; if (k++ == idx) { *pid = p->pid; *ppid = p->ppid; *name = p->name; return 1; } } return 0; }
 static const char *basename_of(const char *p) { const char *b = p; for (const char *q = p; *q; q++) if (*q == '\\' || *q == '/') b = q + 1; return b; }
+/* ---------- .NET: managed exes/dlls are started through the official runtime (the ".NET pack" at C:\Program Files\dotnet) ----------
+   `app.exe a b`  →  "C:\Program Files\dotnet\dotnet.exe" exec [--runtimeconfig "C:\tmp\app.runtimeconfig.json"] "C:\dir\app.exe" a b
+   A runtimeconfig is generated when the app has none next to it (classic .NET Framework exes): net10.0, roll forward to any
+   installed major, invariant globalization, BinaryFormatter allowed — the compatibility mode in which net48 console apps run. */
+#define DOTNET_EXE "C:\\Program Files\\dotnet\\dotnet.exe"
+static const char *cmd_skip_first(const char *cl) {   /* command line without its first (possibly quoted) token */
+  const char *p = cl; while (*p == ' ' || *p == '\t') p++;
+  if (*p == '"') { p++; while (*p && *p != '"') p++; if (*p == '"') p++; } else while (*p && *p != ' ' && *p != '\t') p++;
+  while (*p == ' ' || *p == '\t') p++; return p;
+}
+static char g_dotnet_cmd[4096], g_dotnet_cfg[2048];
+/* returns the dotnet.exe VFS node (>= 0) and rewrites *cmdline, or -1 (not managed) / -2 (managed but no runtime pack) */
+static int dotnet_redirect(Win32 *w, const char *app_path, const u8 *bytes, size_t len, const char **cmdline) {
+  if (pe_managed_kind(bytes, len) != 1) return -1;
+  int dn = vfs_find_node(DOTNET_EXE); VNodeInfo di;
+  if (dn < 0 || !vfs_node_info(dn, &di) || di.is_dir) { w32_report(w, "%s is a .NET assembly: install the .NET runtime pack (Microsoft .NET Runtime 10, win-x64) into C:\\Program Files\\dotnet first", basename_of(app_path)); return -2; }
+  /* <dir>\<base>.runtimeconfig.json next to the app? otherwise generate one in C:\tmp */
+  char cfg[600]; e_snprintf(cfg, sizeof cfg, "%s", app_path); size_t l = e_strlen(cfg); if (l > 4 && (cfg[l - 4] == '.')) cfg[l - 4] = 0;
+  size_t cl = e_strlen(cfg); if (cl + 20 < sizeof cfg) e_memcpy(cfg + cl, ".runtimeconfig.json", 20);
+  const char *rc_opt = "";
+  if (vfs_find_node(cfg) < 0) {
+    const char *bn = basename_of(app_path); char base[260]; e_snprintf(base, sizeof base, "%s", bn); size_t bl = e_strlen(base); if (bl > 4 && base[bl - 4] == '.') base[bl - 4] = 0;
+    static char gen[600]; e_snprintf(gen, sizeof gen, "C:\\tmp\\%s.runtimeconfig.json", base);
+    static const char json[] = "{\"runtimeOptions\":{\"tfm\":\"net10.0\",\"rollForward\":\"LatestMajor\",\"framework\":{\"name\":\"Microsoft.NETCore.App\",\"version\":\"10.0.0\"},"
+      "\"configProperties\":{\"System.Globalization.Invariant\":true,\"System.Globalization.PredefinedCulturesOnly\":false,\"System.Runtime.Serialization.EnableUnsafeBinaryFormatterSerialization\":true,\"System.Reflection.Metadata.MetadataUpdater.IsSupported\":false}}}";
+    vfs_mkdir("C:\\tmp"); vfs_add(gen, (const u8 *)json, sizeof json - 1);
+    e_snprintf(g_dotnet_cfg, sizeof g_dotnet_cfg, " --runtimeconfig \"%s\"", gen); rc_opt = g_dotnet_cfg;
+  }
+  e_snprintf(g_dotnet_cmd, sizeof g_dotnet_cmd, "\"%s\" exec%s \"%s\" %s", DOTNET_EXE, rc_opt, app_path, *cmdline ? cmd_skip_first(*cmdline) : "");
+  { char msg[700]; e_snprintf(msg, sizeof msg, "[x64] .NET assembly %s -> %s\n", basename_of(app_path), g_dotnet_cmd); host_write(3, msg, e_strlen(msg)); }
+  *cmdline = g_dotnet_cmd; return dn;
+}
 /* CreateProcess: load an exe from the VFS into a fresh address space; std_fd[k]: -2 inherit, -1 console, >=3 parent's table entry */
 const char *const *g_spawn_env; int g_spawn_nenv; const char *g_spawn_cwd;
 int proc_spawn(Win32 *parent, const char *exe_path, const char *cmdline, const int std_fd[3]) {
   int node = vfs_find_node(exe_path); VNodeInfo in; if (node < 0 || !vfs_node_info(node, &in) || in.is_dir) return -2;
+  { const u8 *img0 = vfs_node_data(node); if (img0) { int dn = dotnet_redirect(parent, in.path, img0, (size_t)in.size, &cmdline); if (dn == -2) return -2; if (dn >= 0) { node = dn; if (!vfs_node_info(node, &in)) return -2; } } }
   Proc *p = proc_alloc(); if (!p) return -8;
   p->pid = ++g_next_pid; p->ppid = parent->pid; p->state = 1; p->exit_code = 0; p->handles = 0; p->wake_ms = 0;
   e_snprintf(p->name, sizeof p->name, "%s", basename_of(in.path));
@@ -91,11 +124,15 @@ EXPORT(x64_load) int x64_load(const u8 *bytes, size_t len, const char *name, con
   mem_release(&p->mem); cpu_reset(&p->cpu);
   w32_init(&p->w32, &p->cpu, &p->mem); p->w32.pid = p->pid; p->w32.ppid = HOST_PID;
   vfs_init_proc(p->w32.fs, 0); vfs_use(p->w32.fs);
-  int rc = pe_load(&p->w32, bytes, len, name ? basename_of(name) : "app.exe");
-  if (rc) return rc;
   if (name && e_strchr(name, '\\')) e_snprintf(p->w32.exe_path, sizeof p->w32.exe_path, "%s", name); else e_snprintf(p->w32.exe_path, sizeof p->w32.exe_path, "C:\\nebula\\%s", p->name);
-  w32_start(&p->w32, cmdline ? cmdline : name ? name : "app.exe");
-  if (vfs_find_node(p->w32.exe_path) < 0) vfs_add_ref(p->w32.exe_path, (u8 *)bytes, len);
+  if (vfs_find_node(p->w32.exe_path) < 0) vfs_add_ref(p->w32.exe_path, (u8 *)bytes, len);   /* on the virtual disk before loading: a managed exe is passed to dotnet.exe by path */
+  const char *cl = cmdline ? cmdline : name ? name : "app.exe";
+  { int dn = dotnet_redirect(&p->w32, p->w32.exe_path, bytes, len, &cl);
+    if (dn == -2) return -4;
+    if (dn >= 0) { VNodeInfo di; vfs_node_info(dn, &di); bytes = vfs_node_data(dn); len = (size_t)di.size; e_snprintf(p->w32.exe_path, sizeof p->w32.exe_path, "%s", DOTNET_EXE); e_snprintf(p->name, sizeof p->name, "dotnet.exe"); } }
+  int rc = pe_load(&p->w32, bytes, len, p->name);
+  if (rc) return rc;
+  w32_start(&p->w32, cl);
   g_loaded = 1; return 0;
 }
 /* scheduler: run runnable processes round-robin; the host sees the root process' lifecycle */

@@ -49,6 +49,16 @@ static const u8 *pe_rva(PeHdr *h, u32 rva, u32 need) {
   return 0;
 }
 
+/* 0 native, 1 managed assembly (CLR header; x64 or IL-only AnyCPU), 2 .NET apphost launcher (native stub that loads hostfxr.dll),
+   3 mixed-mode (native + managed, unsupported) */
+int pe_managed_kind(const u8 *bytes, size_t len) {
+  PeHdr h; if (pe_parse(&h, bytes, len)) return 0;
+  if (h.dd[14][1]) { const u8 *ch = pe_rva(&h, h.dd[14][0], 24); int il = ch ? (le32(ch + 16) & 1) : 0; return (h.machine == 0x8664 || (il && h.machine == 0x14c)) ? 1 : 3; }
+  if (h.machine != 0x8664 || (h.chars & 0x2000)) return 0;
+  static const u8 needle[] = { 'h',0,'o',0,'s',0,'t',0,'f',0,'x',0,'r',0,'.',0,'d',0,'l',0,'l',0 };   /* UTF-16 "hostfxr.dll" */
+  for (size_t i = 0; i + sizeof needle <= len; i += 2) if (bytes[i] == 'h' && bytes[i + 1] == 0 && !e_memcmp(bytes + i, needle, sizeof needle)) return 2;
+  return 0;
+}
 /* DLLs that the emulator provides itself (shims); anything else is a "private" DLL to be loaded from the virtual disk */
 int pe_is_system_dll(const char *dll) {
   static const char *sys[] = { "kernel32", "kernelbase", "ntdll", "user32", "gdi32", "msvcrt", "ucrtbase", "vcruntime140", "vcruntime140_1", "msvcp140", "msvcp140_1", "msvcp140_2", "msvcp140_atomic_wait", "msvcp140_codecvt_ids", "concrt140",
@@ -234,7 +244,10 @@ int pe_inspect(const u8 *bytes, size_t len, char *out, size_t out_sz) {
   const char *sub = h.subsystem == 2 ? "GUI" : h.subsystem == 3 ? "console" : "other";
   int is_dll = !!(h.chars & 0x2000), is_clr = !!h.dd[14][1], il_only = 0;
   if (is_clr) { const u8 *ch = pe_rva(&h, h.dd[14][0], 24); if (ch) il_only = le32(ch + 16) & 1; }
-  ins_put(&x, "{\"ok\":true,\"arch\":\"%s\",\"machine\":%u,\"pe32plus\":%s,\"subsystem\":\"%s\",\"dll\":%s,\"clr\":%s,\"imageBase\":\"0x%llx\",\"sizeOfImage\":%u,\"entry\":\"0x%x\",\"sections\":%u,\"relocs\":%s,\"tls\":%s,\"exceptions\":%s,\"resources\":%u,",
+  int mk = pe_managed_kind(bytes, len), clr_entry = 0;
+  if (is_clr) { const u8 *ch = pe_rva(&h, h.dd[14][0], 24); if (ch) clr_entry = le32(ch + 20) != 0; }   /* EntryPointToken: an application, not a library */
+  ins_put(&x, "{\"ok\":true,\"dotnet\":%s,", mk == 1 ? (clr_entry ? "\"managed\"" : "\"managed-dll\"") : mk == 2 ? "\"apphost\"" : "null");
+  ins_put(&x, "\"arch\":\"%s\",\"machine\":%u,\"pe32plus\":%s,\"subsystem\":\"%s\",\"dll\":%s,\"clr\":%s,\"imageBase\":\"0x%llx\",\"sizeOfImage\":%u,\"entry\":\"0x%x\",\"sections\":%u,\"relocs\":%s,\"tls\":%s,\"exceptions\":%s,\"resources\":%u,",
     arch, h.machine, h.magic == 0x20b ? "true" : "false", sub, is_dll ? "true" : "false", is_clr ? "true" : "false", (unsigned long long)h.image_base, h.size_image, h.entry, h.nsec,
     h.dd[5][1] ? "true" : "false", h.dd[9][1] ? "true" : "false", h.dd[3][1] ? "true" : "false", h.dd[2][1]);
   /* section names */
@@ -248,9 +261,10 @@ int pe_inspect(const u8 *bytes, size_t len, char *out, size_t out_sz) {
   for (int i = 0; i < x.ndll; i++) ins_put(&x, "%s\"%s\"", i ? "," : "", x.dlls[i]);
   /* verdict */
   const char *verdict; const char *why;
-  if (is_clr && (h.machine == 0x8664 || il_only) && is_dll && h.subsystem != 3 && h.subsystem != 2) { verdict = "partial"; why = ".NET library (not an application) — usable by .NET programs; it has no entry point to run"; }
+  if (is_clr && (h.machine == 0x8664 || il_only) && !clr_entry) { verdict = "partial"; why = ".NET library (not an application) — usable by .NET programs; it has no entry point to run"; }
   else if (is_clr && (h.machine == 0x8664 || il_only)) { verdict = "likely"; why = ".NET assembly — runs on the official .NET runtime (the .NET pack, installed on demand); classic .NET Framework console apps run on it in compatibility mode"; }
   else if (is_clr) { verdict = "unsupported"; why = "mixed-mode .NET image (native + managed) — not supported"; }
+  else if (mk == 2) { verdict = "likely"; why = ".NET apphost launcher — starts <name>.dll next to it on the official .NET runtime (the .NET pack, installed on demand)"; }
   else if (h.machine != 0x8664) { verdict = "unsupported"; why = "only x86-64 (PE32+) code is emulated; 32-bit/ARM binaries are rejected"; }
   else if (is_dll) { verdict = "unsupported"; why = "DLL, not an executable"; }
   else {

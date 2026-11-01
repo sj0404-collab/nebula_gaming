@@ -334,6 +334,7 @@ int  pe_load(Win32 *w, const u8 *bytes, size_t len, const char *name);
 int  pe_load_dll(Win32 *w, const u8 *bytes, size_t len, const char *name);   /* → module index or -1 */
 void pe_tls_thread_init(Win32 *w, int th);
 int  pe_is_system_dll(const char *dll);
+int  pe_managed_kind(const u8 *bytes, size_t len);   /* 0 native, 1 managed assembly, 2 .NET apphost, 3 mixed-mode */
 int  pe_dll_native_ok(const char *dll);   /* system DLL that may be replaced by a real file on the virtual disk (msvcp140, msvcr120, d3dcompiler …) */
 /* static inspection (no execution): fills a JSON-ish report of arch/subsystem/imports and supported ratio */
 int  pe_inspect(const u8 *bytes, size_t len, char *out, size_t out_sz);

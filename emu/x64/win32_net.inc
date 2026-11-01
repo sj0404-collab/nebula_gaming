@@ -179,7 +179,9 @@ static void s_WSARecv(Cpu *c) { SOCK_ARG0(si); u64 bufs = ARG(1); u32 n = (u32)A
     if (sock_readable(s)) { wr64(c, ov, 0); wr64(c, ov + 8, 0); if (bytesp) wr32(c, bytesp, 0); if (assoc && !(skip & 1)) iocp_post(port, key, ov, 0, 0); RET(0); return; }
     if (spend_add(c, 1, si, port, key, ov, 0, 0, 0) < 0) { W->last_error = 10055; RET(~0ull); return; } W->last_error = 997; RET(~0ull); return; }
   s64 r = sock_recv_into(c, si, bufs, n);
-  if (r == -2) { if (spend_add(c, 2, si, port, key, ov, bufs, n, 0) < 0) { W->last_error = 10055; RET(~0ull); return; } W->last_error = 997; RET(~0ull); return; }
+  if (r == -2) {   /* capture the first non-empty buffer NOW: the WSABUF array itself is often a temporary (.NET pins the data, not the array) */
+    u64 b = 0; u32 len = 0; for (u32 i = 0; i < n; i++) { len = rd32(c, bufs + i * 16); b = rd64(c, bufs + i * 16 + 8); if (len) break; }
+    if (spend_add(c, 2, si, port, key, ov, b, len, 0) < 0) { W->last_error = 10055; RET(~0ull); return; } W->last_error = 997; RET(~0ull); return; }
   if (r == -3) { wr64(c, ov, 0xC000020Dull); wr64(c, ov + 8, 0); W->last_error = 10054; RET(~0ull); return; }
   wr64(c, ov, 0); wr64(c, ov + 8, (u64)r); if (bytesp) wr32(c, bytesp, (u32)r); if (assoc && !(skip & 1)) iocp_post(port, key, ov, (u32)r, 0); RET(0); }
 /* WSASend(s, bufs, count, &bytes, flags, ov, routine): writes synchronously (host waits for socket room), completes at once */
@@ -283,8 +285,8 @@ static void net_poll(void) {
     if (o->kind == 5) { int f = s->txlen > s->txoff ? sock_flush(s) : 1; if (f < 0) spend_finish(o, 0xC000020Du, 0, 10054); else if (s->tx_sent >= o->target) spend_finish(o, 0, o->len, 0); continue; }
     if (o->kind == 1) { if (!sock_readable(s)) continue; spend_finish(o, 0, 0, 0); continue; }
     if (o->kind == 2) { if (!sock_readable(s)) continue;
-      Mem *m = o->w->mem; s64 r = -3; u32 nb = o->len;
-      for (u32 i = 0; i < nb; i++) { u32 len = 0, b32[4]; u8 *e = mem_ptr(m, o->buf + i * 16, 16, 0); if (!e) break; e_memcpy(b32, e, 16); len = b32[0]; u64 b = (u64)b32[2] | ((u64)b32[3] << 32); if (!len) continue; u8 *p = mem_ptr(m, b, len, 1); if (!p) break; r = sock_read(s, p, len); break; }
+      Mem *m = o->w->mem; s64 r = -3;
+      { u8 *p = o->len ? mem_ptr(m, o->buf, o->len, 1) : 0; if (p) r = sock_read(s, p, o->len); }   /* o->buf/o->len: the data buffer captured at WSARecv time */
       if (r == -2) continue; if (r < 0) spend_finish(o, 0xC000020Du, 0, 10054); else spend_finish(o, 0, (u32)r, 0); continue; }
     if (o->kind == 4) { u8 ip[4]; int port = 0; int h = host_net_accept(s->host, ip, &port); if (h == -2) continue; if (h < 0) { spend_finish(o, 0xC0000241u, 0, 10053); continue; }
       Sock *a = &g_socks[o->acc]; if (!a->used) { host_net_close(h); spend_finish(o, 0xC0000241u, 0, 10053); continue; }
