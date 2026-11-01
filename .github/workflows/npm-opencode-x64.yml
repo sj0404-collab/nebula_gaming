@@ -46,9 +46,10 @@ jobs:
           set +e
           start=$(date +%s)
           ./emu/x64/x64run --quiet --no-stdin --max-ms 7200000 --env 'PATH=C:\node;C:\Windows\System32;C:\Windows\System32\WindowsPowerShell\v1.0' --mount '/tmp/x/node=C:\node' --mount-rw '/tmp/x/home=C:\Users\user' --mount-rw '/tmp/x/tmp=C:\tmp' --mount-rw '/tmp/x/proj=C:\nebula' \
-            /tmp/x/node/node.exe 'C:\node\node_modules\npm\bin\npm-cli.js' install opencode-ai@1.19.5 --loglevel=notice --foreground-scripts 2>&1 | tee /tmp/x/out/npm-install.txt | tr -d '\r' | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' | grep -v '^[\\|/-]*$' | tail -c 20000
+            /tmp/x/node/node.exe 'C:\node\node_modules\npm\bin\npm-cli.js' install opencode-ai@1.19.5 --loglevel=notice --foreground-scripts --fetch-retries=5 --fetch-retry-mintimeout=5000 --fetch-retry-maxtimeout=60000 2>&1 | tee /tmp/x/out/npm-install.txt | tr -d '\r' | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' | grep -v '^[\\|/-]*$' | tail -c 20000
           rc=${PIPESTATUS[0]}
           echo "npm install exit code: $rc  (took $(( $(date +%s) - start )) s)"
+          echo "full npm install opencode-ai@1.19.5: exit code $rc, $(( $(date +%s) - start )) s" > /tmp/x/out/npm-install-result.txt
           ls -la /tmp/x/proj/node_modules /tmp/x/proj/node_modules/opencode-ai/bin 2>/dev/null || true
           du -sh /tmp/x/home/npm-cache 2>/dev/null || true
           [ "$rc" -eq 0 ] && [ -s /tmp/x/proj/node_modules/opencode-ai/bin/opencode.exe ] && [ "$(stat -c %s /tmp/x/proj/node_modules/opencode-ai/bin/opencode.exe)" -gt 100000000 ]

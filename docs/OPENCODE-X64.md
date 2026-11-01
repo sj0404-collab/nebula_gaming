@@ -111,8 +111,22 @@ that form on a 16 GB runner (with the tarball-URL form as a fallback) and then d
 On the GitHub runner (`npm-opencode-x64.yml`, run 41231346438): the tarball-URL install finished in 19 min
 (`added 2 packages`, postinstall OK), `npx opencode --version` → `1.19.5` in 2 min, and the npm-installed TUI answered
 `123*457 → 56211`, ran the bash tool and found `STARLIGHT_TOKEN` in `beta.c` (`RESULT first_frame=1 answer=1 bash_tool=1 grep_tool=1`).
-The full `npm install opencode-ai` got through all 13 packuments but hit `ECONNRESET` on the tarball after 20 min — it
-is kept as the first attempt (the npm debug log is now in the artifact), the URL form is the fallback.
+The full `npm install opencode-ai` got through all 13 packuments but hit `ECONNRESET` on the tarball after 20 min in
+that run; in run 41239116038 (v1.14.2) the **full form succeeded**: `added 13 packages in 18m`, postinstall exit 0,
+`npx opencode --version` → 1.19.5 — the npm debug log in its artifact shows the two first attempts at the 3 KB
+`opencode-ai` tarball failing with `ECONNRESET` and the third succeeding, while the two 80 MB platform tarballs
+downloaded cleanly in 466 s each.
+
+What the resets are (v1.15.x analysis): npm reuses keep-alive connections from the metadata phase; the guest needs
+minutes to digest the 13 packuments, the registry's edge closes the idle connections in the meantime, and a request
+written to such a connection is answered with a TCP reset — in native node that race window is microseconds, in the
+emulator it is seconds, so the first one or two tarball requests after a long pause can hit it. npm's own retry
+(`fetch-retries`, 10 s → 100 s back-off) opens fresh connections and gets through; the workflow now runs the full form
+with `--fetch-retries=5 --fetch-retry-mintimeout=5000 --fetch-retry-maxtimeout=60000` and keeps the tarball-URL form as a
+fallback. On the emulator side v1.15.1 made the Winsock layer stricter so slowness cannot turn into data loss or stalls:
+a per-socket send queue (`WSASend`/`send` never report short writes — before, a 5 MB loopback write lost its tail),
+read-ahead into a host buffer so the peer always sees an open TCP window while the guest is busy, blocking sockets
+that really block, and working `GetOverlappedResult(bWait)` — `emu/tests/netloop.exe` covers them.
 
 ![npm-installed opencode answering](screenshots/npm-opencode-x64-answer.png)
 ![npm-installed opencode using tools](screenshots/npm-opencode-x64-tools.png)
