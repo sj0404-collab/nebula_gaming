@@ -63,9 +63,11 @@ type DotnetManifest = { pack: string; version: string; files: { path: string; si
 type DotnetState = { status: 'probing' | 'available' | 'installing' | 'installed' | 'unavailable'; manifest?: DotnetManifest; done?: number; note?: string };
 const DOTNET_URL = '/x64/dotnet/';
 const DOTNET_DIR = 'C:\\Program Files\\dotnet\\';
-async function fetchGz(url: string): Promise<Uint8Array> {   // some static servers (vite preview, nginx gzip_static) send .gz files with Content-Encoding: gzip → the browser already inflated them
-  const r = await fetch(url); if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`);
-  const raw = new Uint8Array(await r.arrayBuffer());
+async function fetchGz(url: string, attempt = 0): Promise<Uint8Array> {   // some static servers (vite preview, nginx gzip_static) send .gz files with Content-Encoding: gzip → the browser already inflated them
+  const ac = new AbortController(); const timer = setTimeout(() => ac.abort(), 90_000); let raw: Uint8Array<ArrayBuffer>;
+  try { const r = await fetch(url, { signal: ac.signal }); if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`); raw = new Uint8Array(await r.arrayBuffer()); }
+  catch (e) { clearTimeout(timer); if (attempt < 2) return fetchGz(url, attempt + 1); throw new Error(`${url}: ${ac.signal.aborted ? 'timed out' : String(e)}`); }
+  clearTimeout(timer);
   if (raw.length < 2 || raw[0] !== 0x1f || raw[1] !== 0x8b) return raw;
   if (typeof DecompressionStream === 'undefined') throw new Error('DecompressionStream not supported by this browser');
   const buf = await new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
@@ -239,10 +241,14 @@ export default function X64App() {
     const man = dotnet.manifest; let done = 0, bytes = 0;
     setDotnet({ status: 'installing', manifest: man, done: 0 }); setFetching(`installing .NET pack (${man.files.length} files)…`); setTab('console');
     try {
-      const queue = man.files.slice(); const PAR = 6;
+      const total = man.files.reduce((a, f) => a + f.size, 0);
+      if (!rt.reserve(total + (total >> 4) + (1 << 20))) throw new Error(`cannot grow guest memory by ${(total / 1048576).toFixed(0)} MB`);   // one memory.grow, not one per file
+      const queue = man.files.slice(); const PAR = 6; const t0 = performance.now();
       const worker = async () => { for (;;) { const f = queue.shift(); if (!f) return;
         const b = await fetchGz(DOTNET_URL + f.gz); if (b.length !== f.size) throw new Error(`${f.path}: ${b.length} bytes, expected ${f.size}`);
-        rt.vfsAdd(DOTNET_DIR + f.path, b); bytes += b.length; done++;
+        if (!rt.vfsAdd(DOTNET_DIR + f.path, b)) throw new Error(`${f.path}: virtual disk refused the file`);
+        bytes += b.length; done++;
+        if (done % 50 === 0) setLog(l => [...l, `.NET pack: ${done}/${man.files.length} files, ${(bytes / 1048576).toFixed(1)} MB in ${((performance.now() - t0) / 1000).toFixed(1)} s`]);
         setDotnet({ status: 'installing', manifest: man, done }); setFetching(`installing .NET pack: ${done}/${man.files.length}, ${(bytes / 1048576).toFixed(1)} MB`); } };
       await Promise.all(Array.from({ length: PAR }, worker));
     } catch (e) { setFetching(null); setDotnet({ status: 'available', manifest: man, note: String(e) }); setLog(l => [...l, '.NET PACK: ' + String(e)]); return false; }

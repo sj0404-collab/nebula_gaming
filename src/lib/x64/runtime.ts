@@ -23,7 +23,7 @@ export interface RunStats {
 type Exports = {
   memory: WebAssembly.Memory;
   x64_alloc(n: bigint): bigint; x64_inspect(p: bigint, n: bigint): bigint; x64_load(p: bigint, n: bigint, name: bigint, cmd: bigint): number;
-  x64_run(budget: bigint): number; x64_key(vk: number, down: number): void; x64_mouse(x: number, y: number, ev: number): void;
+  x64_reserve(n: bigint): number; x64_run(budget: bigint): number; x64_key(vk: number, down: number): void; x64_mouse(x: number, y: number, ev: number): void;
   x64_icount(): bigint; x64_exit_code(): number; x64_error(): bigint; x64_error_rip(): bigint; x64_rip(): bigint; x64_report(): bigint; x64_console(): bigint;
   x64_screen_w(): number; x64_screen_h(): number; x64_screen(): bigint; x64_title(): bigint; x64_subsystem(): number; x64_sleep_ms(): number; x64_mem_used(): bigint; x64_has_window(): number; x64_proc_count(): number; x64_thread_count(): number;
   x64_api_stats(): bigint; x64_error_bytes(): bigint;
@@ -98,7 +98,9 @@ export class X64Runtime {
     const a = new Uint8Array(this.ex!.memory.buffer, Number(p)); let n = 0; while (a[n]) n++;
     return this.dec.decode(a.subarray(0, n));
   }
-  private put(bytes: Uint8Array): bigint { const p = this.ex!.x64_alloc(BigInt(bytes.length)); new Uint8Array(this.ex!.memory.buffer, Number(p), bytes.length).set(bytes); return p; }
+  private put(bytes: Uint8Array): bigint { const p = this.ex!.x64_alloc(BigInt(bytes.length)); if (!p && bytes.length) throw new Error(`wasm memory exhausted (could not allocate ${bytes.length} bytes)`); new Uint8Array(this.ex!.memory.buffer, Number(p), bytes.length).set(bytes); return p; }
+  /** grow guest memory once for a batch of files (one memory.grow instead of one per file) */
+  reserve(bytes: number): boolean { return !!this.ex?.x64_reserve(BigInt(bytes)); }
   /** guest memory is bump-allocated, so large exe images are uploaded once and reused on every Run */
   private putCache = new WeakMap<Uint8Array, bigint>();
   private putCached(bytes: Uint8Array): bigint { let p = this.putCache.get(bytes); if (p === undefined) { p = this.put(bytes); this.putCache.set(bytes, p); } return p; }

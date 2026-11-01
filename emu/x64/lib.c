@@ -21,12 +21,21 @@ void *emu_alloc(size_t n) {
   return p;
 }
 int emu_free(void *p) { (void)p; return 0; }   /* arena: no free (caller pools the block) */
+/* make sure the arena can hand out n more bytes with ONE memory.grow (installing a 77 MB runtime pack file by file would grow ~190 times) */
+int emu_reserve(size_t n) {
+  if (!arena_cur) { arena_cur = (uintptr_t)&__heap_base; arena_end = (uintptr_t)__builtin_wasm_memory_size(0) * 65536; }
+  if (arena_cur + n <= arena_end) return 1;
+  size_t need = (arena_cur + n - arena_end + 65535) / 65536 + 16;
+  if (__builtin_wasm_memory_grow(0, need) == (size_t)-1) return 0;
+  arena_end = (uintptr_t)__builtin_wasm_memory_size(0) * 65536; return 1;
+}
 size_t emu_alloc_used(void) { return used_total; }
 #else
 #include <stdlib.h>
 static size_t used_total = 0;
 void *emu_alloc(size_t n) { used_total += n; return calloc(1, n ? n : 1); }
 int emu_free(void *p) { free(p); return 1; }
+int emu_reserve(size_t n) { (void)n; return 1; }
 size_t emu_alloc_used(void) { return used_total; }
 #endif
 

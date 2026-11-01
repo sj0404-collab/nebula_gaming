@@ -111,6 +111,7 @@ static int g_want_stdin; static int g_trace;
 #endif
 
 EXPORT(x64_alloc) void *x64_alloc(size_t n) { return emu_alloc(n); }
+EXPORT(x64_reserve) int x64_reserve(size_t n) { return emu_reserve(n); }   /* grow the wasm arena once before a batch of x64_alloc/x64_vfs_add */
 EXPORT(x64_inspect) const char *x64_inspect(const u8 *bytes, size_t len) { pe_inspect(bytes, len, g_inspect, sizeof g_inspect); return g_inspect; }
 EXPORT(x64_load) int x64_load(const u8 *bytes, size_t len, const char *name, const char *cmdline) {
   /* tear down a previous session: every process dies, kernel objects are dropped, the VFS files stay */

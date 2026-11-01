@@ -297,7 +297,7 @@ await test('x64: .NET pack — the OFFICIAL Microsoft .NET Runtime 10 is install
     const conTxt = await w.locator('[data-x64-console]').innerText().catch(() => '');
     await w.locator('[data-x64-tab="report"]').click().catch(() => {});
     const rep = await w.locator('[data-x64-report]').innerText().catch(() => '');
-    if (status !== 'exited') console.log(`      status=${status} dotnet=${await st()}\n      console: ${JSON.stringify(conTxt.slice(-600))}\n      report: ${JSON.stringify(rep.slice(-1500))}`);
+    if (status !== 'exited') console.log(`      status=${status} dotnet=${await st()} toolbar=${JSON.stringify((await w.innerText().catch(() => '')).slice(0, 300))}\n      console: ${JSON.stringify(conTxt.slice(-600))}\n      report: ${JSON.stringify(rep.slice(0, 2500))}`);
     await w.locator('[data-x64-tab="console"]').click().catch(() => {});
   }
   const con = await w.locator('[data-x64-console]').innerText();
