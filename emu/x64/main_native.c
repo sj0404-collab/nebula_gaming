@@ -108,6 +108,9 @@ int main(int argc, char **argv) {
     if (getenv("X64_DUMP")) { unsigned char b[512]; u64 a = x64_error_rip() & ~0xfull; if (a >= 256) a -= 256; if (x64_mem_copy(a, b, 512)) { FILE *f = fopen(getenv("X64_DUMP"), "wb"); if (f) { fwrite(b, 1, 512, f); fclose(f); fprintf(stderr, "[x64run] dumped 512 bytes from 0x%llx to %s\n", (unsigned long long)a, getenv("X64_DUMP")); } } }
     else if (r == RUN_BREAK) fprintf(stderr, "[x64run] breakpoint at rip=0x%llx\n", (unsigned long long)x64_error_rip());
     fprintf(stderr, "[x64run] %llu instructions in %.3fs = %.1f MIPS, %d frames, %llu yields\n", (unsigned long long)ic, dt, dt > 0 ? ic / dt / 1e6 : 0, host_frames(), (unsigned long long)yields);
+#ifdef X64_OPHIST
+    { extern void cpu_dump_ophist(void); cpu_dump_ophist(); }
+#endif
     if (x64_report()[0]) fprintf(stderr, "[x64run] report:\n%s", x64_report());
     if (stats) fprintf(stderr, "[x64run] api calls: %s\n", x64_api_stats());
   }

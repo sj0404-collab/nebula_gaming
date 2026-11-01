@@ -36,17 +36,45 @@ void cpu_reset(Cpu *c) {
 }
 
 /* ---------- decoding state ---------- */
+/* Decode cache: one entry per instruction address with everything the byte-level decode produces (prefixes, opcode,
+ * ModRM/SIB fields, displacement, offsets) — nothing register-dependent.  Entries validate themselves against the
+ * instruction bytes on every hit (two masked 8-byte compares), so JIT-written / overwritten code is handled without any
+ * page tracking, and processes/threads can share the table (same bytes ⇒ same decode).  Direct-mapped. */
 typedef struct {
-  Cpu *c; u64 start, ip;
+  u64 rip, b0, b1, m0, m1;             /* address, bytes 0-7 / 8-15 (masked), masks for the instruction length */
+  s32 disp;
+  u8 len, hdr, mr_end, op;             /* length, offset after the first opcode byte, offset after ModRM/SIB/disp */
+  u8 rex, rexw, rexr, rexx, rexb, p66, p67, rep, seg, lock;
+  u8 modrm, mod, reg, rm, scale, riprel; s8 base, idx;   /* base/idx -1 = none */
+  u8 fast, op2;                        /* fast handler class (0 = generic path), second opcode byte for 0F forms */
+  const u8 *code; Mem *mem; u32 gen;   /* host pointer to the bytes, valid while mem/gen match (saves the TLB lookup) */
+} Dc;
+enum { FK_NONE, FK_MOV_RM_R, FK_MOV_R_RM, FK_LEA, FK_ALU_RM_IMM8, FK_ALU_RM_IMM32, FK_TEST_RR, FK_ALU_RM_R, FK_ALU_R_RM, FK_JCC8, FK_JCC32, FK_JMP8, FK_JMP32,
+       FK_CALL, FK_RET, FK_PUSH, FK_POP, FK_MOVZX8, FK_MOVZX16, FK_MOVSXD, FK_SHIFT_IMM, FK_FF, FK_MOV_R_IMM, FK_MOV_RM_IMM32, FK_ALU_A_IMM,
+       FK_MOV8_RM_R, FK_MOV8_R_RM, FK_ALU8_RM_IMM, FK_ALU8_RM_R, FK_ALU8_R_RM, FK_ALU8_AL_IMM, FK_TEST8, FK_MOV8_RM_IMM, FK_SETCC, FK_CMOV, FK_IMUL_R_RM, FK_IMUL_IMM,
+       FK_F7_TEST, FK_F7_NOTNEG, FK_CDQE, FK_CDQ, FK_SHIFT_1, FK_SHIFT_CL, FK_MOVSX8, FK_MOVSX16, FK_NOP, FK_RET_N, FK_TEST_RM_R, FK_SSE_MOV, FK_SSE_ARITH, FK_SSE_LOGIC, FK_SSE_CMP };
+#define DC_BITS 15
+static Dc g_dc[1 << DC_BITS];
+#ifdef X64_OPHIST
+static u64 g_ophist[512][4];   /* [op or 256+op2][0: reg form, 1: memory form, 2: rexw, 3: p66] */
+void cpu_dump_ophist(void) { for (int pass = 0; pass < 40; pass++) { int best = -1; u64 bv = 0; for (int k = 0; k < 512; k++) { u64 t = g_ophist[k][0] + g_ophist[k][1]; if (t > bv) { bv = t; best = k; } } if (best < 0 || !bv) break;
+    e_log("[ophist] %s%02x  total=%llu  reg=%llu mem=%llu rexw=%llu p66=%llu\n", best >= 256 ? "0f " : "", best & 255, (unsigned long long)bv, (unsigned long long)g_ophist[best][0], (unsigned long long)g_ophist[best][1], (unsigned long long)g_ophist[best][2], (unsigned long long)g_ophist[best][3]); g_ophist[best][0] = g_ophist[best][1] = 0; } }
+#endif
+#define DC_SLOT(rip) (&g_dc[((rip) ^ ((rip) >> DC_BITS)) & ((1 << DC_BITS) - 1)])
+
+typedef struct {
+  Cpu *c; u64 start, ip, fend;   /* fend: furthest byte fetched (instruction length for the cache; branches move ip) */
   int rex, rexw, rexr, rexx, rexb, p66, p67, rep, seg, lock;
   int mod, reg, rm, modrm; u64 ea; int ea_valid;
   const u8 *code;   /* direct pointer to 16 bytes at start (NULL → slow path) */
+  const Dc *dc;     /* cache hit: decode_modrm takes its fields from here */
+  int hdr, mr_end, riprel, scale; s8 base, idx; s32 disp;   /* recorded on a miss for the new entry */
 } Ins;
 
-static inline u8 fetch8(Ins *i) { if (i->code) { u64 off = i->ip - i->start; if (off < 16) { i->ip++; return i->code[off]; } } return rd8(i->c, i->ip++); }
-static inline u16 fetch16(Ins *i) { u16 v = rd16(i->c, i->ip); i->ip += 2; return v; }
-static inline u32 fetch32(Ins *i) { if (i->code) { u64 off = i->ip - i->start; if (off + 4 <= 16) { u32 v; __builtin_memcpy(&v, i->code + off, 4); i->ip += 4; return v; } } u32 v = rd32(i->c, i->ip); i->ip += 4; return v; }
-static inline u64 fetch64(Ins *i) { u64 v = rd64(i->c, i->ip); i->ip += 8; return v; }
+static inline u8 fetch8(Ins *i) { if (i->code) { u64 off = i->ip - i->start; if (off < 16) { i->ip++; if (i->ip > i->fend) i->fend = i->ip; return i->code[off]; } } u8 v = rd8(i->c, i->ip++); if (i->ip > i->fend) i->fend = i->ip; return v; }
+static inline u16 fetch16(Ins *i) { u16 v = rd16(i->c, i->ip); i->ip += 2; if (i->ip > i->fend) i->fend = i->ip; return v; }
+static inline u32 fetch32(Ins *i) { if (i->code) { u64 off = i->ip - i->start; if (off + 4 <= 16) { u32 v; __builtin_memcpy(&v, i->code + off, 4); i->ip += 4; if (i->ip > i->fend) i->fend = i->ip; return v; } } u32 v = rd32(i->c, i->ip); i->ip += 4; if (i->ip > i->fend) i->fend = i->ip; return v; }
+static inline u64 fetch64(Ins *i) { u64 v = rd64(i->c, i->ip); i->ip += 8; if (i->ip > i->fend) i->fend = i->ip; return v; }
 static inline s64 fetch_s8(Ins *i) { return (s8)fetch8(i); }
 static inline s64 fetch_s32(Ins *i) { return (s32)fetch32(i); }
 
@@ -69,21 +97,31 @@ static inline void set_reg(Ins *i, int r, int sz, u64 v) {
 }
 
 static void decode_modrm(Ins *i) {
+  if (i->dc) {   /* cache hit: fields decoded earlier, only the register-dependent address is computed */
+    const Dc *e = i->dc; i->modrm = 1; i->mod = e->mod; i->reg = e->reg; i->rm = e->rm; i->ip = i->start + e->mr_end; i->ea_valid = 0;
+    if (e->mod == 3) return;
+    if (e->riprel) { i->ea = (u64)(s64)e->disp; i->ea_valid = 2; return; }
+    u64 ea = (u64)(s64)e->disp; if (e->base >= 0) ea += i->c->r[(int)e->base]; if (e->idx >= 0) ea += i->c->r[(int)e->idx] << e->scale;
+    if (i->p67) ea &= 0xffffffffull;
+    if (i->seg == 1) ea += i->c->fs_base; else if (i->seg == 2) ea += i->c->gs_base;
+    i->ea = ea; i->ea_valid = 1; return;
+  }
   u8 m = fetch8(i);
   i->modrm = 1; i->mod = m >> 6; i->reg = ((m >> 3) & 7) | (i->rexr << 3); i->rm = (m & 7) | (i->rexb << 3);
-  i->ea_valid = 0;
-  if (i->mod == 3) return;
+  i->ea_valid = 0; i->base = -1; i->idx = -1; i->scale = 0; i->disp = 0; i->riprel = 0;
+  if (i->mod == 3) { i->mr_end = (int)(i->ip - i->start); return; }
   u64 ea = 0; int rmlow = m & 7;
   if (rmlow == 4) {
     u8 sib = fetch8(i); int scale = sib >> 6, idx = ((sib >> 3) & 7) | (i->rexx << 3), base = (sib & 7) | (i->rexb << 3);
-    if (idx != 4) ea += i->c->r[idx] << scale;
-    if ((sib & 7) == 5 && i->mod == 0) ea += fetch_s32(i);
-    else ea += i->c->r[base];
+    if (idx != 4) { ea += i->c->r[idx] << scale; i->idx = (s8)idx; i->scale = scale; }
+    if ((sib & 7) == 5 && i->mod == 0) { s32 d = (s32)fetch32(i); ea += (u64)(s64)d; i->disp = d; }
+    else { ea += i->c->r[base]; i->base = (s8)base; }
   } else if (rmlow == 5 && i->mod == 0) {
-    s64 d = fetch_s32(i); i->ea = 0; /* rip-relative: resolved after full decode (needs end ip) → store marker */
-    i->ea_valid = 2; i->ea = (u64)d; return;
-  } else ea += i->c->r[i->rm];
-  if (i->mod == 1) ea += fetch_s8(i); else if (i->mod == 2) ea += fetch_s32(i);
+    s32 d = (s32)fetch32(i); i->disp = d; i->riprel = 1; i->mr_end = (int)(i->ip - i->start);   /* rip-relative: resolved after full decode (needs end ip) → store marker */
+    i->ea_valid = 2; i->ea = (u64)(s64)d; return;
+  } else { ea += i->c->r[i->rm]; i->base = (s8)i->rm; }
+  if (i->mod == 1) { s32 d = (s8)fetch8(i); ea += (u64)(s64)d; i->disp = d; } else if (i->mod == 2) { s32 d = (s32)fetch32(i); ea += (u64)(s64)d; i->disp = d; }
+  i->mr_end = (int)(i->ip - i->start);
   if (i->p67) ea &= 0xffffffffull;
   if (i->seg == 1) ea += i->c->fs_base; else if (i->seg == 2) ea += i->c->gs_base;
   i->ea = ea; i->ea_valid = 1;
@@ -283,6 +321,152 @@ static int string_op(Ins *i, int op, int sz) {
 
 static void exec_0f(Ins *i, Cpu *c);
 
+/* ---------- fast handlers for the hottest instruction forms (chosen once per cache entry) ----------
+ * Only plain forms: no segment/67/lock/rep prefixes, operand size 4 or 8 (p66 excluded).  Flags go through the same
+ * helpers as the generic path, so behaviour is identical — the win is skipping the decode and the generic size/operand
+ * dispatch.  Memory faults set c->status like everywhere else; cpu_run handles them the same way. */
+static u8 dc_classify(const Dc *e) {
+  if (e->seg || e->p67 || e->lock) return FK_NONE;
+  u8 op = e->op; int osz = e->rexw ? 8 : 4;
+  if (op == 0x0F && e->len > e->hdr) {   /* SSE forms take 66/F2/F3 as mandatory prefixes */
+    u8 op2 = e->op2;
+    if (op2 == 0x10 || op2 == 0x11 || op2 == 0x28 || op2 == 0x29) return (e->p66 && e->rep) ? FK_NONE : FK_SSE_MOV;
+    if ((op2 == 0x58 || op2 == 0x59 || op2 == 0x5C || op2 == 0x5E) && !(e->p66 && e->rep)) return FK_SSE_ARITH;
+    if (op2 >= 0x54 && op2 <= 0x57 && !e->rep) return FK_SSE_LOGIC;
+    if ((op2 == 0x2E || op2 == 0x2F) && !e->rep) return FK_SSE_CMP;
+  }
+  if (e->rep || e->p66) return (op == 0xC3 && e->rep == 0xF3) ? FK_RET : (op == 0x90 && e->rep == 0xF3) ? FK_NOP : (op == 0x0F && e->op2 == 0x1F && e->p66) ? FK_NOP : FK_NONE;   /* rep ret, pause, 66 0F 1F nop */
+  if (op == 0x88) return FK_MOV8_RM_R; if (op == 0x8A) return FK_MOV8_R_RM; if (op == 0x80) return FK_ALU8_RM_IMM; if (op == 0xC6) return FK_MOV8_RM_IMM;
+  if (op < 0x40 && (op & 7) == 0) return FK_ALU8_RM_R; if (op < 0x40 && (op & 7) == 2) return FK_ALU8_R_RM; if (op < 0x40 && (op & 7) == 4) return FK_ALU8_AL_IMM;
+  if (op == 0x84) return FK_TEST8; if (op == 0x85) return e->mod == 3 ? FK_TEST_RR : FK_TEST_RM_R;
+  if (op == 0x69 || op == 0x6B) return FK_IMUL_IMM; if (op == 0xF7) return (e->reg & 7) < 2 ? FK_F7_TEST : (e->reg & 7) < 4 ? FK_F7_NOTNEG : FK_NONE;
+  if (op == 0x98) return FK_CDQE; if (op == 0x99) return FK_CDQ; if (op == 0xD1) return FK_SHIFT_1; if (op == 0xD3) return FK_SHIFT_CL; if (op == 0x90) return e->rexb ? FK_NONE : FK_NOP; if (op == 0xC2) return FK_RET_N;
+  if (op == 0x89) return FK_MOV_RM_R; if (op == 0x8B) return FK_MOV_R_RM; if (op == 0x8D && e->mod != 3) return FK_LEA;
+  if (op == 0x83) return FK_ALU_RM_IMM8; if (op == 0x81) return FK_ALU_RM_IMM32;
+  if (op == 0x85 && e->mod == 3) return FK_TEST_RR;
+  if (op < 0x40 && (op & 7) == 1) return FK_ALU_RM_R; if (op < 0x40 && (op & 7) == 3) return FK_ALU_R_RM; if (op < 0x40 && (op & 7) == 5) return FK_ALU_A_IMM;
+  if (op >= 0x70 && op <= 0x7F) return FK_JCC8; if (op == 0xEB) return FK_JMP8; if (op == 0xE9) return FK_JMP32; if (op == 0xE8) return FK_CALL; if (op == 0xC3) return FK_RET;
+  if (op >= 0x50 && op <= 0x57) return FK_PUSH; if (op >= 0x58 && op <= 0x5F) return FK_POP;
+  if (op == 0x63 && osz == 8) return FK_MOVSXD; if (op == 0xC1) return FK_SHIFT_IMM; if (op == 0xFF) return FK_FF;
+  if (op >= 0xB8 && op <= 0xBF) return FK_MOV_R_IMM; if (op == 0xC7) return FK_MOV_RM_IMM32;
+  if (op == 0x0F && e->len > e->hdr) {   /* second opcode byte is inside the validated bytes */
+    u8 op2 = (u8)((e->hdr < 8 ? e->b0 >> (e->hdr * 8) : e->b1 >> ((e->hdr - 8) * 8)) & 0xff);
+    if (op2 >= 0x80 && op2 <= 0x8F) return FK_JCC32; if (op2 == 0xB6) return FK_MOVZX8; if (op2 == 0xB7) return FK_MOVZX16;
+    if (op2 >= 0x90 && op2 <= 0x9F) return FK_SETCC; if (op2 >= 0x40 && op2 <= 0x4F) return FK_CMOV; if (op2 == 0xAF) return FK_IMUL_R_RM;
+    if (op2 == 0xBE) return FK_MOVSX8; if (op2 == 0xBF) return FK_MOVSX16; if (op2 == 0x1F) return FK_NOP;
+  }
+  return FK_NONE;
+}
+static inline u64 fast_ea(Cpu *c, const Dc *e, u64 start) {
+  if (e->riprel) return start + e->len + (u64)(s64)e->disp;
+  u64 ea = (u64)(s64)e->disp; if (e->base >= 0) ea += c->r[(int)e->base]; if (e->idx >= 0) ea += c->r[(int)e->idx] << e->scale; return ea;
+}
+static inline u64 fast_rm_get(Cpu *c, const Dc *e, u64 start, int sz) { if (e->mod == 3) return sz == 8 ? c->r[e->rm] : (u32)c->r[e->rm]; u64 a = fast_ea(c, e, start); return sz == 8 ? rd64(c, a) : rd32(c, a); }
+static inline void fast_rm_set(Cpu *c, const Dc *e, u64 start, int sz, u64 v) { if (e->mod == 3) { if (sz == 8) c->r[e->rm] = v; else c->r[e->rm] = (u32)v; return; } u64 a = fast_ea(c, e, start); if (sz == 8) wr64(c, a, v); else wr32(c, a, (u32)v); }
+static inline void fast_reg_set(Cpu *c, int r, int sz, u64 v) { if (sz == 8) c->r[r] = v; else c->r[r] = (u32)v; }
+static inline u64 fast_reg_get(Cpu *c, int r, int sz) { return sz == 8 ? c->r[r] : (u32)c->r[r]; }
+static inline s32 fast_imm32(const u8 *code, int off) { s32 v; __builtin_memcpy(&v, code + off, 4); return v; }
+static inline u64 fast_r8_get(Cpu *c, const Dc *e, int r) { return (!e->rex && r >= 4 && r < 8) ? (c->r[r - 4] >> 8) & 0xff : c->r[r] & 0xff; }
+static inline void fast_r8_set(Cpu *c, const Dc *e, int r, u64 v) { if (!e->rex && r >= 4 && r < 8) c->r[r - 4] = (c->r[r - 4] & ~0xff00ull) | ((v & 0xff) << 8); else c->r[r] = (c->r[r] & ~0xffull) | (v & 0xff); }
+static inline u64 fast_rm8_get(Cpu *c, const Dc *e, u64 start) { return e->mod == 3 ? fast_r8_get(c, e, e->rm) : rd8(c, fast_ea(c, e, start)); }
+static inline void fast_rm8_set(Cpu *c, const Dc *e, u64 start, u64 v) { if (e->mod == 3) fast_r8_set(c, e, e->rm, v); else wr8(c, fast_ea(c, e, start), (u8)v); }
+static inline void fast_xmm_load(Cpu *c, const Dc *e, u64 start, Xmm *out, int bytes) {
+  if (e->mod == 3) { *out = c->x[e->rm]; return; }
+  u64 a = fast_ea(c, e, start); out->q[0] = out->q[1] = 0;
+  if (bytes == 4) out->d[0] = rd32(c, a); else if (bytes == 8) out->q[0] = rd64(c, a); else { out->q[0] = rd64(c, a); out->q[1] = rd64(c, a + 8); }
+}
+static inline void fast_xmm_store(Cpu *c, const Dc *e, u64 start, const Xmm *v, int bytes) {
+  if (e->mod == 3) { if (bytes == 16) c->x[e->rm] = *v; else if (bytes == 8) c->x[e->rm].q[0] = v->q[0]; else c->x[e->rm].d[0] = v->d[0]; return; }
+  u64 a = fast_ea(c, e, start);
+  if (bytes == 4) wr32(c, a, v->d[0]); else if (bytes == 8) wr64(c, a, v->q[0]); else { wr64(c, a, v->q[0]); wr64(c, a + 8, v->q[1]); }
+}
+/* returns the next rip */
+static inline u64 fast_exec(Cpu *c, const Dc *e, const u8 *code, u64 start) {
+  u64 next = start + e->len; int sz = e->rexw ? 8 : 4;
+  switch (e->fast) {
+    case FK_MOV_RM_R: fast_rm_set(c, e, start, sz, fast_reg_get(c, e->reg, sz)); return next;
+    case FK_MOV_R_RM: { u64 v = fast_rm_get(c, e, start, sz); if (c->status == RUN_OK) fast_reg_set(c, e->reg, sz, v); return next; }
+    case FK_LEA: fast_reg_set(c, e->reg, sz, fast_ea(c, e, start)); return next;
+    case FK_ALU_RM_IMM8: case FK_ALU_RM_IMM32: { u64 b = e->fast == FK_ALU_RM_IMM8 ? (u64)(s64)(s8)code[e->mr_end] : (u64)(s64)fast_imm32(code, e->mr_end); u64 a = fast_rm_get(c, e, start, sz); if (c->status != RUN_OK) return next;
+      int aop = e->reg & 7; u64 r = alu(c, aop, a, b, sz); if (aop != 7) fast_rm_set(c, e, start, sz, r); return next; }
+    case FK_TEST_RR: flags_logic(c, fast_reg_get(c, e->rm, sz) & fast_reg_get(c, e->reg, sz), sz); return next;
+    case FK_ALU_RM_R: { int aop = e->op >> 3; u64 a = fast_rm_get(c, e, start, sz); if (c->status != RUN_OK) return next; u64 r = alu(c, aop, a, fast_reg_get(c, e->reg, sz), sz); if (aop != 7) fast_rm_set(c, e, start, sz, r); return next; }
+    case FK_ALU_R_RM: { int aop = e->op >> 3; u64 b = fast_rm_get(c, e, start, sz); if (c->status != RUN_OK) return next; u64 r = alu(c, aop, fast_reg_get(c, e->reg, sz), b, sz); if (aop != 7) fast_reg_set(c, e->reg, sz, r); return next; }
+    case FK_ALU_A_IMM: { int aop = e->op >> 3; u64 b = (u64)(s64)fast_imm32(code, e->hdr); u64 r = alu(c, aop, fast_reg_get(c, RAX, sz), b, sz); if (aop != 7) fast_reg_set(c, RAX, sz, r); return next; }
+    case FK_JCC8: return cond(c, e->op & 15) ? next + (u64)(s64)(s8)code[e->hdr] : next;
+    case FK_JCC32: return cond(c, code[e->hdr] & 15) ? next + (u64)(s64)fast_imm32(code, e->hdr + 1) : next;
+    case FK_JMP8: return next + (u64)(s64)(s8)code[e->hdr];
+    case FK_JMP32: return next + (u64)(s64)fast_imm32(code, e->hdr);
+    case FK_CALL: cpu_push(c, next); return next + (u64)(s64)fast_imm32(code, e->hdr);
+    case FK_RET: return cpu_pop(c);
+    case FK_PUSH: cpu_push(c, c->r[(e->op & 7) | (e->rexb << 3)]); return next;
+    case FK_POP: { u64 v = cpu_pop(c); if (c->status == RUN_OK) c->r[(e->op & 7) | (e->rexb << 3)] = v; return next; }
+    case FK_MOVZX8: { u64 v; if (e->mod == 3) { int r = e->rm; v = (!e->rex && r >= 4 && r < 8) ? (c->r[r - 4] >> 8) & 0xff : c->r[r] & 0xff; } else v = rd8(c, fast_ea(c, e, start)); if (c->status == RUN_OK) fast_reg_set(c, e->reg, sz, v); return next; }
+    case FK_MOVZX16: { u64 v = e->mod == 3 ? c->r[e->rm] & 0xffff : rd16(c, fast_ea(c, e, start)); if (c->status == RUN_OK) fast_reg_set(c, e->reg, sz, v); return next; }
+    case FK_MOVSXD: { u64 v = fast_rm_get(c, e, start, 4); if (c->status == RUN_OK) c->r[e->reg] = (u64)(s64)(s32)v; return next; }
+    case FK_SHIFT_IMM: { u64 v = fast_rm_get(c, e, start, sz); if (c->status != RUN_OK) return next; fast_rm_set(c, e, start, sz, shift(c, e->reg & 7, v, code[e->mr_end], sz)); return next; }
+    case FK_FF: { int sub = e->reg & 7;
+      switch (sub) {
+        case 0: { u64 v = fast_rm_get(c, e, start, sz); if (c->status != RUN_OK) return next; u64 r = (v + 1) & mask(sz); u64 cf = c->rflags & F_CF; flags_add(c, v, 1, r, sz); c->rflags = (c->rflags & ~(u64)F_CF) | cf; fast_rm_set(c, e, start, sz, r); return next; }
+        case 1: { u64 v = fast_rm_get(c, e, start, sz); if (c->status != RUN_OK) return next; u64 r = (v - 1) & mask(sz); u64 cf = c->rflags & F_CF; flags_sub(c, v, 1, r, sz); c->rflags = (c->rflags & ~(u64)F_CF) | cf; fast_rm_set(c, e, start, sz, r); return next; }
+        case 2: { u64 t = fast_rm_get(c, e, start, 8); if (c->status != RUN_OK) return next; cpu_push(c, next); return t; }
+        case 4: { u64 t = fast_rm_get(c, e, start, 8); return c->status == RUN_OK ? t : next; }
+        case 6: { u64 v = fast_rm_get(c, e, start, 8); if (c->status == RUN_OK) cpu_push(c, v); return next; }
+        default: return 0;   /* 0 = not handled → generic path */
+      } }
+    case FK_MOV_R_IMM: { int r = (e->op & 7) | (e->rexb << 3); if (sz == 8) { u64 v; __builtin_memcpy(&v, code + e->hdr, 8); c->r[r] = v; } else c->r[r] = (u32)fast_imm32(code, e->hdr); return next; }
+    case FK_MOV_RM_IMM32: fast_rm_set(c, e, start, sz, (u64)(s64)fast_imm32(code, e->mr_end)); return next;
+    case FK_MOV8_RM_R: fast_rm8_set(c, e, start, fast_r8_get(c, e, e->reg)); return next;
+    case FK_MOV8_R_RM: { u64 v = fast_rm8_get(c, e, start); if (c->status == RUN_OK) fast_r8_set(c, e, e->reg, v); return next; }
+    case FK_MOV8_RM_IMM: fast_rm8_set(c, e, start, code[e->mr_end]); return next;
+    case FK_ALU8_RM_IMM: { u64 a = fast_rm8_get(c, e, start); if (c->status != RUN_OK) return next; int aop = e->reg & 7; u64 r = alu(c, aop, a, code[e->mr_end], 1); if (aop != 7) fast_rm8_set(c, e, start, r); return next; }
+    case FK_ALU8_RM_R: { int aop = e->op >> 3; u64 a = fast_rm8_get(c, e, start); if (c->status != RUN_OK) return next; u64 r = alu(c, aop, a, fast_r8_get(c, e, e->reg), 1); if (aop != 7) fast_rm8_set(c, e, start, r); return next; }
+    case FK_ALU8_R_RM: { int aop = e->op >> 3; u64 b = fast_rm8_get(c, e, start); if (c->status != RUN_OK) return next; u64 r = alu(c, aop, fast_r8_get(c, e, e->reg), b, 1); if (aop != 7) fast_r8_set(c, e, e->reg, r); return next; }
+    case FK_ALU8_AL_IMM: { int aop = e->op >> 3; u64 r = alu(c, aop, c->r[RAX] & 0xff, code[e->hdr], 1); if (aop != 7) c->r[RAX] = (c->r[RAX] & ~0xffull) | (r & 0xff); return next; }
+    case FK_TEST8: { u64 a = fast_rm8_get(c, e, start); if (c->status == RUN_OK) flags_logic(c, a & fast_r8_get(c, e, e->reg), 1); return next; }
+    case FK_TEST_RM_R: { u64 a = fast_rm_get(c, e, start, sz); if (c->status == RUN_OK) flags_logic(c, a & fast_reg_get(c, e->reg, sz), sz); return next; }
+    case FK_SETCC: fast_rm8_set(c, e, start, cond(c, e->op2 & 15)); return next;
+    case FK_CMOV: { u64 v = fast_rm_get(c, e, start, sz); if (c->status != RUN_OK) return next; if (cond(c, e->op2 & 15)) fast_reg_set(c, e->reg, sz, v); else if (sz == 4) c->r[e->reg] = (u32)c->r[e->reg]; return next; }
+    case FK_IMUL_R_RM: case FK_IMUL_IMM: { s64 a, b;
+      if (e->fast == FK_IMUL_R_RM) { a = (s64)sext(fast_reg_get(c, e->reg, sz), sz); b = (s64)sext(fast_rm_get(c, e, start, sz), sz); }
+      else { a = (s64)sext(fast_rm_get(c, e, start, sz), sz); b = e->op == 0x6B ? (s64)(s8)code[e->mr_end] : (s64)fast_imm32(code, e->mr_end); }
+      if (c->status != RUN_OK) return next;
+      s128 p = (s128)a * b; u64 r = (u64)p & mask(sz); int ov = sz == 8 ? (p != (s128)(s64)p) : ((s64)sext(r, sz) != (s64)p);
+      c->rflags &= ~(u64)(F_CF | F_OF); if (ov) c->rflags |= F_CF | F_OF; set_szp(c, r, sz); fast_reg_set(c, e->reg, sz, r); return next; }
+    case FK_F7_TEST: { u64 a = fast_rm_get(c, e, start, sz); if (c->status == RUN_OK) flags_logic(c, a & (u64)(s64)fast_imm32(code, e->mr_end), sz); return next; }
+    case FK_F7_NOTNEG: { u64 v = fast_rm_get(c, e, start, sz); if (c->status != RUN_OK) return next; if ((e->reg & 7) == 2) fast_rm_set(c, e, start, sz, ~v); else { u64 r = (0 - v) & mask(sz); flags_sub(c, 0, v, r, sz); fast_rm_set(c, e, start, sz, r); } return next; }
+    case FK_CDQE: if (sz == 8) c->r[RAX] = (u64)(s64)(s32)c->r[RAX]; else c->r[RAX] = (u32)(s32)(s16)c->r[RAX]; return next;
+    case FK_CDQ: { u64 s_ = (s64)sext(c->r[RAX], sz) < 0 ? ~0ull : 0; fast_reg_set(c, RDX, sz, s_); return next; }
+    case FK_SHIFT_1: case FK_SHIFT_CL: { u64 v = fast_rm_get(c, e, start, sz); if (c->status != RUN_OK) return next; fast_rm_set(c, e, start, sz, shift(c, e->reg & 7, v, e->fast == FK_SHIFT_1 ? 1 : (int)(c->r[RCX] & 0xff), sz)); return next; }
+    case FK_MOVSX8: { u64 v = fast_rm8_get(c, e, start); if (c->status == RUN_OK) fast_reg_set(c, e->reg, sz, (u64)(s64)(s8)v); return next; }
+    case FK_MOVSX16: { u64 v = e->mod == 3 ? c->r[e->rm] & 0xffff : rd16(c, fast_ea(c, e, start)); if (c->status == RUN_OK) fast_reg_set(c, e->reg, sz, (u64)(s64)(s16)v); return next; }
+    case FK_NOP: return next;
+    case FK_RET_N: { u64 ra = cpu_pop(c); if (c->status != RUN_OK) return next; c->r[RSP] += (u16)(code[e->hdr] | (code[e->hdr + 1] << 8)); return ra; }
+    case FK_SSE_MOV: { u8 op2 = e->op2; Xmm v;
+      if (op2 == 0x28 || op2 == 0x29) { if (op2 == 0x28) { fast_xmm_load(c, e, start, &v, 16); if (c->status == RUN_OK) c->x[e->reg] = v; } else fast_xmm_store(c, e, start, &c->x[e->reg], 16); return next; }
+      int bytes = e->rep == 0xF3 ? 4 : e->rep == 0xF2 ? 8 : 16;
+      if (op2 == 0x10) { if (bytes == 16) { fast_xmm_load(c, e, start, &v, 16); if (c->status == RUN_OK) c->x[e->reg] = v; }
+        else { fast_xmm_load(c, e, start, &v, bytes); if (c->status != RUN_OK) return next; if (e->mod == 3) { if (bytes == 4) c->x[e->reg].d[0] = v.d[0]; else c->x[e->reg].q[0] = v.q[0]; } else { c->x[e->reg].q[1] = 0; if (bytes == 4) { c->x[e->reg].q[0] = 0; c->x[e->reg].d[0] = v.d[0]; } else c->x[e->reg].q[0] = v.q[0]; } } }
+      else fast_xmm_store(c, e, start, &c->x[e->reg], bytes);
+      return next; }
+    case FK_SSE_ARITH: { u8 op2 = e->op2; Xmm s_, *d = &c->x[e->reg]; int sc = e->rep == 0xF3 ? 1 : e->rep == 0xF2 ? 2 : e->p66 ? 3 : 0;
+      fast_xmm_load(c, e, start, &s_, sc == 1 ? 4 : sc == 2 ? 8 : 16); if (c->status != RUN_OK) return next;
+#define FOP(a, b) (op2 == 0x58 ? (a) + (b) : op2 == 0x59 ? (a) * (b) : op2 == 0x5C ? (a) - (b) : (a) / (b))
+      if (sc == 1) d->f32[0] = (float)FOP((double)d->f32[0], (double)s_.f32[0]);
+      else if (sc == 2) d->f64[0] = FOP(d->f64[0], s_.f64[0]);
+      else if (sc == 3) { d->f64[0] = FOP(d->f64[0], s_.f64[0]); d->f64[1] = FOP(d->f64[1], s_.f64[1]); }
+      else for (int k = 0; k < 4; k++) d->f32[k] = (float)FOP((double)d->f32[k], (double)s_.f32[k]);
+#undef FOP
+      return next; }
+    case FK_SSE_LOGIC: { u8 op2 = e->op2; Xmm s_; fast_xmm_load(c, e, start, &s_, 16); if (c->status != RUN_OK) return next; Xmm *d = &c->x[e->reg];
+      for (int k = 0; k < 2; k++) d->q[k] = op2 == 0x54 ? d->q[k] & s_.q[k] : op2 == 0x55 ? ~d->q[k] & s_.q[k] : op2 == 0x56 ? d->q[k] | s_.q[k] : d->q[k] ^ s_.q[k]; return next; }
+    case FK_SSE_CMP: { Xmm s_; fast_xmm_load(c, e, start, &s_, e->p66 ? 8 : 4); if (c->status != RUN_OK) return next;
+      double a = e->p66 ? c->x[e->reg].f64[0] : (double)c->x[e->reg].f32[0], b = e->p66 ? s_.f64[0] : (double)s_.f32[0]; set_cmp_flags(c, a, b); return next; }
+  }
+  return 0;
+}
+
+static void exec_body(Ins *i, u8 op);
 static void exec_one(Ins *i) {
   Cpu *c = i->c;
   u8 op;
@@ -296,6 +480,11 @@ static void exec_one(Ins *i) {
     else break;
   }
   if (c->status) return;
+  i->hdr = (int)(i->ip - i->start);
+  exec_body(i, op);
+}
+static void exec_body(Ins *i, u8 op) {
+  Cpu *c = i->c;
   int osz = i->rexw ? 8 : i->p66 ? 2 : 4;   /* operand size */
   if (op == 0x0F) { exec_0f(i, c); return; }
 
@@ -616,11 +805,41 @@ int cpu_run(Cpu *c, u64 max_insns) {
     if (c->rip == X64_WATCH || c->rip == X64_WATCH2) { e_log("[watch] rip=%llx tid=%d rax=%llx rbx=%llx rsp=%llx rbp=%llx rsi=%llx rdi=%llx r12=%llx r13=%llx r14=%llx r15=%llx\n", (unsigned long long)c->rip, c->w->th[c->w->cur_th].tid, (unsigned long long)c->r[0], (unsigned long long)c->r[3], (unsigned long long)c->r[4], (unsigned long long)c->r[5], (unsigned long long)c->r[6], (unsigned long long)c->r[7], (unsigned long long)c->r[12], (unsigned long long)c->r[13], (unsigned long long)c->r[14], (unsigned long long)c->r[15]);
       u8 *sp = mem_ptr(c->mem, c->r[4], 64, 0); if (sp) { e_log("        stack:"); for (int k = 0; k < 8; k++) { u64 v; e_memcpy(&v, sp + 8 * k, 8); e_log(" %llx", (unsigned long long)v); } e_log("\n"); } }
 #endif
+    Dc *e = DC_SLOT(c->rip); u64 w0 = 0, w1 = 0;
+    const u8 *code = (e->rip == c->rip && e->mem == c->mem && e->gen == c->mem->gen) ? e->code : mem_ptr_fast(c->mem, c->rip, 16, 0);
+    if (code) { __builtin_memcpy(&w0, code, 8); __builtin_memcpy(&w1, code + 8, 8); }
+    int hit = e->rip == c->rip && code && (w0 & e->m0) == e->b0 && (w1 & e->m1) == e->b1;
+    if (hit && e->fast) {   /* specialised handler: no Ins at all */
+      u64 start = c->rip, nx = fast_exec(c, e, code, start);
+      if (nx) { if (c->status != RUN_OK) { c->hist[c->hist_i++ & 4095] = start; if (c->status == RUN_FAULT) { c->err_rip = start; if (c->exc_code) { c->rip = start; if (w32_hw_exception(c)) continue; } } return c->status; }
+        if (nx != start + e->len) c->hist[c->hist_i++ & 4095] = nx;   /* history keeps block starts (branch targets); straight-line code is implied */
+        c->rip = nx; c->icount++; if (c->trace) e_log("%llx\n", (unsigned long long)c->rip); continue; }
+    }
     c->hist[c->hist_i++ & 4095] = c->rip;
-    Ins in; in.c = c; in.start = c->rip; in.ip = c->rip;
-    in.rex = in.rexw = in.rexr = in.rexx = in.rexb = in.p66 = in.p67 = in.rep = in.seg = in.lock = 0; in.modrm = 0; in.ea_valid = 0; in.mod = in.reg = in.rm = 0; in.ea = 0;
-    in.code = mem_ptr_fast(c->mem, c->rip, 16, 0);
-    exec_one(&in);
+    Ins in; in.c = c; in.start = c->rip; in.ip = c->rip; in.fend = c->rip; in.code = code;
+    in.modrm = 0; in.ea_valid = 0; in.mod = in.reg = in.rm = 0; in.ea = 0;
+    if (hit) {
+      in.dc = e; in.rex = e->rex; in.rexw = e->rexw; in.rexr = e->rexr; in.rexx = e->rexx; in.rexb = e->rexb; in.p66 = e->p66; in.p67 = e->p67; in.rep = e->rep; in.seg = e->seg; in.lock = e->lock;
+      in.ip = c->rip + e->hdr; in.fend = c->rip + e->len;
+#ifdef X64_OPHIST
+      { int k = e->op == 0x0F ? 256 + code[e->hdr] : e->op; g_ophist[k][e->modrm && e->mod != 3]++; g_ophist[k][2] += e->rexw; g_ophist[k][3] += e->p66; }
+#endif
+      exec_body(&in, e->op);
+    } else {
+      in.dc = 0; in.rex = in.rexw = in.rexr = in.rexx = in.rexb = in.p66 = in.p67 = in.rep = in.seg = in.lock = 0; in.hdr = 0; in.mr_end = 0; in.base = in.idx = -1; in.scale = in.riprel = 0; in.disp = 0;
+      exec_one(&in);
+      if (c->status == RUN_OK && code) {   /* remember the decode (instruction fully inside the 16 fetched bytes) */
+        u64 len = in.fend - in.start;
+        if (len >= 1 && len <= 15) {
+          e->rip = in.start; e->len = (u8)len; e->hdr = (u8)in.hdr; e->mr_end = (u8)in.mr_end;
+          e->m0 = len >= 8 ? ~0ull : (1ull << (len * 8)) - 1; e->m1 = len >= 16 ? ~0ull : len <= 8 ? 0 : (1ull << ((len - 8) * 8)) - 1;
+          e->b0 = w0 & e->m0; e->b1 = w1 & e->m1;
+          e->rex = in.rex; e->rexw = in.rexw; e->rexr = in.rexr; e->rexx = in.rexx; e->rexb = in.rexb; e->p66 = in.p66; e->p67 = in.p67; e->rep = in.rep; e->seg = in.seg; e->lock = in.lock;
+          e->modrm = in.modrm; e->mod = in.mod; e->reg = in.reg; e->rm = in.rm; e->scale = (u8)in.scale; e->riprel = (u8)in.riprel; e->base = in.base; e->idx = in.idx; e->disp = in.disp;
+          e->op = code[in.hdr - 1]; e->op2 = code[in.hdr]; e->code = code; e->mem = c->mem; e->gen = mem_gen(c->mem); e->fast = dc_classify(e);
+        }
+      }
+    }
     if (c->status != RUN_OK) {
       if (c->status == RUN_FAULT) { c->err_rip = in.start; if (c->exc_code) { c->rip = in.start; if (w32_hw_exception(c)) continue; } }
       return c->status;

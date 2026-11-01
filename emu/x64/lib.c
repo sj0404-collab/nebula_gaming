@@ -230,6 +230,7 @@ void e_log(const char *fmt, ...) { char b[1024]; va_list ap; va_start(ap, fmt); 
 #define POOL_MAX 128
 static struct { u8 *host; u64 size; } g_pool[POOL_MAX]; static int g_npool;
 static u8 *pool_take(u64 size) { for (int i = 0; i < g_npool; i++) if (g_pool[i].size == size) { u8 *h = g_pool[i].host; g_pool[i] = g_pool[--g_npool]; e_memset(h, 0, (size_t)size); return h; } return 0; }
+u32 g_mem_gen;
 void mem_release(Mem *m) { for (int i = 0; i < m->n; i++) { if (g_npool < POOL_MAX) { g_pool[g_npool].host = m->r[i].host; g_pool[g_npool].size = m->r[i].size; g_npool++; } } m->n = 0; m->last = 0; mem_tlb_flush(m); }
 u8 *mem_map(Mem *m, u64 base, u64 size, const char *name) {
   if (m->n >= MAX_REGIONS) return 0;

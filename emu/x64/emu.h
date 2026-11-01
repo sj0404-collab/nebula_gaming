@@ -70,6 +70,7 @@ typedef struct {
   u64     fault_addr;                 /* set on failed translation */
   int     fault_write;
   Tlb     tlb[TLB_N];                 /* direct-mapped page translation cache (code / stack / heap no longer thrash `last`) */
+  u32     gen;                        /* bumped on every TLB flush (unmap/release): host pointers cached elsewhere (decode cache) expire */
 } Mem;
 int mem_unmap(Mem *m, u64 base);       /* drop a mem_map region (large VirtualAlloc reservation released) */
 
@@ -81,7 +82,9 @@ static inline u8 *mem_ptr_fast(Mem *m, u64 addr, u64 size, int write) {
   if (t->tag == pg + 1) { u64 o = addr & 4095; if (o + size <= 4096) return t->host + o; }
   return mem_ptr(m, addr, size, write);
 }
-static inline void mem_tlb_flush(Mem *m) { for (int i = 0; i < TLB_N; i++) m->tlb[i].tag = 0; }
+extern u32 g_mem_gen;   /* global generation: a Mem gets a fresh, never-reused value on every flush and on first use */
+static inline u32 mem_gen(Mem *m) { if (!m->gen) m->gen = ++g_mem_gen; return m->gen; }
+static inline void mem_tlb_flush(Mem *m) { for (int i = 0; i < TLB_N; i++) m->tlb[i].tag = 0; m->gen = ++g_mem_gen; }
 Region *mem_region(Mem *m, u64 addr);
 void mem_release(Mem *m);                                     /* give all regions back to the pool */
 void *emu_alloc(size_t n);                                    /* zeroed host memory, never freed (bump) */
