@@ -137,6 +137,7 @@ static void retry_and_yield(Cpu *c, u64 slot) { cpu_push(c, c->rip); c->rip = sl
 static u64 g_cur_slot;
 static int thread_cont_resume(Cpu *c, int kind, u64 rax);
 static int tp_cont_resume(Cpu *c, int kind, u64 rax);
+static int audio_cont_resume(Cpu *c, int kind, u64 rax);
 static int seh_cont_resume(Cpu *c, int kind, u64 rax);
 static int cxx_cont_resume(Cpu *c, int kind, u64 rax);
 static void thread_startup(Cpu *c);
@@ -212,6 +213,7 @@ void w32_cont_resume(Cpu *c) {
   if (seh_cont_resume(c, w->cont[i].kind, rax)) return;
   if (cxx_cont_resume(c, w->cont[i].kind, rax)) return;
   if (tp_cont_resume(c, w->cont[i].kind, rax)) return;
+  if (audio_cont_resume(c, w->cont[i].kind, rax)) return;
   if (thread_cont_resume(c, w->cont[i].kind, rax)) return;
   extern void gdi_cont_resume(Cpu *c, int kind, u64 rax);
   gdi_cont_resume(c, w->cont[i].kind, rax);
@@ -344,6 +346,7 @@ static void iocp_handle_closed(int pid, int fd); static void iocp_kobj_closed(in
 #include "win32_tp.inc"
 #include "win32_bun.inc"
 #include "d3d11.inc"
+#include "win32_audio.inc"
 static void s_CancelIo(Cpu *c) { sock_cancel_io(c, ARG(0)); RET(1); }   /* pipes: parked ReadFile/WriteFile stay (libuv cancels those only on close) */
 static void s_ret0(Cpu *c); static void s_atexit(Cpu *c); static void s_setjmp(Cpu *c);
 #include "win32_compat.inc"
@@ -1197,6 +1200,7 @@ static const ShimDef shims[] = {
   IOCP_SHIMS
   BUN_SHIMS
   D3D_SHIMS
+  AUD_SHIMS
   S(GetLastError), S(SetLastError), S(GetCurrentProcess), S(GetCurrentProcessId), S(ExitProcess), S(TerminateProcess),
   S(GetTickCount), S(GetTickCount64), S(QueryPerformanceCounter), S(QueryPerformanceFrequency), S(GetSystemTimeAsFileTime), S(GetSystemTimePreciseAsFileTime), S(GetSystemTime), S(GetLocalTime), S(Sleep), S(SleepEx),
   S(GetStdHandle), S(WriteFile), S(WriteConsoleA), S(WriteConsoleW), S(ReadFile), S(ReadConsoleA), S(GetConsoleMode), S(SetConsoleMode), S(GetConsoleOutputCP), S(GetConsoleCP), S(SetConsoleOutputCP), S(SetConsoleCP), S(GetConsoleScreenBufferInfo), S(SetConsoleTextAttribute), S(SetConsoleTitleA), S(SetConsoleTitleW), S(GetConsoleTitleW), S(GetConsoleTitleA), S(GetConsoleCursorInfo), S(SetConsoleCursorInfo), S(SetConsoleCursorPosition), S(FillConsoleOutputCharacterW), S(FillConsoleOutputCharacterA), S(FillConsoleOutputAttribute), S(ScrollConsoleScreenBufferW), S(ScrollConsoleScreenBufferA), S(SetConsoleScreenBufferSize), S(SetConsoleWindowInfo), S(WriteConsoleOutputW), S(WriteConsoleOutputA), S(WriteConsoleOutputCharacterW), S(WriteConsoleOutputAttribute), S(ReadConsoleOutputW), S(ReadConsoleOutputCharacterW), S(ReadConsoleOutputAttribute), S(GetLargestConsoleWindowSize), S(WriteConsoleInputW), S(GetConsoleProcessList), S(GetConsoleDisplayMode), S(GetConsoleOriginalTitleW), S(GetConsoleAliasesLengthW), S(GetConsoleScreenBufferInfoEx), S(SetConsoleScreenBufferInfoEx), S(GetCurrentConsoleFontEx), S(GetCurrentConsoleFont), S(SetCurrentConsoleFontEx), S(GetConsoleFontSize), S(GetConsoleWindow), S(AllocConsole), S(SetConsoleCtrlHandler), S(FlushFileBuffers), S(GetFileType), S(CloseHandle),

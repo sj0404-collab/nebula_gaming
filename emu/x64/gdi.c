@@ -88,6 +88,7 @@ static void post_msg(Win32 *w, u32 msg, u64 wp, u64 lp) {
   int next = (w->msg_tail + 1) % MAX_MSGS; if (next == w->msg_head) return;
   GuestMsg *m = &w->msgs[w->msg_tail]; m->hwnd = HWND_MAIN; m->msg = msg; m->wparam = wp; m->lparam = lp; m->time = (u32)(host_now_ms() - w->start_ms); w->msg_tail = next;
 }
+void w32_post_msg(Win32 *w, u32 msg, u64 wp, u64 lp) { post_msg(w, msg, wp, lp); }
 void w32_key(Win32 *w, int vk, int down) {
   if (vk < 0 || vk > 255) return; int prev = w->key_state[vk]; w->key_state[vk] = down;
   u64 lp = 1 | ((u64)(vk & 0x7f) << 16) | (prev ? 1ull << 30 : 0) | (down ? 0 : (1ull << 31) | (1ull << 30));

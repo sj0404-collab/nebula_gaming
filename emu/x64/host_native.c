@@ -126,3 +126,12 @@ void host_gfx_clear_depth(int tex_id, float depth) { (void)tex_id; (void)depth; 
 void host_gfx_draw(const u32 *cmd) { (void)cmd; }
 void host_gfx_readback(int tex_id, u32 *bgra) { (void)tex_id; (void)bgra; }
 void host_gfx_free(int id) { (void)id; }
+
+/* ---- audio: no device in the test runner; a wall-clock "player" keeps the timing honest; X64_AUDIO_WAV=<file> dumps the mix ---- */
+static double g_aud_t0; static long long g_aud_written_frames; static int g_aud_rate; static FILE *g_aud_wav; static long long g_aud_wav_frames;
+static void aud_wav_close(void) { if (!g_aud_wav) return; long long data = g_aud_wav_frames * 8; u8 h[44] = { 'R','I','F','F' }; u32 riff = (u32)(36 + data); memcpy(h + 4, &riff, 4); memcpy(h + 8, "WAVEfmt ", 8);
+  u32 v = 16; memcpy(h + 16, &v, 4); u16 s16v = 3; memcpy(h + 20, &s16v, 2); s16v = 2; memcpy(h + 22, &s16v, 2); v = (u32)g_aud_rate; memcpy(h + 24, &v, 4); v = (u32)g_aud_rate * 8; memcpy(h + 28, &v, 4); s16v = 8; memcpy(h + 32, &s16v, 2); s16v = 32; memcpy(h + 34, &s16v, 2);
+  memcpy(h + 36, "data", 4); v = (u32)data; memcpy(h + 40, &v, 4); fseek(g_aud_wav, 0, SEEK_SET); fwrite(h, 1, 44, g_aud_wav); fclose(g_aud_wav); g_aud_wav = 0; }
+int host_audio_open(int rate) { g_aud_rate = rate; g_aud_t0 = host_now_ms(); g_aud_written_frames = 0; const char *wav = getenv("X64_AUDIO_WAV"); if (wav && !g_aud_wav) { g_aud_wav = fopen(wav, "wb"); if (g_aud_wav) { u8 h[44] = {0}; fwrite(h, 1, 44, g_aud_wav); atexit(aud_wav_close); } } return rate; }
+void host_audio_write(const float *lr, int frames) { if (g_aud_wav) { fwrite(lr, 8, (size_t)frames, g_aud_wav); g_aud_wav_frames += frames; } g_aud_written_frames += frames; }
+int host_audio_queued(void) { long long played = (long long)((host_now_ms() - g_aud_t0) / 1000.0 * g_aud_rate); long long q = g_aud_written_frames - played; if (q < 0) { g_aud_t0 = host_now_ms() - (double)g_aud_written_frames * 1000.0 / g_aud_rate; q = 0; } return (int)q; }

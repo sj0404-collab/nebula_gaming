@@ -46,3 +46,10 @@ void host_gfx_clear_depth(int tex_id, float depth) { js_gfx_clear_depth(tex_id, 
 void host_gfx_draw(const u32 *cmd) { js_gfx_draw(cmd); }
 void host_gfx_readback(int tex_id, u32 *bgra) { js_gfx_readback(tex_id, bgra); }
 void host_gfx_free(int id) { js_gfx_free(id); }
+
+__attribute__((import_module("env"), import_name("host_audio_open"))) int js_audio_open(int rate);
+__attribute__((import_module("env"), import_name("host_audio_write"))) void js_audio_write(const float *lr, int frames);
+__attribute__((import_module("env"), import_name("host_audio_queued"))) int js_audio_queued(void);
+int host_audio_open(int rate) { return js_audio_open(rate); }
+void host_audio_write(const float *lr, int frames) { js_audio_write(lr, frames); }
+int host_audio_queued(void) { return js_audio_queued(); }

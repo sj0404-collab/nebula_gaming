@@ -44,6 +44,14 @@ void   host_net_shutdown(int s, int how);
 void   host_net_close(int s);
 int    host_net_name(int s, int peer, u8 *ip4, int *port);             /* local (0) / peer (1) address; 1 ok */
 
+/* host audio output (browser: Web Audio → the device's audio stack; native runner: silent clock + optional WAV dump) */
+int    host_audio_open(int rate);                                      /* returns the actual output rate (stereo float32 interleaved), 0 = no output */
+void   host_audio_write(const float *lr, int frames);
+int    host_audio_queued(void);                                        /* frames written but not yet played */
+void   w32_audio_pump(void);                                           /* win32_audio.inc: mix + feed the host (scheduler, before every pick) */
+int    w32_audio_pending(void);                                        /* a stream is playing: keep polling (timers/events come from the mixer) */
+int    w32_audio_cb_pending(void);                                     /* waveOut callbacks waiting for their owner process */
+u64    w32_audio_frames(void);
 /* GPU back end for the D3D11 layer (browser: WebGL2 in src/lib/x64/gfx.ts; native runner: none — returns 0 from host_gfx_init). */
 int    host_gfx_init(void);                                            /* 1 = draws are possible */
 int    host_gfx_shader(int kind, const char *glsl);                    /* kind 0 fragment / 1 vertex; host shader id >= 0 or -1 (error logged on fd 3) */
@@ -107,6 +115,7 @@ enum {
 
 typedef struct Cpu Cpu;
 typedef struct Win32 Win32;
+void   w32_audio_deliver(Win32 *w);                                    /* win32_audio.inc: run in the owner's context — helper threads / messages for completed waveOut buffers */
 
 struct Cpu {
   u64  r[16];
