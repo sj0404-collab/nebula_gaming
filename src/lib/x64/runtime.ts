@@ -9,6 +9,7 @@ export interface PeInfo {
   imageBase?: string; sizeOfImage?: number; entry?: string; sections?: number; relocs?: boolean; tls?: boolean; exceptions?: boolean; resources?: number;
   sectionNames?: string[]; unknownImports?: string; imports?: number; knownImports?: number; unknownImportsCount?: number; privateDllImports?: number; dlls?: string[];
   verdict?: 'likely' | 'partial' | 'unlikely' | 'unsupported'; why?: string;
+  dotnet?: 'managed' | 'managed-dll' | 'apphost' | null;   // .NET: IL assembly (started through dotnet.exe exec), library, or apphost launcher
 }
 
 export interface RunStats {

@@ -276,6 +276,36 @@ await test('x64: runtime pack — the REAL msvcp140.dll (VC++ 2015–2022 Redist
   await page.screenshot({ path: resolve(SHOTS, 'x64-runtime-pack.png') });
   await closeAll();
 });
+await test('x64: .NET pack — the OFFICIAL Microsoft .NET Runtime 10 is installed into C:\\Program Files\\dotnet on demand and a C# app (apphost + dll) runs on CoreCLR: LINQ, exceptions, hardware NRE, JSON, reflection, Regex, GC', async () => {
+  const w = await x64Open();
+  const st = async () => w.locator('[data-x64-dotnet]').getAttribute('data-x64-dotnet');
+  await page.waitForFunction(() => { const s = document.querySelector('[data-x64-dotnet]')?.getAttribute('data-x64-dotnet'); return s && s !== 'probing'; }, null, { timeout: 15_000 });
+  const before = await st();
+  await w.locator('[data-x64-exe="nebula-dotnet-test.exe"]').click();
+  expect(/\.NET apphost/.test(await w.innerText()), 'PE report should recognise the .NET apphost');
+  await w.locator('[data-x64-run]').click();
+  if (before === 'unavailable') {
+    console.log('      (.NET pack not built into this deployment — run emu/tools/dotnet-pack.sh; checking the honest path only)');
+    await page.waitForFunction(() => /could not be installed|runtime pack/.test(document.body.innerText), null, { timeout: 30_000 });
+    await closeAll(); return;
+  }
+  await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout: 240_000 });
+  const con = await w.locator('[data-x64-console]').innerText();
+  expect((await st()) === 'installed', '.NET pack should be installed after running a managed exe: ' + await st());
+  expect(/primes 303/.test(con), 'LINQ primes missing: ' + con.slice(0, 400));
+  expect(/caught NRE/.test(con), 'hardware null-reference → managed NullReferenceException failed');
+  expect(/caught boom/.test(con), 'managed throw/catch failed');
+  expect(/json \{"name":"nebula","items":\[2,3,5\],"ok":true\}/.test(con) && /back nebula/.test(con), 'System.Text.Json failed');
+  expect(/reflect List`1 1 6 Main,Run,Steps/.test(con), 'reflection/dynamic failed');
+  expect(/regex 12,345,64/.test(con), 'Regex failed');
+  expect(/gc ok gen0=\d+/.test(con), 'GC.Collect failed');
+  expect(/code 3/.test(await w.innerText()), 'exit code 3 not reported');
+  const files = await w.locator('[data-x64-tab="files"]').click().then(() => w.innerText());
+  expect(/coreclr\.dll/.test(files), 'coreclr.dll should be listed on the virtual disk');
+  await page.screenshot({ path: resolve(SHOTS, 'x64-dotnet.png') });
+  await closeAll();
+});
+
 await test('x64: NebulaStrike.exe (real Win32 GDI PE32+) renders frames through WebGL and reacts to keys', async () => {
   const w = await x64Open();
   await w.locator('[data-x64-exe="NebulaStrike.exe"]').click();

@@ -10,6 +10,8 @@ interface ExeEntry { id: number; name: string; bytes: Uint8Array; info: PeInfo; 
 const SAMPLE_DATA = ['demo.sql', 'demo.json', 'demo.lua', 'demo.txt', 'demo.py', 'demo.bat'];   // small inputs for the real apps, placed in C:\nebula
 const PY_FILES = ['python312.dll', 'python312.zip', 'python312._pth', '_sqlite3.pyd', 'sqlite3.dll', '_decimal.pyd', '_ctypes.pyd', 'libffi-8.dll', '_bz2.pyd', '_lzma.pyd', 'pyexpat.pyd', '_elementtree.pyd', 'unicodedata.pyd', '_queue.pyd', '_socket.pyd', 'select.pyd', '_asyncio.pyd', '_zoneinfo.pyd', '_uuid.pyd', '_multiprocessing.pyd'];
 const SAMPLES: { name: string; href: string; desc: string; args?: string; files?: string[]; lazy?: boolean; needsPack?: boolean }[] = [
+  { name: 'nebula-dotnet-test.exe', href: '/x64/samples/dotnet/nebula-dotnet-test.exe', desc: '.NET 10 (C#): the OFFICIAL Microsoft .NET Runtime (CoreCLR + RyuJIT, win-x64) runs on the emulator — installed on demand into C:\\Program Files\\dotnet (the .NET pack, ~34 MB). apphost launcher + nebula-dotnet-test.dll. Args pick the steps: linq, throw, nre (hardware null-reference → managed exception), json, reflect, regex, culture, async, thread, taskrun, bgspin (GC suspends a spinning thread), proc (Process.Start cmd.exe), http (HttpClient), gc', args: 'linq-throw-nre-json-reflect-regex-gc', files: ['nebula-dotnet-test.dll', 'nebula-dotnet-test.runtimeconfig.json', 'nebula-dotnet-test.deps.json'] },
+  { name: 'fx.exe', href: '/x64/samples/dotnet/fx.exe', desc: 'Classic .NET Framework 4.8 console exe (AnyCPU, IL only, 5 KB): started directly, the emulator hands it to dotnet.exe with a generated runtimeconfig — it runs on the .NET 10 runtime in compatibility mode (LINQ, exceptions, File IO, args). Exit code 5', args: 'a b' },
   { name: 'NebulaStrike.exe', href: '/downloads/NebulaStrike.exe', desc: 'Win32 GDI game, PE32+ x64 (light GUI exe)' },
   { name: 'd3d11tri.exe', href: '/x64/samples/d3d11tri.exe', desc: 'Direct3D 11 → WebGL2: device + swap chain, vertex/index/constant buffers, input layout, precompiled DXBC vertex/pixel shaders translated to GLSL, Draw + DrawIndexed + Present (3 frames). Args: number of frames', args: '3' },
   { name: 'd3d11clear.exe', href: '/x64/samples/d3d11clear.exe', desc: 'Direct3D 11: D3D11CreateDeviceAndSwapChain, GetBuffer, CreateRenderTargetView, ClearRenderTargetView + Present in three colours' },
@@ -54,6 +56,19 @@ type PackState = { status: 'probing' | 'available' | 'installing' | 'installed' 
 const PACK_URL = '/x64/sys32/';
 const PACK_BUILTIN = new Set(['vcruntime140.dll']);   // shipped in the pack for completeness, but the emulator always uses its own implementation (pe_dll_native_ok)
 const exeWantsPack = (dlls: string[] | undefined, man: PackManifest | undefined) => !!man && !!dlls && dlls.some(d => !PACK_BUILTIN.has(d.toLowerCase()) && man.files.some(f => f.name.toLowerCase() === d.toLowerCase()));
+
+/* .NET pack: the official Microsoft .NET Runtime 10 (win-x64), built by emu/tools/dotnet-pack.sh into public/x64/dotnet/ (per-file gzip)
+   and installed on demand into C:\Program Files\dotnet when a managed exe/dll or an apphost is started. */
+type DotnetManifest = { pack: string; version: string; files: { path: string; size: number; gz: string; gzsize: number }[] };
+type DotnetState = { status: 'probing' | 'available' | 'installing' | 'installed' | 'unavailable'; manifest?: DotnetManifest; done?: number; note?: string };
+const DOTNET_URL = '/x64/dotnet/';
+const DOTNET_DIR = 'C:\\Program Files\\dotnet\\';
+async function fetchGz(url: string): Promise<Uint8Array> {
+  const r = await fetch(url); if (!r.ok || !r.body) throw new Error(`${url}: HTTP ${r.status}`);
+  if (typeof DecompressionStream === 'undefined') throw new Error('DecompressionStream not supported by this browser');
+  const buf = await new Response(r.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
+  return new Uint8Array(buf);
+}
 
 export default function X64App() {
   const rtRef = useRef<X64Runtime | null>(null);
@@ -210,6 +225,28 @@ export default function X64App() {
     setLog(l => [...l, `runtime pack installed: ${done} DLLs, ${(bytes / 1048576).toFixed(1)} MB → C:\\Windows\\System32 (${man.pack})`]);
     return true;
   }, [pack]);
+  const [dotnet, setDotnet] = useState<DotnetState>({ status: 'probing' });
+  useEffect(() => { let alive = true; (async () => {
+    try { const r = await fetch(DOTNET_URL + 'manifest.json'); if (!r.ok) throw new Error('HTTP ' + r.status); const man = await r.json() as DotnetManifest; if (alive) setDotnet({ status: 'available', manifest: man }); }
+    catch (e) { if (alive) setDotnet({ status: 'unavailable', note: 'not built into this deployment (' + String(e) + ')' }); }
+  })(); return () => { alive = false; }; }, []);
+  const installDotnet = useCallback(async (rt: X64Runtime): Promise<boolean> => {
+    if (dotnet.status === 'installed') return true;
+    if (dotnet.status !== 'available' || !dotnet.manifest) { setLog(l => [...l, '.NET PACK: ' + (dotnet.note ?? dotnet.status)]); return false; }
+    const man = dotnet.manifest; let done = 0, bytes = 0;
+    setDotnet({ status: 'installing', manifest: man, done: 0 }); setFetching(`installing .NET pack (${man.files.length} files)…`); setTab('console');
+    try {
+      const queue = man.files.slice(); const PAR = 6;
+      const worker = async () => { for (;;) { const f = queue.shift(); if (!f) return;
+        const b = await fetchGz(DOTNET_URL + f.gz); if (b.length !== f.size) throw new Error(`${f.path}: ${b.length} bytes, expected ${f.size}`);
+        rt.vfsAdd(DOTNET_DIR + f.path, b); bytes += b.length; done++;
+        setDotnet({ status: 'installing', manifest: man, done }); setFetching(`installing .NET pack: ${done}/${man.files.length}, ${(bytes / 1048576).toFixed(1)} MB`); } };
+      await Promise.all(Array.from({ length: PAR }, worker));
+    } catch (e) { setFetching(null); setDotnet({ status: 'available', manifest: man, note: String(e) }); setLog(l => [...l, '.NET PACK: ' + String(e)]); return false; }
+    setFetching(null); setDotnet({ status: 'installed', manifest: man, done }); setFiles(rt.vfsList());
+    setLog(l => [...l, `.NET pack installed: ${done} files, ${(bytes / 1048576).toFixed(1)} MB → ${DOTNET_DIR} (${man.pack})`]);
+    return true;
+  }, [dotnet]);
   const run = useCallback(async () => {
     const rt = rtRef.current; if (!rt || !current) return;
     consoleBuf.current = ''; setConsoleText(''); setLog([]); setFrames(0); setWaitingStdin(false);
@@ -230,13 +267,16 @@ export default function X64App() {
     }
     const sample = current.source === 'sample' ? SAMPLES.find(x => x.name === current.name) : undefined;
     if (pack.status !== 'installed' && (sample?.needsPack || exeWantsPack(current.info.dlls, pack.manifest))) await installPack(rt);   // the program imports a vendor-runtime DLL we ship
+    if (current.info.dotnet && dotnet.status !== 'installed' && !(await installDotnet(rt))) {   // managed code needs the real runtime
+      setLog(l => [...l, `${current.name} is a .NET program (${current.info.dotnet}): the .NET runtime pack could not be installed, so it cannot run here`]); setStats(rt.stats()); setTab('report'); return;
+    }
     const base = current.name.split('\\').pop() || current.name;
     const err = rt.start(current.bytes, base, args.trim() ? `${base} ${args.trim()}` : base);
     if (err) { setLog(l => [...l, 'LOADER: ' + err]); setStats(rt.stats()); setTab('report'); return; }
     setStats(rt.stats()); setFiles(rt.vfsList());
     setTab(current.info.subsystem === 'GUI' ? 'screen' : 'console');
     setTimeout(() => screenRef.current?.focus(), 50);
-  }, [current, args, pack, installPack]);
+  }, [current, args, pack, installPack, dotnet, installDotnet]);
   const stop = useCallback(() => { const rt = rtRef.current; if (!rt) return; rt.stop(); setStats(rt.stats()); setFiles(rt.vfsList()); }, []);
 
   // keyboard → guest
@@ -276,6 +316,11 @@ export default function X64App() {
           title={pack.status === 'installed' ? `Runtime pack installed in C:\\Windows\\System32 (${pack.done} DLLs)` : pack.status === 'available' ? `Install the VC++ 2015–2022 runtime DLLs (${pack.manifest?.files.length} files, ${((pack.manifest?.files.reduce((a, f) => a + f.size, 0) ?? 0) / 1048576).toFixed(1)} MB) into C:\\Windows\\System32 — also happens automatically when a program needs them` : pack.status === 'unavailable' ? 'Runtime pack not available: ' + pack.note : 'Runtime pack…'}
           className={`hidden items-center gap-1 rounded border px-2 py-1 sm:flex ${pack.status === 'installed' ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : 'border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-40'}`}>
           <Download size={11} /> {pack.status === 'installed' ? 'VC++ runtime ✓' : pack.status === 'installing' ? `VC++ runtime ${pack.done}/${pack.manifest?.files.length}` : pack.status === 'unavailable' ? 'VC++ runtime n/a' : 'VC++ runtime'}
+        </button>
+        <button data-x64-dotnet={dotnet.status} disabled={dotnet.status !== 'available' || !!running || !!fetching} onClick={() => { const rt = rtRef.current; if (rt) void installDotnet(rt); }}
+          title={dotnet.status === 'installed' ? `.NET pack installed in C:\\Program Files\\dotnet (${dotnet.done} files, ${dotnet.manifest?.pack})` : dotnet.status === 'available' ? `Install the official Microsoft .NET Runtime ${dotnet.manifest?.version} (win-x64; ${dotnet.manifest?.files.length} files, ${((dotnet.manifest?.files.reduce((a, f) => a + f.gzsize, 0) ?? 0) / 1048576).toFixed(1)} MB download) into C:\\Program Files\\dotnet — also happens automatically when a .NET program is started` : dotnet.status === 'unavailable' ? '.NET pack not available: ' + dotnet.note : '.NET pack…'}
+          className={`hidden items-center gap-1 rounded border px-2 py-1 sm:flex ${dotnet.status === 'installed' ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : 'border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-50'}`}>
+          <Download size={11} /> {dotnet.status === 'installed' ? '.NET 10 ✓' : dotnet.status === 'installing' ? `.NET 10 ${dotnet.done}/${dotnet.manifest?.files.length}` : dotnet.status === 'unavailable' ? '.NET n/a' : '.NET 10'}
         </button>
         <div className="ml-auto flex items-center gap-1 rounded bg-slate-100 p-0.5">
           {(['screen', 'console', 'files', 'report'] as const).map(t => (
