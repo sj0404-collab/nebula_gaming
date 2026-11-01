@@ -25,6 +25,20 @@ jobs:
           path: public/x64/sys32/
           if-no-files-found: error
 
+  dx-pack:
+    name: DirectX pack (official DirectX End-User Runtimes June 2010, x64 user-mode DLLs → /x64/dx)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get install -y -q cabextract
+      - name: Download directx_Jun2010_redist.exe, extract the x64 cabinets (D3DCompiler_33…43, d3dx9/10/11, d3dcsx, X3DAudio), gzip per file + manifest (nothing modified)
+        run: ./emu/tools/dx-pack.sh public/x64/dx /tmp/dx/pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dx-pack
+          path: public/x64/dx/
+          if-no-files-found: error
+
   dotnet-pack:
     name: .NET pack (official Microsoft .NET 10 runtime win-x64 → /x64/dotnet) + managed test apps
     runs-on: ubuntu-latest
@@ -58,7 +72,7 @@ jobs:
   emulator:
     name: Nebula x64 emulator · native tests + wasm64 build
     runs-on: ubuntu-latest
-    needs: [runtime-pack, dotnet-pack]
+    needs: [runtime-pack, dotnet-pack, dx-pack]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -66,7 +80,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with: { name: dotnet-pack, path: public/x64/dotnet }
       - uses: actions/download-artifact@v4
+        with: { name: dx-pack, path: public/x64/dx }
+      - uses: actions/download-artifact@v4
         with: { name: dotnet-tests, path: /tmp/dn }
+      - name: Unpack the DirectX pack for the native tests (C:\Windows\System32 mount)
+        run: mkdir -p /tmp/dx/sys32 && (cd public/x64/dx && for f in *.gz; do gunzip -c "$f" > "/tmp/dx/sys32/${f%.gz}"; done) && ls /tmp/dx/sys32 | wc -l
       - uses: mlugg/setup-zig@v2
         with: { version: 0.17.0 }
       - name: Build cmd.exe from source (emu/cmd, zig cc -target x86_64-windows-gnu) + native runner + wasm64 module (zig cc -target wasm64-freestanding)
@@ -76,7 +94,7 @@ jobs:
           cmp emu/cmd/cmd.exe public/x64/apps/cmd.exe
           if ! git diff --quiet -- emu/cmd/cmd.exe; then echo "::warning::cmd.exe built in CI differs from the committed one (zig drift?) — CI build is tested"; cp emu/cmd/cmd.exe public/x64/apps/cmd.exe; fi
       - name: Native capability tests (hello, bench, busybox-w32 incl. virtual disk + stdin, plink, NebulaStrike, cmd.exe/system()/subprocess, real msvcp140 via runtime pack, rejections)
-        run: ./emu/tests/run.sh
+        run: DX_PACK=/tmp/dx/sys32 ./emu/tests/run.sh
       - name: .NET tests (REAL CoreCLR 10 + RyuJIT on the emulator — LINQ/exceptions/JSON/reflection/Regex/GC, apphost, GC with spinning + pool threads, HttpClient, direct .dll start, net48 exe, Roslyn csc compiles + runs a program, rejection without the pack)
         run: |
           mkdir -p /tmp/dn/pack && (cd public/x64/dotnet && find . -name '*.gz' -print0 | while IFS= read -r -d '' f; do mkdir -p "/tmp/dn/pack/$(dirname "$f")"; gunzip -c "$f" > "/tmp/dn/pack/${f%.gz}"; done)
@@ -109,6 +127,8 @@ jobs:
         with: { name: runtime-pack, path: public/x64/sys32 }
       - uses: actions/download-artifact@v4
         with: { name: dotnet-pack, path: public/x64/dotnet }
+      - uses: actions/download-artifact@v4
+        with: { name: dx-pack, path: public/x64/dx }
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
       - uses: oven-sh/setup-bun@v2
@@ -154,6 +174,8 @@ jobs:
         with: { name: runtime-pack, path: public/x64/sys32 }
       - uses: actions/download-artifact@v4
         with: { name: dotnet-pack, path: public/x64/dotnet }
+      - uses: actions/download-artifact@v4
+        with: { name: dx-pack, path: public/x64/dx }
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
       - uses: actions/setup-java@v4
@@ -202,6 +224,8 @@ jobs:
         with: { name: runtime-pack, path: public/x64/sys32 }
       - uses: actions/download-artifact@v4
         with: { name: dotnet-pack, path: public/x64/dotnet }
+      - uses: actions/download-artifact@v4
+        with: { name: dx-pack, path: public/x64/dx }
       - uses: oven-sh/setup-bun@v2
         with: { bun-version: latest }
       - uses: actions/setup-node@v4

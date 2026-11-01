@@ -690,6 +690,9 @@ static void exec_0f(Ins *i, Cpu *c) {
     case 0x51: { decode_modrm(i); Xmm s, *d = &c->x[i->reg];
       if (i->rep == 0xF3) { xmm_load(i, &s, 4); d->f32[0] = __builtin_sqrtf(s.f32[0]); } else if (i->rep == 0xF2) { xmm_load(i, &s, 8); d->f64[0] = __builtin_sqrt(s.f64[0]); }
       else { xmm_load(i, &s, 16); if (i->p66) { d->f64[0] = __builtin_sqrt(s.f64[0]); d->f64[1] = __builtin_sqrt(s.f64[1]); } else for (int k = 0; k < 4; k++) d->f32[k] = __builtin_sqrtf(s.f32[k]); } return; }
+    case 0x52: case 0x53: { decode_modrm(i); Xmm s, *d = &c->x[i->reg];   /* RSQRTPS/SS, RCPPS/SS: approximations (D3DX math uses them with a Newton step, so exact values are fine) */
+      if (i->rep == 0xF3) { xmm_load(i, &s, 4); d->f32[0] = op == 0x52 ? 1.0f / __builtin_sqrtf(s.f32[0]) : 1.0f / s.f32[0]; }
+      else { xmm_load(i, &s, 16); for (int k = 0; k < 4; k++) d->f32[k] = op == 0x52 ? 1.0f / __builtin_sqrtf(s.f32[k]) : 1.0f / s.f32[k]; } return; }
     case 0x54: case 0x55: case 0x56: case 0x57: { decode_modrm(i); Xmm s; xmm_load(i, &s, 16); Xmm *d = &c->x[i->reg];
       for (int k = 0; k < 2; k++) d->q[k] = op == 0x54 ? d->q[k] & s.q[k] : op == 0x55 ? ~d->q[k] & s.q[k] : op == 0x56 ? d->q[k] | s.q[k] : d->q[k] ^ s.q[k]; return; }
     case 0x58: case 0x59: case 0x5C: case 0x5D: case 0x5E: case 0x5F: { decode_modrm(i); Xmm s, *d = &c->x[i->reg]; int sc = i->rep == 0xF3 ? 1 : i->rep == 0xF2 ? 2 : i->p66 ? 3 : 0; /* ss sd pd ps */

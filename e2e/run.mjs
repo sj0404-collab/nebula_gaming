@@ -278,6 +278,54 @@ await test('x64: runtime pack — the REAL msvcp140.dll (VC++ 2015–2022 Redist
   await page.screenshot({ path: resolve(SHOTS, 'x64-runtime-pack.png') });
   await closeAll();
 });
+await test('x64: DirectX pack — the REAL D3DCompiler_43.dll (DirectX End-User Runtimes, June 2010) is installed into C:\\Windows\\System32 on demand; HLSL compiled at run time by Microsoft\'s compiler is drawn through D3D11 → WebGL2; d3dx9/d3dx11/X3DAudio work', async () => {
+  const w = await x64Open();
+  const st = async () => w.locator('[data-x64-dx]').getAttribute('data-x64-dx');
+  await page.waitForFunction(() => { const s = document.querySelector('[data-x64-dx]')?.getAttribute('data-x64-dx'); return s && s !== 'probing'; }, null, { timeout: 15_000 });
+  const before = await st();
+  if (before === 'unavailable') console.log('      (DirectX pack not built into this deployment — run emu/tools/dx-pack.sh; checking the honest path only)');
+  await w.locator('[data-x64-exe="d3dcompile.exe"]').click();
+  await w.locator('[data-x64-run]').click();
+  try { await page.waitForFunction(() => /^(exited|fault)$/.test(document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') ?? '') || !!document.querySelector('[data-x64-dx]')?.getAttribute('data-x64-dx-note'), null, { timeout: 240_000 }); }
+  catch (e) { await page.screenshot({ path: resolve(SHOTS, 'x64-dx-timeout.png') }); throw e; }
+  let con = await w.locator('[data-x64-console]').innerText();
+  if (before === 'unavailable') { expect(/install the DirectX pack/.test(con), 'without the pack the test must say so honestly: ' + con.slice(0, 300)); await closeAll(); return; }
+  const note = await w.locator('[data-x64-dx]').getAttribute('data-x64-dx-note');
+  expect(!note, 'DirectX pack installation failed: ' + note);
+  expect((await st()) === 'installed', 'DirectX pack should be installed after running an exe that needs it: ' + await st());
+  expect(/shader compiler: D3DCompiler_43\.dll \(C:\\Windows\\System32\\D3DCompiler_43\.dll\)/.test(con), 'real D3DCompiler_43 not used: ' + con.slice(0, 400));
+  expect(/vs_main vs_4_0: 1096 bytes, magic DXBC, valid DXBC container/.test(con) && /ps_main ps_4_0: 580 bytes, magic DXBC, valid DXBC container/.test(con), 'HLSL not compiled: ' + con.slice(0, 600));
+  expect(/contains mul\/mad arithmetic/.test(con), 'D3DDisassemble output missing: ' + con.slice(0, 600));
+  expect(/frame 2: triangle drawn with shaders compiled by D3DCompiler_43\.dll/.test(con) && /d3dcompile ok/.test(con), 'd3dcompile did not finish: ' + con.slice(-500));
+  await w.locator('[data-x64-tab="screen"]').click(); await sleep(500);
+  const hist = await w.locator('[data-x64-screen]').evaluate((c) => {
+    const gl = c.getContext('webgl2') || c.getContext('webgl'); const px = new Uint8Array(c.width * c.height * 4); gl.readPixels(0, 0, c.width, c.height, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    const h = { clear: 0, orange: 0, cyan: 0, magenta: 0, total: 0 };
+    for (let i = 0; i < px.length; i += 4) {
+      const r = px[i], g = px[i + 1], b = px[i + 2]; h.total++;
+      if (Math.abs(r - 13) < 12 && Math.abs(g - 38) < 14 && Math.abs(b - 26) < 14) h.clear++;
+      else if (r > 150 && g > 60 && g < 160 && b < 90) h.orange++; else if (r < 90 && g > 150 && b > 150) h.cyan++; else if (r > 150 && g < 90 && b > 150) h.magenta++;
+    }
+    return h;
+  });
+  expect(hist.clear > hist.total * 0.2, 'clear colour (0.05,0.15,0.1) missing: ' + JSON.stringify(hist));
+  expect(hist.orange > 30 && hist.cyan > 30 && hist.magenta > 30, 'triangle corners (orange/cyan/magenta) from the runtime-compiled shaders missing: ' + JSON.stringify(hist));
+  await page.screenshot({ path: resolve(SHOTS, 'x64-dx-d3dcompile.png') });
+  const files = await w.locator('[data-x64-tab="files"]').click().then(() => w.innerText());
+  expect(/D3DCompiler_43\.dll/.test(files) && /d3dx9_43\.dll/i.test(files), 'pack DLLs should be listed on the virtual disk');
+  // second program in the same session: the pack is already installed — d3dx9 math, D3DX11CompileFromMemory, X3DAudio panning, XInput honest answer
+  await w.locator('[data-x64-exe="dxpack.exe"]').click();
+  await w.locator('[data-x64-run]').click();
+  await page.waitForFunction(() => /^(exited|fault)$/.test(document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') ?? ''), null, { timeout: 120_000 });
+  con = await w.locator('[data-x64-console]').innerText();
+  expect(/P\*inverse\(P\) deviates from identity by 0\.0000/.test(con), 'd3dx9_43 math wrong: ' + con.slice(-500));
+  expect(/HLSL compiled through D3DCompiler_43/.test(con), 'D3DX11CompileFromMemory failed: ' + con.slice(-500));
+  expect(/left 0\.000 right 1\.000/.test(con), 'X3DAudio panning wrong: ' + con.slice(-500));
+  expect(/XInputGetState\(0\) = 1167/.test(con), 'XInput should answer ERROR_DEVICE_NOT_CONNECTED: ' + con.slice(-500));
+  expect(/dxpack: 0 failure\(s\)/.test(con), 'dxpack reported failures: ' + con.slice(-500));
+  await page.screenshot({ path: resolve(SHOTS, 'x64-dx-dxpack.png') });
+  await closeAll();
+});
 await test('x64: .NET pack — the OFFICIAL Microsoft .NET Runtime 10 is installed into C:\\Program Files\\dotnet on demand and a C# app (apphost + dll) runs on CoreCLR: LINQ, exceptions, hardware NRE, JSON, reflection, Regex, GC', async () => {
   const w = await x64Open();
   const st = async () => w.locator('[data-x64-dotnet]').getAttribute('data-x64-dotnet');

@@ -232,8 +232,9 @@ int w32_dispatch(Cpu *c, u64 addr) {
   if (idx == SLOT_STARTUP) { if (w->cur_th) thread_startup(c); else { cont_push(c, CONT_STARTUP); w32_cont_resume(c); } return c->status; }
   if (!s->fn) {
     w->unknown_import_calls++;
-    cpu_fault(c, "unimplemented API %s!%s (called from 0x%llx)", s->dll, s->name, (unsigned long long)ret);
-    w32_report(w, "STOP: unimplemented API %s!%s", s->dll, s->name);
+    int pack = pe_dll_native_only(s->dll);
+    cpu_fault(c, "unimplemented API %s!%s (called from 0x%llx)%s", s->dll, s->name, (unsigned long long)ret, pack ? " — this DLL comes from the DirectX pack: install it into C:\\Windows\\System32" : "");
+    w32_report(w, "STOP: unimplemented API %s!%s%s", s->dll, s->name, pack ? " (install the DirectX pack)" : "");
     return RUN_FAULT;
   }
   c->r[RAX] = 0;
@@ -516,6 +517,7 @@ static u64 fake_module(const char *n) { char k[40]; fake_key(n && n[0] ? n : "?"
 static const char *fake_module_name(u64 h) { if ((h >> 32) != 0x7ff || (h & 0xfff)) return 0; u64 i = (h >> 12) & 0xfffff; return i >= 1 && i <= (u64)g_nfake ? g_fake_names[i - 1] : 0; }
 /* export ordinals of the DLLs that are still imported by number (delay-loaded WSOCK32 in Bun, OLEAUT32 everywhere) */
 static const char *ordinal_name(const char *dll, u32 ord) {
+  if (dll && !e_strnicmp_(dll, "xinput", 6)) { switch (ord) { case 100: return "XInputGetStateEx"; case 101: return "XInputWaitForGuideButton"; case 102: return "XInputCancelGuideButtonWait"; case 103: return "XInputPowerOffController"; default: return 0; } }   /* hidden exports used by Steam Input / SDL */
   if (!dll) return 0;
   if (!e_stricmp(dll, "ws2_32") || !e_stricmp(dll, "wsock32")) { static const char *const t[] = { 0, "accept", "bind", "closesocket", "connect", "getpeername", "getsockname", "getsockopt", "htonl", "htons", "ioctlsocket", "inet_addr", "inet_ntoa", "listen", "ntohl", "ntohs", "recv", "recvfrom", "select", "send", "sendto", "setsockopt", "shutdown", "socket" };
     if (ord < 24) return t[ord]; switch (ord) { case 51: return "gethostbyaddr"; case 52: return "gethostbyname"; case 53: return "getprotobyname"; case 54: return "getprotobynumber"; case 55: return "getservbyname"; case 56: return "getservbyport"; case 57: return "gethostname";
@@ -527,20 +529,23 @@ static void load_library(Cpu *c, const char *n) {
   if (!pe_is_system_dll(n) || pe_dll_native_ok(n)) {
     int m = mod_load(W, n);
     if (m >= 0) { u64 base = W->mods[m].base; if (!W->mods[m].attached || W->nmods > m + 1) { int i = cont_push(c, CONT_DLLMAIN); if (i < 0) return; W->cont[i].data[0] = base; w32_cont_resume(c); return; } RET(base); return; }
+    if (pe_dll_native_only(n)) { char msg[400]; e_snprintf(msg, sizeof msg, "[x64] LoadLibrary(%s): not on the virtual disk and not shimmed — install the DirectX pack (C:\\Windows\\System32)\n", n); host_write(3, msg, e_strlen(msg)); W->last_error = 126; RET(0); return; }
     /* not on the virtual disk: behave like a system DLL (shims by name); a real miss shows up as "unimplemented API dll!name" */
     if (!pe_is_system_dll(n)) { char msg[400]; e_snprintf(msg, sizeof msg, "[x64] LoadLibrary(%s): not found on the virtual disk, using shims\n", n); host_write(3, msg, e_strlen(msg)); }
   }
   RET(fake_module(n));
 }
-static void s_GetModuleHandleA(Cpu *c) { const char *n = rd_str(c, ARG(0), 260); if (!n) { RET(W->image_base); return; } int m = mod_find(W, n); if (m >= 0) { RET(W->mods[m].base); return; } if ((mod_name_eq(mod_basename(n), W->exe_name) || mod_name_eq(mod_basename(n), "node.exe"))) { RET(W->image_base); return; } RET(fake_module(n)); }
-static void s_GetModuleHandleW(Cpu *c) { if (!ARG(0)) { RET(W->image_base); return; } char n[260]; wstr_to_utf8(c, ARG(0), n, sizeof n, -1); c->r[RCX] = 0; int m = mod_find(W, n); if (m >= 0) { RET(W->mods[m].base); return; } if ((mod_name_eq(mod_basename(n), W->exe_name) || mod_name_eq(mod_basename(n), "node.exe"))) { RET(W->image_base); return; } RET(fake_module(n)); }
+/* GetModuleHandle of a DLL that exists only as a real file (DirectX pack) and is not loaded: NULL, so the program goes on to LoadLibrary it */
+static u64 fake_module_gmh(Win32 *w, const char *n) { if (pe_dll_native_only(mod_basename(n))) { w->last_error = 126; return 0; } return fake_module(n); }
+static void s_GetModuleHandleA(Cpu *c) { const char *n = rd_str(c, ARG(0), 260); if (!n) { RET(W->image_base); return; } int m = mod_find(W, n); if (m >= 0) { RET(W->mods[m].base); return; } if ((mod_name_eq(mod_basename(n), W->exe_name) || mod_name_eq(mod_basename(n), "node.exe"))) { RET(W->image_base); return; } RET(fake_module_gmh(W, n)); }
+static void s_GetModuleHandleW(Cpu *c) { if (!ARG(0)) { RET(W->image_base); return; } char n[260]; wstr_to_utf8(c, ARG(0), n, sizeof n, -1); c->r[RCX] = 0; int m = mod_find(W, n); if (m >= 0) { RET(W->mods[m].base); return; } if ((mod_name_eq(mod_basename(n), W->exe_name) || mod_name_eq(mod_basename(n), "node.exe"))) { RET(W->image_base); return; } RET(fake_module_gmh(W, n)); }
 static void s_GetModuleHandleExW(Cpu *c) { u64 h = W->image_base; u32 flags = (u32)ARG(0);
   if (ARG(1)) { if (flags & 4) { for (int i = 0; i < W->nmods; i++) if (ARG(1) - W->mods[i].base < W->mods[i].size) h = W->mods[i].base; }   /* GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS */
-    else { char n[260]; wstr_to_utf8(c, ARG(1), n, sizeof n, -1); int m = mod_find(W, n); h = m >= 0 ? W->mods[m].base : (mod_name_eq(mod_basename(n), W->exe_name) || mod_name_eq(mod_basename(n), "node.exe")) ? W->image_base : fake_module(n); } }
+    else { char n[260]; wstr_to_utf8(c, ARG(1), n, sizeof n, -1); int m = mod_find(W, n); h = m >= 0 ? W->mods[m].base : (mod_name_eq(mod_basename(n), W->exe_name) || mod_name_eq(mod_basename(n), "node.exe")) ? W->image_base : fake_module_gmh(W, n); } }
   if (ARG(2)) wr64(c, ARG(2), h); RET(1); }
 static void s_GetModuleHandleExA(Cpu *c) { u64 h = W->image_base; u32 flags = (u32)ARG(0);
   if (ARG(1)) { if (flags & 4) { for (int i = 0; i < W->nmods; i++) if (ARG(1) - W->mods[i].base < W->mods[i].size) h = W->mods[i].base; }
-    else { const char *n = rd_str(c, ARG(1), 260); int m = n ? mod_find(W, n) : -1; h = m >= 0 ? W->mods[m].base : (n && (mod_name_eq(mod_basename(n), W->exe_name) || mod_name_eq(mod_basename(n), "node.exe"))) ? W->image_base : fake_module(n); } }
+    else { const char *n = rd_str(c, ARG(1), 260); int m = n ? mod_find(W, n) : -1; h = m >= 0 ? W->mods[m].base : (n && (mod_name_eq(mod_basename(n), W->exe_name) || mod_name_eq(mod_basename(n), "node.exe"))) ? W->image_base : fake_module_gmh(W, n); } }
   if (ARG(2)) wr64(c, ARG(2), h); RET(1); }
 static void s_LoadLibraryA(Cpu *c) { load_library(c, rd_str(c, ARG(0), 260)); }
 static void s_LoadLibraryW(Cpu *c) { char n[260]; wstr_to_utf8(c, ARG(0), n, sizeof n, -1); load_library(c, n); }
@@ -556,7 +561,7 @@ static void s_GetProcAddress(Cpu *c) {
   if (!w32_have_shim("", n)) { char msg[320]; e_snprintf(msg, sizeof msg, "[x64] GetProcAddress miss: %s\n", n); host_write(3, msg, e_strlen(msg)); W->last_error = 127; RET(0); return; }
   RET(w32_shim_slot(W, "dynamic", n)); }
 static const char *mod_file_name(Win32 *w, u64 h) { int m = h ? mod_by_base(w, h) : -1; return m >= 0 ? w->mods[m].name : w->exe_name; }
-static void mod_full_path(Win32 *w, u64 h, char *p, size_t cap) { int m = h ? mod_by_base(w, h) : -1; if (m < 0 && w->exe_path[0]) e_snprintf(p, cap, "%s", w->exe_path); else e_snprintf(p, cap, "C:\\nebula\\%s", mod_file_name(w, h)); }
+static void mod_full_path(Win32 *w, u64 h, char *p, size_t cap) { int m = h ? mod_by_base(w, h) : -1; if (m < 0 && w->exe_path[0]) e_snprintf(p, cap, "%s", w->exe_path); else if (m >= 0 && w->mods[m].dir[0]) e_snprintf(p, cap, "%s\\%s", w->mods[m].dir, mod_file_name(w, h)); else e_snprintf(p, cap, "C:\\nebula\\%s", mod_file_name(w, h)); }
 static void s_GetModuleFileNameA(Cpu *c) { char p[600]; mod_full_path(W, ARG(0), p, sizeof p); size_t l = e_strlen(p); u32 n = (u32)ARG(2); if (l + 1 > n) l = n ? n - 1 : 0; u8 *d = mem_ptr(c->mem, ARG(1), l + 1, 1); if (d) { e_memcpy(d, p, l); d[l] = 0; } RET(l); }
 static void s_GetModuleFileNameW(Cpu *c) { char p[600]; mod_full_path(W, ARG(0), p, sizeof p); size_t l = e_strlen(p); u32 n = (u32)ARG(2); if (l + 1 > n) l = n ? n - 1 : 0; for (size_t i = 0; i < l; i++) wr16(c, ARG(1) + i * 2, (u8)p[i]); wr16(c, ARG(1) + l * 2, 0); RET(l); }
 static void s_GetSystemDirectoryA(Cpu *c) { const char *d = "C:\\Windows\\System32"; size_t l = e_strlen(d); if ((u32)ARG(1) > l) { u8 *p = mem_ptr(c->mem, ARG(0), l + 1, 1); if (p) e_memcpy(p, d, l + 1); } RET(l); }

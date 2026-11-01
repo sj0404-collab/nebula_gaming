@@ -76,7 +76,17 @@ int pe_is_system_dll(const char *dll) {
  * mingw runtime DLLs, GDI+ and the Direct3D shader compilers. Core OS DLLs (kernel32, ntdll, user32, ws2_32, ucrtbase,
  * vcruntime140, api-ms-*, d3d11/dxgi …) are always the emulator's own. */
 int pe_dll_native_ok(const char *dll) {
-  static const char *pref[] = { "msvcp", "msvcr", "concrt", "vcomp", "vcamp", "vccorlib", "mfc", "vcruntime140_1", "vcruntime140_threads", "libgcc_s", "libstdc++", "libwinpthread", "gdiplus", "d3dcompiler_", "d3dx9_", "d3dx10_", "d3dx11_", "d3dcsx", "xinput1_3", "x3daudio", 0 };
+  static const char *pref[] = { "msvcp", "msvcr", "concrt", "vcomp", "vcamp", "vccorlib", "mfc", "vcruntime140_1", "vcruntime140_threads", "libgcc_s", "libstdc++", "libwinpthread", "gdiplus", "d3dcompiler_", "d3dx9_", "d3dx10_", "d3dx11_", "d3dcsx", "x3daudio", 0 };
+  char b[64]; int n = 0; for (const char *p = dll; *p && n < 63; p++) { char ch = *p; if (ch >= 'A' && ch <= 'Z') ch += 32; b[n++] = ch; } b[n] = 0;
+  for (int i = 0; pref[i]; i++) if (!e_strncmp(b, pref[i], e_strlen(pref[i]))) return 1;
+  return 0;
+}
+
+/* DLLs that only exist as real files: the Direct3D shader compilers and D3DX/D3DCSX/X3DAudio helpers of the DirectX End-User
+ * Runtime ("DirectX pack", installed on demand into C:\Windows\System32). The emulator has no shims for them, so without
+ * the file LoadLibrary fails with ERROR_MOD_NOT_FOUND instead of handing out a module whose every GetProcAddress is NULL. */
+int pe_dll_native_only(const char *dll) {
+  static const char *pref[] = { "d3dcompiler_", "d3dx9_", "d3dx10_", "d3dx11_", "d3dcsx", "x3daudio", 0 };
   char b[64]; int n = 0; for (const char *p = dll; *p && n < 63; p++) { char ch = *p; if (ch >= 'A' && ch <= 'Z') ch += 32; b[n++] = ch; } b[n] = 0;
   for (int i = 0; pref[i]; i++) if (!e_strncmp(b, pref[i], e_strlen(pref[i]))) return 1;
   return 0;
@@ -224,7 +234,7 @@ int pe_load(Win32 *w, const u8 *bytes, size_t len, const char *name) {
 }
 
 /* ---------- static inspection ---------- */
-typedef struct { char *out; size_t sz, pos; int n, known, unknown, priv; char dlls[64][48]; int ndll; int unknown_listed; } InsCtx;
+typedef struct { char *out; size_t sz, pos; int n, known, unknown, priv, pack; char dlls[64][48]; int ndll; int unknown_listed; } InsCtx;
 static void ins_put(InsCtx *x, const char *fmt, ...) { if (x->pos >= x->sz) return; __builtin_va_list ap; __builtin_va_start(ap, fmt); int n = e_vsnprintf(x->out + x->pos, x->sz - x->pos, fmt, ap); __builtin_va_end(ap); x->pos += n; if (x->pos > x->sz - 1) x->pos = x->sz - 1; }
 int w32_have_shim(const char *dll, const char *name);
 static void ins_import(void *ctx, const char *dll, const char *name, u32 ordinal, u32 iat_rva) {
@@ -234,6 +244,7 @@ static void ins_import(void *ctx, const char *dll, const char *name, u32 ordinal
   if (!found && x->ndll < 64) { e_snprintf(x->dlls[x->ndll++], 48, "%s", dll); }
   if (w32_have_shim(dll, name) || (name && w32_data_import_off(name))) x->known++;
   else if (!pe_is_system_dll(dll)) { x->priv++; x->known++; }   /* resolved from the private DLL next to the exe at load time */
+  else if (pe_dll_native_only(dll)) { x->pack++; x->known++; }   /* real DLL from the DirectX pack (installed on demand) */
   else { x->unknown++; if (x->unknown_listed < 60) { ins_put(x, "%s%s!%s", x->unknown_listed ? ", " : "", dll, name); x->unknown_listed++; } else if (x->unknown_listed == 60) { ins_put(x, ", ..."); x->unknown_listed++; } }
 }
 int pe_inspect(const u8 *bytes, size_t len, char *out, size_t out_sz) {
@@ -273,6 +284,7 @@ int pe_inspect(const u8 *bytes, size_t len, char *out, size_t out_sz) {
       if (!e_strncmp(d, "d3d", 3) || !e_strncmp(d, "D3D", 3) || !e_stricmp(d, "opengl32.dll") || !e_stricmp(d, "dxgi.dll") || !e_stricmp(d, "vulkan-1.dll") || !e_stricmp(d, "xinput1_4.dll") || !e_stricmp(d, "dsound.dll") || !e_stricmp(d, "xaudio2_9.dll") || !e_stricmp(d, "mono-2.0-bdwgc.dll") || !e_stricmp(d, "UnityPlayer.dll") || !e_stricmp(d, "GameAssembly.dll")) heavy = 1; }
     if (heavy) { verdict = "unsupported"; why = "needs GPU/audio subsystems (Direct3D 9/12, OpenGL, Vulkan, XAudio, Unity/Mono) that have no wasm64 implementation here"; }
     else if (d3d11) { verdict = "partial"; why = "Direct3D 11 through the WebGL2 translation layer (device, swap chain, buffers, textures, SM4/5 vertex + pixel shaders, Draw/DrawIndexed); compute/geometry/tessellation and many state paths are not implemented and stop with the method name"; }
+    else if (x.unknown == 0 && x.pack) { verdict = "partial"; why = x.priv ? "needs DLLs from the DirectX pack (D3DCompiler/D3DX, installed on demand into C:\\Windows\\System32) and its own DLLs next to the exe; the rest of the imports have shims" : "needs DLLs from the DirectX pack (D3DCompiler/D3DX — installed on demand into C:\\Windows\\System32); the rest of the imports have shims"; }
     else if (x.unknown == 0 && x.priv) { verdict = "partial"; why = "all system imports have shims; the program also imports its own DLLs, which are loaded from the virtual disk if you add them next to the exe"; }
     else if (x.unknown == 0) { verdict = "likely"; why = "all imports have shims"; }
     else if (x.unknown * 5 <= x.n * 2) { verdict = "partial"; why = "most imports have shims (no network/GPU/audio); the program runs until the first unimplemented call"; }

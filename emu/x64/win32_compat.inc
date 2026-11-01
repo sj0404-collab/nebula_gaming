@@ -187,7 +187,47 @@ static void s_yn(Cpu *c) { F0 = m_yn((int)ARG(0), F1); }
 #undef F0
 #undef F1
 
-#define COMPAT_SHIMS \
+/* MSVC C++ operator new/delete as exported by msvcrt.dll / msvcr*.dll (D3DCompiler_43, D3DX, older MSVC programs link them by
+   mangled name): plain, array, nothrow and sized variants all map onto the process heap */
+static void s_cxx_new(Cpu *c) { RET(w32_heap_alloc(W, ARG(0) ? ARG(0) : 1, 0)); }
+static void s_cxx_delete(Cpu *c) { if (ARG(0)) w32_heap_free(W, ARG(0)); RET(0); }
+static void s__mbstrlen(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 30); RET(s ? e_strlen(s) : 0); }
+static void s__fpclass(Cpu *c) {   /* _FPCLASS_* bits: SNAN 1 QNAN 2 NINF 4 NN 8 ND 0x10 NZ 0x20 PZ 0x40 PD 0x80 PN 0x100 PINF 0x200 */
+  double d = c->x[0].f64[0]; int neg = __builtin_signbit(d) != 0, r;
+  if (d != d) r = 2; else if (__builtin_isinf(d)) r = neg ? 4 : 0x200; else if (d == 0) r = neg ? 0x20 : 0x40;
+  else if (e_fabs(d) < 2.2250738585072014e-308) r = neg ? 0x10 : 0x80; else r = neg ? 8 : 0x100;
+  RET(r); }
+/* msvcrt.dll's std::exception (layout: vptr @0, const char *what @8, int dofree @16) — the D3DX / D3DCompiler DLLs and older
+   MSVC programs import its constructors and what() by mangled name; the guest vtable holds the scalar deleting destructor and what() */
+static u64 g_cxxexc_vt; static Win32 *g_cxxexc_owner;
+static u64 cxxexc_vtable(Cpu *c) { Win32 *w = W; if (g_cxxexc_owner != w) { g_cxxexc_vt = 0; g_cxxexc_owner = w; }
+  if (!g_cxxexc_vt) { u64 vt = w32_heap_alloc(w, 24, 1); if (!vt) return 0; wr64(c, vt, w32_shim_slot(w, "msvcrt", "??_Gexception@@UEAAPEAXI@Z")); wr64(c, vt + 8, w32_shim_slot(w, "msvcrt", "?what@exception@@UEBAPEBDXZ")); wr64(c, vt + 16, w32_shim_slot(w, "msvcrt", "?what@exception@@UEBAPEBDXZ")); g_cxxexc_vt = vt; } return g_cxxexc_vt; }
+static void cxxexc_init(Cpu *c, u64 self, u64 msg, int copy) { wr64(c, self, cxxexc_vtable(c)); u64 m = msg; if (copy && msg) { const char *s = rd_str(c, msg, 1 << 16); if (s) { size_t l = e_strlen(s); m = w32_heap_alloc(W, l + 1, 0); u8 *p = m ? mem_ptr(c->mem, m, l + 1, 1) : 0; if (p) e_memcpy(p, s, l + 1); else m = msg; } } wr64(c, self + 8, m); wr32(c, self + 16, copy && m != msg); RET(self); }
+static void s_cxxexc_ctor0(Cpu *c) { cxxexc_init(c, ARG(0), 0, 0); }                                  /* exception() */
+static void s_cxxexc_ctor_msg(Cpu *c) { cxxexc_init(c, ARG(0), rd64(c, ARG(1)), 1); }               /* exception(const char *const &) */
+static void s_cxxexc_ctor_msg_nocopy(Cpu *c) { cxxexc_init(c, ARG(0), rd64(c, ARG(1)), 0); }        /* exception(const char *const &, int) */
+static void s_cxxexc_ctor_copy(Cpu *c) { cxxexc_init(c, ARG(0), rd64(c, ARG(1) + 8), 1); }          /* exception(const exception &) */
+static void s_cxxexc_assign(Cpu *c) { if (ARG(0) != ARG(1)) { wr64(c, ARG(0) + 8, rd64(c, ARG(1) + 8)); wr32(c, ARG(0) + 16, 0); } RET(ARG(0)); }
+static void s_cxxexc_dtor(Cpu *c) { RET(0); }
+static void s_cxxexc_sdtor(Cpu *c) { if (ARG(1) & 1) w32_heap_free(W, ARG(0)); RET(ARG(0)); }
+static void s_cxxexc_what(Cpu *c) { u64 m = rd64(c, ARG(0) + 8); if (!m) { static const char u[] = "Unknown exception"; m = w32_heap_alloc(W, sizeof u, 0); u8 *p = m ? mem_ptr(c->mem, m, sizeof u, 1) : 0; if (p) e_memcpy(p, u, sizeof u); wr64(c, ARG(0) + 8, m); } RET(m); }
+static void vsprintf_common(Cpu *c, u64 opts, u64 buf, u64 len, u64 fmt, u64 va, int wide);
+static void s__vsnwprintf(Cpu *c) { vsprintf_common(c, 1, ARG(0), ARG(1), ARG(2), ARG(3), 1); }
+/* XInput: no controller is connected (ERROR_DEVICE_NOT_CONNECTED) — games fall back to keyboard/mouse; the Gamepad API bridge is future work */
+static void s_XInputGetState(Cpu *c) { if (ARG(1)) { u8 *p = mem_ptr(c->mem, ARG(1), 16, 1); if (p) e_memset(p, 0, 16); } RET(1167); }
+static void s_XInputNotConnected(Cpu *c) { RET(1167); }
+static void s_XInputEnable(Cpu *c) { RET(0); }
+#define DX_COMPAT_SHIMS \
+  SA("??0exception@@QEAA@XZ", cxxexc_ctor0), SA("??0exception@@QEAA@AEBQEBD@Z", cxxexc_ctor_msg), SA("??0exception@@QEAA@AEBQEBDH@Z", cxxexc_ctor_msg_nocopy), SA("??0exception@@QEAA@AEBV0@@Z", cxxexc_ctor_copy), \
+  SA("??4exception@@QEAAAEAV0@AEBV0@@Z", cxxexc_assign), SA("??1exception@@UEAA@XZ", cxxexc_dtor), SA("??_Gexception@@UEAAPEAXI@Z", cxxexc_sdtor), SA("?what@exception@@UEBAPEBDXZ", cxxexc_what), \
+  S(_vsnwprintf), SA("RegOpenKeyA", RegOpenKeyExA), SA("RegOpenKeyW", RegOpenKeyExA), SA("IsBadReadPtr", ret0), SA("IsBadWritePtr", ret0), SA("IsBadCodePtr", ret0), SA("IsBadStringPtrA", ret0), SA("IsBadStringPtrW", ret0), \
+  S(XInputGetState), SA("XInputGetStateEx", XInputGetState), SA("XInputSetState", XInputNotConnected), SA("XInputGetCapabilities", XInputNotConnected), \
+  SA("XInputGetBatteryInformation", XInputNotConnected), SA("XInputGetKeystroke", XInputNotConnected), SA("XInputGetDSoundAudioDeviceGuids", XInputNotConnected), SA("XInputGetAudioDeviceIds", XInputNotConnected), S(XInputEnable),
+#define CXX_NEWDELETE_SHIMS DX_COMPAT_SHIMS \
+  SA("??2@YAPEAX_K@Z", cxx_new), SA("??_U@YAPEAX_K@Z", cxx_new), SA("??2@YAPEAX_KAEBUnothrow_t@std@@@Z", cxx_new), SA("??_U@YAPEAX_KAEBUnothrow_t@std@@@Z", cxx_new), \
+  SA("??3@YAXPEAX@Z", cxx_delete), SA("??_V@YAXPEAX@Z", cxx_delete), SA("??3@YAXPEAX_K@Z", cxx_delete), SA("??_V@YAXPEAX_K@Z", cxx_delete), \
+  SA("??3@YAXPEAXAEBUnothrow_t@std@@@Z", cxx_delete), SA("??_V@YAXPEAXAEBUnothrow_t@std@@@Z", cxx_delete), S(_mbstrlen), S(_fpclass),
+#define COMPAT_SHIMS CXX_NEWDELETE_SHIMS \
   SA("FileTimeToSystemTime", FileTimeToSystemTime2), SA("SystemTimeToFileTime", SystemTimeToFileTime2), S(SystemTimeToTzSpecificLocalTime), S(TzSpecificLocalTimeToSystemTime), \
   S(FileTimeToDosDateTime), S(DosDateTimeToFileTime), S(CompareFileTime), SA("_mkgmtime64", mkgmtime64), SA("_mkgmtime", mkgmtime64), \
   S(SysAllocString), S(SysAllocStringLen), S(SysAllocStringByteLen), S(SysFreeString), S(SysStringLen), S(SysStringByteLen), S(SysReAllocStringLen), S(VariantInit), S(VariantClear), S(VariantCopy), \

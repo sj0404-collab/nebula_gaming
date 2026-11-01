@@ -268,6 +268,31 @@ if [ -f ../public/x64/sys32/msvcp140.dll ]; then
     case "$out" in *"exports missing"*|*"MSVCP OK"*) echo "  ok   $d";; *) echo "  FAIL $d: $(printf '%s' "$out" | head -3)"; fail=1;; esac
   done
 fi
+DXP=${DX_PACK:-/var/tmp/dx/pack}
+echo "[5dx] DirectX pack: REAL D3DCompiler_43 / d3dx9_43 / d3dx11_43 / X3DAudio1_7 from the June 2010 redistributable (DX_PACK=$DXP)"
+if [ -f "$DXP/D3DCompiler_43.dll" ]; then
+  out=$($X --quiet --no-stdin --max-ms 280000 --mount "$DXP=C:\\Windows\\System32" tests/d3dcompile.exe 2>&1 || true)
+  check "real compiler found"     "shader compiler: D3DCompiler_43.dll" "$out"
+  check "vs_4_0 compiled"         "vs_main vs_4_0: 1096 bytes, magic DXBC, valid DXBC container" "$out"
+  check "ps_4_0 compiled"         "ps_main ps_4_0: 580 bytes, magic DXBC, valid DXBC container" "$out"
+  check "disassembly"             "contains mul/mad arithmetic" "$out"
+  check "DXBC accepted by D3D11"  "runtime-compiled shaders bound" "$out"
+  out=$($X --quiet --no-stdin --max-ms 280000 --mount "$DXP=C:\\Windows\\System32" tests/dxpack.exe 2>&1 || true)
+  check "d3dx9 math"              "P*inverse(P) deviates from identity by 0.0000" "$out"
+  check "d3dx11 compile"          "HLSL compiled through D3DCompiler_43" "$out"
+  check "X3DAudio panning"        "left 0.000 right 1.000" "$out"
+  check "XInput honest"           "XInputGetState(0) = 1167" "$out"
+  check "dxpack all"              "dxpack: 0 failure(s)" "$out"
+  out=$($X --quiet --no-stdin tests/d3dcompile.exe 2>&1 || true)
+  check "no pack → honest"        "install the DirectX pack" "$out"
+  echo "  every pack DLL loads and runs its DllMain (LoadLibrary from C:\\Windows\\System32)"
+  for d in $(ls "$DXP"/*.dll | xargs -n1 basename); do
+    out=$($X --quiet --no-stdin --max-ms 60000 --mount "$DXP=C:\\Windows\\System32" tests/msvcp.exe "$d" 2>&1 || true)
+    case "$out" in *"exports missing"*|*"MSVCP OK"*) echo "  ok   $d";; *) echo "  FAIL $d: $(printf '%s' "$out" | head -3)"; fail=1;; esac
+  done
+else
+  echo "  skip (run emu/tools/dx-pack.sh public/x64/dx /var/tmp/dx/pack first)"
+fi
 echo "[6] honest rejections"
 check "32-bit PE"   '"verdict":"unsupported"' "$(printf 'MZ' | head -c 2 > /tmp/pe32.bin; python3 - <<'PY'
 import struct

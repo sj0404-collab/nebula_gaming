@@ -9,13 +9,15 @@ interface ExeEntry { id: number; name: string; bytes: Uint8Array; info: PeInfo; 
 
 const SAMPLE_DATA = ['demo.sql', 'demo.json', 'demo.lua', 'demo.txt', 'demo.py', 'demo.bat'];   // small inputs for the real apps, placed in C:\nebula
 const PY_FILES = ['python312.dll', 'python312.zip', 'python312._pth', '_sqlite3.pyd', 'sqlite3.dll', '_decimal.pyd', '_ctypes.pyd', 'libffi-8.dll', '_bz2.pyd', '_lzma.pyd', 'pyexpat.pyd', '_elementtree.pyd', 'unicodedata.pyd', '_queue.pyd', '_socket.pyd', 'select.pyd', '_asyncio.pyd', '_zoneinfo.pyd', '_uuid.pyd', '_multiprocessing.pyd'];
-const SAMPLES: { name: string; href: string; desc: string; args?: string; files?: string[]; lazy?: boolean; needsPack?: boolean; dir?: string }[] = [   // dir: subdirectory of C:\nebula for the exe + files
+const SAMPLES: { name: string; href: string; desc: string; args?: string; files?: string[]; lazy?: boolean; needsPack?: boolean; needsDx?: boolean; dir?: string }[] = [   // dir: subdirectory of C:\nebula for the exe + files
   { name: 'NebulaStrike.exe', href: '/downloads/NebulaStrike.exe', desc: 'Win32 GDI game, PE32+ x64 (light GUI exe)' },
   { name: 'd3d11tri.exe', href: '/x64/samples/d3d11tri.exe', desc: 'Direct3D 11 → WebGL2: device + swap chain, vertex/index/constant buffers, input layout, precompiled DXBC vertex/pixel shaders translated to GLSL, Draw + DrawIndexed + Present (3 frames). Args: number of frames', args: '3' },
   { name: 'd3d11clear.exe', href: '/x64/samples/d3d11clear.exe', desc: 'Direct3D 11: D3D11CreateDeviceAndSwapChain, GetBuffer, CreateRenderTargetView, ClearRenderTargetView + Present in three colours' },
   { name: 'msvcp.exe', href: '/x64/samples/msvcp.exe', needsPack: true, desc: 'Runtime pack test: loads the REAL msvcp140.dll (Microsoft Visual C++ 2015–2022 Redistributable, served from /x64/sys32 as C:\\Windows\\System32) and drives std::cout through its exports — static init, locale facets and iostream output of a vendor runtime DLL on top of the emulator\'s UCRT' },
   { name: 'nebula-dotnet-test.exe', href: '/x64/samples/dotnet/nebula-dotnet-test.exe', desc: '.NET 10 (C#): the OFFICIAL Microsoft .NET Runtime (CoreCLR + RyuJIT, win-x64) runs on the emulator — installed on demand into C:\\Program Files\\dotnet (the .NET pack, ~34 MB). apphost launcher + nebula-dotnet-test.dll. Args pick the steps: linq, throw, nre (hardware null-reference → managed exception), json, reflect, regex, culture, async, thread, taskrun, bgspin (GC suspends a spinning thread), proc (Process.Start cmd.exe), http (HttpClient), gc', args: 'linq-throw-nre-json-reflect-regex-gc', files: ['nebula-dotnet-test.dll', 'nebula-dotnet-test.runtimeconfig.json', 'nebula-dotnet-test.deps.json'], dir: 'dotnet' },
   { name: 'fx.exe', href: '/x64/samples/dotnet/fx.exe', desc: 'Classic .NET Framework 4.8 console exe (AnyCPU, IL only, 5 KB): started directly, the emulator hands it to dotnet.exe with a generated runtimeconfig — it runs on the .NET 10 runtime in compatibility mode (LINQ, exceptions, File IO, args). Exit code 5', args: 'a b', dir: 'dotnet' },
+  { name: 'd3dcompile.exe', href: '/x64/samples/d3dcompile.exe', needsDx: true, desc: 'DirectX pack test: loads the REAL D3DCompiler_43.dll (Microsoft DirectX End-User Runtimes, June 2010) from C:\\Windows\\System32, compiles HLSL vs_4_0/ps_4_0 at run time, disassembles it and draws the result through Direct3D 11 → WebGL2 (installs the DirectX pack on first use)' },
+  { name: 'dxpack.exe', href: '/x64/samples/dxpack.exe', needsDx: true, desc: 'DirectX pack test: d3dx9_43 matrix/vector math, D3DX11CompileFromMemory, X3DAudio1_7 3-D panning, XInput (honest: no controller) — all real Microsoft DLLs except XInput' },
   { name: 'hello.exe', href: '/x64/samples/hello.exe', desc: 'UCRT console: printf/qsort/malloc/math (light console exe)' },
   { name: 'cmd.exe', href: '/x64/apps/cmd.exe', desc: 'Command Prompt: the emulator\'s own cmd.exe (52 KB, kernel32 only; the same binary is embedded at C:\\Windows\\System32\\cmd.exe so system(), _popen and subprocess(shell=True) work). Default args run demo.bat and then stay interactive — type dir, echo, set, if, for, pipes and redirections into the console, or start any program on the virtual disk (jq.exe, python.exe …). Try: /c "dir /b | sort /r" · /c "python.exe -c print(42) | findstr 42"', args: '/k demo.bat' },
   { name: 'powershell.exe', href: '/x64/apps/powershell.exe', desc: 'Windows PowerShell subset: the emulator\'s own powershell.exe (91 KB, kernel32 only; embedded at C:\\Windows\\System32\\WindowsPowerShell\\v1.0 so installers that shell out to PowerShell work — opencode unpacks ripgrep with Expand-Archive through it). Cmdlets: Expand-Archive / [IO.Compression.ZipFile]::ExtractToDirectory (deflate + stored), Get-FileHash, Get-ChildItem, Get/Set-Content, Select-String, Where/Select/Measure-Object, Test-Path, Join-Path, New/Copy/Remove-Item, $env:, -f, -join, try/catch, if/foreach/while, & external programs, exit N. Not implemented: objects/properties beyond strings and numbers, modules, classes, .NET beyond ZipFile/Path.', args: '-NoProfile -File demo.ps1' },
@@ -63,6 +65,14 @@ type DotnetManifest = { pack: string; version: string; files: { path: string; si
 type DotnetState = { status: 'probing' | 'available' | 'installing' | 'installed' | 'unavailable'; manifest?: DotnetManifest; done?: number; note?: string };
 const DOTNET_URL = '/x64/dotnet/';
 const DOTNET_DIR = 'C:\\Program Files\\dotnet\\';
+/* DirectX pack: the x64 user-mode DLLs of the official DirectX End-User Runtimes (June 2010) — D3DCompiler_33…43, d3dx9/10/11,
+   d3dcsx, X3DAudio — built by emu/tools/dx-pack.sh into public/x64/dx/ (per-file gzip, same manifest layout as the .NET pack)
+   and installed on demand into C:\Windows\System32 when a program imports one of them (or asks for it with LoadLibrary). */
+const DX_URL = '/x64/dx/';
+const DX_DIR = 'C:\\Windows\\System32\\';
+type GzPack = { key: 'dotnet' | 'dx'; url: string; dir: string; label: string };
+const GZ_PACKS: Record<'dotnet' | 'dx', GzPack> = { dotnet: { key: 'dotnet', url: DOTNET_URL, dir: DOTNET_DIR, label: '.NET pack' }, dx: { key: 'dx', url: DX_URL, dir: DX_DIR, label: 'DirectX pack' } };
+const exeWantsDx = (dlls: string[] | undefined, man: DotnetManifest | undefined) => !!man && !!dlls && dlls.some(d => man.files.some(f => f.path.toLowerCase() === d.toLowerCase()));
 async function fetchGz(url: string, attempt = 0): Promise<Uint8Array> {   // some static servers (vite preview, nginx gzip_static) send .gz files with Content-Encoding: gzip → the browser already inflated them
   const ac = new AbortController(); const timer = setTimeout(() => ac.abort(), 90_000); let raw: Uint8Array<ArrayBuffer>;
   try { const r = await fetch(url, { signal: ac.signal }); if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`); raw = new Uint8Array(await r.arrayBuffer()); }
@@ -231,35 +241,39 @@ export default function X64App() {
     return true;
   }, [pack]);
   const [dotnet, setDotnet] = useState<DotnetState>({ status: 'probing' });
-  useEffect(() => { let alive = true; (async () => {
-    try { const r = await fetch(DOTNET_URL + 'manifest.json'); if (!r.ok) throw new Error('HTTP ' + r.status); const man = await r.json() as DotnetManifest; if (alive) setDotnet({ status: 'available', manifest: man }); }
-    catch (e) { if (alive) setDotnet({ status: 'unavailable', note: 'not built into this deployment (' + String(e) + ')' }); }
-  })(); return () => { alive = false; }; }, []);
-  const installDotnet = useCallback(async (rt: X64Runtime): Promise<boolean> => {
-    if (dotnet.status === 'installed') return true;
-    if (dotnet.status !== 'available' || !dotnet.manifest) { setLog(l => [...l, '.NET PACK: ' + (dotnet.note ?? dotnet.status)]); return false; }
-    const man = dotnet.manifest; let done = 0, bytes = 0;
-    setDotnet({ status: 'installing', manifest: man, done: 0 }); setFetching(`installing .NET pack (${man.files.length} files)…`); setTab('console');
+  const [dx, setDx] = useState<DotnetState>({ status: 'probing' });
+  useEffect(() => { let alive = true; const probe = async (url: string, set: (st: DotnetState) => void) => {
+    try { const r = await fetch(url + 'manifest.json'); if (!r.ok) throw new Error('HTTP ' + r.status); const man = await r.json() as DotnetManifest; if (alive) set({ status: 'available', manifest: man }); }
+    catch (e) { if (alive) set({ status: 'unavailable', note: 'not built into this deployment (' + String(e) + ')' }); } };
+  void probe(DOTNET_URL, setDotnet); void probe(DX_URL, setDx); return () => { alive = false; }; }, []);
+  /* shared installer for the per-file-gzip packs (.NET, DirectX): parallel fetch → inflate → virtual disk, one memory.grow up front */
+  const installGz = useCallback(async (rt: X64Runtime, pk: GzPack, st: DotnetState, set: (v: DotnetState) => void): Promise<boolean> => {
+    if (st.status === 'installed') return true;
+    if (st.status !== 'available' || !st.manifest) { setLog(l => [...l, pk.label.toUpperCase() + ': ' + (st.note ?? st.status)]); return false; }
+    const man = st.manifest; let done = 0, bytes = 0;
+    set({ status: 'installing', manifest: man, done: 0 }); setFetching(`installing ${pk.label} (${man.files.length} files)…`); setTab('console');
     try {
       const total = man.files.reduce((a, f) => a + f.size, 0);
       if (!rt.reserve(total + (total >> 4) + (1 << 20))) throw new Error(`cannot grow guest memory by ${(total / 1048576).toFixed(0)} MB`);   // one memory.grow, not one per file
       const queue = man.files.slice(); const PAR = 6; const t0 = performance.now(); const inflight = new Set<string>(); let failed = false;
-      const label = () => `installing .NET pack: ${done}/${man.files.length}, ${(bytes / 1048576).toFixed(1)} MB` + (done + inflight.size >= man.files.length ? ` — waiting for ${[...inflight].join(', ')}` : '');
+      const label = () => `installing ${pk.label}: ${done}/${man.files.length}, ${(bytes / 1048576).toFixed(1)} MB` + (done + inflight.size >= man.files.length ? ` — waiting for ${[...inflight].join(', ')}` : '');
       const worker = async () => { for (;;) { const f = queue.shift(); if (!f || failed) return; inflight.add(f.gz.slice(f.gz.lastIndexOf('/') + 1));
         let b: Uint8Array;
-        try { b = await fetchGz(DOTNET_URL + f.gz); } catch (e) { failed = true; throw e; }
+        try { b = await fetchGz(pk.url + f.gz); } catch (e) { failed = true; throw e; }
         if (failed) return;   // another worker failed meanwhile: do not touch the state again (it already says 'available' + the error)
         if (b.length !== f.size) { failed = true; throw new Error(`${f.path}: ${b.length} bytes, expected ${f.size}`); }
-        if (!rt.vfsAdd(DOTNET_DIR + f.path, b)) { failed = true; throw new Error(`${f.path}: virtual disk refused the file`); }
+        if (!rt.vfsAdd(pk.dir + f.path, b)) { failed = true; throw new Error(`${f.path}: virtual disk refused the file`); }
         bytes += b.length; done++; inflight.delete(f.gz.slice(f.gz.lastIndexOf('/') + 1));
-        if (done % 50 === 0) setLog(l => [...l, `.NET pack: ${done}/${man.files.length} files, ${(bytes / 1048576).toFixed(1)} MB in ${((performance.now() - t0) / 1000).toFixed(1)} s`]);
-        setDotnet({ status: 'installing', manifest: man, done }); setFetching(label()); } };
+        if (done % 50 === 0) setLog(l => [...l, `${pk.label}: ${done}/${man.files.length} files, ${(bytes / 1048576).toFixed(1)} MB in ${((performance.now() - t0) / 1000).toFixed(1)} s`]);
+        set({ status: 'installing', manifest: man, done }); setFetching(label()); } };
       await Promise.all(Array.from({ length: PAR }, worker));
-    } catch (e) { setFetching(null); setDotnet({ status: 'available', manifest: man, note: String(e) }); setLog(l => [...l, '.NET PACK: ' + String(e)]); return false; }
-    setFetching(null); setDotnet({ status: 'installed', manifest: man, done }); setFiles(rt.vfsList());
-    setLog(l => [...l, `.NET pack installed: ${done} files, ${(bytes / 1048576).toFixed(1)} MB → ${DOTNET_DIR} (${man.pack})`]);
+    } catch (e) { setFetching(null); set({ status: 'available', manifest: man, note: String(e) }); setLog(l => [...l, pk.label.toUpperCase() + ': ' + String(e)]); return false; }
+    setFetching(null); set({ status: 'installed', manifest: man, done }); setFiles(rt.vfsList());
+    setLog(l => [...l, `${pk.label} installed: ${done} files, ${(bytes / 1048576).toFixed(1)} MB → ${pk.dir} (${man.pack})`]);
     return true;
-  }, [dotnet]);
+  }, []);
+  const installDotnet = useCallback((rt: X64Runtime) => installGz(rt, GZ_PACKS.dotnet, dotnet, setDotnet), [installGz, dotnet]);
+  const installDx = useCallback((rt: X64Runtime) => installGz(rt, GZ_PACKS.dx, dx, setDx), [installGz, dx]);
   const run = useCallback(async () => {
     const rt = rtRef.current; if (!rt || !current) return;
     consoleBuf.current = ''; setConsoleText(''); setLog([]); setFrames(0); setWaitingStdin(false);
@@ -280,6 +294,7 @@ export default function X64App() {
     }
     const sample = current.source === 'sample' ? SAMPLES.find(x => x.name === current.name) : undefined;
     if (pack.status !== 'installed' && (sample?.needsPack || exeWantsPack(current.info.dlls, pack.manifest))) await installPack(rt);   // the program imports a vendor-runtime DLL we ship
+    if (dx.status !== 'installed' && (sample?.needsDx || exeWantsDx(current.info.dlls, dx.manifest))) await installDx(rt);   // the program imports a DirectX DLL we ship (D3DX, D3DCompiler …)
     if (current.info.dotnet && dotnet.status !== 'installed' && !(await installDotnet(rt))) {   // managed code needs the real runtime
       setLog(l => [...l, `${current.name} is a .NET program (${current.info.dotnet}): the .NET runtime pack could not be installed, so it cannot run here`]); setStats(rt.stats()); setTab('report'); return;
     }
@@ -289,7 +304,7 @@ export default function X64App() {
     setStats(rt.stats()); setFiles(rt.vfsList());
     setTab(current.info.subsystem === 'GUI' ? 'screen' : 'console');
     setTimeout(() => screenRef.current?.focus(), 50);
-  }, [current, args, pack, installPack, dotnet, installDotnet]);
+  }, [current, args, pack, installPack, dotnet, installDotnet, dx, installDx]);
   const stop = useCallback(() => { const rt = rtRef.current; if (!rt) return; rt.stop(); setStats(rt.stats()); setFiles(rt.vfsList()); }, []);
 
   // keyboard → guest
@@ -334,6 +349,11 @@ export default function X64App() {
           title={dotnet.status === 'installed' ? `.NET pack installed in C:\\Program Files\\dotnet (${dotnet.done} files, ${dotnet.manifest?.pack})` : dotnet.status === 'available' ? `Install the official Microsoft .NET Runtime ${dotnet.manifest?.version} (win-x64; ${dotnet.manifest?.files.length} files, ${((dotnet.manifest?.files.reduce((a, f) => a + f.gzsize, 0) ?? 0) / 1048576).toFixed(1)} MB download) into C:\\Program Files\\dotnet — also happens automatically when a .NET program is started` : dotnet.status === 'unavailable' ? '.NET pack not available: ' + dotnet.note : '.NET pack…'}
           className={`hidden items-center gap-1 rounded border px-2 py-1 sm:flex ${dotnet.status === 'installed' ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : 'border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-50'}`}>
           <Download size={11} /> {dotnet.status === 'installed' ? '.NET 10 ✓' : dotnet.status === 'installing' ? `.NET 10 ${dotnet.done}/${dotnet.manifest?.files.length}` : dotnet.status === 'unavailable' ? '.NET n/a' : '.NET 10'}
+        </button>
+        <button data-x64-dx={dx.status} data-x64-dx-note={dx.note ?? ''} disabled={dx.status !== 'available' || !!running || !!fetching} onClick={() => { const rt = rtRef.current; if (rt) void installDx(rt); }}
+          title={dx.status === 'installed' ? `DirectX pack installed in C:\\Windows\\System32 (${dx.done} DLLs, ${dx.manifest?.pack})` : dx.status === 'available' ? `Install the x64 user-mode DLLs of the official DirectX End-User Runtimes (June 2010): D3DCompiler_33…43, d3dx9_24…43, d3dx10/11, d3dcsx, X3DAudio (${dx.manifest?.files.length} files, ${((dx.manifest?.files.reduce((a, f) => a + f.gzsize, 0) ?? 0) / 1048576).toFixed(1)} MB download) — also happens automatically when a program imports one of them` : dx.note ?? 'DirectX pack'}
+          className={`hidden items-center gap-1 rounded border px-2 py-1 sm:flex ${dx.status === 'installed' ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : 'border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-50'}`}>
+          <Download size={11} /> {dx.status === 'installed' ? 'DirectX ✓' : dx.status === 'installing' ? `DirectX ${dx.done}/${dx.manifest?.files.length}` : dx.status === 'unavailable' ? 'DirectX n/a' : 'DirectX'}
         </button>
         <div className="ml-auto flex items-center gap-1 rounded bg-slate-100 p-0.5">
           {(['screen', 'console', 'files', 'report'] as const).map(t => (

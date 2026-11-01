@@ -2,7 +2,7 @@
 
 | file | origin | licence |
 |---|---|---|
-| hello.exe, bench.exe, threads.exe, pthreads.exe, cxxexc.exe, hwexc.exe, d3d11clear.exe, d3d11tri.exe (its DXBC shaders come from SDL2, zlib licence) | built from emu/tests/*.c with `zig cc -target x86_64-windows-gnu` | MIT (this repo) |
+| hello.exe, bench.exe, threads.exe, pthreads.exe, cxxexc.exe, hwexc.exe, d3d11clear.exe, d3d11tri.exe (its DXBC shaders come from SDL2, zlib licence), d3dcompile.exe, dxpack.exe (DirectX pack tests — the pack itself, /x64/dx/, is built in CI from directx_Jun2010_redist.exe, see docs/DIRECTX-X64.md) | built from emu/tests/*.c with `zig cc -target x86_64-windows-gnu` | MIT (this repo) |
 | busybox64.exe | https://frippery.org/busybox/ (busybox-w32, FRP-6354) | GPL-2.0 — source at the link |
 | plink.exe | https://www.chiark.greenend.org.uk/~sgtatham/putty/ (PuTTY 0.85, 64-bit) | MIT |
 
