@@ -16,7 +16,8 @@ void *emu_alloc(size_t n) {
     arena_end = (uintptr_t)__builtin_wasm_memory_size(0) * 65536;
   }
   void *p = (void *)arena_cur; arena_cur += n; used_total += n;
-  e_memset(p, 0, n);
+  /* no memset: the arena only hands out memory that has never been written (fresh wasm pages are zero), and the browser commits
+     pages lazily — clearing a 768 MB GC reservation would make it resident at once (pool_take clears recycled blocks itself) */
   return p;
 }
 int emu_free(void *p) { (void)p; return 0; }   /* arena: no free (caller pools the block) */

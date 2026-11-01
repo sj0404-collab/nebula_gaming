@@ -282,6 +282,7 @@ await test('x64: .NET pack — the OFFICIAL Microsoft .NET Runtime 10 is install
   await page.waitForFunction(() => { const s = document.querySelector('[data-x64-dotnet]')?.getAttribute('data-x64-dotnet'); return s && s !== 'probing'; }, null, { timeout: 15_000 });
   const before = await st();
   await w.locator('[data-x64-exe="nebula-dotnet-test.exe"]').click();
+  await w.locator('[data-x64-tab="report"]').click();
   expect(/\.NET apphost/.test(await w.innerText()), 'PE report should recognise the .NET apphost');
   await w.locator('[data-x64-run]').click();
   if (before === 'unavailable') {

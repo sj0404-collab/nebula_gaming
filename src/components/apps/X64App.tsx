@@ -5,17 +5,17 @@ import { X64Runtime, vkFromEvent, wasm64Supported, type PeInfo, type RunStats, t
 import { FramePresenter } from '../../lib/x64/present';
 import { takeX64Launch, onX64Launch, type X64Launch } from '../../lib/x64/launch';
 
-interface ExeEntry { id: number; name: string; bytes: Uint8Array; info: PeInfo; source: 'sample' | 'file'; pending?: string[] }   // pending: companion files fetched on first Run (big runtimes)
+interface ExeEntry { id: number; name: string; bytes: Uint8Array; info: PeInfo; source: 'sample' | 'file'; pending?: string[]; path?: string }   // path: guest path when not C:\nebula\<name>   // pending: companion files fetched on first Run (big runtimes)
 
 const SAMPLE_DATA = ['demo.sql', 'demo.json', 'demo.lua', 'demo.txt', 'demo.py', 'demo.bat'];   // small inputs for the real apps, placed in C:\nebula
 const PY_FILES = ['python312.dll', 'python312.zip', 'python312._pth', '_sqlite3.pyd', 'sqlite3.dll', '_decimal.pyd', '_ctypes.pyd', 'libffi-8.dll', '_bz2.pyd', '_lzma.pyd', 'pyexpat.pyd', '_elementtree.pyd', 'unicodedata.pyd', '_queue.pyd', '_socket.pyd', 'select.pyd', '_asyncio.pyd', '_zoneinfo.pyd', '_uuid.pyd', '_multiprocessing.pyd'];
-const SAMPLES: { name: string; href: string; desc: string; args?: string; files?: string[]; lazy?: boolean; needsPack?: boolean }[] = [
-  { name: 'nebula-dotnet-test.exe', href: '/x64/samples/dotnet/nebula-dotnet-test.exe', desc: '.NET 10 (C#): the OFFICIAL Microsoft .NET Runtime (CoreCLR + RyuJIT, win-x64) runs on the emulator — installed on demand into C:\\Program Files\\dotnet (the .NET pack, ~34 MB). apphost launcher + nebula-dotnet-test.dll. Args pick the steps: linq, throw, nre (hardware null-reference → managed exception), json, reflect, regex, culture, async, thread, taskrun, bgspin (GC suspends a spinning thread), proc (Process.Start cmd.exe), http (HttpClient), gc', args: 'linq-throw-nre-json-reflect-regex-gc', files: ['nebula-dotnet-test.dll', 'nebula-dotnet-test.runtimeconfig.json', 'nebula-dotnet-test.deps.json'] },
-  { name: 'fx.exe', href: '/x64/samples/dotnet/fx.exe', desc: 'Classic .NET Framework 4.8 console exe (AnyCPU, IL only, 5 KB): started directly, the emulator hands it to dotnet.exe with a generated runtimeconfig — it runs on the .NET 10 runtime in compatibility mode (LINQ, exceptions, File IO, args). Exit code 5', args: 'a b' },
+const SAMPLES: { name: string; href: string; desc: string; args?: string; files?: string[]; lazy?: boolean; needsPack?: boolean; dir?: string }[] = [   // dir: subdirectory of C:\nebula for the exe + files
   { name: 'NebulaStrike.exe', href: '/downloads/NebulaStrike.exe', desc: 'Win32 GDI game, PE32+ x64 (light GUI exe)' },
   { name: 'd3d11tri.exe', href: '/x64/samples/d3d11tri.exe', desc: 'Direct3D 11 → WebGL2: device + swap chain, vertex/index/constant buffers, input layout, precompiled DXBC vertex/pixel shaders translated to GLSL, Draw + DrawIndexed + Present (3 frames). Args: number of frames', args: '3' },
   { name: 'd3d11clear.exe', href: '/x64/samples/d3d11clear.exe', desc: 'Direct3D 11: D3D11CreateDeviceAndSwapChain, GetBuffer, CreateRenderTargetView, ClearRenderTargetView + Present in three colours' },
   { name: 'msvcp.exe', href: '/x64/samples/msvcp.exe', needsPack: true, desc: 'Runtime pack test: loads the REAL msvcp140.dll (Microsoft Visual C++ 2015–2022 Redistributable, served from /x64/sys32 as C:\\Windows\\System32) and drives std::cout through its exports — static init, locale facets and iostream output of a vendor runtime DLL on top of the emulator\'s UCRT' },
+  { name: 'nebula-dotnet-test.exe', href: '/x64/samples/dotnet/nebula-dotnet-test.exe', desc: '.NET 10 (C#): the OFFICIAL Microsoft .NET Runtime (CoreCLR + RyuJIT, win-x64) runs on the emulator — installed on demand into C:\\Program Files\\dotnet (the .NET pack, ~34 MB). apphost launcher + nebula-dotnet-test.dll. Args pick the steps: linq, throw, nre (hardware null-reference → managed exception), json, reflect, regex, culture, async, thread, taskrun, bgspin (GC suspends a spinning thread), proc (Process.Start cmd.exe), http (HttpClient), gc', args: 'linq-throw-nre-json-reflect-regex-gc', files: ['nebula-dotnet-test.dll', 'nebula-dotnet-test.runtimeconfig.json', 'nebula-dotnet-test.deps.json'], dir: 'dotnet' },
+  { name: 'fx.exe', href: '/x64/samples/dotnet/fx.exe', desc: 'Classic .NET Framework 4.8 console exe (AnyCPU, IL only, 5 KB): started directly, the emulator hands it to dotnet.exe with a generated runtimeconfig — it runs on the .NET 10 runtime in compatibility mode (LINQ, exceptions, File IO, args). Exit code 5', args: 'a b', dir: 'dotnet' },
   { name: 'hello.exe', href: '/x64/samples/hello.exe', desc: 'UCRT console: printf/qsort/malloc/math (light console exe)' },
   { name: 'cmd.exe', href: '/x64/apps/cmd.exe', desc: 'Command Prompt: the emulator\'s own cmd.exe (52 KB, kernel32 only; the same binary is embedded at C:\\Windows\\System32\\cmd.exe so system(), _popen and subprocess(shell=True) work). Default args run demo.bat and then stay interactive — type dir, echo, set, if, for, pipes and redirections into the console, or start any program on the virtual disk (jq.exe, python.exe …). Try: /c "dir /b | sort /r" · /c "python.exe -c print(42) | findstr 42"', args: '/k demo.bat' },
   { name: 'powershell.exe', href: '/x64/apps/powershell.exe', desc: 'Windows PowerShell subset: the emulator\'s own powershell.exe (91 KB, kernel32 only; embedded at C:\\Windows\\System32\\WindowsPowerShell\\v1.0 so installers that shell out to PowerShell work — opencode unpacks ripgrep with Expand-Archive through it). Cmdlets: Expand-Archive / [IO.Compression.ZipFile]::ExtractToDirectory (deflate + stored), Get-FileHash, Get-ChildItem, Get/Set-Content, Select-String, Where/Select/Measure-Object, Test-Path, Join-Path, New/Copy/Remove-Item, $env:, -f, -join, try/catch, if/foreach/while, & external programs, exit N. Not implemented: objects/properties beyond strings and numbers, modules, classes, .NET beyond ZipFile/Path.', args: '-NoProfile -File demo.ps1' },
@@ -63,10 +63,12 @@ type DotnetManifest = { pack: string; version: string; files: { path: string; si
 type DotnetState = { status: 'probing' | 'available' | 'installing' | 'installed' | 'unavailable'; manifest?: DotnetManifest; done?: number; note?: string };
 const DOTNET_URL = '/x64/dotnet/';
 const DOTNET_DIR = 'C:\\Program Files\\dotnet\\';
-async function fetchGz(url: string): Promise<Uint8Array> {
-  const r = await fetch(url); if (!r.ok || !r.body) throw new Error(`${url}: HTTP ${r.status}`);
+async function fetchGz(url: string): Promise<Uint8Array> {   // some static servers (vite preview, nginx gzip_static) send .gz files with Content-Encoding: gzip → the browser already inflated them
+  const r = await fetch(url); if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`);
+  const raw = new Uint8Array(await r.arrayBuffer());
+  if (raw.length < 2 || raw[0] !== 0x1f || raw[1] !== 0x8b) return raw;
   if (typeof DecompressionStream === 'undefined') throw new Error('DecompressionStream not supported by this browser');
-  const buf = await new Response(r.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
+  const buf = await new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
   return new Uint8Array(buf);
 }
 
@@ -124,9 +126,10 @@ export default function X64App() {
         try {
           const r = await fetch(s.href); if (!r.ok) continue; const bytes = new Uint8Array(await r.arrayBuffer());
           const d = s.href.slice(0, s.href.lastIndexOf('/') + 1);
-          loaded.push({ id: nextId.current++, name: s.name, bytes, info: rt.inspect(bytes), source: 'sample', pending: s.lazy && s.files ? s.files.map(f => d + f) : undefined });
-          rt.vfsAdd('C:\\nebula\\' + s.name, bytes);   // on the virtual disk too, so busybox sh can chain them and DLLs find their exe
-          if (!s.lazy) for (const f of s.files ?? []) { const rf = await fetch(d + f); if (rf.ok) rt.vfsAdd('C:\\nebula\\' + f, new Uint8Array(await rf.arrayBuffer())); }
+          const gd = 'C:\\nebula\\' + (s.dir ? s.dir + '\\' : '');
+          loaded.push({ id: nextId.current++, name: s.name, bytes, info: rt.inspect(bytes), source: 'sample', pending: s.lazy && s.files ? s.files.map(f => d + f) : undefined, path: s.dir ? gd + s.name : undefined });
+          rt.vfsAdd(gd + s.name, bytes);   // on the virtual disk too, so busybox sh can chain them and DLLs find their exe
+          if (!s.lazy) for (const f of s.files ?? []) { const rf = await fetch(d + f); if (rf.ok) rt.vfsAdd(gd + f, new Uint8Array(await rf.arrayBuffer())); }
         } catch { /* sample missing */ }
       }
       for (const f of SAMPLE_DATA) { try { const r = await fetch('/x64/apps/' + f); if (r.ok) rt.vfsAdd('C:\\nebula\\' + f, new Uint8Array(await r.arrayBuffer())); } catch { /* optional */ } }
@@ -271,7 +274,7 @@ export default function X64App() {
       setLog(l => [...l, `${current.name} is a .NET program (${current.info.dotnet}): the .NET runtime pack could not be installed, so it cannot run here`]); setStats(rt.stats()); setTab('report'); return;
     }
     const base = current.name.split('\\').pop() || current.name;
-    const err = rt.start(current.bytes, base, args.trim() ? `${base} ${args.trim()}` : base);
+    const err = rt.start(current.bytes, current.path ?? base, args.trim() ? `${base} ${args.trim()}` : base);
     if (err) { setLog(l => [...l, 'LOADER: ' + err]); setStats(rt.stats()); setTab('report'); return; }
     setStats(rt.stats()); setFiles(rt.vfsList());
     setTab(current.info.subsystem === 'GUI' ? 'screen' : 'console');
