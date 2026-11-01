@@ -614,8 +614,11 @@ if (bridgeUp || process.env.E2E_BRIDGE) {
     catch (e) {
       const txt = await pg.locator('[data-window="opencode"]').innerText().catch(() => '');
       const working = await pg.locator('input[placeholder*="working"]').count().catch(() => 0);
-      if (/Timeout/.test(String(e.message)) && working && !/error:|FreeUsageLimit/i.test(txt)) { const err = new Error(`free model still working after ${AGENT_TIMEOUT / 1000} s (request accepted, no error) — ${txt.replace(/\s+/g, ' ').slice(-160)}`); err.name = 'Inconclusive'; throw err; }
-      throw e;
+      const tail = txt.replace(/\s+/g, ' ').slice(-220);
+      const quota = /FreeUsageLimit|free usage limit|rate limit|429/i.test(txt);
+      if (/Timeout/.test(String(e.message)) && (quota || (working && !/error:/i.test(txt)))) { const err = new Error(`${quota ? 'free tier quota (FreeUsageLimit) reached on the third-party model' : `free model still working after ${AGENT_TIMEOUT / 1000} s (request accepted, no error)`} — ${tail}`); err.name = 'Inconclusive'; throw err; }
+      try { await pg.screenshot({ path: resolve(SHOTS, 'fail-agent-window.png') }); } catch { /* ignore */ }
+      throw new Error(`${String(e.message).split('\n')[0]} — window: ${tail}`);
     }
   };
   await test('opencode window: LIVE mode — real agent answers and runs a tool', async () => {
