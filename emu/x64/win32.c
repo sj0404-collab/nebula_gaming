@@ -454,9 +454,12 @@ static void s_SetDllDirectoryA(Cpu *c) { const char *d = ARG(0) ? rd_str(c, ARG(
 static const char *env_get(const char *name);   /* win32_fs.inc */
 static int mod_load(Win32 *w, const char *name) {
   int m = mod_find(w, name); if (m >= 0) return m;
-  char path[600]; const char *cands[24]; int nc = 0; cands[nc++] = name; const char *bn = mod_basename(name);
+  char path[600]; const char *cands[48]; int nc = 0; cands[nc++] = name; const char *bn = mod_basename(name);
   char p0[600], p1[600], p2[600], p3[600]; char pbuf[8][600]; int np = 0;
   if (w->exe_path[0]) { e_snprintf(p0, sizeof p0, "%s", w->exe_path); char *sl = 0; for (char *q = p0; *q; q++) if (*q == '\\' || *q == '/') sl = q; if (sl) { size_t l = (size_t)(sl + 1 - p0); e_snprintf(p0 + l, sizeof p0 - l, "%s", bn); cands[nc++] = p0; } }
+  /* directories of the DLLs already loaded from the virtual disk (coreclr.dll finds clrjit.dll / System.*.dll next to itself) */
+  char pm[8][600]; int npm = 0;
+  for (int i = w->nmods - 1; i >= 0 && npm < 8; i--) { if (!w->mods[i].dir[0]) continue; int dup = 0; for (int k = 0; k < npm; k++) if (!e_strnicmp_(pm[k], w->mods[i].dir, e_strlen(w->mods[i].dir))) { dup = 1; break; } if (dup) continue; e_snprintf(pm[npm], sizeof pm[npm], "%s\\%s", w->mods[i].dir, bn); cands[nc++] = pm[npm++]; }
   char pd[8][600]; for (int i = 0; i < w->ndll_dirs && i < 8; i++) if (w->dll_dirs[i][0]) { e_snprintf(pd[i], sizeof pd[i], "%s\\%s", w->dll_dirs[i], bn); cands[nc++] = pd[i]; }
   e_snprintf(p3, sizeof p3, "C:\\Windows\\System32\\%s", bn); cands[nc++] = p3;
   e_snprintf(p1, sizeof p1, "%s\\%s", vfs_cwd(), bn); cands[nc++] = p1; e_snprintf(p2, sizeof p2, "C:\\nebula\\%s", bn); cands[nc++] = p2;
@@ -467,6 +470,7 @@ static int mod_load(Win32 *w, const char *name) {
     if (node < 0) continue;
     VNodeInfo vi; if (!vfs_node_info(node, &vi) || vi.is_dir) continue; const u8 *img = vfs_node_data(node); if (!img) continue;
     int idx = pe_load_dll(w, img, (size_t)vi.size, mod_basename(path));
+    if (idx >= 0) { size_t dl = (size_t)(mod_basename(path) - path); if (dl && dl < sizeof w->mods[idx].dir) { e_memcpy(w->mods[idx].dir, path, dl - 1); w->mods[idx].dir[dl - 1] = 0; } }
     if (idx >= 0) { char msg[400]; e_snprintf(msg, sizeof msg, "[x64] loaded DLL %s at 0x%llx (%llu KB)\n", w->mods[idx].name, (unsigned long long)w->mods[idx].base, (unsigned long long)(w->mods[idx].size >> 10)); host_write(3, msg, e_strlen(msg)); }
     return idx;
   }
@@ -1173,6 +1177,7 @@ static void s_dsign(Cpu *c) { RET(c->x[0].f64[0] < 0 ? 1 : 0); }
 
 #include "win32_rt.inc"
 #include "win32_math.inc"
+#include "win32_clr.inc"
 /* ---------- table ---------- */
 #define S(n) { "", #n, s_##n }
 #define SA(api, fn) { "", api, s_##fn }
@@ -1243,6 +1248,7 @@ static const ShimDef shims[] = {
   S(memcpy), SA("memmove", memcpy), S(memset), S(memcmp), S(memchr), S(qsort), SA("qsort_s", qsort), S(bsearch), SA("_setjmp", setjmp), SA("_setjmpex", setjmp), S(longjmp), S(div), SA("ldiv", div), S(abs), S(labs), SA("_abs64", llabs), S(llabs),
   S(sin), S(cos), S(tan), S(exp), S(log), S(pow), S(atan2), S(asin), S(acos), S(atan), S(sinh), S(cosh), S(tanh), S(log10), S(log2), S(cbrt), S(sqrt), S(floor), S(ceil), S(fabs), S(fmod), S(round), S(trunc), S(ldexp), S(frexp), S(modf), S(hypot), SA("_hypot", hypot), S(sinf), S(cosf), S(tanf), S(expf), S(logf), S(powf), S(atan2f), S(sqrtf), S(floorf), S(ceilf), S(fabsf), S(fmodf), S(roundf), SA("_dclass", dclass), SA("_fdclass", fdclass), SA("_dsign", dsign), SA("_fdsign", dsign), SA("_dtest", dclass), SA("_fdtest", fdclass), SA("_finite", ret1), SA("_isnan", ret0), SA("_copysign", copysign), S(copysign), S(exp2), SA("nearbyint", round), SA("rint", round), S(lround), SA("llround", lround), S(fmin), S(fmax),
   SA("__CxxFrameHandler4", CxxFrameHandler4), SA("__std_exception_copy", ret0), SA("__std_exception_destroy", ret0), SA("__std_type_info_destroy_list", ret0), SA("__current_exception", ret0), SA("__current_exception_context", ret0), SA("_except_handler4_common", ret1), SA("__intrinsic_setjmp", setjmp), SA("__report_gsfailure", abort), SA("_purecall", abort), SA("terminate", abort), SA("__p__mbctype", pctype_func), SA("_ismbblead", ret0), SA("__mb_cur_max", ret1),
+  CLR_SHIMS   /* last: these override earlier definitions (CoreCLR needs the real semantics) */
 };
 /* OLEAUT32 exports most of its API by ordinal only */
 static int oleaut_dll(const char *d) { const char *k = "oleaut32"; for (int i = 0; k[i]; i++) { char ch = d[i]; if (ch >= 'A' && ch <= 'Z') ch += 32; if (ch != k[i]) return 0; } return 1; }
@@ -1309,8 +1315,13 @@ void w32_start(Win32 *w, const char *cmdline) {
   }
   wr32(c, w->ubuf + 0x200, (u32)argc); wr64(c, w->ubuf + 0x208, argv); wr64(c, w->ubuf + 0x210, w->cmdline_a); wr64(c, w->ubuf + 0x218, wargv); wr64(c, w->ubuf + 0x220, w->cmdline_w);
   static const char *base_envs[] = { "PATH=C:\\Windows\\System32;C:\\Windows\\System32\\WindowsPowerShell\\v1.0", "SYSTEMROOT=C:\\Windows", "TEMP=C:\\tmp", "TMP=C:\\tmp", "USERPROFILE=C:\\Users\\user", "HOMEPATH=\\Users\\user", "USERNAME=user", "COMPUTERNAME=NEBULA", "OS=Windows_NT", "NEBULA_X64=1", "BUN_JSC_useConcurrentGC=false", "BUN_JSC_useConcurrentJIT=false", "PROCESSOR_ARCHITECTURE=AMD64", "PROCESSOR_IDENTIFIER=Intel64 Family 6 Model 158 Stepping 10, GenuineIntel", "PROCESSOR_LEVEL=6", "PROCESSOR_REVISION=9e0a", "NUMBER_OF_PROCESSORS=1", "PATHEXT=.COM;.EXE;.BAT;.CMD", "HOMEDRIVE=C:", "WINDIR=C:\\Windows", "COMSPEC=C:\\Windows\\System32\\cmd.exe", 0 };
-  const char *envs[96]; int ne = 0; for (int i = 0; base_envs[i] && ne < 64; i++) envs[ne++] = base_envs[i]; for (int i = 0; i < g_nextra_env && ne < 95; i++) envs[ne++] = g_extra_env[i]; envs[ne] = 0;
-  u64 envp = w32_heap_alloc(w, 8 * 100, 1); size_t total = 1; for (int i = 0; envs[i]; i++) total += e_strlen(envs[i]) + 1;
+  /* defaults for the official .NET runtime (CoreCLR) — overridable with --env: no W^X double mapping (we have no MapViewOfFile3 aliasing),
+     GC regions in a fixed 768 MB reservation, invariant globalization (no ICU on the virtual disk), no telemetry/first-run noise */
+  static const char *dotnet_envs[] = { "DOTNET_EnableWriteXorExecute=0", "DOTNET_GCRegionRange=0x30000000", "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1", "DOTNET_CLI_TELEMETRY_OPTOUT=1", "DOTNET_NOLOGO=1", "DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1", "DOTNET_TieredPGO=0", "DOTNET_ROOT=C:\\Program Files\\dotnet", 0 };
+  const char *envs[128]; int ne = 0; for (int i = 0; base_envs[i] && ne < 64; i++) envs[ne++] = base_envs[i];
+  for (int i = 0; dotnet_envs[i] && ne < 90; i++) { const char *eq = dotnet_envs[i]; size_t nl = 0; while (eq[nl] && eq[nl] != '=') nl++; int dup = 0; for (int k = 0; k < g_nextra_env; k++) if (e_strncmp(g_extra_env[k], dotnet_envs[i], nl) == 0 && g_extra_env[k][nl] == '=') dup = 1; if (!dup) envs[ne++] = dotnet_envs[i]; }
+  for (int i = 0; i < g_nextra_env && ne < 127; i++) envs[ne++] = g_extra_env[i]; envs[ne] = 0;
+  u64 envp = w32_heap_alloc(w, 8 * 130, 1); size_t total = 1; for (int i = 0; envs[i]; i++) total += e_strlen(envs[i]) + 1;
   u64 blk = w32_heap_alloc(w, total, 1), wblk = w32_heap_alloc(w, total * 2, 1); u64 o = 0;
   for (int i = 0; envs[i]; i++) { size_t l = e_strlen(envs[i]) + 1; u8 *d = mem_ptr(w->mem, blk + o, l, 1); if (d) e_memcpy(d, envs[i], l); for (size_t k = 0; k < l; k++) wr16(c, wblk + (o + k) * 2, (u8)envs[i][k]); wr64(c, envp + i * 8, blk + o); o += l; }
   w->env_a = blk; w->env_w = wblk; wr64(c, w->ubuf + 0x228, envp); wr64(c, w->ubuf + 0x230, 0);

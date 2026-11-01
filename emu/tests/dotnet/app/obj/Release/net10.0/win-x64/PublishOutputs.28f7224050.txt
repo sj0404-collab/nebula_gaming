@@ -1,0 +1,5 @@
+/var/tmp/dn/app/nebula-dotnet-test.exe
+/var/tmp/dn/app/nebula-dotnet-test.dll
+/var/tmp/dn/app/nebula-dotnet-test.deps.json
+/var/tmp/dn/app/nebula-dotnet-test.runtimeconfig.json
+/var/tmp/dn/app/nebula-dotnet-test.pdb

@@ -1,0 +1,15 @@
+/home/user/nebula_gaming/emu/tests/dotnet/app/bin/Release/net10.0/win-x64/nebula-dotnet-test.exe
+/home/user/nebula_gaming/emu/tests/dotnet/app/bin/Release/net10.0/win-x64/nebula-dotnet-test.deps.json
+/home/user/nebula_gaming/emu/tests/dotnet/app/bin/Release/net10.0/win-x64/nebula-dotnet-test.runtimeconfig.json
+/home/user/nebula_gaming/emu/tests/dotnet/app/bin/Release/net10.0/win-x64/nebula-dotnet-test.dll
+/home/user/nebula_gaming/emu/tests/dotnet/app/bin/Release/net10.0/win-x64/nebula-dotnet-test.pdb
+/home/user/nebula_gaming/emu/tests/dotnet/app/obj/Release/net10.0/win-x64/app.GeneratedMSBuildEditorConfig.editorconfig
+/home/user/nebula_gaming/emu/tests/dotnet/app/obj/Release/net10.0/win-x64/app.AssemblyInfoInputs.cache
+/home/user/nebula_gaming/emu/tests/dotnet/app/obj/Release/net10.0/win-x64/app.AssemblyInfo.cs
+/home/user/nebula_gaming/emu/tests/dotnet/app/obj/Release/net10.0/win-x64/app.csproj.CoreCompileInputs.cache
+/home/user/nebula_gaming/emu/tests/dotnet/app/obj/Release/net10.0/win-x64/app.sourcelink.json
+/home/user/nebula_gaming/emu/tests/dotnet/app/obj/Release/net10.0/win-x64/nebula-dotnet-test.dll
+/home/user/nebula_gaming/emu/tests/dotnet/app/obj/Release/net10.0/win-x64/refint/nebula-dotnet-test.dll
+/home/user/nebula_gaming/emu/tests/dotnet/app/obj/Release/net10.0/win-x64/nebula-dotnet-test.pdb
+/home/user/nebula_gaming/emu/tests/dotnet/app/obj/Release/net10.0/win-x64/app.genruntimeconfig.cache
+/home/user/nebula_gaming/emu/tests/dotnet/app/obj/Release/net10.0/win-x64/ref/nebula-dotnet-test.dll

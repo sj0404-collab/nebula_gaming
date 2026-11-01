@@ -1,0 +1,5 @@
+/var/tmp/dn/fx/fx.exe.config
+/var/tmp/dn/fx/fx.exe
+/home/user/nebula_gaming/emu/tests/dotnet/fx/obj/Release/net48/fx.GeneratedMSBuildEditorConfig.editorconfig
+/home/user/nebula_gaming/emu/tests/dotnet/fx/obj/Release/net48/fx.csproj.CoreCompileInputs.cache
+/home/user/nebula_gaming/emu/tests/dotnet/fx/obj/Release/net48/fx.exe

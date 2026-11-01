@@ -130,17 +130,22 @@ static int pe_tls_register(Win32 *w, u64 raw_start, u64 raw_end, u32 zero, u64 i
 static int pe_map(Win32 *w, const u8 *bytes, size_t len, const char *name, int want_dll, PeHdr *hp, u64 *pbase, u64 *psize) {
   PeHdr h; int rc = pe_parse(&h, bytes, len);
   if (rc) { w32_report(w, "%s: not a PE file (code %d)", name, rc); return -1; }
-  if (h.machine != 0x8664) { w32_report(w, "%s: unsupported machine 0x%x (only x86-64 / PE32+ is emulated)", name, h.machine); return -2; }
-  if (h.magic != 0x20b) { w32_report(w, "%s: not PE32+", name); return -2; }
+  /* managed (.NET) images are mapped as data for the CLR, which loads them through LoadLibraryExW and reads the metadata from
+     the mapped image: x64 PE32+ assemblies and AnyCPU (x86 PE32, IL-only) assemblies; their entry stub is never executed */
+  int managed = h.dd[14][1] != 0, il_only = 0;
+  if (managed) { const u8 *ch = pe_rva(&h, h.dd[14][0], 24); if (ch) il_only = le32(ch + 16) & 1; }
+  if (h.machine != 0x8664 && !(managed && il_only && h.machine == 0x14c)) { w32_report(w, "%s: unsupported machine 0x%x (only x86-64 / PE32+ is emulated)", name, h.machine); return -2; }
+  if (h.magic != 0x20b && !(managed && il_only && h.magic == 0x10b)) { w32_report(w, "%s: not PE32+", name); return -2; }
   if (!want_dll && (h.chars & 0x2000)) { w32_report(w, "file is a DLL, not an executable"); return -3; }
-  if (want_dll && !(h.chars & 0x2000)) { w32_report(w, "%s: not a DLL", name); return -3; }
-  if (h.dd[14][1]) { w32_report(w, "%s: .NET / CLR image — needs the .NET runtime, not supported", name); return -4; }
+  if (want_dll && !(h.chars & 0x2000) && !managed) { w32_report(w, "%s: not a DLL", name); return -3; }
+  if (managed && !want_dll) { w32_report(w, "%s: .NET assembly — start it through the .NET runtime (dotnet.exe)", name); return -4; }
   u64 base = h.image_base; u64 size = (h.size_image + 0xffff) & ~0xffffull;
   /* collide with our fixed regions or with something already mapped? relocate */
   int collide = (base < G_SHIM_BASE + G_SHIM_SIZE && base + size > G_SHIM_BASE) || (base < G_STACK_BASE + G_STACK_SIZE && base + size > G_STACK_BASE) || (base < G_HEAP_BASE + 0x40000000ull && base + size > G_HEAP_BASE);
   if (!collide) for (u64 a = base; a < base + size; a += 0x10000) if (mem_region(w->mem, a)) { collide = 1; break; }
+  if (managed && want_dll) collide = 1;
   if (base == 0 || collide) {
-    if (!h.dd[5][1] && !(h.dllchars & 0x40)) { w32_report(w, "%s: image base 0x%llx collides and the file has no relocations", name, (unsigned long long)base); return -5; }
+    if (!h.dd[5][1] && !(h.dllchars & 0x40) && !managed) { w32_report(w, "%s: image base 0x%llx collides and the file has no relocations", name, (unsigned long long)base); return -5; }
     if (!want_dll) { base = 0x0000000140000000ull; if (base < G_HEAP_BASE + 0x40000000ull) base = 0x0000000180000000ull; }
     else { if (!w->dll_next) w->dll_next = 0x0000000190000000ull; base = w->dll_next; w->dll_next += size + 0x10000; }
   }
@@ -173,11 +178,12 @@ static int pe_map(Win32 *w, const u8 *bytes, size_t len, const char *name, int w
     if (w->nmods >= MAX_MODULES) { w32_report(w, "%s: too many DLLs (max %d)", name, MAX_MODULES); return -7; }
     GuestModule *m = &w->mods[w->nmods++]; e_memset(m, 0, sizeof *m);
     const char *bn = name; for (const char *p = name; *p; p++) if (*p == '\\' || *p == '/') bn = p + 1;
-    e_snprintf(m->name, sizeof m->name, "%s", bn); m->base = base; m->size = size; m->entry = h.entry ? base + h.entry : 0; m->exp_rva = h.dd[0][0]; m->exp_size = h.dd[0][1]; m->pdata_rva = h.dd[3][0]; m->pdata_size = h.dd[3][1];
+    e_snprintf(m->name, sizeof m->name, "%s", bn); m->base = base; m->size = size; m->entry = h.entry && !managed ? base + h.entry : 0; m->exp_rva = h.dd[0][0]; m->exp_size = h.dd[0][1]; m->pdata_rva = h.dd[3][0]; m->pdata_size = h.dd[3][1];
+    if (managed) m->attached = 1;   /* nothing to run: the CLR takes it from here */
   }
-  /* imports → shim slots or exports of other loaded DLLs */
+  /* imports → shim slots or exports of other loaded DLLs (a pure managed image only imports mscoree!_CorDllMain for its stub) */
   LoadCtx lc = { w, img, base, 0 };
-  pe_walk_imports(&h, load_import, &lc);
+  if (!managed) pe_walk_imports(&h, load_import, &lc);
   *hp = h; *pbase = base; *psize = size; return 0;
 }
 int pe_load_dll(Win32 *w, const u8 *bytes, size_t len, const char *name) {
@@ -226,7 +232,8 @@ int pe_inspect(const u8 *bytes, size_t len, char *out, size_t out_sz) {
   if (rc) { ins_put(&x, "{\"ok\":false,\"error\":\"not a PE executable (code %d)\"}", rc); return -1; }
   const char *arch = h.machine == 0x8664 ? "x86-64" : h.machine == 0x14c ? "x86 (32-bit)" : h.machine == 0xaa64 ? "ARM64" : h.machine == 0x1c0 ? "ARM" : "unknown";
   const char *sub = h.subsystem == 2 ? "GUI" : h.subsystem == 3 ? "console" : "other";
-  int is_dll = !!(h.chars & 0x2000), is_clr = !!h.dd[14][1];
+  int is_dll = !!(h.chars & 0x2000), is_clr = !!h.dd[14][1], il_only = 0;
+  if (is_clr) { const u8 *ch = pe_rva(&h, h.dd[14][0], 24); if (ch) il_only = le32(ch + 16) & 1; }
   ins_put(&x, "{\"ok\":true,\"arch\":\"%s\",\"machine\":%u,\"pe32plus\":%s,\"subsystem\":\"%s\",\"dll\":%s,\"clr\":%s,\"imageBase\":\"0x%llx\",\"sizeOfImage\":%u,\"entry\":\"0x%x\",\"sections\":%u,\"relocs\":%s,\"tls\":%s,\"exceptions\":%s,\"resources\":%u,",
     arch, h.machine, h.magic == 0x20b ? "true" : "false", sub, is_dll ? "true" : "false", is_clr ? "true" : "false", (unsigned long long)h.image_base, h.size_image, h.entry, h.nsec,
     h.dd[5][1] ? "true" : "false", h.dd[9][1] ? "true" : "false", h.dd[3][1] ? "true" : "false", h.dd[2][1]);
@@ -241,9 +248,11 @@ int pe_inspect(const u8 *bytes, size_t len, char *out, size_t out_sz) {
   for (int i = 0; i < x.ndll; i++) ins_put(&x, "%s\"%s\"", i ? "," : "", x.dlls[i]);
   /* verdict */
   const char *verdict; const char *why;
-  if (h.machine != 0x8664) { verdict = "unsupported"; why = "only x86-64 (PE32+) code is emulated; 32-bit/ARM binaries are rejected"; }
+  if (is_clr && (h.machine == 0x8664 || il_only) && is_dll && h.subsystem != 3 && h.subsystem != 2) { verdict = "partial"; why = ".NET library (not an application) — usable by .NET programs; it has no entry point to run"; }
+  else if (is_clr && (h.machine == 0x8664 || il_only)) { verdict = "likely"; why = ".NET assembly — runs on the official .NET runtime (the .NET pack, installed on demand); classic .NET Framework console apps run on it in compatibility mode"; }
+  else if (is_clr) { verdict = "unsupported"; why = "mixed-mode .NET image (native + managed) — not supported"; }
+  else if (h.machine != 0x8664) { verdict = "unsupported"; why = "only x86-64 (PE32+) code is emulated; 32-bit/ARM binaries are rejected"; }
   else if (is_dll) { verdict = "unsupported"; why = "DLL, not an executable"; }
-  else if (is_clr) { verdict = "unsupported"; why = ".NET executable — needs the CLR"; }
   else {
     int heavy = 0, d3d11 = 0; for (int i = 0; i < x.ndll; i++) { const char *d = x.dlls[i];
       if (!e_stricmp(d, "d3d11.dll") || !e_stricmp(d, "dxgi.dll")) { d3d11 = 1; continue; }   /* Direct3D 11 has a (partial) WebGL2 translation layer */
