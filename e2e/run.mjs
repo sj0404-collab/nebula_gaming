@@ -67,12 +67,14 @@ const windowsCount = () => page.locator('[data-window]').count();
 const ICON = { 'This PC': 'pc', 'Recycle Bin': 'recycle', 'Nebula Strike': 'game', 'Steam': 'steam', 'Epic Games': 'epic', 'Command Prompt': 'terminal', 'opencode': 'opencode', 'Microsoft Edge': 'edge', 'x64 Runner': 'x64' };
 const iconOf = (p, label) => p.locator(`[data-desktop-icon="${ICON[label]}"]`);
 const openFromDesktop = async (label) => { await iconOf(page, label).dblclick(); await sleep(300); };
+// close the TOPMOST window first through a DOM click: a forced pointer click on the first window's Close button lands on
+// whatever window overlaps it (the Command Prompt under a cascaded x64 Runner in CI), closing nothing 20 times in a row
 const closeAll = async () => {
   for (let i = 0; i < 20; i++) {
-    const b = page.locator('[aria-label="Close"]').first();
-    if (!(await b.count())) break;
-    await b.click({ force: true }); await sleep(120);
+    const n = await page.evaluate(() => { const b = document.querySelectorAll('[aria-label="Close"]'); if (!b.length) return 0; b[b.length - 1].click(); return b.length; });
+    if (!n) break; await sleep(120);
   }
+  expect((await page.locator('[data-window]').count()) === 0, 'closeAll left windows open');
 };
 
 console.log(`\nNebula OS e2e → ${url}\n`);

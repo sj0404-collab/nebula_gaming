@@ -244,7 +244,7 @@ static void unwind_step(Cpu *c, int ci) {
     u32 fl = rd32(c, rec + 4); if (at_target) fl |= EXC_TARGET_UNWIND; else fl &= ~EXC_TARGET_UNWIND; wr32(c, rec + 4, fl);
     uctx_write(c, uctx, &x); prev.r[RAX] = retval; uctx_write(c, pctx, &prev);
     w->cont[ci].idx = at_target;
-    if (handler) { dc_write(c, dc, prev.rip, base, fe, est, target_ip, pctx, handler, hd); w->cont[ci].data[7] = est; guest_call(c, handler, rec, est, pctx, dc); return; }
+    if (handler) { dc_write(c, dc, prev.rip, base, fe, est, target_ip, pctx, handler, hd); w->cont[ci].data[7] = est; seh_log("[x64]   unwind frame pc 0x%llx est 0x%llx handler 0x%llx%s\n", (unsigned long long)prev.rip, (unsigned long long)est, (unsigned long long)handler, at_target ? " (target)" : ""); guest_call(c, handler, rec, est, pctx, dc); return; }
     if (at_target) break;
   }
   /* reached the target: resume there with the (possibly handler-modified) context of that frame */
@@ -254,12 +254,13 @@ static void unwind_step(Cpu *c, int ci) {
 }
 static void start_unwind(Cpu *c, u64 target, u64 target_ip, u64 rec, u64 retval, u64 from_ctx) {
   Win32 *w = W;
+  u64 caller_rsp = c->r[RSP];   /* the walk starts in the caller's frame: capture its RSP BEFORE the scratch area lowers it (a GS cookie check in the first unwound frame reads garbage otherwise) */
   u64 sc = seh_scratch(c, (rec ? 0 : EXREC_SIZE) + 2 * CTX_SIZE + DC_SIZE + 64);
   u64 uctx = (sc + 63) & ~63ull, pctx = uctx + CTX_SIZE, dc = pctx + CTX_SIZE, nrec = dc + DC_SIZE;
   if (!rec) { u8 *rp = mem_ptr(c->mem, nrec, EXREC_SIZE, 1); if (rp) e_memset(rp, 0, EXREC_SIZE); wr32(c, nrec, STATUS_UNWIND); wr64(c, nrec + 16, from_ctx ? rd64(c, from_ctx + 0xf8) : c->rip); rec = nrec; }
   u32 fl = rd32(c, rec + 4) | EXC_UNWINDING; if (!target) fl |= EXC_EXIT_UNWIND; wr32(c, rec + 4, fl);
   if (from_ctx) { u8 *s = mem_ptr(c->mem, from_ctx, CTX_SIZE, 0); u8 *d = mem_ptr(c->mem, uctx, CTX_SIZE, 1); if (s && d) e_memcpy(d, s, CTX_SIZE); }
-  else ctx_capture(c, uctx);
+  else { ctx_capture(c, uctx); wr64(c, uctx + 0x98, caller_rsp); }
   int ci = cont_push(c, CONT_UNWIND); if (ci < 0) return;
   w->cont[ci].data[0] = target; w->cont[ci].data[1] = target_ip; w->cont[ci].data[2] = rec; w->cont[ci].data[3] = retval; w->cont[ci].data[4] = uctx; w->cont[ci].data[5] = pctx; w->cont[ci].data[6] = dc;
   seh_log("[x64] RtlUnwindEx target frame 0x%llx ip 0x%llx\n", (unsigned long long)target, (unsigned long long)target_ip);

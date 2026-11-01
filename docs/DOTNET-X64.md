@@ -50,6 +50,10 @@ Environment defaults set by the emulator for the runtime: `DOTNET_EnableWriteXor
 * **Misc APIs**: `GetSystemTimes`, `QueryUnbiasedInterruptTime(Precise)`, wide ctype (`isw*`), `GetCPInfoExW`,
   `WinHttpGetIEProxyConfigForCurrentUser` (no proxy), `version.dll` stubs, `Ro*`/WinRT and `IErrorInfo` stubs,
   `GetModuleFileName`-relative DLL search for `clrjit.dll` (loaded by bare name from CoreCLR's directory).
+* **Crypto (emu/x64/win32_bcrypt.inc)**: CNG hashing — `BCryptOpenAlgorithmProvider`/`CreateHash`/`HashData`/
+  `FinishHash`/`DuplicateHash`/`BCryptHash` for MD5, SHA-1/256/384/512 and their HMACs (real + Windows 10 pseudo
+  handles, reusable hashes) and `BCryptGenRandom`. `System.Security.Cryptography` hashing P/Invokes these; Roslyn
+  fails fast without them (it hashes every source file and reference). No AES/RSA/ECDSA yet.
 * **Networking**: `HttpClient` = `SocketsHttpHandler` on overlapped Winsock + I/O completion ports (`WSASend`, `WSARecv`
   with the data buffer captured at call time — the `WSABUF` array itself is a temporary in .NET — `ConnectEx`,
   `GetQueuedCompletionStatusEx`). HTTP only: SChannel/TLS is not implemented, so `https://` fails honestly.
@@ -64,10 +68,17 @@ Environment defaults set by the emulator for the runtime: `DOTNET_EnableWriteXor
 | D4 `http` | `HttpClient.GetStringAsync("http://example.com/")` → `http 577 bytes` (skipped without network) |
 | D5 `nebula-dotnet-test.dll` opened directly | redirected to `dotnet.exe exec`, exit 3 |
 | D6 `fx.exe a b` — a **.NET Framework 4.8** console exe (AnyCPU, IL only, 5 KB) | `Hello from a .NET Framework 4.8 exe on 10.0.14 …`, `linq: b,a`, `caught: fx boom`, `file: written by net48 app`, `args: a b`, exit 5 — 2.2 s |
+| D8 **Roslyn**: `dotnet.exe csc.dll @hello.rsp` (the real C# compiler, IL-only `csc.dll` from the official `Microsoft.Net.Compilers.Toolset 5.0.0` NuGet package, 25 MB of managed code) | compiles `hello.cs` → `hello.dll` (4.6 KB) with no diagnostics, exit 0 — **~13 G instructions, 325 s** at 40 MIPS in the sandbox (faster on a desktop); the compiled program then runs: `hello from csc inside the emulator: 1,4,9,16,25`, exit 42 |
 | D7 without the pack | `fx.exe is a .NET assembly: install the .NET runtime pack …` |
 
 Test sources: `emu/tests/dotnet/app` (net10.0, `dotnet publish -r win-x64 --self-contained false`) and
 `emu/tests/dotnet/fx` (net48). The built binaries are bundled as x64 Runner samples (`/x64/samples/dotnet/`).
+
+Bugs found by Roslyn (fixed in v1.17.2): `RtlUnwindEx` captured the caller's context *after* reserving its scratch area
+on the stack, so the first unwound frame saw a wrong RSP and the static CRT's `__GSHandlerCheck` reported a cookie
+mismatch (`__fastfail` → exit 0xC0000409) on the first C++ `catch` inside CoreCLR; `UnmapViewOfFile` of a *read-only*
+view marked the file dirty, and the write-back truncated the very host file the data was mmapped from
+(`hello.runtimeconfig.json` became empty) — write-backs now go through a temp file + rename and only for changed data.
 
 ## Limits (honest)
 

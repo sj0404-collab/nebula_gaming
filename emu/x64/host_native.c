@@ -52,7 +52,11 @@ int host_fs_op(int op, const char *a, const char *b, u8 **data, u64 *size) {
   char ha[2048], hb[2048];
   if (op == 6) { if (data && *data && size) munmap(*data, (size_t)*size); return 1; }
   if (!a || !rw_map(a, ha, sizeof ha)) return 0;
-  if (op == 1) { rw_mkdirs(ha); int fd = open(ha, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (fd < 0) return 0; u64 off = 0; while (off < *size) { ssize_t w = write(fd, *data + off, (size_t)(*size - off)); if (w <= 0) { close(fd); return 0; } off += (u64)w; } close(fd); return 1; }
+  if (op == 1) {   /* write to a temp file and rename: the node data may be an mmap of the destination itself (op 2), which O_TRUNC would tear away under it */
+    rw_mkdirs(ha); size_t hl = strlen(ha); if (hl + 12 >= sizeof hb) return 0; memcpy(hb, ha, hl); memcpy(hb + hl, ".x64tmp", 8);
+    int fd = open(hb, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (fd < 0) return 0; u64 off = 0;
+    while (off < *size) { ssize_t w = write(fd, *data + off, (size_t)(*size - off)); if (w <= 0) { close(fd); unlink(hb); return 0; } off += (u64)w; }
+    close(fd); if (rename(hb, ha)) { unlink(hb); return 0; } return 1; }
   if (op == 2) { int fd = open(ha, O_RDONLY); if (fd < 0) return 0; struct stat st; if (fstat(fd, &st) || !S_ISREG(st.st_mode)) { close(fd); return 0; } if (!data || !size) { close(fd); return 1; }   /* existence probe */
     size_t n = (size_t)st.st_size; void *p = n ? mmap(0, n, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0) : 0; close(fd); if (n && p == MAP_FAILED) return 0; *data = (u8 *)p; *size = n; return 1; }
   if (op == 3) { rw_mkdirs(ha); return mkdir(ha, 0755) == 0 || errno == EEXIST; }

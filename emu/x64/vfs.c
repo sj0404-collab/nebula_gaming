@@ -273,7 +273,8 @@ u8 *vfs_map_data(int fd, u64 *size) {
   if (m->node >= 0) { VNode *v = &g_nodes[m->node]; node_load(m->node); if (!grow(v, m->size)) return 0; if (v->size < m->size) { e_memset(v->data + v->size, 0, (size_t)(m->size - v->size)); } *size = m->size; return v->data; }
   *size = m->size; return m->data;
 }
-int vfs_map_write_back(int fd, const u8 *src, u64 n) { u64 sz; u8 *d = vfs_map_data(fd, &sz); if (!d) return 0; if (n > sz) n = sz; e_memcpy(d, src, (size_t)n); FdEnt *f = vf(fd); if (f && g_maps[f->obj].node >= 0) { VNode *v = &g_nodes[g_maps[f->obj].node]; if (v->size < n) v->size = n; v->written = 1; } return 1; }
+int vfs_map_write_back(int fd, const u8 *src, u64 n) { u64 sz; u8 *d = vfs_map_data(fd, &sz); if (!d) return 0; if (n > sz) n = sz; if (!e_memcmp(d, src, (size_t)n)) return 1;   /* read-only views (and unchanged ones) must not dirty the node: a write-back would truncate the very host file the data is mapped from */
+  e_memcpy(d, src, (size_t)n); FdEnt *f = vf(fd); if (f && g_maps[f->obj].node >= 0) { VNode *v = &g_nodes[g_maps[f->obj].node]; if (v->size < n) v->size = n; v->written = 1; } return 1; }
 /* process handles */
 int vfs_proc_handle(int pid) { int fd = ent_new(FD_PROC); if (fd < 0) return -1; vf(fd)->obj = pid; proc_handle_ref(pid, 1); return fd; }
 int vfs_fd_pid(int fd) { FdEnt *f = vf(fd); return f && f->kind == FD_PROC ? f->obj : -1; }

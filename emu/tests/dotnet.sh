@@ -2,10 +2,11 @@
 # .NET capability tests for the Nebula x64 emulator: the REAL Microsoft .NET 10 runtime (CoreCLR + RyuJIT, win-x64)
 # runs managed programs on the emulator.  Needs the .NET pack unpacked (emu/tools/dotnet-pack.sh <out> <plaindir>) and
 # the test apps built with the .NET SDK (emu/tests/dotnet/app → net10.0, emu/tests/dotnet/fx → net48).
-# usage: emu/tests/dotnet.sh [packdir=/var/tmp/dn/pack] [appdir=/var/tmp/dn/app] [fxdir=/var/tmp/dn/fx]
+# usage: emu/tests/dotnet.sh [packdir=/var/tmp/dn/pack] [appdir=/var/tmp/dn/app] [fxdir=/var/tmp/dn/fx] [cscdir=/var/tmp/dn/csc/tasks/netcore/bincore]
+# cscdir = tasks/netcore/bincore of the Microsoft.Net.Compilers.Toolset NuGet package (the IL-only Roslyn csc.dll); D8 is skipped without it.
 set -e
 cd "$(dirname "$0")/.."
-PACK=${1:-/var/tmp/dn/pack}; APP=${2:-/var/tmp/dn/app}; FX=${3:-/var/tmp/dn/fx}
+PACK=${1:-/var/tmp/dn/pack}; APP=${2:-/var/tmp/dn/app}; FX=${3:-/var/tmp/dn/fx}; CSC=${4:-/var/tmp/dn/csc/tasks/netcore/bincore}
 [ -f "$PACK/dotnet.exe" ] || { echo "dotnet.sh: no dotnet.exe in $PACK (run emu/tools/dotnet-pack.sh public/x64/dotnet $PACK)"; exit 2; }
 [ -f "$APP/nebula-dotnet-test.dll" ] || { echo "dotnet.sh: no nebula-dotnet-test.dll in $APP (dotnet publish emu/tests/dotnet/app -c Release -o $APP)"; exit 2; }
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
@@ -61,6 +62,25 @@ if [ -f "$FX/fx.exe" ]; then
   check "args"        "args: a b" "$out"
   code "$rc" 5
 else echo "[D6] fx.exe: skip (not built)"; fi
+if [ -f "$CSC/csc.dll" ]; then
+  echo "[D8] Roslyn: the real C# compiler (csc.dll, Microsoft.Net.Compilers.Toolset) compiles a program on the emulator, then the result runs (BCrypt hashing, C++ EH inside CoreCLR, ~13 G instructions)"
+  FW=$(ls -d "$PACK"/shared/Microsoft.NETCore.App/*/ | head -1); FW=${FW%/}; FWV=${FW##*/}
+  printf 'using System;\nusing System.Linq;\nclass P { static int Main(string[] a) { Console.WriteLine("hello from csc inside the emulator: " + string.Join(",", Enumerable.Range(1,5).Select(x => x*x))); return 42; } }\n' > "$TMP/hello.cs"
+  { printf '/nologo\n/nostdlib+\n/target:exe\n/out:C:\\tmp\\hello.dll\n'
+    for r in System.Runtime System.Private.CoreLib System.Console System.Linq System.Collections; do printf '/r:"C:\\Program Files\\dotnet\\shared\\Microsoft.NETCore.App\\%s\\%s.dll"\n' "$FWV" "$r"; done
+    printf 'C:\\tmp\\hello.cs\n'; } > "$TMP/csc.rsp"
+  rc=0; out=$(timeout 1500 ./x64/x64run --quiet --no-stdin --max-ms 1400000 --env DOTNET_gcServer=0 --mount "$PACK=C:\\Program Files\\dotnet" --mount "$CSC=C:\\csc" --mount-rw "$TMP=C:\\tmp" "$PACK/dotnet.exe" 'C:\csc\csc.dll' '@C:\tmp\csc.rsp' 2>&1) || rc=$?
+  [ -z "$out" ] && echo "  ok   csc: no diagnostics" || { echo "  FAIL csc output:"; printf '%s\n' "$out" | head -20; fail=1; }
+  code "$rc" 0
+  if [ -f "$TMP/hello.dll" ]; then
+    echo "  ok   hello.dll written ($(wc -c < "$TMP/hello.dll") bytes)"
+    cp "$APP/nebula-dotnet-test.runtimeconfig.json" "$TMP/hello.runtimeconfig.json"
+    run "$PACK/dotnet.exe" 'C:\tmp\hello.dll'
+    check "compiled program runs" "hello from csc inside the emulator: 1,4,9,16,25" "$out"
+    code "$rc" 42
+    [ "$(wc -c < "$TMP/hello.runtimeconfig.json")" -gt 0 ] && echo "  ok   read-only mapping of a write-back file left intact" || { echo "  FAIL hello.runtimeconfig.json was truncated by the read-only mapping write-back"; fail=1; }
+  else echo "  FAIL hello.dll not produced"; fail=1; fi
+else echo "[D8] csc: skip (no csc.dll in $CSC)"; fi
 echo "[D7] honest rejection without the pack"
 rc=0; out=$(timeout 60 ./x64/x64run --quiet --no-stdin --mount "$APP=C:\\app" "$APP/nebula-dotnet-test.dll" gc 2>&1) || rc=$?
 check "message"     "is a .NET assembly: install the .NET runtime pack" "$out"

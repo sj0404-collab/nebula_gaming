@@ -139,6 +139,7 @@ static void s_RoInitialize(Cpu *c) { RET(0); }
 static void s_RoGetActivationFactory(Cpu *c) { if (ARG(2)) wr64(c, ARG(2), 0); RET(0x80040154); }   /* REGDB_E_CLASSNOTREG */
 static void s_LoadStringW(Cpu *c) { if (ARG(3)) wr16(c, ARG(2), 0); RET(0); }
 
+static void s_GetThreadIOPendingFlag(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), 0); RET(1); }   /* no outstanding I/O requests on this thread */
 #define CLR_SHIMS \
   S(wcstoul), S(wcstol), S(wcstoll), S(wcstoull), SA("_wcstoui64", wcstoull), SA("_wcstoi64", wcstoll), SA("_wtoi", wtoi), SA("_wtol", wtoi), SA("_wtoi64", wtoi64), S(wcstod), S(wcsftime), SA("_wcserror_s", wcserror_s), \
   SA("_register_thread_local_exe_atexit_callback", register_thread_local_exe_atexit_callback), SA("__stdio_common_vsnwprintf_s", stdio_common_vsnwprintf_s), \
@@ -154,4 +155,4 @@ static void s_LoadStringW(Cpu *c) { if (ARG(3)) wr16(c, ARG(2), 0); RET(0); }
   S(WinHttpGetIEProxyConfigForCurrentUser), S(WinHttpGetDefaultProxyConfiguration), S(WinHttpOpen), S(WinHttpGetProxyForUrl), S(WinHttpCloseHandle), SA("WinHttpConnect", WinHttpFail), SA("WinHttpOpenRequest", WinHttpFail), SA("WinHttpSendRequest", WinHttpFail), SA("WinHttpReceiveResponse", WinHttpFail), SA("WinHttpSetOption", ret1), SA("WinHttpQueryOption", WinHttpFail), SA("WinHttpSetStatusCallback", ret0), SA("WinHttpSetTimeouts", ret1), SA("WinHttpQueryHeaders", WinHttpFail), SA("WinHttpQueryDataAvailable", WinHttpFail), SA("WinHttpReadData", WinHttpFail), SA("WinHttpWriteData", WinHttpFail), SA("WinHttpAddRequestHeaders", WinHttpFail), SA("WinHttpCrackUrl", WinHttpFail), SA("WinHttpCreateUrl", WinHttpFail), SA("WinHttpResetAutoProxy", ret0), SA("WinHttpGetProxyForUrlEx", WinHttpFail), SA("WinHttpCreateProxyResolver", WinHttpFail), SA("WinHttpFreeProxyResult", ret0), \
   S(GetFileVersionInfoSizeExW), SA("GetFileVersionInfoSizeW", GetFileVersionInfoSizeExW), SA("GetFileVersionInfoExW", ret0), SA("GetFileVersionInfoW", ret0), SA("VerQueryValueW", ret0), \
   S(RoInitialize), SA("RoUninitialize", ret0), S(RoGetActivationFactory), SA("RoOriginateLanguageException", ret0), SA("RoOriginateError", ret0), SA("RoOriginateErrorW", ret0), SA("SetRestrictedErrorInfo", ret0), SA("GetRestrictedErrorInfo", ret1), SA("RoGetErrorReportingFlags", ret0), SA("RoSetErrorReportingFlags", ret0), SA("RoReportUnhandledError", ret0), \
-  S(LoadStringW),
+  S(LoadStringW), S(GetThreadIOPendingFlag),

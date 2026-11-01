@@ -39,6 +39,10 @@ jobs:
           dotnet publish emu/tests/dotnet/app -c Release -o /tmp/dn/app
           dotnet build emu/tests/dotnet/fx -c Release -o /tmp/dn/fx
           mkdir -p dn-tests && cp -r /tmp/dn/app /tmp/dn/fx dn-tests/
+      - name: Roslyn csc.dll (IL-only, from the official Microsoft.Net.Compilers.Toolset 5.0.0 NuGet package) for the compiler test
+        run: |
+          curl -fsSL -o /tmp/roslyn.nupkg https://api.nuget.org/v3-flatcontainer/microsoft.net.compilers.toolset/5.0.0/microsoft.net.compilers.toolset.5.0.0.nupkg
+          mkdir -p dn-tests/csc && (cd dn-tests/csc && unzip -q -o /tmp/roslyn.nupkg 'tasks/netcore/bincore/*') && ls dn-tests/csc/tasks/netcore/bincore | head -5
       - uses: actions/upload-artifact@v4
         with:
           name: dotnet-pack
@@ -73,11 +77,11 @@ jobs:
           if ! git diff --quiet -- emu/cmd/cmd.exe; then echo "::warning::cmd.exe built in CI differs from the committed one (zig drift?) — CI build is tested"; cp emu/cmd/cmd.exe public/x64/apps/cmd.exe; fi
       - name: Native capability tests (hello, bench, busybox-w32 incl. virtual disk + stdin, plink, NebulaStrike, cmd.exe/system()/subprocess, real msvcp140 via runtime pack, rejections)
         run: ./emu/tests/run.sh
-      - name: .NET tests (REAL CoreCLR 10 + RyuJIT on the emulator — LINQ/exceptions/JSON/reflection/Regex/GC, apphost, GC with spinning + pool threads, HttpClient, direct .dll start, net48 exe, rejection without the pack)
+      - name: .NET tests (REAL CoreCLR 10 + RyuJIT on the emulator — LINQ/exceptions/JSON/reflection/Regex/GC, apphost, GC with spinning + pool threads, HttpClient, direct .dll start, net48 exe, Roslyn csc compiles + runs a program, rejection without the pack)
         run: |
           mkdir -p /tmp/dn/pack && (cd public/x64/dotnet && find . -name '*.gz' -print0 | while IFS= read -r -d '' f; do mkdir -p "/tmp/dn/pack/$(dirname "$f")"; gunzip -c "$f" > "/tmp/dn/pack/${f%.gz}"; done)
           ls -la /tmp/dn/pack /tmp/dn/app | head -20
-          ./emu/tests/dotnet.sh /tmp/dn/pack /tmp/dn/app /tmp/dn/fx
+          ./emu/tests/dotnet.sh /tmp/dn/pack /tmp/dn/app /tmp/dn/fx /tmp/dn/csc/tasks/netcore/bincore
       - name: wasm64 module is bit-identical to the committed public/x64/nebula_x64.wasm
         run: |
           git status --porcelain public/x64/nebula_x64.wasm

@@ -237,7 +237,7 @@ int w32_dispatch(Cpu *c, u64 addr) {
     return RUN_FAULT;
   }
   c->r[RAX] = 0;
-  if (w->api_trace) e_log("[api] t%d %s(%llx, %llx, %llx, %llx)\n", w->th[w->cur_th].tid, s->name, (unsigned long long)c->r[RCX], (unsigned long long)c->r[RDX], (unsigned long long)c->r[R8], (unsigned long long)c->r[R9]);
+  if (w->api_trace) e_log("[api] t%d %s(%llx, %llx, %llx, %llx) @%llx\n", w->th[w->cur_th].tid, s->name, (unsigned long long)c->r[RCX], (unsigned long long)c->r[RDX], (unsigned long long)c->r[R8], (unsigned long long)c->r[R9], (unsigned long long)ret);
   s->fn(c);
   if (w->api_trace) e_log("[api]   -> %llx\n", (unsigned long long)c->r[RAX]);
   return c->status;
@@ -1175,6 +1175,7 @@ static void s_dsign(Cpu *c) { RET(c->x[0].f64[0] < 0 ? 1 : 0); }
 #include "win32_rt.inc"
 #include "win32_math.inc"
 #include "win32_clr.inc"
+#include "win32_bcrypt.inc"
 /* ---------- table ---------- */
 #define S(n) { "", #n, s_##n }
 #define SA(api, fn) { "", api, s_##fn }
@@ -1245,6 +1246,7 @@ static const ShimDef shims[] = {
   S(memcpy), SA("memmove", memcpy), S(memset), S(memcmp), S(memchr), S(qsort), SA("qsort_s", qsort), S(bsearch), SA("_setjmp", setjmp), SA("_setjmpex", setjmp), S(longjmp), S(div), SA("ldiv", div), S(abs), S(labs), SA("_abs64", llabs), S(llabs),
   S(sin), S(cos), S(tan), S(exp), S(log), S(pow), S(atan2), S(asin), S(acos), S(atan), S(sinh), S(cosh), S(tanh), S(log10), S(log2), S(cbrt), S(sqrt), S(floor), S(ceil), S(fabs), S(fmod), S(round), S(trunc), S(ldexp), S(frexp), S(modf), S(hypot), SA("_hypot", hypot), S(sinf), S(cosf), S(tanf), S(expf), S(logf), S(powf), S(atan2f), S(sqrtf), S(floorf), S(ceilf), S(fabsf), S(fmodf), S(roundf), SA("_dclass", dclass), SA("_fdclass", fdclass), SA("_dsign", dsign), SA("_fdsign", dsign), SA("_dtest", dclass), SA("_fdtest", fdclass), SA("_finite", ret1), SA("_isnan", ret0), SA("_copysign", copysign), S(copysign), S(exp2), SA("nearbyint", round), SA("rint", round), S(lround), SA("llround", lround), S(fmin), S(fmax),
   SA("__CxxFrameHandler4", CxxFrameHandler4), SA("__std_exception_copy", ret0), SA("__std_exception_destroy", ret0), SA("__std_type_info_destroy_list", ret0), SA("__current_exception", ret0), SA("__current_exception_context", ret0), SA("_except_handler4_common", ret1), SA("__intrinsic_setjmp", setjmp), SA("__report_gsfailure", abort), SA("_purecall", abort), SA("terminate", abort), SA("__p__mbctype", pctype_func), SA("_ismbblead", ret0), SA("__mb_cur_max", ret1),
+  BCRYPT_SHIMS
   CLR_SHIMS   /* last: these override earlier definitions (CoreCLR needs the real semantics) */
 };
 /* OLEAUT32 exports most of its API by ordinal only */
