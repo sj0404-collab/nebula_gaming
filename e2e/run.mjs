@@ -290,7 +290,16 @@ await test('x64: .NET pack — the OFFICIAL Microsoft .NET Runtime 10 is install
     await page.waitForFunction(() => /could not be installed|runtime pack/.test(document.body.innerText), null, { timeout: 30_000 });
     await closeAll(); return;
   }
-  await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout: 240_000 });
+  try { await page.waitForFunction(() => /^(exited|fault)$/.test(document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') ?? ''), null, { timeout: 240_000 }); }
+  catch (e) { await page.screenshot({ path: resolve(SHOTS, 'x64-dotnet-timeout.png') }); throw e; }
+  finally {   // diagnostics for CI: what the guest printed and what the loader/emulator logged
+    const status = await page.evaluate(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status'));
+    const conTxt = await w.locator('[data-x64-console]').innerText().catch(() => '');
+    await w.locator('[data-x64-tab="report"]').click().catch(() => {});
+    const rep = await w.locator('[data-x64-report]').innerText().catch(() => '');
+    if (status !== 'exited') console.log(`      status=${status} dotnet=${await st()}\n      console: ${JSON.stringify(conTxt.slice(-600))}\n      report: ${JSON.stringify(rep.slice(-1500))}`);
+    await w.locator('[data-x64-tab="console"]').click().catch(() => {});
+  }
   const con = await w.locator('[data-x64-console]').innerText();
   expect((await st()) === 'installed', '.NET pack should be installed after running a managed exe: ' + await st());
   expect(/primes 303/.test(con), 'LINQ primes missing: ' + con.slice(0, 400));
