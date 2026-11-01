@@ -322,13 +322,14 @@ static int fd_of_handle(u64 h) { if (h == 0x11 || h == 0x12) return (int)(h - 0x
 static u64 now_100ns(void) { return (u64)(host_wall_ms() * 10000.0) + 116444736000000000ull; }   /* FILETIME: 100 ns since 1601 */
 static u64 unix_time(void) { return (u64)(host_wall_ms() / 1000.0); }
 static void queue_apc(Win32 *w, u64 fn, u64 a0, u64 a1, u64 a2);
-static void s_RtlNtStatusToDosError(Cpu *c) { u32 st = (u32)ARG(0); u32 e;
-  if ((st & 0xFFFF0000u) == 0x80070000u) { RET(st & 0xFFFFu); return; }   /* NTSTATUS_FROM_WIN32(err): the Win32 code travels in the low 16 bits (libuv SET_REQ_ERROR) */
+static u32 nt_to_dos(u32 st) { u32 e;
+  if ((st & 0xFFFF0000u) == 0x80070000u) return st & 0xFFFFu;   /* NTSTATUS_FROM_WIN32(err): the Win32 code travels in the low 16 bits (libuv SET_REQ_ERROR) */
   switch (st) { case 0: e = 0; break; case 0x103: e = 997; break; case 0xC0000008: e = 6; break; case 0xC000000D: e = 87; break; case 0xC000000F: case 0xC0000034: e = 2; break; case 0xC000003A: e = 3; break;
     case 0xC0000022: case 0xC00000BA: e = 5; break; case 0xC0000011: e = 38; break; case 0xC0000035: e = 183; break; case 0xC000014B: e = 109; break; case 0xC00000B1: e = 232; break; case 0xC00000AD: case 0xC00000AE: e = 231; break;
     case 0xC0000120: e = 995; break; case 0xC0000103: e = 267; break; case 0xC0000005: e = 998; break; case 0xC0000017: e = 8; break; case 0xC0000023: e = 122; break; case 0xC0000004: e = 24; break; case 0xC00000BB: e = 50; break; case 0xC0000043: e = 32; break; case 0xC0000101: e = 145; break; case 0xC0000033: e = 123; break; case 0xC0000039: e = 161; break;
     default: e = (st & 0xC0000000u) == 0xC0000000u ? 31 : 0; }
-  RET(e); }
+  return e; }
+static void s_RtlNtStatusToDosError(Cpu *c) { RET(nt_to_dos((u32)ARG(0))); }
 static int iocp_rw(Cpu *c, int fd, int write, u64 buf, u32 len, u64 bytes_out, u64 ov);   /* win32_iocp.inc */
 static void iocp_handle_closed(int pid, int fd); static void iocp_kobj_closed(int kobj); static int iocp_has_packets(int kobj);
 #include "win32_fs.inc"
@@ -782,7 +783,14 @@ static void s_GetDriveTypeA(Cpu *c) { RET(3); }
 static void s_GetLogicalDrives(Cpu *c) { RET(4); }
 static void s_GetDiskFreeSpaceExA(Cpu *c) { RET(0); }
 static void s_SetHandleCount(Cpu *c) { RET(ARG(0)); }
-static void s_GetOverlappedResult(Cpu *c) { RET(0); }
+/* GetOverlappedResult(h, ov, &bytes, bWait): reads OVERLAPPED.Internal (NTSTATUS) / InternalHigh (bytes); with bWait the thread is
+ * re-scheduled every 2 ms until the parked operation (pipe/file/socket) has been completed by the scheduler's I/O poll */
+static void s_GetOverlappedResult(Cpu *c) { Win32 *w = W; u64 ov = ARG(1); if (!ov) { w->sleeping = 0; w->last_error = 87; RET(0); return; }
+  u64 st = rd64(c, ov);
+  if (st == 0x103) { if (ARG(3)) { w->sleeping = 1; w->sleep_until_ms = host_now_ms() + 2; w->block = BLOCK_SLEEP; retry_and_yield(c, g_cur_slot); return; } w->sleeping = 0; w->last_error = 996; RET(0); return; }
+  w->sleeping = 0; if (ARG(2)) wr32(c, ARG(2), (u32)rd64(c, ov + 8));
+  if ((u32)st == 0 || ((u32)st & 0xC0000000u) != 0xC0000000u) { RET(1); return; }
+  w->last_error = nt_to_dos((u32)st); RET(0); }
 static void s_Beep(Cpu *c) { RET(1); }
 static void s_DebugBreak(Cpu *c) { c->status = RUN_BREAK; }
 /* PROCESS_MEMORY_COUNTERS(_EX): cb @0, PageFaultCount @4, PeakWorkingSetSize @8, WorkingSetSize @16, QuotaPeakPaged @24, QuotaPaged @32, QuotaPeakNonPaged @40,

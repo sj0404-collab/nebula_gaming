@@ -11,25 +11,86 @@
  *  The wasm host has no raw TCP: every host_net_* call fails there with WSAENETDOWN, so programs see "network down" instead of hanging. */
 
 #define SOCK_MAX 256
-typedef struct { int used, refs, host, state, err, nonblock, bound; u8 lip[4]; int lport; } Sock;   /* state: 0 new 1 connecting 2 connected 3 listening 4 failed */
+typedef struct { int used, refs, host, state, err, nonblock, bound; u8 lip[4]; int lport;
+  u8 *rx; u32 rxlen, rxoff, rxcap; int rxeof, rxerr;            /* rx*: host-side read-ahead buffer (see sock_pump) */
+  u8 *tx; u32 txlen, txoff, txcap; int txerr, txshut; u64 tx_total, tx_sent; } Sock;   /* tx*: send queue flushed by the scheduler (see sock_write); state 5 = closed by the guest, draining */   /* state: 0 new 1 connecting 2 connected 3 listening 4 failed */
 static Sock g_socks[SOCK_MAX];
 static int sock_ready_mask(int si);
 #define SPEND_MAX 256
-typedef struct { int used, kind, sock, pid, port, acc; Win32 *w; u64 key, ov, buf; u32 len; } SockOp;   /* kind: 1 zero-read 2 read 3 connect 4 accept */
+typedef struct { int used, kind, sock, pid, port, acc; Win32 *w; u64 key, ov, buf, target; u32 len; } SockOp;   /* kind: 1 zero-read 2 read 3 connect 4 accept 5 send (done when tx_sent >= target) */
 static SockOp g_spend[SPEND_MAX];
 static int g_net_pending;
 static void spend_finish(SockOp *o, u32 status, u32 bytes, u32 err);
+static void sock_destroy(int idx) { Sock *s = &g_socks[idx]; if (s->host >= 0) host_net_close(s->host); if (s->rx) emu_free(s->rx); if (s->tx) emu_free(s->tx); s->rx = s->tx = 0; s->host = -1; s->used = 0; }
 
 void w32_sock_ref(int idx, int delta) {
   if (idx < 0 || idx >= SOCK_MAX || !g_socks[idx].used) return;
   g_socks[idx].refs += delta;
-  if (g_socks[idx].refs <= 0) { if (g_socks[idx].host >= 0) host_net_close(g_socks[idx].host); g_socks[idx].used = 0;
-    for (int k = 0; k < SPEND_MAX; k++) if (g_spend[k].used && g_spend[k].sock == idx) spend_finish(&g_spend[k], 0xC0000120u, 0, 995); }   /* STATUS_CANCELLED / ERROR_OPERATION_ABORTED */
+  if (g_socks[idx].refs <= 0) {
+    for (int k = 0; k < SPEND_MAX; k++) if (g_spend[k].used && g_spend[k].sock == idx) spend_finish(&g_spend[k], 0xC0000120u, 0, 995);   /* STATUS_CANCELLED / ERROR_OPERATION_ABORTED */
+    Sock *s = &g_socks[idx];
+    if (s->host >= 0 && s->state == 2 && !s->txerr && s->txlen > s->txoff) { s->state = 5; return; }   /* unsent bytes: keep the host socket until the scheduler has flushed them */
+    sock_destroy(idx); }
 }
 int w32_net_pending(void) { return g_net_pending; }
 static int sock_new(void) { for (int i = 0; i < SOCK_MAX; i++) if (!g_socks[i].used) { e_memset(&g_socks[i], 0, sizeof(Sock)); g_socks[i].used = 1; g_socks[i].host = -1; return i; } return -1; }
 static int sock_of(Cpu *c, u64 h) { int fd = handle_fd(h); if (fd < 3 || vfs_kind(fd) != FD_SOCK) return -1; int i = vfs_fd_obj(fd); return (i >= 0 && i < SOCK_MAX && g_socks[i].used) ? i : -1; }
 #define SOCK_ARG0(var) int var = sock_of(c, ARG(0)); if (var < 0) { W->last_error = 10038; RET(~0ull); return; }
+/* ---- read-ahead: the emulated program digests network data 50-100x slower than a native one; if the bytes stayed in the kernel
+ * socket buffer the TCP window would close for minutes and servers/proxies drop the connection (npm saw ECONNRESET on big tarballs).
+ * sock_pump() therefore moves everything the host socket has into a per-socket buffer (up to RX_MAX) whenever the scheduler runs,
+ * so the peer always sees an open window; guest reads are served from the buffer first. */
+#define RX_MAX (256u << 20)
+static void sock_pump(Sock *s) {
+  if (s->state != 2 || s->host < 0 || s->rxeof || s->rxerr) return;
+  for (;;) {
+    if (s->rxoff == s->rxlen) s->rxoff = s->rxlen = 0;
+    u32 live = s->rxlen - s->rxoff; if (live >= RX_MAX) return;
+    if (s->rxcap - s->rxlen < 65536) {   /* compact / grow so that at least 64 KB are free */
+      u32 nc = s->rxcap ? s->rxcap : 262144; while (nc - live < 65536) nc *= 2;
+      if (nc != s->rxcap) { u8 *nb = (u8 *)emu_alloc(nc); if (!nb) return; if (live) e_memcpy(nb, s->rx + s->rxoff, live); if (s->rx) emu_free(s->rx); s->rx = nb; s->rxcap = nc; }
+      else if (s->rxoff) e_memmove(s->rx, s->rx + s->rxoff, live);
+      s->rxoff = 0; s->rxlen = live; }
+    s64 r = host_net_read(s->host, s->rx + s->rxlen, s->rxcap - s->rxlen);
+    if (r > 0) { s->rxlen += (u32)r; continue; }
+    if (r == -2) return;
+    if (r == 0) s->rxeof = 1; else { s->rxerr = 1; e_log("[x64] socket %d: host read error (reset) after %u buffered bytes\n", (int)(s - g_socks), live); }
+    return; }
+}
+static s64 sock_read(Sock *s, u8 *p, u32 len) {   /* >0 bytes, 0 EOF, -2 would block, -3 error */
+  if (s->host < 0) return -3;
+  sock_pump(s); u32 have = s->rxlen - s->rxoff;
+  if (have) { if (len > have) len = have; e_memcpy(p, s->rx + s->rxoff, len); s->rxoff += len; return (s64)len; }
+  if (s->rxerr) return -3; if (s->rxeof) return 0;
+  return s->state == 2 ? -2 : host_net_read(s->host, p, len); }
+static int sock_readable(Sock *s) { if (s->host < 0) return 1; sock_pump(s); if (s->rxlen > s->rxoff || s->rxeof || s->rxerr) return 1; return s->state == 2 ? 0 : host_net_readable(s->host); }
+static int sock_avail(Sock *s) { if (s->host < 0) return 0; sock_pump(s); return (int)(s->rxlen - s->rxoff) + host_net_avail(s->host); }
+/* ---- send queue: Winsock promises that an overlapped WSASend completes only when all bytes were accepted, and a blocking send() returns
+ * the full count. The host socket is non-blocking, so whatever does not fit right now is copied into a per-socket queue that the
+ * scheduler flushes (sock_flush); a parked kind-5 op completes once tx_sent reaches its target. (Before this, a 5 MB write on a
+ * loopback connection returned a short count that libuv took as "all written" and the receiver waited forever.) */
+static int sock_flush(Sock *s) {   /* 1 = queue empty, 0 = bytes still pending, -1 = error */
+  while (s->txoff < s->txlen) { s64 r = host_net_write(s->host, s->tx + s->txoff, s->txlen - s->txoff); if (r < 0) { s->txerr = 1; return -1; } if (r == 0) return 0; s->txoff += (u32)r; s->tx_sent += (u64)r; }
+  s->txoff = s->txlen = 0; if (s->txshut) { host_net_shutdown(s->host, s->txshut - 1); s->txshut = 0; } return 1; }
+static int sock_queue(Sock *s, const u8 *p, u32 len) {
+  if (s->txoff == s->txlen) s->txoff = s->txlen = 0;
+  if (s->txcap - s->txlen < len) { u32 live = s->txlen - s->txoff; u32 nc = s->txcap ? s->txcap : 65536; while (nc - live < len) nc *= 2;
+    u8 *nb = (u8 *)emu_alloc(nc); if (!nb) return 0; if (live) e_memcpy(nb, s->tx + s->txoff, live); if (s->tx) emu_free(s->tx); s->tx = nb; s->txcap = nc; s->txoff = 0; s->txlen = live; }
+  e_memcpy(s->tx + s->txlen, p, len); s->txlen += len; s->tx_total += len; return 1; }
+static s64 sock_write(Sock *s, const u8 *p, u32 len) {   /* accepts everything: returns len, or -3 on a dead connection */
+  if (s->host < 0 || s->state != 2 || s->txerr) return -3; u32 want = len;
+  if (s->txoff == s->txlen) { s64 r = host_net_write(s->host, p, len); if (r < 0) { s->txerr = 1; return -3; } s->tx_total += (u64)r; s->tx_sent += (u64)r; if ((u32)r == len) return (s64)want; p += r; len -= (u32)r; }
+  if (!sock_queue(s, p, len)) return -3;
+  return (s64)want; }
+/* blocking sockets (default mode): the call parks the thread on the socket's readiness mask (same mechanism as select()) and is
+ * re-executed when the scheduler sees the socket ready — non-blocking sockets (FIONBIO) keep returning WSAEWOULDBLOCK */
+static void sock_block(Cpu *c, int si, int mask) { Win32 *w = W; wait_begin(c, 0xffffffffu); w->nwobj = 1; w->wobj_idx[0] = si; w->wobj_kind[0] = mask; park(c, BLOCK_SELECT); }
+static double g_pump_ms;
+static void net_pump_all(void) {   /* called before every scheduler pick; at most every 5 ms */
+  double now = host_now_ms(); if (now - g_pump_ms < 5) return; g_pump_ms = now;
+  for (int i = 0; i < SOCK_MAX; i++) { Sock *s = &g_socks[i]; if (!s->used || s->host < 0) continue;
+    if (s->state == 2) { sock_pump(s); if (s->txlen > s->txoff) sock_flush(s); }
+    else if (s->state == 5) { if (sock_flush(s) != 0) sock_destroy(i); } } }
 static u32 wsa_to_ntstatus(int e) {
   switch (e) { case 0: return 0; case 10061: return 0xC0000236u; case 10060: return 0xC00000B5u; case 10065: return 0xC000023Du; case 10051: return 0xC000023Cu; case 10054: return 0xC000020Du;
     case 10053: return 0xC0000241u; case 10058: return 0xC000020Cu; case 10050: return 0xC00000BEu; default: return 0xC0000001u; } }
@@ -52,7 +113,7 @@ static void s_socket(Cpu *c) {
 static void s_closesocket(Cpu *c) { int si = sock_of(c, ARG(0)); if (si < 0) { W->last_error = 10038; RET(~0ull); return; } int fd = handle_fd(ARG(0)); iocp_handle_closed(W->pid, fd); vfs_close(fd); RET(0); }
 static void s_ioctlsocket(Cpu *c) { SOCK_ARG0(si); u32 cmd = (u32)ARG(1);
   if (cmd == 0x8004667Eu) { g_socks[si].nonblock = rd32(c, ARG(2)) != 0; RET(0); return; }                                   /* FIONBIO */
-  if (cmd == 0x4004667Fu) { wr32(c, ARG(2), g_socks[si].host >= 0 ? (u32)host_net_avail(g_socks[si].host) : 0); RET(0); return; }   /* FIONREAD */
+  if (cmd == 0x4004667Fu) { wr32(c, ARG(2), (u32)sock_avail(&g_socks[si])); RET(0); return; }   /* FIONREAD */
   RET(0); }
 static void s_setsockopt(Cpu *c) { SOCK_ARG0(si); (void)si; RET(0); }
 /* getsockopt(s, level, opt, buf, &len) */
@@ -76,15 +137,22 @@ static int sock_start_connect(Cpu *c, int si, u64 addr) {
   int err = 0; s->host = host_net_connect(ip, port, &err); if (s->host < 0) { s->state = 4; s->err = err; return err; }
   s->state = 1; return 0; }
 /* classic connect(): starts the connect and reports WSAEWOULDBLOCK unless it finished at once (callers then poll/select) */
-static void s_connect(Cpu *c) { SOCK_ARG0(si); int e = sock_start_connect(c, si, ARG(1)); if (e) { W->last_error = e; RET(~0ull); return; }
-  int st = host_net_status(g_socks[si].host); if (st > 0) { g_socks[si].state = 2; RET(0); return; } W->last_error = 10035; RET(~0ull); }
+static void s_connect(Cpu *c) { SOCK_ARG0(si); Sock *s = &g_socks[si];
+  if (s->state == 1 && W->wait_active && W->wait_rip == c->rip) {   /* re-executed after parking: report the outcome */
+    int m = sock_ready_mask(si); if (!(m & 6)) { sock_block(c, si, 2 | 4); return; } wait_end(W); if (s->state == 2) { RET(0); return; } W->last_error = s->err ? (u32)s->err : 10061; RET(~0ull); return; }
+  int e = sock_start_connect(c, si, ARG(1)); if (e) { wait_end(W); W->last_error = e; RET(~0ull); return; }
+  int st = host_net_status(s->host); if (st > 0) { wait_end(W); s->state = 2; RET(0); return; }
+  if (st < 0) { wait_end(W); s->state = 4; s->err = -st; W->last_error = (u32)-st; RET(~0ull); return; }
+  if (!s->nonblock) { sock_block(c, si, 2 | 4); return; } wait_end(W); W->last_error = 10035; RET(~0ull); }
 /* ConnectEx(s, addr, len, sendbuf, sendlen, &bytes, ov): always completes through the port */
 static void s_ConnectEx(Cpu *c) { int si = sock_of(c, ARG(0)); if (si < 0) { W->last_error = 10038; RET(0); return; } u64 ov = ARG(6);
   int port = -1, skip = 0; u64 key = 0; if (!sock_assoc(c, si, &port, &key, &skip) || !ov) { W->last_error = 10045; RET(0); return; }
   int e = sock_start_connect(c, si, ARG(1)); if (e) { W->last_error = e; RET(0); return; }
   if (spend_add(c, 3, si, port, key, ov, 0, 0, 0) < 0) { W->last_error = 10055; RET(0); return; } W->last_error = 997; RET(0); }
-static void s_shutdown(Cpu *c) { SOCK_ARG0(si); if (g_socks[si].host >= 0) host_net_shutdown(g_socks[si].host, (int)ARG(1)); RET(0); }
+static void sock_shutdown(Sock *s, int how) { if (s->host < 0) return; if (how != 0 && s->txlen > s->txoff && !s->txerr) { s->txshut = how + 1; if (how == 2) host_net_shutdown(s->host, 0); return; } host_net_shutdown(s->host, how); }
+static void s_shutdown(Cpu *c) { SOCK_ARG0(si); sock_shutdown(&g_socks[si], (int)ARG(1)); RET(0); }
 static void s_getsockname(Cpu *c) { SOCK_ARG0(si); Sock *s = &g_socks[si]; u8 ip[4] = {0,0,0,0}; int port = s->lport; e_memcpy(ip, s->lip, 4);
+  if (s->host < 0 && s->bound && s->lport == 0 && s->state == 0) { int err = 0; s->host = host_net_listen(s->lip, 0, 16, &err); if (s->host >= 0) { host_net_name(s->host, 0, s->lip, &s->lport); s->state = 3; port = s->lport; e_memcpy(ip, s->lip, 4); } }   /* bind(0) + getsockname: Windows reports the chosen port before listen() */
   if (s->host >= 0) host_net_name(s->host, 0, ip, &port); if (ARG(2) && rd32(c, ARG(2)) >= 16) { write_sockaddr(c, ARG(1), ip, port); wr32(c, ARG(2), 16); RET(0); } else { W->last_error = 10014; RET(~0ull); } }
 static void s_getpeername(Cpu *c) { SOCK_ARG0(si); Sock *s = &g_socks[si]; u8 ip[4]; int port;
   if (s->host < 0 || !host_net_name(s->host, 1, ip, &port)) { W->last_error = 10057; RET(~0ull); return; } if (ARG(2) && rd32(c, ARG(2)) >= 16) { write_sockaddr(c, ARG(1), ip, port); wr32(c, ARG(2), 16); RET(0); } else { W->last_error = 10014; RET(~0ull); } }
@@ -92,23 +160,23 @@ static void s_getpeername(Cpu *c) { SOCK_ARG0(si); Sock *s = &g_socks[si]; u8 ip
 static u32 wsabuf_total(Cpu *c, u64 bufs, u32 n) { u64 t = 0; for (u32 i = 0; i < n; i++) t += rd32(c, bufs + i * 16); return t > 0x7fffffff ? 0x7fffffff : (u32)t; }
 static s64 sock_recv_into(Cpu *c, int si, u64 bufs, u32 n) {   /* non-blocking read into the first buffer with room; >0 bytes, 0 EOF, -2 would block, -3 error */
   Sock *s = &g_socks[si]; if (s->host < 0) return -3;
-  for (u32 i = 0; i < n; i++) { u32 len = rd32(c, bufs + i * 16); u64 b = rd64(c, bufs + i * 16 + 8); if (!len) continue; u8 *p = mem_ptr(c->mem, b, len, 1); if (!p) return -3; return host_net_read(s->host, p, len); }
+  for (u32 i = 0; i < n; i++) { u32 len = rd32(c, bufs + i * 16); u64 b = rd64(c, bufs + i * 16 + 8); if (!len) continue; u8 *p = mem_ptr(c->mem, b, len, 1); if (!p) return -3; return sock_read(s, p, len); }
   return 0; }
 static s64 sock_send_from(Cpu *c, int si, u64 bufs, u32 n) {
   Sock *s = &g_socks[si]; if (s->host < 0 || s->state != 2) return -3; u64 total = 0;
   for (u32 i = 0; i < n; i++) { u32 len = rd32(c, bufs + i * 16); u64 b = rd64(c, bufs + i * 16 + 8); if (!len) continue; const u8 *p = mem_ptr(c->mem, b, len, 0); if (!p) return -3;
-    s64 r = host_net_write(s->host, p, len); if (r < 0) return total ? (s64)total : -3; total += (u64)r; if ((u32)r < len) break; }
+    s64 r = sock_write(s, p, len); if (r < 0) return total ? (s64)total : -3; total += (u64)r; }
   return (s64)total; }
 /* WSARecv(s, bufs, count, &bytes, &flags, ov, routine) */
 static void s_WSARecv(Cpu *c) { SOCK_ARG0(si); u64 bufs = ARG(1); u32 n = (u32)ARG(2); u64 bytesp = ARG(3), ov = ARG(5);
   Sock *s = &g_socks[si];
-  if (!ov) { s64 r = sock_recv_into(c, si, bufs, n); if (r == -2) { W->last_error = 10035; RET(~0ull); return; } if (r == -3) { W->last_error = 10054; RET(~0ull); return; }
-    if (bytesp) wr32(c, bytesp, (u32)r); RET(0); return; }
+  if (!ov) { s64 r = sock_recv_into(c, si, bufs, n); if (r == -2) { if (!s->nonblock && s->state == 2) { sock_block(c, si, 1 | 4); return; } wait_end(W); W->last_error = 10035; RET(~0ull); return; }
+    wait_end(W); if (r == -3) { W->last_error = 10054; RET(~0ull); return; } if (bytesp) wr32(c, bytesp, (u32)r); RET(0); return; }
   int port = -1, skip = 0; u64 key = 0; int assoc = sock_assoc(c, si, &port, &key, &skip);
   u32 total = wsabuf_total(c, bufs, n);
   if (s->host < 0) { W->last_error = 10057; RET(~0ull); return; }
   if (total == 0) {   /* zero-byte read: readiness notification */
-    if (host_net_readable(s->host)) { wr64(c, ov, 0); wr64(c, ov + 8, 0); if (bytesp) wr32(c, bytesp, 0); if (assoc && !(skip & 1)) iocp_post(port, key, ov, 0, 0); RET(0); return; }
+    if (sock_readable(s)) { wr64(c, ov, 0); wr64(c, ov + 8, 0); if (bytesp) wr32(c, bytesp, 0); if (assoc && !(skip & 1)) iocp_post(port, key, ov, 0, 0); RET(0); return; }
     if (spend_add(c, 1, si, port, key, ov, 0, 0, 0) < 0) { W->last_error = 10055; RET(~0ull); return; } W->last_error = 997; RET(~0ull); return; }
   s64 r = sock_recv_into(c, si, bufs, n);
   if (r == -2) { if (spend_add(c, 2, si, port, key, ov, bufs, n, 0) < 0) { W->last_error = 10055; RET(~0ull); return; } W->last_error = 997; RET(~0ull); return; }
@@ -118,20 +186,25 @@ static void s_WSARecv(Cpu *c) { SOCK_ARG0(si); u64 bufs = ARG(1); u32 n = (u32)A
 static void s_WSASend(Cpu *c) { SOCK_ARG0(si); u64 bufs = ARG(1); u32 n = (u32)ARG(2); u64 bytesp = ARG(3), ov = ARG(5);
   s64 r = sock_send_from(c, si, bufs, n);
   if (r < 0) { if (ov) { wr64(c, ov, 0xC000020Dull); wr64(c, ov + 8, 0); } W->last_error = g_socks[si].state == 2 ? 10054 : 10057; RET(~0ull); return; }
+  Sock *s = &g_socks[si];
+  if (ov && s->txlen > s->txoff) {   /* not everything reached the host yet: complete asynchronously when the queue has drained this far */
+    int port = -1, skip = 0; u64 key = 0; sock_assoc(c, si, &port, &key, &skip);
+    int k = spend_add(c, 5, si, port, key, ov, 0, (u32)r, 0); if (k < 0) { W->last_error = 10055; RET(~0ull); return; } g_spend[k].target = s->tx_total; W->last_error = 997; RET(~0ull); return; }
   if (bytesp) wr32(c, bytesp, (u32)r);
   if (ov) { wr64(c, ov, 0); wr64(c, ov + 8, (u64)r); int port = -1, skip = 0; u64 key = 0; if (sock_assoc(c, si, &port, &key, &skip) && !(skip & 1)) iocp_post(port, key, ov, (u32)r, 0); }
   RET(0); }
 static void s_recv(Cpu *c) { SOCK_ARG0(si); u32 len = (u32)ARG(2);
   if (len == 0) { int m = sock_ready_mask(si); if (g_socks[si].state == 2) { RET(0); return; } W->last_error = (m & 4) ? (g_socks[si].err ? (u32)g_socks[si].err : 10061) : 10057; RET(~0ull); return; }   /* recv(s, NULL, 0): Bun probes connection state this way */
-  u8 *p = mem_ptr(c->mem, ARG(1), len, 1); if (!p || g_socks[si].host < 0) { W->last_error = 10014; RET(~0ull); return; }
-  s64 r = host_net_read(g_socks[si].host, p, len); if (r == -2) { W->last_error = 10035; RET(~0ull); return; } if (r == -3) { W->last_error = 10054; RET(~0ull); return; } RET((u64)r); }
+  u8 *p = mem_ptr(c->mem, ARG(1), len, 1); if (!p || g_socks[si].host < 0) { wait_end(W); W->last_error = 10014; RET(~0ull); return; }
+  s64 r = sock_read(&g_socks[si], p, len); if (r == -2) { if (!g_socks[si].nonblock && g_socks[si].state == 2) { sock_block(c, si, 1 | 4); return; } wait_end(W); W->last_error = 10035; RET(~0ull); return; }
+  wait_end(W); if (r == -3) { W->last_error = 10054; RET(~0ull); return; } RET((u64)r); }
 static void s_send(Cpu *c) { SOCK_ARG0(si); u32 len = (u32)ARG(2); if (len == 0) { RET(0); return; }
   const u8 *p = mem_ptr(c->mem, ARG(1), len, 0); if (!p || g_socks[si].host < 0) { W->last_error = 10014; RET(~0ull); return; }
-  s64 r = host_net_write(g_socks[si].host, p, len); if (r < 0) { W->last_error = 10054; RET(~0ull); return; } RET((u64)r); }
+  s64 r = sock_write(&g_socks[si], p, len); if (r < 0) { W->last_error = 10054; RET(~0ull); return; } RET((u64)r); }
 /* accept(): non-blocking; AcceptEx(listen, accept, buf, 0, local_len, remote_len, &bytes, ov) → completes through the port, buffer gets the two sockaddrs */
 static void s_accept(Cpu *c) { SOCK_ARG0(si); Sock *s = &g_socks[si]; if (s->state != 3) { W->last_error = 10022; RET(~0ull); return; }
-  u8 ip[4]; int port = 0; int h = host_net_accept(s->host, ip, &port); if (h == -2) { W->last_error = 10035; RET(~0ull); return; } if (h < 0) { W->last_error = 10054; RET(~0ull); return; }
-  int ni = sock_new(); if (ni < 0) { host_net_close(h); W->last_error = 10024; RET(~0ull); return; } g_socks[ni].host = h; g_socks[ni].state = 2; g_socks[ni].nonblock = 1;
+  u8 ip[4]; int port = 0; int h = host_net_accept(s->host, ip, &port); if (h == -2) { if (!s->nonblock) { sock_block(c, si, 1); return; } wait_end(W); W->last_error = 10035; RET(~0ull); return; } wait_end(W); if (h < 0) { W->last_error = 10054; RET(~0ull); return; }
+  int ni = sock_new(); if (ni < 0) { host_net_close(h); W->last_error = 10024; RET(~0ull); return; } g_socks[ni].host = h; g_socks[ni].state = 2; g_socks[ni].nonblock = s->nonblock;   /* inherits the blocking mode */
   int fd = vfs_sock_handle(ni); if (fd < 0) { g_socks[ni].used = 0; host_net_close(h); W->last_error = 10024; RET(~0ull); return; }
   if (ARG(1) && ARG(2) && rd32(c, ARG(2)) >= 16) { write_sockaddr(c, ARG(1), ip, port); wr32(c, ARG(2), 16); } RET(H_FILE_BASE + (u64)fd); }
 static void s_AcceptEx(Cpu *c) { int si = sock_of(c, ARG(0)), ai = sock_of(c, ARG(1)); u64 ov = ARG(7);
@@ -141,7 +214,7 @@ static void s_AcceptEx(Cpu *c) { int si = sock_of(c, ARG(0)), ai = sock_of(c, AR
   if (spend_add(c, 4, si, port, key, ov, ARG(2), (u32)ARG(4) + (u32)ARG(5), ai) < 0) { W->last_error = 10055; RET(0); return; } W->last_error = 997; RET(0); }
 /* GetAcceptExSockaddrs(buf, datalen, local_len, remote_len, &local, &local_len, &remote, &remote_len) */
 static void s_GetAcceptExSockaddrs(Cpu *c) { u64 buf = ARG(0) + ARG(1); u32 ll = (u32)ARG(2); if (ARG(4)) wr64(c, ARG(4), buf); if (ARG(5)) wr32(c, ARG(5), 16); if (ARG(6)) wr64(c, ARG(6), buf + ll); if (ARG(7)) wr32(c, ARG(7), 16); RET(0); }
-static void s_DisconnectEx(Cpu *c) { int si = sock_of(c, ARG(0)); if (si >= 0 && g_socks[si].host >= 0) host_net_shutdown(g_socks[si].host, 2); RET(1); }
+static void s_DisconnectEx(Cpu *c) { int si = sock_of(c, ARG(0)); if (si >= 0) sock_shutdown(&g_socks[si], 2); RET(1); }
 /* WSAIoctl(s, code, in, inlen, out, outlen, &ret, ov, routine) */
 static void s_WSAIoctl(Cpu *c) { SOCK_ARG0(si); u32 code = (u32)ARG(1); u64 in = ARG(2), out = ARG(4); u64 retp = ARG(6);
   if (code == 0xC8000006u) {   /* SIO_GET_EXTENSION_FUNCTION_POINTER: GUID Data1 picks the function */
@@ -154,7 +227,12 @@ static void s_WSAIoctl(Cpu *c) { SOCK_ARG0(si); u32 code = (u32)ARG(1); u64 in =
   (void)si; W->last_error = 10045; RET(~0ull); }
 static void s_WSAGetLastError(Cpu *c) { RET(W->last_error); }
 static void s_WSASetLastError(Cpu *c) { W->last_error = (u32)ARG(0); RET(0); }
-static void s_WSAGetOverlappedResult(Cpu *c) { u64 ov = ARG(1); u64 st = rd64(c, ov); if (st == 0x103) { W->last_error = 996; RET(0); return; } if (ARG(2)) wr32(c, ARG(2), (u32)rd64(c, ov + 8)); if (st) { W->last_error = 10054; RET(0); return; } RET(1); }
+static u32 ntstatus_to_wsa(u32 st) { switch (st) { case 0xC0000236u: return 10061; case 0xC00000B5u: return 10060; case 0xC000023Du: return 10065; case 0xC000023Cu: return 10051; case 0xC000020Du: return 10054; case 0xC0000241u: return 10053; case 0xC0000120u: return 995; default: return 10054; } }
+/* WSAGetOverlappedResult(s, ov, &bytes, fWait, &flags): like GetOverlappedResult; fWait re-schedules the thread until the op completed */
+static void s_WSAGetOverlappedResult(Cpu *c) { Win32 *w = W; u64 ov = ARG(1); if (!ov) { w->sleeping = 0; w->last_error = 10014; RET(0); return; } u64 st = rd64(c, ov);
+  if (st == 0x103) { if (ARG(3)) { w->sleeping = 1; w->sleep_until_ms = host_now_ms() + 2; w->block = BLOCK_SLEEP; retry_and_yield(c, g_cur_slot); return; } w->sleeping = 0; w->last_error = 996; RET(0); return; }
+  w->sleeping = 0; if (ARG(2)) wr32(c, ARG(2), (u32)rd64(c, ov + 8)); if (ARG(4)) wr32(c, ARG(4), 0);
+  if ((u32)st && ((u32)st & 0xC0000000u) == 0xC0000000u) { w->last_error = ntstatus_to_wsa((u32)st); RET(0); return; } RET(1); }
 
 /* ---- name resolution: ADDRINFO(W) { int flags, family, socktype, protocol; size_t addrlen; canonname*; addr*; next* } 48 B + sockaddr_in 16 B ---- */
 static int service_port(const char *svc) { if (!svc || !*svc) return 0; if (svc[0] >= '0' && svc[0] <= '9') { int p = 0; while (*svc >= '0' && *svc <= '9') p = p * 10 + (*svc++ - '0'); return p; }
@@ -196,15 +274,17 @@ static void spend_finish(SockOp *o, u32 status, u32 bytes, u32 err) {
   if (ovp) { u64 st = status, by = bytes; for (int i = 0; i < 8; i++) { ovp[i] = (u8)(st >> (8 * i)); ovp[8 + i] = (u8)(by >> (8 * i)); } }
   iocp_post(o->port, o->key, o->ov, bytes, err); o->used = 0; g_net_pending--; }
 static void net_poll(void) {
+  net_pump_all();
   if (!g_net_pending) return;
   for (int k = 0; k < SPEND_MAX; k++) {
     SockOp *o = &g_spend[k]; if (!o->used) continue;
     Sock *s = &g_socks[o->sock]; if (!s->used || s->host < 0) { spend_finish(o, 0xC0000241u, 0, 10053); continue; }
     if (o->kind == 3) { int st = host_net_status(s->host); if (st == 0) continue; if (st > 0) { s->state = 2; spend_finish(o, 0, 0, 0); } else { s->state = 4; s->err = -st; spend_finish(o, wsa_to_ntstatus(-st), 0, (u32)-st); } continue; }
-    if (o->kind == 1) { if (!host_net_readable(s->host)) continue; spend_finish(o, 0, 0, 0); continue; }
-    if (o->kind == 2) { if (!host_net_readable(s->host)) continue;
+    if (o->kind == 5) { int f = s->txlen > s->txoff ? sock_flush(s) : 1; if (f < 0) spend_finish(o, 0xC000020Du, 0, 10054); else if (s->tx_sent >= o->target) spend_finish(o, 0, o->len, 0); continue; }
+    if (o->kind == 1) { if (!sock_readable(s)) continue; spend_finish(o, 0, 0, 0); continue; }
+    if (o->kind == 2) { if (!sock_readable(s)) continue;
       Mem *m = o->w->mem; s64 r = -3; u32 nb = o->len;
-      for (u32 i = 0; i < nb; i++) { u32 len = 0, b32[4]; u8 *e = mem_ptr(m, o->buf + i * 16, 16, 0); if (!e) break; e_memcpy(b32, e, 16); len = b32[0]; u64 b = (u64)b32[2] | ((u64)b32[3] << 32); if (!len) continue; u8 *p = mem_ptr(m, b, len, 1); if (!p) break; r = host_net_read(s->host, p, len); break; }
+      for (u32 i = 0; i < nb; i++) { u32 len = 0, b32[4]; u8 *e = mem_ptr(m, o->buf + i * 16, 16, 0); if (!e) break; e_memcpy(b32, e, 16); len = b32[0]; u64 b = (u64)b32[2] | ((u64)b32[3] << 32); if (!len) continue; u8 *p = mem_ptr(m, b, len, 1); if (!p) break; r = sock_read(s, p, len); break; }
       if (r == -2) continue; if (r < 0) spend_finish(o, 0xC000020Du, 0, 10054); else spend_finish(o, 0, (u32)r, 0); continue; }
     if (o->kind == 4) { u8 ip[4]; int port = 0; int h = host_net_accept(s->host, ip, &port); if (h == -2) continue; if (h < 0) { spend_finish(o, 0xC0000241u, 0, 10053); continue; }
       Sock *a = &g_socks[o->acc]; if (!a->used) { host_net_close(h); spend_finish(o, 0xC0000241u, 0, 10053); continue; }
@@ -221,7 +301,7 @@ static int sock_ready_mask(int si) {
   Sock *s = &g_socks[si]; if (!s->used) return 4; int m = 0;
   if (s->state == 1 && s->host >= 0) { int st = host_net_status(s->host); if (st > 0) s->state = 2; else if (st < 0) { s->state = 4; s->err = -st; } }
   if (s->state == 4) m |= 4 | 1;
-  if (s->state == 2) { m |= 2; if (s->host >= 0 && host_net_readable(s->host)) m |= 1; }
+  if (s->state == 2) { m |= 2; if (s->host >= 0 && sock_readable(s)) m |= 1; }
   if (s->state == 3 && s->host >= 0 && host_net_readable(s->host)) m |= 1;
   return m;
 }

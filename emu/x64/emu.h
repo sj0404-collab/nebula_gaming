@@ -37,7 +37,7 @@ int    host_net_listen(const u8 *ip4, int port, int backlog, int *wsa_err);   /*
 int    host_net_accept(int s, u8 *peer_ip4, int *peer_port);           /* new host socket, -2 would block, -3 error */
 int    host_net_status(int s);                                         /* connect progress: 0 in progress, 1 connected, <0 = -winsock error */
 s64    host_net_read(int s, u8 *buf, u64 n);                           /* >0 bytes, 0 EOF, -2 would block, -3 error (reset) */
-s64    host_net_write(int s, const u8 *buf, u64 n);                    /* bytes written (waits briefly for room), -3 error */
+s64    host_net_write(int s, const u8 *buf, u64 n);                    /* bytes written now (0 = no room, never blocks), -3 error */
 int    host_net_readable(int s);                                       /* 1 when a read would not block (data, EOF or error) */
 int    host_net_avail(int s);                                          /* bytes available without blocking */
 void   host_net_shutdown(int s, int how);

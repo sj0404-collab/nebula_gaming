@@ -99,10 +99,10 @@ s64 host_net_read(int s, u8 *buf, u64 n) {
   ssize_t r = recv(s, buf, (size_t)n, MSG_DONTWAIT); if (r >= 0) return (s64)r;
   return errno == EAGAIN || errno == EWOULDBLOCK ? -2 : -3; }
 s64 host_net_write(int s, const u8 *buf, u64 n) {
-  u64 done = 0; int waits = 0;
+  u64 done = 0;
   while (done < n) { ssize_t r = send(s, buf + done, (size_t)(n - done), MSG_NOSIGNAL | MSG_DONTWAIT);
     if (r > 0) { done += (u64)r; continue; }
-    if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) { if (++waits > 200) break; struct pollfd p = { s, POLLOUT, 0 }; poll(&p, 1, 50); continue; }   /* up to ~10 s for room */
+    if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;   /* no room: the caller queues the rest (win32_net.inc sock_write) */
     return done ? (s64)done : -3; }
   return (s64)done; }
 int host_net_readable(int s) { struct pollfd p = { s, POLLIN, 0 }; return poll(&p, 1, 0) > 0; }
