@@ -56,6 +56,7 @@ test('real agent answers a prompt through the bridge (SSE)', async () => {
   // Free Zen model can be slow / rate-limited on shared CI runners → up to 3 attempts, fresh session each time.
   let text = '';
   let idle = false;
+  let anyError = false;
   for (let attempt = 1; attempt <= 3 && !idle; attempt++) {
     const s = await (await fetch(`${BASE}/api/opencode/session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: `bridge test #${attempt}` }) })).json() as { id: string };
     expect(s.id).toMatch(/^ses_/);
@@ -90,10 +91,11 @@ test('real agent answers a prompt through the bridge (SSE)', async () => {
         if (e.type === 'session.idle' && (p as { sessionID: string }).sessionID === s.id) idle = true;
       }
     }
+    if (errored) anyError = true;
     if (!idle) { console.warn(`[test] attempt ${attempt}: no session.idle in 75 s; events seen:`, Object.fromEntries(seen)); try { await fetch(`${BASE}/api/opencode/session/${s.id}/abort`, { method: 'POST' }); } catch { /* ignore */ } }
   }
   reader.cancel();
-  if (!idle && !errored && (seen.get('session.status') ?? 0) > 0) {
+  if (!idle && !anyError && (seen.get('session.status') ?? 0) > 0) {
     // The bridge did its job (session created, prompt accepted, events streamed) but the free opencode/big-pickle model never
     // produced an answer in 3 × 75 s — that is the provider's queue, not this code. Say so loudly instead of failing the build.
     console.warn('[test] INCONCLUSIVE: the free model did not answer within the time budget (provider slow/overloaded); bridge plumbing verified, answer not.');
