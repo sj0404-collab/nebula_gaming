@@ -11,6 +11,9 @@ const SAMPLE_DATA = ['demo.sql', 'demo.json', 'demo.lua', 'demo.txt', 'demo.py',
 const PY_FILES = ['python312.dll', 'python312.zip', 'python312._pth', '_sqlite3.pyd', 'sqlite3.dll', '_decimal.pyd', '_ctypes.pyd', 'libffi-8.dll', '_bz2.pyd', '_lzma.pyd', 'pyexpat.pyd', '_elementtree.pyd', 'unicodedata.pyd', '_queue.pyd', '_socket.pyd', 'select.pyd', '_asyncio.pyd', '_zoneinfo.pyd', '_uuid.pyd', '_multiprocessing.pyd'];
 const SAMPLES: { name: string; href: string; desc: string; args?: string; files?: string[]; lazy?: boolean; needsPack?: boolean; needsDx?: boolean; dir?: string }[] = [   // dir: subdirectory of C:\nebula for the exe + files
   { name: 'NebulaStrike.exe', href: '/downloads/NebulaStrike.exe', desc: 'Win32 GDI game, PE32+ x64 (light GUI exe)' },
+  { name: 'NebulaStrike32.exe', href: '/x64/samples/NebulaStrike32.exe', desc: 'The same Win32 GDI game built as a 32-bit x86 PE32 exe: runs as a 32-bit process (IA-32 mode, fs:[0] TEB, stdcall shims)' },
+  { name: 'hello32.exe', href: '/x64/samples/hello32.exe', args: 'a b', desc: '32-bit x86 console exe (PE32): argv, heap, 64-bit math on 32-bit, threads, TLS, files — exit code 42' },
+  { name: 'seh32.exe', href: '/x64/samples/seh32.exe', desc: '32-bit SEH self-test: fs:[0] registration chain, RaiseException → handler → RtlUnwind → longjmp, access-violation fix-up through the CONTEXT, vectored handlers, top-level filter' },
   { name: 'd3d11tri.exe', href: '/x64/samples/d3d11tri.exe', desc: 'Direct3D 11 → WebGL2: device + swap chain, vertex/index/constant buffers, input layout, precompiled DXBC vertex/pixel shaders translated to GLSL, Draw + DrawIndexed + Present (3 frames). Args: number of frames', args: '3' },
   { name: 'd3d11clear.exe', href: '/x64/samples/d3d11clear.exe', desc: 'Direct3D 11: D3D11CreateDeviceAndSwapChain, GetBuffer, CreateRenderTargetView, ClearRenderTargetView + Present in three colours' },
   { name: 'msvcp.exe', href: '/x64/samples/msvcp.exe', needsPack: true, desc: 'Runtime pack test: loads the REAL msvcp140.dll (Microsoft Visual C++ 2015–2022 Redistributable, served from /x64/sys32 as C:\\Windows\\System32) and drives std::cout through its exports — static init, locale facets and iostream output of a vendor runtime DLL on top of the emulator\'s UCRT' },
@@ -329,7 +332,7 @@ export default function X64App() {
       <div className="flex h-11 shrink-0 items-center gap-2 border-b border-slate-200 bg-white px-3">
         <Cpu size={16} className="text-indigo-600" />
         <span className="font-semibold">x64 Runner</span>
-        <span className="hidden text-[10px] text-slate-400 sm:inline">x86-64 · PE32+ · wasm64 + WebGL</span>
+        <span className="hidden text-[10px] text-slate-400 sm:inline">x86-64 + x86 · PE32+/PE32 · wasm64 + WebGL</span>
         <label className="ml-3 flex cursor-pointer items-center gap-1 rounded border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50">
           <FolderOpen size={13} /> Open .exe…
           <input type="file" accept=".exe,application/x-msdownload,application/octet-stream" multiple className="hidden" data-x64-file onChange={e => { if (e.target.files) void addFiles(e.target.files); e.target.value = ''; }} />
@@ -505,7 +508,7 @@ function PeReport({ e, stats, log, apiStats }: { e: ExeEntry; stats: RunStats | 
         </div>
       )}
       <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-[10px] leading-relaxed text-slate-600">
-        <b>What this is:</b> a user-mode x86-64 interpreter (integer ISA + SSE2, PE32+ loader, kernel32/UCRT/user32/gdi32 shims) compiled to wasm64 and drawing through WebGL. Programs get an in-memory C:\ drive (Files tab), stdin from the console input line, and a real environment block. It is honest about its limits: 32-bit, .NET, Direct3D/OpenGL/Vulkan, audio and networking are not emulated (threads, child processes, pipes and the program's own DLLs are) — such programs stop at the first missing API, and the report above tells you which one.
+        <b>What this is:</b> a user-mode x86-64 / x86 interpreter (integer ISA + SSE2, PE32+ and PE32 loader, 32-bit processes in IA-32 compatibility mode, kernel32/UCRT/user32/gdi32 shims) compiled to wasm64 and drawing through WebGL. Programs get an in-memory C:\ drive (Files tab), stdin from the console input line, and a real environment block. It is honest about its limits: 32-bit, .NET, Direct3D/OpenGL/Vulkan, audio and networking are not emulated (threads, child processes, pipes and the program's own DLLs are) — such programs stop at the first missing API, and the report above tells you which one.
       </div>
     </div>
   );

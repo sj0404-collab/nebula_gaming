@@ -393,6 +393,43 @@ await test('x64: .NET pack — the OFFICIAL Microsoft .NET Runtime 10 is install
   await closeAll();
 });
 
+await test('x64: hello32.exe (32-bit x86 PE32) runs as a 32-bit process to exit code 42', async () => {
+  const w = await x64Open();
+  await w.locator('[data-x64-exe="hello32.exe"]').click();
+  await w.locator('[data-x64-run]').click();
+  await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout: 60_000 });
+  const con = await w.locator('[data-x64-console]').innerText();
+  expect(/hello from 32-bit x86! argc=3 sizeof\(void\*\)=4/.test(con), '32-bit greeting missing: ' + con.slice(0, 300));
+  expect(/ll div 176366841446 mul 13580246791353/.test(con), '64-bit arithmetic in 32-bit mode wrong');
+  expect(/thread exit 7/.test(con) && /tid ok=1 tick ok=1/.test(con), 'threads/TLS output missing');
+  expect(/code 42/.test(await w.innerText()), 'exit code 42 not reported');
+  await page.screenshot({ path: resolve(SHOTS, 'x64-hello32.png') });
+  await closeAll();
+});
+await test('x64: seh32.exe — 32-bit structured exception handling (fs:[0] chain, RtlUnwind, context fix-up, VEH)', async () => {
+  const w = await x64Open();
+  await w.locator('[data-x64-exe="seh32.exe"]').click();
+  await w.locator('[data-x64-run]').click();
+  await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout: 60_000 });
+  const con = await w.locator('[data-x64-console]').innerText();
+  expect(/seh32: 9 checks, 0 failed/.test(con), 'seh32 checks failed: ' + con.slice(0, 600));
+  await closeAll();
+});
+await test('x64: NebulaStrike32.exe (the GDI game as a 32-bit PE32 process) renders frames through WebGL', async () => {
+  const w = await x64Open();
+  await w.locator('[data-x64-exe="NebulaStrike32.exe"]').click();
+  await w.locator('[data-x64-run]').click();
+  await page.waitForFunction(() => Number(document.querySelector('[data-x64-screen]')?.getAttribute('data-frames') ?? 0) >= 30, null, { timeout: 60_000 });
+  const canvas = w.locator('[data-x64-screen]');
+  const lum = await canvas.evaluate((c) => {
+    const gl = c.getContext('webgl2') || c.getContext('webgl'); const px = new Uint8Array(c.width * c.height * 4); gl.readPixels(0, 0, c.width, c.height, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    let s = 0, n = 0; for (let i = 0; i < px.length; i += 16) { s += px[i] + px[i + 1] + px[i + 2]; n++; } return s / n;
+  });
+  expect(lum > 2, '32-bit game window is black: ' + lum);
+  await page.screenshot({ path: resolve(SHOTS, 'x64-nebulastrike32.png') });
+  await w.locator('[data-x64-stop]').click();
+  await closeAll();
+});
 await test('x64: NebulaStrike.exe (real Win32 GDI PE32+) renders frames through WebGL and reacts to keys', async () => {
   const w = await x64Open();
   await w.locator('[data-x64-exe="NebulaStrike.exe"]').click();
@@ -689,19 +726,21 @@ await test('x64: virtual disk + stdin — files mounted from the host, read/writ
   await page.screenshot({ path: resolve(SHOTS, 'x64-files.png') });
   await closeAll();
 });
-await test('x64: opening a non-PE file and a 32-bit / unsupported PE gives an honest verdict', async () => {
+await test('x64: opening a non-PE file and an ARM64 PE gives an honest verdict; a 32-bit PE is no longer rejected', async () => {
   const w = await x64Open();
-  // garbage → not a PE; minimal 32-bit PE header → unsupported
-  const pe32 = new Uint8Array(0x200); const dv = new DataView(pe32.buffer);
-  pe32[0] = 0x4d; pe32[1] = 0x5a; dv.setUint32(0x3c, 0x80, true); pe32[0x80] = 0x50; pe32[0x81] = 0x45; dv.setUint16(0x84, 0x14c, true); dv.setUint16(0x94, 0xe0, true); dv.setUint16(0x98, 0x10b, true);
+  // garbage → not a PE; minimal ARM64 PE header → unsupported; minimal 32-bit x86 PE header → accepted by the inspector (it is a PE32 process now)
+  const mk = (machine, magic) => { const b = new Uint8Array(0x200); const dv = new DataView(b.buffer); b[0] = 0x4d; b[1] = 0x5a; dv.setUint32(0x3c, 0x80, true); b[0x80] = 0x50; b[0x81] = 0x45; dv.setUint16(0x84, machine, true); dv.setUint16(0x94, magic === 0x20b ? 0xf0 : 0xe0, true); dv.setUint16(0x98, magic, true); return Buffer.from(b); };
   await w.locator('[data-x64-file]').setInputFiles([
     { name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('this is not an executable') },
-    { name: 'legacy32.exe', mimeType: 'application/octet-stream', buffer: Buffer.from(pe32) },
+    { name: 'arm64.exe', mimeType: 'application/octet-stream', buffer: mk(0xaa64, 0x20b) },
+    { name: 'legacy32.exe', mimeType: 'application/octet-stream', buffer: mk(0x14c, 0x10b) },
   ]);
   await w.locator('[data-x64-exe="legacy32.exe"]').waitFor();
   expect(await w.locator('[data-x64-exe="notes.txt"] [data-x64-verdict="invalid"]').count() === 1, 'text file not flagged');
+  const varm = await w.locator('[data-x64-exe="arm64.exe"] [data-x64-verdict]').getAttribute('data-x64-verdict');
+  expect(varm === 'unsupported', 'ARM64 PE verdict: ' + varm);
   const v32 = await w.locator('[data-x64-exe="legacy32.exe"] [data-x64-verdict]').getAttribute('data-x64-verdict');
-  expect(v32 === 'unsupported', '32-bit PE verdict: ' + v32);
+  expect(v32 !== 'unsupported' && v32 !== 'invalid', '32-bit PE must not be rejected any more, verdict: ' + v32);
   await closeAll();
 });
 
