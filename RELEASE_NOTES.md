@@ -1,3 +1,13 @@
+# v1.20.0 — Nebula x64: 32-bit x86 (PE32) processes
+
+**Why.** Most Windows installers and a large share of games/programs are still 32-bit; until now the emulator rejected every PE32 up front ("unsupported").
+
+**What is new** (details: `docs/X86-32BIT.md`): an IA-32 compatibility mode in the CPU core; a PE32 loader with a 32-bit address map; a generated stdcall/cdecl marshaller for all 1256 shimmed APIs (argument sizes from Wine's `.spec` files); 32-bit TEB/PEB and 32-bit layouts of every Win32 structure the shims touch; the x86 structured-exception protocol (`fs:[0]` chain, `RaiseException`, `RtlUnwind`, `_except_handler3/4`, `_local_unwind2/4`, `_global_unwind2`, `longjmp`) and MSVC x86 C++ exceptions (`__CxxFrameHandler`); the inspector reports PE32 verdicts like PE32+.
+
+**Measured** (test suite section `[18]`, e2e scenarios `hello32.exe`, `seh32.exe`, `NebulaStrike32.exe`): the official 32-bit `7za.exe` 25.01 compresses/extracts bit-exact with worker threads and its MSVC C++ error path; zig-built 32-bit console, SEH (9/9), C++ EH, winpthreads, Winsock and GDI-game programs pass natively and in Chromium (wasm64).
+
+**Honest limits.** No x86 runtime packs yet (VC++/.NET/DirectX packs are x64 only); no dialog manager/common controls, so GUI installers (e.g. `7z2501.exe`) load and stop at `CreateDialogParamW` — next release; no 16-bit code; `IsWow64Process` = not WOW64.
+
 # v1.11.0 — Nebula x64: a real `cmd.exe` (shell for `system()`, `_popen`, `subprocess`, batch files) + alertable I/O
 
 **Why.** Many programs do not spawn children directly — they call `system()`, `_popen()`, `os.system`, `subprocess(shell=True)`,
