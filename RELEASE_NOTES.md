@@ -1,3 +1,45 @@
+# v1.22.0 — Nebula x64: NSIS and Inno Setup installers run (x86 and x64), ISCC compiles installers inside the emulator, real ECDSA, a CPU bug that broke every Delphi binary
+
+**Why.** After 7‑Zip (v1.21) the two installer engines almost every Windows program ships with are **NSIS** (Notepad++,
+countless games/tools) and **Inno Setup** (Delphi/VCL — the biggest class of 32‑bit Windows software). Both are now proven
+end‑to‑end on **both bitnesses together**: every change was tested with the x86 *and* x64 suites before it was committed.
+
+**Measured** (test suite `[19]`, 185 native checks ALL OK for x86 + x64; e2e 22/23 in headless Chromium — the 23rd scenario
+needs the CI‑built .NET pack; `docs/screenshots/x64-npp-setup.png`):
+
+* **Notepad++ 8.8.9 (NSIS), x86 and x64 setups**: silent `/S` → exit 0, `notepad++.exe` (PE32 resp. PE32+) + plugins/themes/
+  localization on disk; the x86 setup also installs **through the GUI wizard** (license → components → directory → install →
+  finish, 560 presented frames).
+* **Inno Setup 6.5.4 installing itself** (`innosetup-6.5.4.exe`, Delphi): `SetupLdr` → `Setup` child process → `Compil32 /ASSOC`
+  third process, 117 files incl. `Compil32.exe`, `ISCC.exe`, `ISCmplr.dll`, languages, examples — exit 0, ~75 s at 63 MIPS.
+  Inno 6.5 verifies **ECDSA P‑256 `.issig` signatures of its own DLLs** through BCrypt; that verification is now real
+  (see below), so the compiler DLLs load.
+* **The installed `ISCC.exe` compiles an Inno script inside the emulator** — ISPP preprocessor, `islzma.dll` with **LZMA2 worker
+  threads** (ring buffers between threads, `lock xadd`), `iszlib.dll`; `lzma2/max` + solid → `Successful compile` in 90 s;
+  the produced `nebula-setup.exe` (an Inno installer *built by Inno inside the emulator*) **installs** (`/VERYSILENT`) in 2–10 s
+  and the payload (`MyProg.exe`) is **byte‑identical** after the compress/decompress round trip; `unins000.exe` is written.
+
+**What was wrong and is fixed** (`emu/x64/cpu.c`, `win32_bcrypt.inc`, `ecdsa.inc`, `user.inc`, `win32_fs.inc`, `win32_shell.inc`,
+`win32_inno.inc`, `win32_vcl.inc`, `seh.inc`, `seh32.inc`, `x87.inc`, `pe.c`, `api.c`, `gdi.c`):
+
+| area | change |
+|---|---|
+| **CPU bug (affects every Delphi x86 and x64 binary)** | `LEA` honoured segment overrides: Delphi pads code with `64 66 8D 80 00 00 00 00` (`lea ax, fs:[eax]`) multi‑byte NOPs, and the emulator added the FS base (TEB) to AX — the SSE `Move()` source pointer lost 16 bits → access violations in the LZMA ring buffer. LEA now ignores `fs:`/`gs:`. |
+| CPU | `CMPXCHG8B`/`CMPXCHG16B`, `RDRAND`/`RDSEED` (pseudo‑random), x87 `FBLD`/`FBSTP` (Delphi RTL) |
+| **BCrypt: real ECDSA P‑256** | `BCryptImportKeyPair` (ECCPUBLICBLOB), `BCryptExportKey`, `BCryptVerifySignature` — Montgomery arithmetic over p and n, Jacobian point add/double, Fermat inversion, point‑on‑curve check, truncation of long hashes; verified against RFC 6979 A.2.5 vectors (SHA‑256 and SHA‑1), tampered hash/signature rejected. Nothing is faked: a forged `.issig` is still refused. |
+| USER32 | **per‑process window classes** (+ windows/classes are released when a child process exits) — `Compil32` launched from Setup found Setup's `TApplication` class and jumped into the wrong process's import table; cross‑process `PostMessage`/`SendMessage` (degrades to post), per‑process builtin wndproc slots, `GetClassInfo*`, `CallWindowProc`, `UnregisterClass`, `MsgWaitForMultipleObjects` polls real handles, `SetFocus`/`GetFocus`, palettes (`CreatePalette`/`SelectPalette`/`RealizePalette`), VCL/uxtheme/dwmapi/DPI shims (visual styles off, 96 DPI), ~100 previously unknown imports used by VCL |
+| KERNEL32 | `SearchPathA/W` (ISPP locates `ISPPBuiltins.iss`), INI API (`Get/WritePrivateProfile*`), `wsprintfW`, `GetLogicalProcessorInformation` 32‑bit layout, `VirtualQuery` in mode32, `UnhandledExceptionFilter` semantics (no infinite resume), `GetTokenInformation`/`CheckTokenMembership`/`ConvertStringSecurityDescriptorToSecurityDescriptor` (one admin token, SDDL accepted), Restart Manager `Rm*` (empty), ordinal imports resolved through Wine spec tables |
+| SHELL/OLE | `IShellLink` gets an `IPropertyStore` (AppUserModelID accepted, no‑op), `ShellExecute` sniffs `MZ`, `VariantCopyInd`/`Ole*`, `FOLDERID_UserProgramFiles(+Common)` (`{autopf}` with `PrivilegesRequired=lowest`), `SHGetKnownFolderPath` Downloads |
+| diagnostics | `RaiseException`/NULL‑call reports show the x86 frame chain and the last executed blocks; `X64_WATCH=rip,…` and `X64_DWATCH=addr` log registers / every change of a dword — these found the LEA bug |
+
+**Honest limits.** The Inno Setup **GUI** wizard (non‑silent) opens its window but VCL does not paint yet (silent installs are
+complete; GUI installs work for NSIS and 7‑Zip); `Compil32.exe` (the IDE) stops at `ImageList_Read` (streamed VCL image lists
+are not implemented); `LZMAUseSeparateProcess=yes` needs `CreateFileMapping` across processes (not implemented — the default
+in‑process threads work); menus are not drawn; `SysTreeView32`/`SysListView32`/`SysTabControl32`/RichEdit are placeholders;
+no HTTPS/TLS, no browser networking, no WinForms/WPF, D3D11 partial, no D3D9/DirectDraw/DirectInput; runtime packs x64‑only;
+US keyboard, 8×8 font; file dialogs cancel; visual styles off; BCrypt = SHA‑1/256/MD5/HMAC/RNG/ECDSA‑verify only (no RSA, no
+signing); RDRAND is pseudo‑random; cross‑process `SendMessage` does not wait for the reply.
+
 # v1.21.0 — Nebula x64: the USER32 dialog manager (x64 **and** x86), standard controls, resources, real installers
 
 **Why.** Almost every Windows installer and most small GUI programs are built from *dialog templates* (`DialogBoxParam`,
