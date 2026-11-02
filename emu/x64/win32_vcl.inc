@@ -102,14 +102,8 @@ static void s_LineDDA(Cpu *c) { RET(1); }
 static void s_ExtFloodFill(Cpu *c) { RET(1); }
 static void s_FloodFill(Cpu *c) { RET(1); }
 static void s_MaskBlt(Cpu *c) { /* (hdcDest, x, y, w, h, hdcSrc, xs, ys, mask, xm, ym, rop) → plain BitBlt with the foreground rop */ call_shim_tail(c, s_BitBlt, ARG(0), ARG(1), ARG(2), ARG(3)); }
-static void s_ExcludeClipRect(Cpu *c) { RET(2); }   /* SIMPLEREGION: clipping is not tracked per rectangle */
-static void s_RectVisible(Cpu *c) { RET(1); }
-static void s_PtVisible(Cpu *c) { RET(1); }
-static void s_GetClipBox(Cpu *c) { Surf s; u64 r = ARG(1); if (!dc_surf(c, ARG(0), &s)) { RET(0); return; } wr32(c, r, 0); wr32(c, r + 4, 0); wr32(c, r + 8, (u32)s.w); wr32(c, r + 12, (u32)s.h); RET(2); }
-static void s_GetClipRgn(Cpu *c) { RET(0); }
-static void s_SetRectRgn(Cpu *c) { RET(1); }
+static void s_SetRectRgn(Cpu *c) { GdiObj *r = gdi_get(W, ARG(0)); if (!r || r->kind != K_RGN) { RET(0); return; } r->npts = 0; r->rx = (s32)ARG(1); r->ry = (s32)ARG(2); r->rw = (s32)ARG(3) - r->rx; r->rh = (s32)ARG(4) - r->ry; RET(1); }
 static void s_FrameRgn(Cpu *c) { RET(1); }
-static void s_GetWindowOrgEx(Cpu *c) { if (ARG(1)) { wr32(c, ARG(1), 0); wr32(c, ARG(1) + 4, 0); } RET(1); }
 static void s_GetBrushOrgEx(Cpu *c) { if (ARG(1)) { wr32(c, ARG(1), 0); wr32(c, ARG(1) + 4, 0); } RET(1); }
 static void s_GetCurrentPositionEx(Cpu *c) { GdiObj *dc = gdi_get(W, ARG(0)); if (!dc) { RET(0); return; } if (ARG(1)) { wr32(c, ARG(1), (u32)cur_x); wr32(c, ARG(1) + 4, (u32)cur_y); } RET(1); }
 static void s_GetStretchBltMode(Cpu *c) { RET(3); }
@@ -325,3 +319,72 @@ static void s_CloseTouchInputHandle(Cpu *c) { RET(1); }
 static void s_GetPointerType(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), 4); RET(1); }   /* PT_MOUSE */
 #define DPI_SHIMS S(GetWindowDpiAwarenessContext), S(GetThreadDpiAwarenessContext), S(SetThreadDpiAwarenessContext), S(GetAwarenessFromDpiAwarenessContext), S(GetDpiFromDpiAwarenessContext), S(AreDpiAwarenessContextsEqual), S(IsValidDpiAwarenessContext), S(EnableNonClientDpiScaling), \
   S(SetProcessDpiAwareness), S(GetProcessDpiAwareness), S(IsProcessDPIAware), S(ChangeWindowMessageFilter), S(ChangeWindowMessageFilterEx), S(SetGestureConfig), S(GetGestureConfig), S(CloseGestureInfoHandle), S(GetGestureInfo), S(RegisterTouchWindow), S(UnregisterTouchWindow), S(IsTouchWindow), S(GetTouchInputInfo), S(CloseTouchInputHandle), S(GetPointerType)
+
+/* imm32: no input-method editor — every query says "no IME / no context" (Delphi VCL delay-loads these for TEdit/TMemo IME support) */
+static void s_ImmAssociateContextEx(Cpu *c) { RET(1); }
+static void s_ImmReleaseContext(Cpu *c) { RET(1); }
+static void s_ImmNotifyIME(Cpu *c) { RET(1); }
+static void s_ImmSetOpenStatus(Cpu *c) { RET(1); }
+static void s_ImmDestroyContext(Cpu *c) { RET(1); }
+static void s_ImmDisableIME(Cpu *c) { RET(1); }
+static void s_ImmDisableTextFrameService(Cpu *c) { RET(1); }
+static void s_ImmDisableLegacyIME(Cpu *c) { RET(1); }
+static void s_ImmGetContext(Cpu *c) { RET(0); }
+static void s_ImmSetCompositionWindow(Cpu *c) { RET(0); }
+static void s_ImmSetCompositionFontW(Cpu *c) { RET(0); }
+static void s_ImmSetCompositionFontA(Cpu *c) { RET(0); }
+static void s_ImmGetCompositionStringW(Cpu *c) { RET(0); }
+static void s_ImmGetCompositionStringA(Cpu *c) { RET(0); }
+static void s_ImmIsIME(Cpu *c) { RET(0); }
+static void s_ImmGetOpenStatus(Cpu *c) { RET(0); }
+static void s_ImmGetConversionStatus(Cpu *c) { RET(0); }
+static void s_ImmSetConversionStatus(Cpu *c) { RET(0); }
+static void s_ImmGetDefaultIMEWnd(Cpu *c) { RET(0); }
+static void s_ImmAssociateContext(Cpu *c) { RET(0); }
+static void s_ImmSetCandidateWindow(Cpu *c) { RET(0); }
+static void s_ImmGetVirtualKey(Cpu *c) { RET(0); }
+static void s_ImmEscapeW(Cpu *c) { RET(0); }
+static void s_ImmEscapeA(Cpu *c) { RET(0); }
+static void s_ImmGetProperty(Cpu *c) { RET(0); }
+static void s_ImmCreateContext(Cpu *c) { RET(0); }
+static void s_ImmGetIMEFileNameW(Cpu *c) { RET(0); }
+static void s_ImmGetIMEFileNameA(Cpu *c) { RET(0); }
+static void s_ImmInstallIMEW(Cpu *c) { RET(0); }
+static void s_ImmSimulateHotKey(Cpu *c) { RET(0); }
+static void s_ImmGetCandidateListW(Cpu *c) { RET(0); }
+static void s_ImmGetCandidateListA(Cpu *c) { RET(0); }
+static void s_ImmGetCandidateListCountW(Cpu *c) { RET(0); }
+static void s_ImmGetCandidateListCountA(Cpu *c) { RET(0); }
+static void s_ImmSetStatusWindowPos(Cpu *c) { RET(0); }
+static void s_ImmGetStatusWindowPos(Cpu *c) { RET(0); }
+static void s_ImmConfigureIMEW(Cpu *c) { RET(0); }
+static void s_ImmEnumRegisterWordW(Cpu *c) { RET(0); }
+static void s_ImmGetRegisterWordStyleW(Cpu *c) { RET(0); }
+static void s_ImmRegisterWordW(Cpu *c) { RET(0); }
+static void s_ImmUnregisterWordW(Cpu *c) { RET(0); }
+static void s_ImmGetGuideLineW(Cpu *c) { RET(0); }
+static void s_ImmGetDescriptionW(Cpu *c) { RET(0); }
+static void s_ImmGetDescriptionA(Cpu *c) { RET(0); }
+static void s_ImmGetCompositionFontW(Cpu *c) { RET(0); }
+static void s_ImmGetCompositionFontA(Cpu *c) { RET(0); }
+static void s_ImmGetCompositionWindow(Cpu *c) { RET(0); }
+static void s_ImmGetCandidateWindow(Cpu *c) { RET(0); }
+static void s_ImmGetHotKey(Cpu *c) { RET(0); }
+static void s_ImmSetHotKey(Cpu *c) { RET(0); }
+static void s_ImmGenerateMessage(Cpu *c) { RET(0); }
+static void s_ImmGetImeMenuItemsW(Cpu *c) { RET(0); }
+static void s_ImmGetImeMenuItemsA(Cpu *c) { RET(0); }
+static void s_ImmSetCompositionStringW(Cpu *c) { RET(0); }
+static void s_ImmSetCompositionStringA(Cpu *c) { RET(0); }
+static void s_ImmIsUIMessageW(Cpu *c) { RET(0); }
+static void s_ImmIsUIMessageA(Cpu *c) { RET(0); }
+static void s_ImmGetIMCLockCount(Cpu *c) { RET(0); }
+static void s_ImmLockIMC(Cpu *c) { RET(0); }
+static void s_ImmUnlockIMC(Cpu *c) { RET(0); }
+static void s_ImmGetIMCCSize(Cpu *c) { RET(0); }
+static void s_ImmLockIMCC(Cpu *c) { RET(0); }
+static void s_ImmUnlockIMCC(Cpu *c) { RET(0); }
+static void s_ImmCreateIMCC(Cpu *c) { RET(0); }
+static void s_ImmDestroyIMCC(Cpu *c) { RET(0); }
+static void s_ImmReSizeIMCC(Cpu *c) { RET(0); }
+#define IMM_SHIMS S(ImmAssociateContextEx), S(ImmReleaseContext), S(ImmNotifyIME), S(ImmSetOpenStatus), S(ImmDestroyContext), S(ImmDisableIME), S(ImmDisableTextFrameService), S(ImmDisableLegacyIME), S(ImmGetContext), S(ImmSetCompositionWindow), S(ImmSetCompositionFontW), S(ImmSetCompositionFontA), S(ImmGetCompositionStringW), S(ImmGetCompositionStringA), S(ImmIsIME), S(ImmGetOpenStatus), S(ImmGetConversionStatus), S(ImmSetConversionStatus), S(ImmGetDefaultIMEWnd), S(ImmAssociateContext), S(ImmSetCandidateWindow), S(ImmGetVirtualKey), S(ImmEscapeW), S(ImmEscapeA), S(ImmGetProperty), S(ImmCreateContext), S(ImmGetIMEFileNameW), S(ImmGetIMEFileNameA), S(ImmInstallIMEW), S(ImmSimulateHotKey), S(ImmGetCandidateListW), S(ImmGetCandidateListA), S(ImmGetCandidateListCountW), S(ImmGetCandidateListCountA), S(ImmSetStatusWindowPos), S(ImmGetStatusWindowPos), S(ImmConfigureIMEW), S(ImmEnumRegisterWordW), S(ImmGetRegisterWordStyleW), S(ImmRegisterWordW), S(ImmUnregisterWordW), S(ImmGetGuideLineW), S(ImmGetDescriptionW), S(ImmGetDescriptionA), S(ImmGetCompositionFontW), S(ImmGetCompositionFontA), S(ImmGetCompositionWindow), S(ImmGetCandidateWindow), S(ImmGetHotKey), S(ImmSetHotKey), S(ImmGenerateMessage), S(ImmGetImeMenuItemsW), S(ImmGetImeMenuItemsA), S(ImmSetCompositionStringW), S(ImmSetCompositionStringA), S(ImmIsUIMessageW), S(ImmIsUIMessageA), S(ImmGetIMCLockCount), S(ImmLockIMC), S(ImmUnlockIMC), S(ImmGetIMCCSize), S(ImmLockIMCC), S(ImmUnlockIMCC), S(ImmCreateIMCC), S(ImmDestroyIMCC), S(ImmReSizeIMCC)

@@ -301,7 +301,7 @@ int w32_dispatch(Cpu *c, u64 addr) {
     return RUN_FAULT;
   }
   g_entry_eax = c->r[RAX]; c->r[RAX] = 0;   /* x86 __CxxFrameHandler thunks pass FuncInfo in eax */
-  if (w->api_trace) e_log("[api] t%d %s(%llx, %llx, %llx, %llx) @%llx\n", w->th[w->cur_th].tid, s->name, (unsigned long long)ARG(0), (unsigned long long)ARG(1), (unsigned long long)ARG(2), (unsigned long long)ARG(3), (unsigned long long)ret);
+  if (w->api_trace) e_log("[api] t%d %s(%llx, %llx, %llx, %llx, %llx, %llx) @%llx\n", w->th[w->cur_th].tid, s->name, (unsigned long long)ARG(0), (unsigned long long)ARG(1), (unsigned long long)ARG(2), (unsigned long long)ARG(3), (unsigned long long)ARG(4), (unsigned long long)ARG(5), (unsigned long long)ret);
   if (c->mode32) { w32_call32(c, s, ret); if (w->api_trace) e_log("[api]   -> %llx\n", (unsigned long long)c->r[RAX]); return c->status; }
   s->fn(c);
   if (w->api_trace) e_log("[api]   -> %llx\n", (unsigned long long)c->r[RAX]);

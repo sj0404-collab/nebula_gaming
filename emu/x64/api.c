@@ -223,6 +223,7 @@ EXPORT(x64_rip) u64 x64_rip(void) { return g_cpu.rip; }
 EXPORT(x64_slot_name) const char *x64_slot_name(u64 addr) { static char nm[160]; u64 off = addr - G_SHIM_BASE; if (off >= G_SHIM_SIZE) return ""; int i = (int)(off / SHIM_SLOT_SIZE); if (i < 0 || i >= g_w32.nslots) return "?"; e_snprintf(nm, sizeof nm, "%s!%s", g_w32.slots[i].dll, g_w32.slots[i].name); return nm; }
 EXPORT(x64_report) const char *x64_report(void) { return g_w32.report; }
 EXPORT(x64_console) const char *x64_console(void) { return g_w32.con; }
+EXPORT(x64_present_all) void x64_present_all(void) { for (int i = 0; i < g_nprocs; i++) { Proc *p = g_procs[i]; if (p && p->used && p->w32.screen) { e_log("[screen] pid %d %dx%d\n", p->pid, p->w32.screen_w, p->w32.screen_h); host_present(p->w32.screen, p->w32.screen_w, p->w32.screen_h); } } }   /* debug: dump every process' framebuffer */
 EXPORT(x64_screen_w) int x64_screen_w(void) { return g_w32.screen ? g_w32.screen_w : 0; }
 EXPORT(x64_screen_h) int x64_screen_h(void) { return g_w32.screen ? g_w32.screen_h : 0; }
 EXPORT(x64_screen) const u32 *x64_screen(void) { return g_w32.screen; }

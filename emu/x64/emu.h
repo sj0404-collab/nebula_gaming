@@ -187,6 +187,9 @@ typedef struct {
   u64 handle; int kind;               /* 1 DC, 2 BITMAP, 3 BRUSH, 4 PEN, 5 FONT, 6 RGN */
   /* DC */ u64 bitmap; u32 text_color, bk_color; int bk_mode; u64 font, brush, pen;
   int wnd, ox, oy, vw, vh;            /* window DC: window index+1 (-1 = whole screen), framebuffer origin and visible size */
+  int lox, loy;                       /* DC: logical → device shift (viewport org − window org) */
+  int clip_on, cl, ct, cr, cb;        /* DC: clip rectangle in device coordinates (IntersectClipRect / BeginPaint) */
+  int save_depth;                     /* DC: SaveDC nesting */
   /* BITMAP */ int bw, bh; u64 bits; /* guest address of BGRA pixels */
   /* BRUSH/PEN */ u32 color; int pen_width;
   /* FONT */ int font_h; int font_bold; int font_em;   /* font_h = cell (line) height; font_em = em height the character width is derived from (0 = same as font_h) */
@@ -354,7 +357,8 @@ void   w32_thread_sync(Win32 *w);                 /* save the live ctx into th[c
 int    w32_thread_pick(Win32 *w);                 /* switch to the next runnable thread after cur_th; 1 if one was found */
 void   w32_threads_summary(Win32 *w, int *stdin_wait, int *sleeping, double *best_ms);   /* why nothing runs */
 void   w32_proc_teardown(Win32 *w);
-void   user_proc_exit(Win32 *w);                 /* USER: destroy the windows and classes of an exited process */               /* process exit: release thread objects */
+void   user_proc_exit(Win32 *w);
+void   user_dump_windows(void);                  /* debug: list all windows on fd 3 */                 /* USER: destroy the windows and classes of an exited process */               /* process exit: release thread objects */
 int    w32_thread_count(Win32 *w);
 int    w32_thread_alive(Win32 *w);               /* current thread still runnable (not exited / suspended)? */
 

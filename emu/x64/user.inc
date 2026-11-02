@@ -15,11 +15,12 @@
 #define SCREEN_X0 64
 #define SCREEN_Y0 64
 #define CAPTION_H 24
+#define SUPER_ADOPT(i, k) do { if (!g_wnd[i].builtin) { g_wnd[i].builtin = (k); g_wnd[i].superclassed = 1; } } while (0)
 enum { BI_NONE = 0, BI_BUTTON, BI_STATIC, BI_EDIT, BI_COMBO, BI_LISTBOX, BI_SCROLLBAR, BI_DIALOG, BI_PROGRESS, BI_LINK, BI_COMBOLIST, BI_UNSUPPORTED, BI_MSGBOX };
-enum { CONT_WNDCREATE = 6 /* = CONT_CREATEWND in win32.c */, CONT_WNDDESTROY = 400, CONT_CTLPAINT = 401, CONT_DLGINIT = 402, CONT_MODAL = 403, CONT_DLGMSG = 404, CONT_SENDCMD = 405, CONT_DLGPROC = 406, CONT_RET_VAL_ = 5 };
+enum { CONT_WNDCREATE = 6 /* = CONT_CREATEWND in win32.c */, CONT_WNDDESTROY = 400, CONT_CTLPAINT = 401, CONT_DLGINIT = 402, CONT_MODAL = 403, CONT_DLGMSG = 404, CONT_SENDCMD = 405, CONT_DLGPROC = 406, CONT_ERASEBG = 407, CONT_SETPOS = 408, CONT_RET_VAL_ = 5 };
 #define MAX_ITEMS 512
 typedef struct {
-  int used, destroyed; int parent, owner; int builtin; int pid;   /* owning process: messages from other processes are posted to its queue */ char clsname[40]; u64 wndproc; u64 cls_brush; u32 cls_style; int cls_extra;
+  int used, destroyed; int parent, owner; int builtin; int superclassed; /* app-registered class whose wndproc delegates to a built-in proc (VCL TNewButton …): behaves like the built-in for painting but all messages flow through the guest wndproc */ int pid;   /* owning process: messages from other processes are posted to its queue */ char clsname[40]; u64 wndproc; u64 cls_brush; u32 cls_style; int cls_extra;
   u32 style, exstyle; u64 id, inst;
   int x, y, w, h;            /* relative to the parent's client origin (top-level: framebuffer coordinates) */
   int ncx, ncy;              /* client offset inside the window (caption/border of secondary top-level windows) */
@@ -59,9 +60,14 @@ static int wnd_visible_chain(int i) { for (int k = i; k >= 0; k = g_wnd[k].paren
 static int wnd_enabled_chain(int i) { for (int k = i; k >= 0; k = g_wnd[k].parent) if (!g_wnd[k].enabled) return 0; return 1; }
 static int wnd_is_child_of(int i, int anc) { for (int k = g_wnd[i].parent; k >= 0; k = g_wnd[k].parent) if (k == anc) return 1; return 0; }
 static void wnd_invalidate(int i, int erase) { if (!wnd_alive(i)) return; g_wnd[i].invalid = 1; if (erase) g_wnd[i].erase = 1; for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && g_wnd[k].parent == i) wnd_invalidate(k, erase); }
+/* debug aid (X64_WNDDUMP): every live window with its geometry and paint state */
+void user_dump_windows(void) { for (int k = 0; k < MAX_WND; k++) { Wnd *n = &g_wnd[k]; if (!n->used) continue; e_log("[wnd] #%d hwnd=%llx pid=%d \"%s\" \"%.40s\" parent=%d at %d,%d %dx%d nc=%d,%d style=%08x vis=%d inv=%d erase=%d destroyed=%d builtin=%d proc=%llx\n", k, (unsigned long long)HWND_OF(k), n->pid, n->clsname, n->text, n->parent, n->x, n->y, n->w, n->h, n->ncx, n->ncy, n->style, n->visible, n->invalid, n->erase, n->destroyed, n->builtin, (unsigned long long)n->wndproc); } }
 static void wnd_invalidate_all(void) { for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed) { g_wnd[k].invalid = 1; g_wnd[k].erase = 1; } }
 /* the main window (index 0) is mirrored into w->win for the parts win32.c / d3d11 read */
 static void sync_main(Win32 *w) { Wnd *m = &g_wnd[0]; w->win.created = m->used && !m->destroyed; w->win.hwnd = HWND_OF(0); w->win.w = wnd_client_w(0); w->win.h = wnd_client_h(0); w->win.style = (m->style & ~0x40000000u) | (m->invalid ? 0x40000000u : 0); w->win.wndproc = m->wndproc; w->win.shown = m->visible; w->win.brush = m->cls_brush; e_snprintf(w->win.title, sizeof w->win.title, "%s", m->text); }
+/* a top-level window that is hidden, moved or destroyed leaves the desktop colour behind it (the other windows repaint themselves through wnd_invalidate_all) */
+static void desktop_clear(Win32 *w, int i) { Wnd *n = &g_wnd[i]; if (!w->screen || n->parent >= 0) return; int x0 = n->x < 0 ? 0 : n->x, y0 = n->y < 0 ? 0 : n->y, x1 = n->x + n->w > w->screen_w ? w->screen_w : n->x + n->w, y1 = n->y + n->h > w->screen_h ? w->screen_h : n->y + n->h;
+  for (int y = y0; y < y1; y++) for (int x = x0; x < x1; x++) w->screen[(size_t)y * w->screen_w + x] = 0x3b3b3b; w->dirty = 1; }
 static int any_window(void) { for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed) return 1; return 0; }
 static void screen_ensure(Win32 *w, int cw, int ch) {
   if (cw < 16) cw = 16; if (ch < 16) ch = 16; if (cw > 4096) cw = 4096; if (ch > 4096) ch = 4096;
@@ -90,7 +96,7 @@ static void dc_bind_window(Win32 *w, GdiObj *dc, int i) {
   dc->wnd = i + 1; dc->ox = ox < 0 ? 0 : ox; dc->oy = oy < 0 ? 0 : oy; dc->vw = x1 - dc->ox; dc->vh = y1 - dc->oy; if (dc->vw < 0) dc->vw = 0; if (dc->vh < 0) dc->vh = 0;
 }
 static u64 wnd_dc(Cpu *c, int i) { Win32 *w = W; u64 h = make_dc(w); GdiObj *dc = gdi_get(w, h); if (!dc) return 0; if (i >= 0) { dc_bind_window(w, dc, i); if (g_wnd[i].font) dc->font = g_wnd[i].font; } else { dc->wnd = -1; } return h; }
-static void wnd_dc_free(Win32 *w, u64 h) { GdiObj *dc = gdi_get(w, h); if (dc && dc->kind == K_DC && h != window_dc) dc->kind = 0; }
+static void wnd_dc_free(Win32 *w, u64 h) { GdiObj *dc = gdi_get(w, h); if (dc && dc->kind == K_DC && h != window_dc) { dc->kind = 0; dcsave_drop(h); } }
 
 /* ---------- messages ---------- */
 static void post_msg_to(Win32 *w, u64 hwnd, u32 msg, u64 wp, u64 lp) {
@@ -338,8 +344,8 @@ static void destroy_step(Cpu *c) {
       for (int k = 0; k < g_destroy[d].n; k++) wnd_free(g_destroy[d].list[k]); g_ndestroy--; sync_main(w); wnd_invalidate_all(); w->dirty = 1;
       /* owned popups of a destroyed top-level go with it */ w32_cont_finish(c, 1); return; }
     int i = g_destroy[d].list[g_destroy[d].pos++]; Wnd *n = &g_wnd[i]; if (!n->used) continue;
-    int direct = n->builtin && !(n->is_dlg && n->dlgproc);   /* dialogs with a dialog procedure see WM_DESTROY / WM_NCDESTROY through DefDlgProc */
-    if (g_destroy[d].phase == 0) { if (n->visible) { n->visible = 0; } if (direct) { builtin_proc_direct(c, i, 0x0002, 0, 0); continue; } w32_guest_call(c, n->wndproc, HWND_OF(i), 0x0002, 0, 0); return; }
+    int direct = n->builtin && !n->superclassed && !(n->is_dlg && n->dlgproc);   /* dialogs with a dialog procedure see WM_DESTROY / WM_NCDESTROY through DefDlgProc */
+    if (g_destroy[d].phase == 0) { if (n->visible) { n->visible = 0; desktop_clear(w, i); } if (direct) { builtin_proc_direct(c, i, 0x0002, 0, 0); continue; } w32_guest_call(c, n->wndproc, HWND_OF(i), 0x0002, 0, 0); return; }
     else { n->destroyed = 1; if (direct) continue; w32_guest_call(c, n->wndproc, HWND_OF(i), 0x0082, 0, 0); return; } }
 }
 static void destroy_window(Cpu *c, int i) { Win32 *w = W; if (g_ndestroy >= 6) { cpu_fault(c, "DestroyWindow nesting too deep"); return; }
@@ -350,13 +356,25 @@ static void destroy_window(Cpu *c, int i) { Win32 *w = W; if (g_ndestroy >= 6) {
 static void s_DestroyWindow(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0 || g_wnd[i].destroyed) { W->last_error = 1400; RET(0); return; } destroy_window(c, i); }
 
 /* ---------- painting: BeginPaint/GetDC hand out window DCs; a pending erase fills the client with the class brush ---------- */
+static void wnd_frame(Cpu *c, int i);
 static void wnd_erase(Cpu *c, int i) { Win32 *w = W; Wnd *n = &g_wnd[i]; u64 hb = n->cls_brush; u32 px = 0xf0f0f0; int skip = 0;
   if (n->is_dlg || n->builtin == BI_MSGBOX) px = 0xf0f0f0; else { GdiObj *b = gdi_get(w, hb); if (b) { if (b->kind == K_BRUSH && b->pen_width == -1) skip = 1; px = b->color; } else if (hb >= 1 && hb <= 31) px = g_sys_colors[hb - 1]; else if (!hb) skip = 1; }
-  if (skip) return; u64 hdc = wnd_dc(c, i); Surf s; if (hdc && dc_surf(c, hdc, &s)) { fill_rect_px(&s, 0, 0, s.w, s.h, px); mark_screen(w, hdc); } if (hdc) wnd_dc_free(w, hdc);
+  if (!skip) { u64 hdc = wnd_dc(c, i); Surf s; if (hdc && dc_surf(c, hdc, &s)) { fill_rect_px(&s, 0, 0, s.w, s.h, px); mark_screen(w, hdc); } if (hdc) wnd_dc_free(w, hdc); }
+  wnd_frame(c, i); }
+static void wnd_frame(Cpu *c, int i) { Win32 *w = W; Wnd *n = &g_wnd[i];
   if (n->parent < 0 && i != 0 && n->ncy) { /* caption bar + border of a secondary top-level window */ u64 fdc = make_dc(w); GdiObj *d = gdi_get(w, fdc); if (d) { d->wnd = -1; Surf f; if (dc_surf(c, fdc, &f)) { int wx, wy; wnd_window_origin(i, &wx, &wy); int active = g_active == i; fill_rect_px(&f, wx, wy, wx + n->w, wy + n->ncy, active ? 0xffffff : 0xf0f0f0); edge_rect(&f, wx, wy, wx + n->w, wy + n->h, active ? 0x3c7fb1 : 0xa0a0a0, active ? 0x3c7fb1 : 0xa0a0a0);
       d->text_color = px2cr(active ? 0x000000 : 0x6d6d6d); d->bk_mode = 1; GdiObj *fo = gdi_get(w, g_dlg_font); d->font = fo ? g_dlg_font : d->font; draw_text(&f, d, w, wx + 8, wy + (n->ncy - 13) / 2, n->text, (int)e_strlen(n->text)); draw_text(&f, d, w, wx + n->w - 20, wy + (n->ncy - 13) / 2, "x", 1); w->dirty = 1; } d->kind = 0; } } }
-static void s_BeginPaint(Cpu *c) { Win32 *w = W; int i = wnd_of(ARG(0)); u64 ps = ARG(1); if (i < 0) { RET(0); return; } Wnd *n = &g_wnd[i]; if (n->erase) wnd_erase(c, i); n->invalid = 0; n->erase = 0; if (i == 0) sync_main(w);
-  u64 hdc = wnd_dc(c, i); u64 r = ps + (c->mode32 ? 8 : 12); wrp(c, ps, hdc); wr32(c, ps + (c->mode32 ? 4 : 8), 0); wr32(c, r, 0); wr32(c, r + 4, 0); wr32(c, r + 8, (u32)wnd_client_w(i)); wr32(c, r + 12, (u32)wnd_client_h(i)); RET(hdc); }
+static void beginpaint_fill(Cpu *c, int i, u64 ps, u64 hdc, int erased) { u64 r = ps + (c->mode32 ? 8 : 12); wrp(c, ps, hdc); wr32(c, ps + (c->mode32 ? 4 : 8), erased ? 0 : 1); wr32(c, r, 0); wr32(c, r + 4, 0); wr32(c, r + 8, (u32)wnd_client_w(i)); wr32(c, r + 12, (u32)wnd_client_h(i)); }
+static void erasebg_resume(Cpu *c, u64 rax) { Win32 *w = W; int ci = w->ncont - 1; int i = (int)w->cont[ci].data[0]; u64 hdc = w->cont[ci].data[1], ps = w->cont[ci].data[2];
+  if (!wnd_alive(i)) { wnd_dc_free(w, hdc); w32_cont_finish(c, 0); return; }
+  if (!(u32)rax) { /* the window procedure declined: erase with the class brush */ wnd_erase(c, i); } else { mark_screen(w, hdc); wnd_frame(c, i); }
+  beginpaint_fill(c, i, ps, hdc, 1); w32_cont_finish(c, hdc); }
+static void s_BeginPaint(Cpu *c) { Win32 *w = W; int i = wnd_of(ARG(0)); u64 ps = ARG(1); if (i < 0) { RET(0); return; } Wnd *n = &g_wnd[i]; int erase = n->erase; n->invalid = 0; n->erase = 0; if (i == 0) sync_main(w);
+  u64 hdc = wnd_dc(c, i);
+  if (erase && hdc && (!n->builtin || n->superclassed) && !(n->is_dlg && n->dlgproc) && n->wndproc) {   /* WM_ERASEBKGND goes through the guest window procedure (VCL / custom frameworks paint their own background) */
+    w32_push_cont(c, CONT_ERASEBG, (u64)i); w->cont[w->ncont - 1].data[1] = hdc; w->cont[w->ncont - 1].data[2] = ps; w32_guest_call(c, n->wndproc, HWND_OF(i), 0x14, hdc, 0); return; }
+  if (erase) wnd_erase(c, i);
+  beginpaint_fill(c, i, ps, hdc, 1); RET(hdc); }
 static void s_EndPaint(Cpu *c) { Win32 *w = W; u64 hdc = rdp(c, ARG(1)); wnd_dc_free(w, hdc); w->dirty = 1; w->blits_since_yield++; RET(1); }
 static void s_GetDC(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(ARG(0) == 0 || ARG(0) == HWND_DESKTOP ? wnd_dc(c, -1) : 0); return; } RET(wnd_dc(c, i)); }
 static void s_GetWindowDC(Cpu *c) { Win32 *w = W; int i = wnd_of(ARG(0)); if (i < 0) { RET(wnd_dc(c, -1)); return; } u64 h = wnd_dc(c, i); GdiObj *dc = gdi_get(w, h); if (dc) { int wx, wy; wnd_window_origin(i, &wx, &wy); dc->ox = wx < 0 ? 0 : wx; dc->oy = wy < 0 ? 0 : wy; dc->vw = g_wnd[i].w; dc->vh = g_wnd[i].h; } RET(h); }
@@ -406,8 +424,8 @@ static void s_CallWindowProcA(Cpu *c) { s_CallWindowProcW(c); }
 
 /* ---------- show / move / size / enable ---------- */
 static void s_ShowWindow(Cpu *c) { Win32 *w = W; int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } int cmd = (int)ARG(1); int prev = g_wnd[i].visible;
-  if (cmd == 0 /* SW_HIDE */) { g_wnd[i].style &= ~0x10000000u; if (prev) { g_wnd[i].visible = 0; wnd_invalidate_all(); w->dirty = 1; if (g_focus == i || (g_focus >= 0 && wnd_is_child_of(g_focus, i))) g_focus = -1; } }
-  else { g_wnd[i].style |= 0x10000000u; if (!prev) { wnd_show_now(c, i); if (!g_wnd[i].builtin) post_msg_to(w, HWND_OF(i), 0x18, 1, 0); } if (g_wnd[i].parent < 0 && cmd != 4 && cmd != 7 && cmd != 8) g_active = i; }
+  if (cmd == 0 /* SW_HIDE */) { g_wnd[i].style &= ~0x10000000u; if (prev) { g_wnd[i].visible = 0; desktop_clear(w, i); wnd_invalidate_all(); w->dirty = 1; if (g_focus == i || (g_focus >= 0 && wnd_is_child_of(g_focus, i))) g_focus = -1; } }
+  else { g_wnd[i].style |= 0x10000000u; if (!prev) { wnd_show_now(c, i); if (!g_wnd[i].builtin || g_wnd[i].superclassed) post_msg_to(w, HWND_OF(i), 0x18, 1, 0); } if (g_wnd[i].parent < 0 && cmd != 4 && cmd != 7 && cmd != 8) g_active = i; }
   if (i == 0) sync_main(w); RET(prev); }
 static void s_ShowWindowAsync(Cpu *c) { s_ShowWindow(c); }
 static void s_UpdateWindow(Cpu *c) { Win32 *w = W; int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } if (g_wnd[i].visible && g_wnd[i].invalid) { w32_push_cont(c, CONT_RET_VAL_, 1); w32_guest_call(c, g_wnd[i].wndproc, HWND_OF(i), 0x0F, 0, 0); (void)w; return; } RET(1); }
@@ -419,22 +437,30 @@ static void s_RedrawWindow(Cpu *c) { int i = wnd_of(ARG(0)); u32 fl = (u32)ARG(3
 static void s_GetClientRect(Cpu *c) { int i = wnd_of(ARG(0)); u64 r = ARG(1); int cw = i >= 0 ? wnd_client_w(i) : W->screen_w, ch = i >= 0 ? wnd_client_h(i) : W->screen_h; wr32(c, r, 0); wr32(c, r + 4, 0); wr32(c, r + 8, (u32)cw); wr32(c, r + 12, (u32)ch); RET(i >= 0 || ARG(0) == HWND_DESKTOP); }
 static void s_GetWindowRect(Cpu *c) { int i = wnd_of(ARG(0)); u64 r = ARG(1); if (i < 0) { wr32(c, r, 0); wr32(c, r + 4, 0); wr32(c, r + 8, 1280); wr32(c, r + 12, 720); RET(ARG(0) == HWND_DESKTOP); return; } int sx, sy; wnd_window_origin(i, &sx, &sy); wr32(c, r, (u32)(sx + SCREEN_X0)); wr32(c, r + 4, (u32)(sy + SCREEN_Y0)); wr32(c, r + 8, (u32)(sx + SCREEN_X0 + g_wnd[i].w)); wr32(c, r + 12, (u32)(sy + SCREEN_Y0 + g_wnd[i].h)); RET(1); }
 static void s_GetWindowInfo(Cpu *c) { int i = wnd_of(ARG(0)); u64 p = ARG(1); if (i < 0) { RET(0); return; } int sx, sy; wnd_window_origin(i, &sx, &sy); int cx, cy; wnd_client_origin(i, &cx, &cy); wr32(c, p, 60); wr32(c, p + 4, (u32)(sx + SCREEN_X0)); wr32(c, p + 8, (u32)(sy + SCREEN_Y0)); wr32(c, p + 12, (u32)(sx + SCREEN_X0 + g_wnd[i].w)); wr32(c, p + 16, (u32)(sy + SCREEN_Y0 + g_wnd[i].h)); wr32(c, p + 20, (u32)(cx + SCREEN_X0)); wr32(c, p + 24, (u32)(cy + SCREEN_Y0)); wr32(c, p + 28, (u32)(cx + SCREEN_X0 + wnd_client_w(i))); wr32(c, p + 32, (u32)(cy + SCREEN_Y0 + wnd_client_h(i))); wr32(c, p + 36, g_wnd[i].style); wr32(c, p + 40, g_wnd[i].exstyle); wr32(c, p + 44, g_active == i); wr32(c, p + 48, (u32)g_wnd[i].ncx); wr32(c, p + 52, (u32)g_wnd[i].ncx); wr16(c, p + 56, 0); wr16(c, p + 58, 0); RET(1); }
-static void wnd_set_pos(Cpu *c, int i, int x, int y, int cx, int cy, u32 flags) {
-  Win32 *w = W; Wnd *n = &g_wnd[i]; int moved = 0, sized = 0;
+/* SetWindowPos family: WM_SIZE / WM_MOVE are delivered synchronously (VCL's UpdateBounds relies on it); returns 1 when a guest call was started — the caller must then return without RET, the API result is delivered by setpos_resume */
+static int wnd_set_pos(Cpu *c, int i, int x, int y, int cx, int cy, u32 flags, u64 api_ret) {
+  Win32 *w = W; Wnd *n = &g_wnd[i]; int moved = 0, sized = 0; int ox = n->x, oy = n->y, ow = n->w, oh = n->h;
   if (!(flags & 2 /* SWP_NOMOVE */)) { int nx = x, ny = y; if (n->parent < 0) { nx -= SCREEN_X0; ny -= SCREEN_Y0; } if (i == 0) { nx = 0; ny = 0; } else if (n->parent < 0) { /* the framebuffer is the whole visible screen: a top-level window that centres itself on the 1280x720 "desktop" (PuTTY, many setup wizards) is kept inside the presented area */ int sw = w->screen_w, sh = w->screen_h; if (nx + n->w > sw) nx = sw - n->w; if (ny + n->h > sh) ny = sh - n->h; if (nx < 0) nx = 0; if (ny < 0) ny = 0; } if (nx != n->x || ny != n->y) { n->x = nx; n->y = ny; moved = 1; } }
   if (!(flags & 1 /* SWP_NOSIZE */)) { int nw = cx, nh = cy; if (i == 0) { int cw = nw, ch = nh; if (n->style & 0x00C00000u) { cw -= 16; ch -= 39; } if (cw < 16) cw = 16; if (ch < 16) ch = 16; if (cw != n->w || ch != n->h) { n->w = cw; n->h = ch; screen_ensure(w, cw, ch); sized = 1; } }
     else if (nw != n->w || nh != n->h) { n->w = nw < 0 ? 0 : nw; n->h = nh < 0 ? 0 : nh; sized = 1; if (n->parent < 0) screen_ensure(w, w->screen_w > n->x + n->w ? w->screen_w : n->x + n->w, w->screen_h > n->y + n->h ? w->screen_h : n->y + n->h); } }
-  if (flags & 0x40 /* SWP_SHOWWINDOW */) { n->style |= 0x10000000u; wnd_show_now(c, i); } if (flags & 0x80 /* SWP_HIDEWINDOW */) { n->style &= ~0x10000000u; n->visible = 0; wnd_invalidate_all(); }
-  if (moved || sized) { wnd_invalidate_all(); w->dirty = 1; if (!n->builtin) { if (sized) post_msg_to(w, HWND_OF(i), 0x05, 0, ((u64)(wnd_client_h(i) & 0xffff) << 16) | (wnd_client_w(i) & 0xffff)); if (moved) { int sx, sy; wnd_client_origin(i, &sx, &sy); post_msg_to(w, HWND_OF(i), 0x03, 0, ((u64)(u16)sy << 16) | (u16)sx); } } }
+  if (flags & 0x40 /* SWP_SHOWWINDOW */) { n->style |= 0x10000000u; wnd_show_now(c, i); } if (flags & 0x80 /* SWP_HIDEWINDOW */) { n->style &= ~0x10000000u; if (n->visible) desktop_clear(w, i); n->visible = 0; wnd_invalidate_all(); }
+  if ((moved || sized) && n->visible && n->parent < 0 && i != 0) { int nx = n->x, ny = n->y, nw = n->w, nh = n->h; n->x = ox; n->y = oy; n->w = ow; n->h = oh; desktop_clear(w, i); n->x = nx; n->y = ny; n->w = nw; n->h = nh; }
   if (i == 0) sync_main(w);
+  if (moved || sized) { wnd_invalidate_all(); w->dirty = 1; if (!n->builtin || n->superclassed) {
+      u64 size_lp = ((u64)(wnd_client_h(i) & 0xffff) << 16) | (wnd_client_w(i) & 0xffff); int sx, sy; wnd_client_origin(i, &sx, &sy); u64 move_lp = ((u64)(u16)sy << 16) | (u16)sx;
+      if (n->pid != w->pid || !n->wndproc) { if (sized) post_msg_to(w, HWND_OF(i), 0x05, 0, size_lp); if (moved) post_msg_to(w, HWND_OF(i), 0x03, 0, move_lp); return 0; }
+      w32_push_cont(c, CONT_SETPOS, (u64)i); w->cont[w->ncont - 1].data[1] = api_ret; w->cont[w->ncont - 1].data[2] = sized && moved ? 1 : 0; w->cont[w->ncont - 1].data[3] = move_lp;
+      w32_guest_call(c, n->wndproc, HWND_OF(i), sized ? 0x05 : 0x03, 0, sized ? size_lp : move_lp); return 1; } }
+  return 0;
 }
-static void s_SetWindowPos(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } u64 after = ARG(1); if (!(ARG(6) & 4) && (after == 0 || after == (u64)-1 || after == 0xffffffffull)) g_wnd[i].zseq = ++g_zseq; wnd_set_pos(c, i, (int)(s32)ARG(2), (int)(s32)ARG(3), (int)(s32)ARG(4), (int)(s32)ARG(5), (u32)ARG(6)); RET(1); }
-static void s_MoveWindow(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } wnd_set_pos(c, i, (int)(s32)ARG(1), (int)(s32)ARG(2), (int)(s32)ARG(3), (int)(s32)ARG(4), 0); if (ARG(5)) wnd_invalidate(i, 1); RET(1); }
+static void setpos_resume(Cpu *c, u64 rax) { Win32 *w = W; int ci = w->ncont - 1; int i = (int)w->cont[ci].data[0]; (void)rax; if (w->cont[ci].data[2] && wnd_alive(i)) { w->cont[ci].data[2] = 0; w32_guest_call(c, g_wnd[i].wndproc, HWND_OF(i), 0x03, 0, w->cont[ci].data[3]); return; } w32_cont_finish(c, w->cont[ci].data[1]); }
+static void s_SetWindowPos(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } u64 after = ARG(1); if (!(ARG(6) & 4) && (after == 0 || after == (u64)-1 || after == 0xffffffffull)) g_wnd[i].zseq = ++g_zseq; if (wnd_set_pos(c, i, (int)(s32)ARG(2), (int)(s32)ARG(3), (int)(s32)ARG(4), (int)(s32)ARG(5), (u32)ARG(6), 1)) return; RET(1); }
+static void s_MoveWindow(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } if (ARG(5)) wnd_invalidate(i, 1); if (wnd_set_pos(c, i, (int)(s32)ARG(1), (int)(s32)ARG(2), (int)(s32)ARG(3), (int)(s32)ARG(4), 0, 1)) return; RET(1); }
 static void s_BeginDeferWindowPos(Cpu *c) { RET(0x5D001); }
-static void s_DeferWindowPos(Cpu *c) { int i = wnd_of(ARG(1)); if (i >= 0) wnd_set_pos(c, i, (int)(s32)ARG(3), (int)(s32)ARG(4), (int)(s32)ARG(5), (int)(s32)ARG(6), (u32)ARG(7)); RET(ARG(0)); }
+static void s_DeferWindowPos(Cpu *c) { int i = wnd_of(ARG(1)); if (i >= 0 && wnd_set_pos(c, i, (int)(s32)ARG(3), (int)(s32)ARG(4), (int)(s32)ARG(5), (int)(s32)ARG(6), (u32)ARG(7), ARG(0))) return; RET(ARG(0)); }
 static void s_EndDeferWindowPos(Cpu *c) { RET(1); }
 static void s_GetWindowPlacement(Cpu *c) { int i = wnd_of(ARG(0)); u64 p = ARG(1); if (i < 0) { RET(0); return; } int sx, sy; wnd_window_origin(i, &sx, &sy); wr32(c, p, 44); wr32(c, p + 4, 0); wr32(c, p + 8, g_wnd[i].visible ? 1 : 0); wr32(c, p + 28, (u32)(sx + SCREEN_X0)); wr32(c, p + 32, (u32)(sy + SCREEN_Y0)); wr32(c, p + 36, (u32)(sx + SCREEN_X0 + g_wnd[i].w)); wr32(c, p + 40, (u32)(sy + SCREEN_Y0 + g_wnd[i].h)); RET(1); }
-static void s_SetWindowPlacement(Cpu *c) { int i = wnd_of(ARG(0)); u64 p = ARG(1); if (i < 0) { RET(0); return; } u32 show = rd32(c, p + 8); int l = (s32)rd32(c, p + 28), t = (s32)rd32(c, p + 32), r = (s32)rd32(c, p + 36), b = (s32)rd32(c, p + 40); wnd_set_pos(c, i, l, t, r - l, b - t, 0); if (show && show != 0) wnd_show_now(c, i); RET(1); }
+static void s_SetWindowPlacement(Cpu *c) { int i = wnd_of(ARG(0)); u64 p = ARG(1); if (i < 0) { RET(0); return; } u32 show = rd32(c, p + 8); int l = (s32)rd32(c, p + 28), t = (s32)rd32(c, p + 32), r = (s32)rd32(c, p + 36), b = (s32)rd32(c, p + 40); if (show && show != 0) wnd_show_now(c, i); if (wnd_set_pos(c, i, l, t, r - l, b - t, 0, 1)) return; RET(1); }
 static void s_EnableWindow(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } int prev = !g_wnd[i].enabled; int en = ARG(1) != 0; if (g_wnd[i].enabled != en) { g_wnd[i].enabled = en; wnd_invalidate(i, 1); if (!en && (g_focus == i || (g_focus >= 0 && wnd_is_child_of(g_focus, i)))) g_focus = -1; if (!g_wnd[i].builtin) post_msg_to(W, HWND_OF(i), 0x0A, en, 0); } RET(prev); }
 static void s_IsWindowEnabled(Cpu *c) { int i = wnd_of(ARG(0)); RET(i >= 0 && wnd_enabled_chain(i)); }
 static void s_IsWindow(Cpu *c) { int i = wnd_of(ARG(0)); RET(i >= 0 && !g_wnd[i].destroyed); }
@@ -504,7 +530,7 @@ static void s_SetWindowLongPtrA(Cpu *c) { int i = wnd_of(ARG(0)); int idx = (int
   else if (idx >= 0 && idx / 4 < 16) { int k = idx / (c->mode32 ? 4 : 8); if (c->mode32) { old = n->extra[idx / 4]; n->extra[idx / 4] = (u32)ARG(2); } else { if (k > 15) k = 15; old = n->extra[k]; n->extra[k] = ARG(2); } if (n->is_dlg && idx == (c->mode32 ? 4 : 8)) n->dlgproc = ARG(2); if (n->is_dlg && idx == 0) n->msgresult = ARG(2); } else old = 0;
   if (i == 0) sync_main(W); RET(old); }
 static void s_GetWindowLongPtrA(Cpu *c) { int i = wnd_of(ARG(0)); int idx = (int)(s32)ARG(1); if (i < 0) { W->last_error = 1400; RET(0); return; } Wnd *n = &g_wnd[i];
-  if (idx == -21) RET(n->userdata); else if (idx == -4) RET(n->wndproc); else if (idx == -16) RET(n->style & ~0x40000000u); else if (idx == -20) RET(n->exstyle); else if (idx == -12) RET(n->id); else if (idx == -8) RET(n->parent >= 0 ? HWND_OF(n->parent) : 0); else if (idx == -6) RET(n->inst);
+  if (idx == -21) RET(n->userdata); else if (idx == -4) RET(n->wndproc); else if (idx == -16) RET(n->parent >= 0 ? (n->style | 0x40000000u) : (n->style & ~0x40000000u)); /* WS_CHILD must be reported for children: VCL's UpdateBounds converts GetWindowRect to parent coordinates only when it is set */ else if (idx == -20) RET(n->exstyle); else if (idx == -12) RET(n->id); else if (idx == -8) RET(n->parent >= 0 ? HWND_OF(n->parent) : 0); else if (idx == -6) RET(n->inst);
   else if (idx >= 0 && idx / 4 < 16) { if (c->mode32) RET(n->extra[idx / 4]); else { int k = idx / 8; if (k > 15) k = 15; RET(n->extra[k]); } } else RET(0); }
 static void s_SetWindowLongA(Cpu *c) { s_SetWindowLongPtrA(c); }
 static void s_GetWindowLongA(Cpu *c) { s_GetWindowLongPtrA(c); }
@@ -520,8 +546,8 @@ static void s_SetPropA(Cpu *c) { s_SetPropW(c); }
 static void s_RemovePropA(Cpu *c) { s_RemovePropW(c); }
 /* focus: WM_KILLFOCUS / WM_SETFOCUS are posted (not sent) so this never nests guest calls inside a shim that cannot continue */
 static void set_focus(Cpu *c, int i) { Win32 *w = W; int old = g_focus; if (old == i) return; g_focus = i;
-  if (wnd_alive(old)) { g_wnd[old].focus_draw = 0; wnd_invalidate(old, 1); if (g_wnd[old].builtin) builtin_proc_direct(c, old, 0x08, i >= 0 ? HWND_OF(i) : 0, 0); else post_msg_to(w, HWND_OF(old), 0x08, i >= 0 ? HWND_OF(i) : 0, 0); }
-  if (wnd_alive(i)) { g_wnd[i].focus_draw = 1; wnd_invalidate(i, 1); if (g_wnd[i].builtin) builtin_proc_direct(c, i, 0x07, old >= 0 ? HWND_OF(old) : 0, 0); else post_msg_to(w, HWND_OF(i), 0x07, old >= 0 ? HWND_OF(old) : 0, 0); g_active = wnd_root(i); } }
+  if (wnd_alive(old)) { g_wnd[old].focus_draw = 0; wnd_invalidate(old, 1); if (g_wnd[old].builtin && !g_wnd[old].superclassed) builtin_proc_direct(c, old, 0x08, i >= 0 ? HWND_OF(i) : 0, 0); else post_msg_to(w, HWND_OF(old), 0x08, i >= 0 ? HWND_OF(i) : 0, 0); }
+  if (wnd_alive(i)) { g_wnd[i].focus_draw = 1; wnd_invalidate(i, 1); if (g_wnd[i].builtin && !g_wnd[i].superclassed) builtin_proc_direct(c, i, 0x07, old >= 0 ? HWND_OF(old) : 0, 0); else post_msg_to(w, HWND_OF(i), 0x07, old >= 0 ? HWND_OF(old) : 0, 0); g_active = wnd_root(i); } }
 static void s_SetFocus(Cpu *c) { int i = wnd_of(ARG(0)); int old = g_focus; if (ARG(0) && i < 0) { RET(0); return; } set_focus(c, i); RET(wnd_alive(old) ? HWND_OF(old) : 0); }
 static void s_GetFocus(Cpu *c) { RET(wnd_alive(g_focus) ? HWND_OF(g_focus) : 0); }
 static void s_SetForegroundWindow(Cpu *c) { int i = wnd_of(ARG(0)); if (i >= 0) { g_active = wnd_root(i); g_wnd[g_active].zseq = ++g_zseq; wnd_invalidate_all(); } RET(1); }
@@ -797,7 +823,7 @@ static u64 ctl_paint_begin(Cpu *c, int i) { u64 hdc = wnd_dc(c, i); return hdc; 
 static void ctl_paint_end(Cpu *c, int i, u64 hdc) { Win32 *w = W; g_wnd[i].invalid = 0; g_wnd[i].erase = 0; wnd_dc_free(w, hdc); w->dirty = 1; w->blits_since_yield++; (void)c; }
 static void ctl_text(Cpu *c, u64 hdc, int i, int l, int t, int r, int b, u32 fmt, u32 color, const char *text) { Win32 *w = W; GdiObj *dc = gdi_get(w, hdc); if (!dc) return; dc->text_color = px2cr(color); dc->bk_mode = 1; int L = l, T = t, R = r, B = b; draw_text_rect(c, hdc, text, (int)e_strlen(text), &L, &T, &R, &B, fmt); (void)i; }
 /* WM_CTLCOLOR*: ask the parent (guest) for a brush before painting; the continuation paints with the result */
-static int ctl_color_query(Cpu *c, int i, u32 ctlmsg, u64 hdc) { int p = g_wnd[i].parent; if (p < 0 || !wnd_alive(p) || g_wnd[p].builtin) return 0; Win32 *w = W; w32_push_cont(c, CONT_CTLPAINT, (u64)i); w->cont[w->ncont - 1].data[1] = hdc; w->cont[w->ncont - 1].data[2] = ctlmsg; w32_guest_call(c, g_wnd[p].wndproc, HWND_OF(p), ctlmsg, hdc, HWND_OF(i)); return 1; }
+static int ctl_color_query(Cpu *c, int i, u32 ctlmsg, u64 hdc) { int p = g_wnd[i].parent; if (p < 0 || !wnd_alive(p) || (g_wnd[p].builtin && !g_wnd[p].superclassed)) return 0; Win32 *w = W; w32_push_cont(c, CONT_CTLPAINT, (u64)i); w->cont[w->ncont - 1].data[1] = hdc; w->cont[w->ncont - 1].data[2] = ctlmsg; w32_guest_call(c, g_wnd[p].wndproc, HWND_OF(p), ctlmsg, hdc, HWND_OF(i)); return 1; }
 static void button_paint(Cpu *c, int i, u64 hdc, u64 hbr);
 static void static_paint(Cpu *c, int i, u64 hdc, u64 hbr);
 static void edit_paint(Cpu *c, int i, u64 hdc, u64 hbr);
@@ -826,7 +852,7 @@ static void button_click(Cpu *c, int i) { Wnd *n = &g_wnd[i]; u32 bs = n->style 
   if (bs == 3 || bs == 6) { n->checked = bs == 6 ? (n->checked + 1) % 3 : !n->checked; wnd_invalidate(i, 1); }
   else if (bs == 9) { /* auto radio: uncheck the others in the group (siblings between WS_GROUP markers) */ int p = n->parent; for (int k = 0; k < MAX_WND; k++) if (wnd_alive(k) && g_wnd[k].parent == p && g_wnd[k].builtin == BI_BUTTON && ((g_wnd[k].style & 0xF) == 9 || (g_wnd[k].style & 0xF) == 4) && k != i) { g_wnd[k].checked = 0; wnd_invalidate(k, 1); } n->checked = 1; wnd_invalidate(i, 1); }
   notify_parent(c, i, 0 /* BN_CLICKED */, 0); }
-static void s_NebulaButtonProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } u32 msg = (u32)ARG(1); u64 wp = ARG(2), lp = ARG(3); Wnd *n = &g_wnd[i];
+static void s_NebulaButtonProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } SUPER_ADOPT(i, BI_BUTTON); u32 msg = (u32)ARG(1); u64 wp = ARG(2), lp = ARG(3); Wnd *n = &g_wnd[i];
   switch (msg) {
     case 0x0F: ctl_do_paint(c, i); return;
     case 0x87: { u32 bs = n->style & 0xF; RET(bs == 1 ? 0x2001 : (bs == 0 || bs == 8) ? 0x2000 | 0x0020 : bs == 4 || bs == 9 ? 0x0040 : 0x0020); return; }   /* DLGC_DEFPUSHBUTTON / UNDEFPUSHBUTTON / RADIOBUTTON / BUTTON */
@@ -860,7 +886,7 @@ static void static_paint(Cpu *c, int i, u64 hdc, u64 hbr) { Win32 *w = W; Wnd *n
   u32 col = en ? (n->builtin == BI_LINK ? 0x0066cc : 0x000000) : 0x6d6d6d; char plain[1024]; const char *txt = n->text;
   if (n->builtin == BI_LINK) { /* strip <a ...> tags */ int o = 0; for (const char *p = n->text; *p && o < 1000; p++) { if (*p == '<') { while (*p && *p != '>') p++; continue; } plain[o++] = *p; } plain[o] = 0; txt = plain; }
   ctl_text(c, hdc, i, 0, 0, cw, ch, fmt, col, txt); if (n->builtin == BI_LINK) { int fcw, fh; font_dims(w, n->font ? n->font : g_dlg_font, &fcw, &fh); hline(&s, 0, utf8_len_chars(txt, (int)e_strlen(txt)) * fcw - 1, fh - 1, col); } }
-static void s_NebulaStaticProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } u32 msg = (u32)ARG(1); u64 wp = ARG(2), lp = ARG(3); Wnd *n = &g_wnd[i];
+static void s_NebulaStaticProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } SUPER_ADOPT(i, BI_STATIC); u32 msg = (u32)ARG(1); u64 wp = ARG(2), lp = ARG(3); Wnd *n = &g_wnd[i];
   switch (msg) {
     case 0x0F: ctl_do_paint(c, i); return;
     case 0x87: RET(0x0100 /* DLGC_STATIC */); return;
@@ -874,7 +900,7 @@ static void s_NebulaStaticProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RE
     case 0x0C: { char t[1024]; text_in(c, lp, 1, t, sizeof t); e_snprintf(n->text, sizeof n->text, "%s", t); wnd_invalidate(i, 1); RET(1); return; }
     case 0x700: RET(1); return; case 0x702: RET(1); return;   /* LM_HITTEST / LM_SETITEM */
     default: if (ctl_common(c, i, msg, wp, lp)) return; def_window_proc(c, i, msg, wp, lp); return; } }
-static void s_NebulaLinkProc(Cpu *c) { s_NebulaStaticProc(c); }
+static void s_NebulaLinkProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i >= 0) SUPER_ADOPT(i, BI_LINK); s_NebulaStaticProc(c); }
 
 /* Edit (single-line editing, multi-line display): ES_LEFT 0 CENTER 1 RIGHT 2 MULTILINE 4 UPPERCASE 8 LOWERCASE 0x10 PASSWORD 0x20 AUTOVSCROLL 0x40 AUTOHSCROLL 0x80 NOHIDESEL 0x100 READONLY 0x800 WANTRETURN 0x1000 NUMBER 0x2000 */
 static void edit_paint(Cpu *c, int i, u64 hdc, u64 hbr) { Win32 *w = W; Wnd *n = &g_wnd[i]; Surf s; if (!dc_surf(c, hdc, &s)) return; int cw = wnd_client_w(i), ch = wnd_client_h(i); int en = wnd_enabled_chain(i); int ro = (n->style & 0x800) != 0; int fcw, fh; font_dims(w, n->font ? n->font : g_dlg_font, &fcw, &fh);
@@ -896,7 +922,7 @@ static void edit_replace_sel(Cpu *c, int i, const char *ins) { Wnd *n = &g_wnd[i
   int il = (int)e_strlen(ins); int room = n->limit > 0 && n->limit < 1023 ? n->limit : 1023; int newlen = len - (b - a) + il; if (newlen > room) { il -= newlen - room; if (il < 0) il = 0; }
   char out[1024]; e_memcpy(out, n->text, (size_t)a); e_memcpy(out + a, ins, (size_t)il); e_memcpy(out + a + il, n->text + b, (size_t)(len - b)); out[a + il + len - b] = 0; e_snprintf(n->text, sizeof n->text, "%s", out); n->sel0 = n->sel1 = a + il; n->modified = 1; wnd_invalidate(i, 1); (void)c; }
 static void edit_notify_change(Cpu *c, int i) { notify_parent(c, i, 0x300 /* EN_CHANGE */, 0); }
-static void s_NebulaEditProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } u32 msg = (u32)ARG(1); u64 wp = ARG(2), lp = ARG(3); Wnd *n = &g_wnd[i]; int len = (int)e_strlen(n->text); int ro = (n->style & 0x800) != 0;
+static void s_NebulaEditProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } SUPER_ADOPT(i, BI_EDIT); u32 msg = (u32)ARG(1); u64 wp = ARG(2), lp = ARG(3); Wnd *n = &g_wnd[i]; int len = (int)e_strlen(n->text); int ro = (n->style & 0x800) != 0;
   switch (msg) {
     case 0x01: n->sel0 = n->sel1 = 0; n->limit = 30000; RET(0); return;
     case 0x0F: ctl_do_paint(c, i); return;
@@ -952,7 +978,7 @@ static void listbox_paint(Cpu *c, int i, u64 hdc, u64 hbr) { Win32 *w = W; Wnd *
   u32 bc = !en ? 0xcccccc : n->focus_draw ? 0x0078d7 : 0x7a7a7a; edge_rect(&s, 0, 0, cw, ch, bc, bc); if (n->nitems > vis) { /* scrollbar hint */ int bar_h = ch - 2, th = vis * bar_h / (n->nitems ? n->nitems : 1); if (th < 8) th = 8; int ty = 1 + n->top_index * (bar_h - th) / (n->nitems - vis > 0 ? n->nitems - vis : 1); fill_rect_px(&s, cw - 8, 1, cw - 1, ch - 1, 0xf0f0f0); fill_rect_px(&s, cw - 7, ty, cw - 2, ty + th, 0xcdcdcd); } }
 static void listbox_select_notify(Cpu *c, int i) { Wnd *n = &g_wnd[i]; if (n->builtin == BI_COMBOLIST) { /* a dropped combo list: the owner combo takes the selection */ int combo = n->owner; if (combo >= 0 && wnd_alive(combo)) { Wnd *cb = &g_wnd[combo]; cb->cursel = n->cursel; if (cb->cursel >= 0 && cb->cursel < cb->nitems) e_snprintf(cb->text, sizeof cb->text, "%s", cb->items[cb->cursel]); cb->dropped = 0; cb->drop_wnd = -1; wnd_invalidate(combo, 1); n->visible = 0; g_capture = -1; wnd_invalidate_all(); notify_parent(c, combo, 1 /* CBN_SELCHANGE */, 0); /* the list window is freed lazily */ wnd_free(i); return; } RET(0); return; }
   notify_parent(c, i, 1 /* LBN_SELCHANGE */, 0); }
-static void s_NebulaListBoxProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } u32 msg = (u32)ARG(1); u64 wp = ARG(2), lp = ARG(3); Wnd *n = &g_wnd[i]; Win32 *w = W;
+static void s_NebulaListBoxProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } SUPER_ADOPT(i, BI_LISTBOX); u32 msg = (u32)ARG(1); u64 wp = ARG(2), lp = ARG(3); Wnd *n = &g_wnd[i]; Win32 *w = W;
   switch (msg) {
     case 0x0F: ctl_do_paint(c, i); return;
     case 0x87: RET(0x0001 | 0x0002); return;
@@ -981,7 +1007,7 @@ static void s_NebulaListBoxProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { R
     case 0x190: RET(n->cursel >= 0 ? 1 : 0); return; case 0x191: { if (wp && n->cursel >= 0) wr32(c, lp, (u32)n->cursel); RET(n->cursel >= 0 ? 1 : 0); return; }   /* LB_GETSELCOUNT / LB_GETSELITEMS */
     case 0x194: RET(0); return; case 0x195: RET(0); return; case 0x196: RET(0); return; case 0x19F: RET(0); return; case 0x1A4: RET(0); return; case 0x1A5: RET(0); return;
     default: if (ctl_common(c, i, msg, wp, lp)) return; def_window_proc(c, i, msg, wp, lp); return; } }
-static void s_NebulaComboListProc(Cpu *c) { s_NebulaListBoxProc(c); }
+static void s_NebulaComboListProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i >= 0) SUPER_ADOPT(i, BI_COMBOLIST); s_NebulaListBoxProc(c); }
 
 /* ComboBox: CBS_SIMPLE 1 DROPDOWN 2 DROPDOWNLIST 3; the dropped list is a popup ComboLBox owned by the combo */
 static void combo_paint(Cpu *c, int i, u64 hdc, u64 hbr) { Win32 *w = W; Wnd *n = &g_wnd[i]; Surf s; if (!dc_surf(c, hdc, &s)) return; int cw = wnd_client_w(i), ch = wnd_client_h(i); int en = wnd_enabled_chain(i); int fcw, fh; font_dims(w, n->font ? n->font : g_dlg_font, &fcw, &fh);
@@ -993,7 +1019,7 @@ static void combo_drop(Cpu *c, int i) { Win32 *w = W; Wnd *n = &g_wnd[i]; if (n-
   Wnd *l = &g_wnd[li]; l->owner = i; l->font = n->font; l->zseq = ++g_zseq; if (l->y + l->h > w->screen_h) l->y = oy - lh; if (l->y < 0) l->y = 0;
   /* share the items */ l->items = emu_alloc(sizeof(char[128]) * MAX_ITEMS); l->itemdata = emu_alloc(sizeof(u64) * MAX_ITEMS); for (int k = 0; k < n->nitems; k++) { e_memcpy(l->items[k], n->items[k], 128); l->itemdata[k] = n->itemdata[k]; } l->nitems = n->nitems; l->cursel = n->cursel; l->top_index = n->cursel > 0 ? n->cursel : 0;
   l->visible = 1; l->invalid = 1; n->dropped = 1; n->drop_wnd = li; g_capture = li; wnd_invalidate(i, 1); w->dirty = 1; }
-static void s_NebulaComboProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } u32 msg = (u32)ARG(1); u64 wp = ARG(2), lp = ARG(3); Wnd *n = &g_wnd[i]; Win32 *w = W;
+static void s_NebulaComboProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } SUPER_ADOPT(i, BI_COMBO); u32 msg = (u32)ARG(1); u64 wp = ARG(2), lp = ARG(3); Wnd *n = &g_wnd[i]; Win32 *w = W;
   switch (msg) {
     case 0x01: { /* the template height covers the dropped list; the control itself is one line tall */ int fcw, fh; font_dims(w, n->font ? n->font : g_dlg_font, &fcw, &fh); if ((n->style & 3) != 1 && n->h > fh + 10) n->h = fh + 8; RET(0); return; }
     case 0x0F: ctl_do_paint(c, i); return;
@@ -1025,7 +1051,7 @@ static void s_NebulaComboProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET
 
 /* progress bar: PBM_SETRANGE 0x401 SETPOS 0x402 DELTAPOS 0x403 SETSTEP 0x404 STEPIT 0x405 SETRANGE32 0x406 GETRANGE 0x407 GETPOS 0x408 SETBARCOLOR 0x409 SETBKCOLOR 0x2001 SETMARQUEE 0x40A SETSTATE 0x410 */
 static void progress_paint(Cpu *c, int i, u64 hdc) { Wnd *n = &g_wnd[i]; Surf s; if (!dc_surf(c, hdc, &s)) return; int cw = wnd_client_w(i), ch = wnd_client_h(i); fill_rect_px(&s, 0, 0, cw, ch, 0xe6e6e6); edge_rect(&s, 0, 0, cw, ch, 0xbcbcbc, 0xbcbcbc); int range = n->pmax - n->pmin; if (range <= 0) range = 1; int pos = n->ppos - n->pmin; if (pos < 0) pos = 0; if (pos > range) pos = range; int fw = (int)((long long)(cw - 2) * pos / range); u32 col = n->icon == 2 ? 0xda3a3a : n->icon == 3 ? 0xd9b22a : 0x06b025; if (n->style & 4 /* PBS_VERTICAL */) { int fhh = (int)((long long)(ch - 2) * pos / range); fill_rect_px(&s, 1, ch - 1 - fhh, cw - 1, ch - 1, col); } else fill_rect_px(&s, 1, 1, 1 + fw, ch - 1, col); (void)c; }
-static void s_NebulaProgressProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } u32 msg = (u32)ARG(1); u64 wp = ARG(2), lp = ARG(3); Wnd *n = &g_wnd[i];
+static void s_NebulaProgressProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } SUPER_ADOPT(i, BI_PROGRESS); u32 msg = (u32)ARG(1); u64 wp = ARG(2), lp = ARG(3); Wnd *n = &g_wnd[i];
   switch (msg) {
     case 0x01: n->pmin = 0; n->pmax = 100; n->ppos = 0; n->pstep = 10; RET(0); return;
     case 0x0F: ctl_do_paint(c, i); return;
@@ -1040,7 +1066,7 @@ static void s_NebulaProgressProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { 
     case 0x409: case 0x2001: RET(0xffffffff); return; case 0x40A: wnd_invalidate(i, 0); RET(1); return; case 0x40D: RET(n->pstep); return;
     case 0x410: { u64 old = n->icon ? n->icon : 1; n->icon = wp; wnd_invalidate(i, 0); RET(old); return; } case 0x411: RET(n->icon ? n->icon : 1); return;
     default: if (ctl_common(c, i, msg, wp, lp)) return; def_window_proc(c, i, msg, wp, lp); return; } }
-static void s_NebulaScrollBarProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } u32 msg = (u32)ARG(1); if (msg == 0x0F) { u64 hdc = ctl_paint_begin(c, i); Surf s; if (hdc && dc_surf(c, hdc, &s)) { fill_rect_px(&s, 0, 0, s.w, s.h, 0xf0f0f0); edge_rect(&s, 0, 0, s.w, s.h, 0xdcdcdc, 0xdcdcdc); } if (hdc) ctl_paint_end(c, i, hdc); RET(0); return; } if (ctl_common(c, i, msg, ARG(2), ARG(3))) return; def_window_proc(c, i, msg, ARG(2), ARG(3)); }
+static void s_NebulaScrollBarProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } SUPER_ADOPT(i, BI_SCROLLBAR); u32 msg = (u32)ARG(1); if (msg == 0x0F) { u64 hdc = ctl_paint_begin(c, i); Surf s; if (hdc && dc_surf(c, hdc, &s)) { fill_rect_px(&s, 0, 0, s.w, s.h, 0xf0f0f0); edge_rect(&s, 0, 0, s.w, s.h, 0xdcdcdc, 0xdcdcdc); } if (hdc) ctl_paint_end(c, i, hdc); RET(0); return; } if (ctl_common(c, i, msg, ARG(2), ARG(3))) return; def_window_proc(c, i, msg, ARG(2), ARG(3)); }
 static int g_unsupported_reported;
 static void s_NebulaUnsupportedProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } u32 msg = (u32)ARG(1); Wnd *n = &g_wnd[i]; Win32 *w = W;
   if (msg == 0x01) { if (g_unsupported_reported++ < 6) w32_report(w, "control class \"%s\" is not implemented yet — shown as an empty box", n->clsname); RET(0); return; }
@@ -1265,6 +1291,8 @@ void gdi_cont_resume(Cpu *c, int kind, u64 rax) {
     case CONT_WNDCREATE: wndcreate_resume(c, rax); return;
     case CONT_WNDDESTROY: destroy_step(c); return;
     case CONT_CTLPAINT: ctlpaint_resume(c, rax); return;
+    case CONT_ERASEBG: erasebg_resume(c, rax); return;
+    case CONT_SETPOS: setpos_resume(c, rax); return;
     case CONT_DLGINIT: dlginit_resume(c, rax); return;
     case CONT_DLGPROC: dlgproc_resume(c, rax); return;
     case CONT_MODAL: { int m = g_nmodal - 1; if (m >= 0 && g_modal[m].phase == 2) { u64 res = modal_result(w, m); g_nmodal--; w32_cont_finish(c, res); return; } modal_resume(c, rax); return; }

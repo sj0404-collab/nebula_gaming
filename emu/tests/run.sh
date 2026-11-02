@@ -406,6 +406,10 @@ if [ -f $IS ]; then
     rm -rf $SRC $OUT $RT
   fi
   rm -rf $ID
+  # the GUI wizard (Delphi VCL: superclassed controls, WM_ERASEBKGND through the window procedure, synchronous WM_SIZE, DC origins/clipping)
+  GD=$(mktemp -d); out=$(X64_LOG=1 X64_WNDDUMP=1 $X --no-stdin --max-ms 45000 --mount-rw "$GD=C:\\inst" $IS '/DIR=C:\inst\is' 2>&1 3>&1 | grep -a "^\[wnd\]\|frames" || true); rm -rf $GD
+  check "Inno Setup GUI: the 'Select Setup Language' form (VCL) is created, laid out and painted"   '"TSelectLanguageForm" "Select Setup Language" parent=-1 at [0-9]*,[0-9]* 3[0-9][0-9]x1[0-9][0-9] nc=1,24 style=[0-9a-f]* vis=1 inv=0'   "$out"
+  check "Inno Setup GUI: combo box, OK/Cancel buttons and the prompt are visible"   '"TNewComboBox" "English".*vis=1 inv=0'   "$(echo "$out" | tr '\n' ' ')"
 else echo "  skip Inno Setup (no network)"; fi
 # a real MSVC x64 GUI program with dialog templates + common controls: PuTTY reaches its configuration dialog
 # (About box opens through the dialog manager); SysTreeView32 is still reported as not implemented
