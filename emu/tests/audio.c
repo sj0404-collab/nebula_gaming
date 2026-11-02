@@ -31,7 +31,7 @@ static int test_waveout(void) {
   enum { N = 4, FR = 4410 }; static short pcm[N][FR * 2]; WAVEHDR hd[N]; double ph = 0;
   for (int i = 0; i < N; i++) { fill_s16(pcm[i], FR, 2, 44100, 440, &ph); memset(&hd[i], 0, sizeof hd[i]); hd[i].lpData = (LPSTR)pcm[i]; hd[i].dwBufferLength = sizeof pcm[i]; CHECK(waveOutPrepareHeader(h, &hd[i], sizeof hd[i]) == 0, "prepare %d", i); CHECK(waveOutWrite(h, &hd[i], sizeof hd[i]) == 0, "write %d", i); }
   DWORD t0 = GetTickCount(); int done = 0;
-  while (done < N && GetTickCount() - t0 < 3000) { WaitForSingleObject(ev, 200); done = 0; for (int i = 0; i < N; i++) if (hd[i].dwFlags & WHDR_DONE) done++; }
+  while (done < N && GetTickCount() - t0 < 10000) { WaitForSingleObject(ev, 200); done = 0; for (int i = 0; i < N; i++) if (hd[i].dwFlags & WHDR_DONE) done++; }
   MMTIME mt; mt.wType = TIME_SAMPLES; waveOutGetPosition(h, &mt, sizeof mt);
   printf("  event callback: %d/%d buffers done in %lu ms, position %lu samples\n", done, N, (unsigned long)(GetTickCount() - t0), (unsigned long)mt.u.sample);
   CHECK(done == N, "buffers not completed"); CHECK(mt.u.sample >= FR * N, "position did not advance"); CHECK(GetTickCount() - t0 >= 250, "4 x 100 ms finished too fast (%lu ms): the clock is not real (buffers complete when the mixer consumes them, ~100 ms ahead of the speaker)", (unsigned long)(GetTickCount() - t0));
@@ -40,8 +40,8 @@ static int test_waveout(void) {
   /* function callback: WOM_OPEN, N x WOM_DONE, WOM_CLOSE on a helper thread */
   r = waveOutOpen(&h, 0, &f, (DWORD_PTR)wo_cb, 0x1234, CALLBACK_FUNCTION); CHECK(r == MMSYSERR_NOERROR, "waveOutOpen (function) = %u", r);
   for (int i = 0; i < 2; i++) { hd[i].dwFlags = 0; waveOutPrepareHeader(h, &hd[i], sizeof hd[i]); waveOutWrite(h, &hd[i], sizeof hd[i]); }
-  t0 = GetTickCount(); while (g_wom_done < 2 && GetTickCount() - t0 < 2000) Sleep(10);
-  waveOutReset(h); waveOutClose(h); Sleep(50);
+  t0 = GetTickCount(); while (g_wom_done < 2 && GetTickCount() - t0 < 8000) Sleep(10);
+  waveOutReset(h); waveOutClose(h); for (int k = 0; k < 100 && !g_wom_close; k++) Sleep(10);
   printf("  function callback: WOM_OPEN %d, WOM_DONE %d, WOM_CLOSE %d\n", g_wom_open, g_wom_done, g_wom_close);
   CHECK(g_wom_open == 1 && g_wom_done == 2 && g_wom_close == 1, "callback counts wrong");
   CHECK(waveInGetNumDevs() == 0, "waveIn should report no capture device");

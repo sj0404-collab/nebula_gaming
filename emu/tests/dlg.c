@@ -297,6 +297,67 @@ static void comctl_tests(void) {
   ImageList_Destroy(il);
 }
 
+
+/* tree view (treeview.inc): hierarchy, navigation flags, selection notifications (vetoable), expand notifications, hit testing, keyboard */
+static HWND g_tv; static int g_tv_phase, g_tv_changing, g_tv_changed, g_tv_expanding, g_tv_expanded, g_tv_quit, g_tv_veto, g_tv_disp; static HTREEITEM g_tv_root1, g_tv_root2, g_tv_c1, g_tv_c2, g_tv_gc, g_tv_last_new; static LPARAM g_tv_last_param;
+static LRESULT CALLBACK tv_wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+  switch (m) {
+    case WM_NOTIFY: { NMHDR *nm = (NMHDR *)lp; if (nm->hwndFrom != g_tv) return 0; NMTREEVIEWW *tv = (NMTREEVIEWW *)lp;
+      if (nm->code == TVN_SELCHANGINGW) { g_tv_changing++; return g_tv_veto ? TRUE : FALSE; }
+      if (nm->code == TVN_SELCHANGEDW) { g_tv_changed++; g_tv_last_new = tv->itemNew.hItem; g_tv_last_param = tv->itemNew.lParam; return 0; }
+      if (nm->code == TVN_ITEMEXPANDINGW) { g_tv_expanding++; return g_tv_veto ? TRUE : FALSE; }
+      if (nm->code == TVN_ITEMEXPANDEDW) { g_tv_expanded++; return 0; }
+      if (nm->code == TVN_GETDISPINFOW) { NMTVDISPINFOW *di = (NMTVDISPINFOW *)lp; g_tv_disp++; if (di->item.mask & TVIF_TEXT) wcscpy(di->item.pszText, L"Callback text"); return 0; }
+      return 0; }
+    case WM_TIMER: {
+      g_tv_phase++;
+      switch (g_tv_phase) {
+        case 1: { /* click on the "+" button of root 1 -> TVN_ITEMEXPANDING/ED and the children become visible */ RECT r; *(HTREEITEM *)&r = g_tv_root1; TreeView_GetItemRect(g_tv, g_tv_root1, &r, TRUE); TVHITTESTINFO ht; ht.pt.x = 12; ht.pt.y = (r.top + r.bottom) / 2; HTREEITEM hh = TreeView_HitTest(g_tv, &ht); chk(hh == g_tv_root1 && (ht.flags & TVHT_ONITEMBUTTON), "treeview: TVM_HITTEST on the expand button");
+          SendMessageW(g_tv, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(ht.pt.x, ht.pt.y)); break; }
+        case 2: chk(g_tv_expanding == 1 && g_tv_expanded == 1 && (TreeView_GetItemState(g_tv, g_tv_root1, TVIS_EXPANDED) & TVIS_EXPANDED) && TreeView_GetNextItem(g_tv, g_tv_root1, TVGN_NEXTVISIBLE) == g_tv_c1, "treeview: button click -> TVN_ITEMEXPANDING + TVN_ITEMEXPANDED, child 1 is the next visible item");
+          { /* click on child 2's label -> TVN_SELCHANGING (vetoed once) */ g_tv_veto = 1; RECT r; TreeView_GetItemRect(g_tv, g_tv_c2, &r, TRUE); SendMessageW(g_tv, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(r.left + 4, (r.top + r.bottom) / 2)); } break;
+        case 3: chk(g_tv_changing == 1 && g_tv_changed == 0 && TreeView_GetSelection(g_tv) == NULL, "treeview: TVN_SELCHANGING returning TRUE vetoed the click");
+          { g_tv_veto = 0; RECT r; TreeView_GetItemRect(g_tv, g_tv_c2, &r, TRUE); SendMessageW(g_tv, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(r.left + 4, (r.top + r.bottom) / 2)); } break;
+        case 4: chk(g_tv_changing == 2 && g_tv_changed == 1 && TreeView_GetSelection(g_tv) == g_tv_c2 && g_tv_last_new == g_tv_c2 && g_tv_last_param == 12, "treeview: label click -> TVN_SELCHANGING + TVN_SELCHANGED with itemNew.hItem/lParam, GetSelection = child 2");
+          SendMessageW(g_tv, WM_KEYDOWN, VK_UP, 0); break;
+        case 5: chk(TreeView_GetSelection(g_tv) == g_tv_c1 && g_tv_changed == 2, "treeview: Up arrow selected child 1 with notification"); SendMessageW(g_tv, WM_KEYDOWN, VK_RIGHT, 0); break;
+        case 6: chk((TreeView_GetItemState(g_tv, g_tv_c1, TVIS_EXPANDED) & TVIS_EXPANDED) && g_tv_expanded == 2 && TreeView_GetNextItem(g_tv, g_tv_c1, TVGN_NEXTVISIBLE) == g_tv_gc, "treeview: Right arrow expanded child 1 (grandchild visible)"); SendMessageW(g_tv, WM_KEYDOWN, VK_LEFT, 0); break;
+        case 7: chk(!(TreeView_GetItemState(g_tv, g_tv_c1, TVIS_EXPANDED) & TVIS_EXPANDED) && TreeView_GetNextItem(g_tv, g_tv_c1, TVGN_NEXTVISIBLE) == g_tv_c2, "treeview: Left arrow collapsed child 1 again"); SendMessageW(g_tv, WM_KEYDOWN, VK_END, 0); break;
+        case 8: chk(TreeView_GetSelection(g_tv) == g_tv_root2, "treeview: End selects the last visible item (root 2)"); SendMessageW(g_tv, WM_KEYDOWN, VK_HOME, 0); break;
+        case 9: chk(TreeView_GetSelection(g_tv) == g_tv_root1, "treeview: Home selects the first item"); chk(g_tv_disp >= 1, "treeview: LPSTR_TEXTCALLBACK fetched through TVN_GETDISPINFOW before painting");
+          chk(TreeView_SelectItem(g_tv, g_tv_gc) && TreeView_GetSelection(g_tv) == g_tv_gc && (TreeView_GetItemState(g_tv, g_tv_c1, TVIS_EXPANDED) & TVIS_EXPANDED), "treeview: TVM_SELECTITEM(TVGN_CARET) selects a hidden grandchild and expands its parent");
+          g_tv_quit = 1; KillTimer(h, 5); DestroyWindow(h); break; }
+      return 0; }
+    case WM_DESTROY: PostQuitMessage(10); return 0; }
+  return DefWindowProcW(h, m, wp, lp);
+}
+static HTREEITEM tv_ins(HWND tv, HTREEITEM parent, HTREEITEM after, const WCHAR *text, LPARAM lp, int children) { TVINSERTSTRUCTW is; memset(&is, 0, sizeof is); is.hParent = parent; is.hInsertAfter = after; is.item.mask = TVIF_TEXT | TVIF_PARAM | (children ? TVIF_CHILDREN : 0); is.item.pszText = (LPWSTR)text; is.item.lParam = lp; is.item.cChildren = children; return (HTREEITEM)SendMessageW(tv, TVM_INSERTITEMW, 0, (LPARAM)&is); }
+static void treeview_tests(void) {
+  WNDCLASSW wc; memset(&wc, 0, sizeof wc); wc.lpfnWndProc = tv_wnd_proc; wc.hInstance = g_inst; wc.lpszClassName = L"NebulaTvTest"; wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); RegisterClassW(&wc);
+  HWND h = CreateWindowExW(0, L"NebulaTvTest", L"TreeView test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 120, 120, 420, 320, NULL, NULL, g_inst, NULL);
+  g_tv = CreateWindowExW(WS_EX_CLIENTEDGE, WC_TREEVIEWW, NULL, WS_CHILD | WS_VISIBLE | WS_TABSTOP | TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT | TVS_SHOWSELALWAYS, 10, 10, 200, 260, h, (HMENU)304, g_inst, NULL);
+  chk(g_tv != NULL && TreeView_GetCount(g_tv) == 0 && TreeView_GetRoot(g_tv) == NULL, "treeview: SysTreeView32 created (real class, not the unsupported placeholder)");
+  g_tv_root1 = tv_ins(g_tv, TVI_ROOT, TVI_LAST, L"Session", 1, 0); g_tv_root2 = tv_ins(g_tv, TVI_ROOT, TVI_LAST, L"Window", 2, 0); HTREEITEM r0 = tv_ins(g_tv, TVI_ROOT, TVI_FIRST, L"Logging", 0, 0);
+  g_tv_c1 = tv_ins(g_tv, g_tv_root1, TVI_LAST, L"Terminal", 11, 0); g_tv_c2 = tv_ins(g_tv, g_tv_root1, TVI_LAST, L"Keyboard", 12, 0); HTREEITEM cb = tv_ins(g_tv, g_tv_root1, TVI_LAST, LPSTR_TEXTCALLBACKW, 13, 0); g_tv_gc = tv_ins(g_tv, g_tv_c1, TVI_LAST, L"Bell", 111, 0);
+  chk(g_tv_root1 && g_tv_root2 && r0 && g_tv_c1 && g_tv_c2 && cb && g_tv_gc && TreeView_GetCount(g_tv) == 7, "treeview: TVM_INSERTITEMW x7 (TVI_ROOT/TVI_FIRST/TVI_LAST), GetCount = 7");
+  chk(TreeView_GetRoot(g_tv) == r0 && TreeView_GetNextSibling(g_tv, r0) == g_tv_root1 && TreeView_GetNextSibling(g_tv, g_tv_root1) == g_tv_root2 && TreeView_GetNextSibling(g_tv, g_tv_root2) == NULL && TreeView_GetPrevSibling(g_tv, g_tv_root1) == r0, "treeview: TVGN_ROOT / NEXT / PREVIOUS walk the root chain in insertion order (TVI_FIRST went first)");
+  chk(TreeView_GetChild(g_tv, g_tv_root1) == g_tv_c1 && TreeView_GetParent(g_tv, g_tv_gc) == g_tv_c1 && TreeView_GetParent(g_tv, r0) == NULL && TreeView_GetChild(g_tv, g_tv_root2) == NULL, "treeview: TVGN_CHILD / TVGN_PARENT");
+  chk(TreeView_GetNextVisible(g_tv, g_tv_root1) == g_tv_root2 && TreeView_GetFirstVisible(g_tv) == r0 && TreeView_GetVisibleCount(g_tv) >= 5, "treeview: collapsed children are skipped by TVGN_NEXTVISIBLE; FIRSTVISIBLE; GETVISIBLECOUNT");
+  WCHAR buf[64]; TVITEMW it; memset(&it, 0, sizeof it); it.mask = TVIF_TEXT | TVIF_PARAM | TVIF_CHILDREN | TVIF_HANDLE; it.hItem = g_tv_c2; it.pszText = buf; it.cchTextMax = 64; chk(SendMessageW(g_tv, TVM_GETITEMW, 0, (LPARAM)&it) && wcscmp(buf, L"Keyboard") == 0 && it.lParam == 12 && it.cChildren == 0, "treeview: TVM_GETITEMW text/lParam/cChildren");
+  it.hItem = g_tv_root1; chk(SendMessageW(g_tv, TVM_GETITEMW, 0, (LPARAM)&it) && it.cChildren == 1, "treeview: cChildren reports 1 for an item with children");
+  it.mask = TVIF_TEXT | TVIF_HANDLE; it.hItem = g_tv_c2; it.pszText = (LPWSTR)L"Keys"; chk(SendMessageW(g_tv, TVM_SETITEMW, 0, (LPARAM)&it) && (it.pszText = buf, it.cchTextMax = 64, SendMessageW(g_tv, TVM_GETITEMW, 0, (LPARAM)&it)) && wcscmp(buf, L"Keys") == 0, "treeview: TVM_SETITEMW changes the text");
+  RECT ra, rb; TreeView_GetItemRect(g_tv, r0, &ra, FALSE); TreeView_GetItemRect(g_tv, g_tv_root1, &rb, FALSE); chk(ra.bottom > ra.top && rb.top == ra.bottom && ra.bottom - ra.top >= 16, "treeview: TVM_GETITEMRECT rows stack vertically");
+  chk(!TreeView_GetItemRect(g_tv, g_tv_c1, &ra, FALSE), "treeview: TVM_GETITEMRECT of a hidden (collapsed) child returns FALSE");
+  chk(TreeView_Expand(g_tv, g_tv_root1, TVE_EXPAND) && TreeView_GetNextVisible(g_tv, g_tv_root1) == g_tv_c1 && g_tv_expanding == 0, "treeview: TVM_EXPAND(TVE_EXPAND) shows the children without notifications"); TreeView_Expand(g_tv, g_tv_root1, TVE_COLLAPSE); chk(TreeView_GetNextVisible(g_tv, g_tv_root1) == g_tv_root2, "treeview: TVM_EXPAND(TVE_COLLAPSE)");
+  chk(TreeView_GetIndent(g_tv) > 0 && (TreeView_SetIndent(g_tv, 24), TreeView_GetIndent(g_tv) == 24), "treeview: TVM_GET/SETINDENT");
+  chk(TreeView_DeleteItem(g_tv, r0) && TreeView_GetCount(g_tv) == 6 && TreeView_GetRoot(g_tv) == g_tv_root1, "treeview: TVM_DELETEITEM of the first root relinks the chain");
+  chk(TreeView_SelectItem(g_tv, NULL) && TreeView_GetSelection(g_tv) == NULL, "treeview: no selection initially; SelectItem(NULL) keeps it empty");
+  SetTimer(h, 5, 150, NULL);
+  MSG msg; DWORD t0 = GetTickCount();
+  while (GetMessageW(&msg, NULL, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessageW(&msg); if (GetTickCount() - t0 > 15000) { printf("FAIL treeview: timeout\n"); g_fail++; break; } }
+  chk(g_tv_quit && msg.message == WM_QUIT && msg.wParam == 10, "treeview: the window closed, WM_QUIT reached GetMessage");
+}
+
 int main(void) {
   g_inst = GetModuleHandleW(NULL);
   InitCommonControls();
@@ -322,6 +383,7 @@ int main(void) {
   chk(quit_code == 5, "modeless: PostQuitMessage code reached GetMessage");
   menu_tests();
   comctl_tests();
+  treeview_tests();
   printf("%s %d/%d\n", g_fail ? "FAILED" : "ALL OK", g_ok, g_ok + g_fail);
   return g_fail ? 1 : 0;
 }

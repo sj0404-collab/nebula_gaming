@@ -345,8 +345,8 @@ check "7za.exe x86: extract"      "Everything is Ok"                            
 check "7za.exe x86: round-trip identical" "same" "$(cmp -s $W32/src/rand.bin $W32/out/src/rand.bin && cmp -s $W32/src/nums.txt $W32/out/src/nums.txt && echo same || echo different)"
 check "7za.exe x86: error path = MSVC C++ throw/catch (__CxxFrameHandler)" "System ERROR:" "$($X --quiet --max-ms 30000 --mount-rw $W32='C:\w' $Z7/7za.exe x '-oC:\w\o2' 'C:\w\nope.7z' 2>&1 || true)"
 echo "[19] dialog manager (user32 dialogs, standard controls, resources, shell folders, IShellLink) — same test built for x64 and x86"
-check "dlg.exe (x64): 88 checks (dialogs, controls, menus, status bar / toolbar / tab control)"    "ALL OK 88/88"   "$($X --quiet --no-stdin --max-ms 40000 tests/dlg.exe 2>&1 || true)"
-check "dlg32.exe (x86): 88 checks (dialogs, controls, menus, status bar / toolbar / tab control)"  "ALL OK 88/88"   "$($X --quiet --no-stdin --max-ms 40000 tests/dlg32.exe 2>&1 || true)"
+check "dlg.exe (x64): 115 checks (dialogs, controls, menus, status bar / toolbar / tab control / tree view)"    "ALL OK 115/115"   "$($X --quiet --no-stdin --max-ms 40000 tests/dlg.exe 2>&1 || true)"
+check "dlg32.exe (x86): 115 checks (dialogs, controls, menus, status bar / toolbar / tab control / tree view)"  "ALL OK 115/115"   "$($X --quiet --no-stdin --max-ms 40000 tests/dlg32.exe 2>&1 || true)"
 check "input.exe (x64): 30 checks (Raw Input WM_INPUT, DirectInput8 keyboard/mouse, buffered data)"  "ALL OK 30/30"   "$($X --quiet --no-stdin --max-ms 15000 --key 0x27@1000:1500 --key 0x28@3000:400 --move 300,300@4200 tests/input.exe 2>&1 || true)"
 check "input32.exe (x86): 30 checks (Raw Input WM_INPUT, DirectInput8 keyboard/mouse, buffered data)"  "ALL OK 30/30"   "$($X --quiet --no-stdin --max-ms 15000 --key 0x27@1000:1500 --key 0x28@3000:400 --move 300,300@4200 tests/input32.exe 2>&1 || true)"
 # the same real installer twice: the x86 build (32-bit files) and the x64 build (a 32-bit setup stub that probes
@@ -437,6 +437,8 @@ if [ -f $PT ]; then
   out=$($X --no-stdin --max-ms 4000 --click 50,415@2000 $PT 2>&1 | grep -v "last blocks" || true)
   check "putty.exe (x64, MSVC): configuration dialog + About box are shown, no fault"   "time limit reached"   "$out"
   check "putty.exe: frames presented"   "[1-9][0-9]* frames"   "$out"
-  check "putty.exe: the missing common control is reported honestly"   "SysTreeView32.*not implemented"   "$out"
+  check "putty.exe: no control class is reported as unimplemented (SysTreeView32 is real now)"   "unimplemented_controls=0"   "unimplemented_controls=$(printf '%s' "$out" | grep -c 'not implemented yet')"
+  out=$(X64_LOG=1 X64_WNDDUMP=1 $X --no-stdin --max-ms 4000 $PT 2>&1 3>&1 | grep -a "^\[wnd\]" || true)
+  check "putty.exe: the Session panel controls exist (Host Name edit, Saved Sessions list, Telnet combo)"   "Host &Name"   "$out"
 else echo "  skip putty.exe (no network)"; fi
 [ $fail = 0 ] && echo "ALL OK" || { echo "FAILURES"; exit 1; }

@@ -17,15 +17,15 @@
 #define CAPTION_H 24
 #define MENU_H 20
 #define SUPER_ADOPT(i, k) do { if (!g_wnd[i].builtin) { g_wnd[i].builtin = (k); g_wnd[i].superclassed = 1; } } while (0)
-enum { BI_NONE = 0, BI_BUTTON, BI_STATIC, BI_EDIT, BI_COMBO, BI_LISTBOX, BI_SCROLLBAR, BI_DIALOG, BI_PROGRESS, BI_LINK, BI_COMBOLIST, BI_UNSUPPORTED, BI_MSGBOX, BI_MENU, BI_STATUS, BI_TOOLBAR, BI_TAB };
-enum { CONT_WNDCREATE = 6 /* = CONT_CREATEWND in win32.c */, CONT_WNDDESTROY = 400, CONT_CTLPAINT = 401, CONT_DLGINIT = 402, CONT_MODAL = 403, CONT_DLGMSG = 404, CONT_SENDCMD = 405, CONT_DLGPROC = 406, CONT_ERASEBG = 407, CONT_SETPOS = 408, CONT_STREAMIN = 409, CONT_ILREAD = 410, CONT_WICREAD = 411, CONT_MENUOPEN = 412, CONT_MENUDRAW = 413, CONT_TABSEL = 414, CONT_SUBCLASS = 415, CONT_DIENUM = 416, CONT_RET_VAL_ = 5 };
+enum { BI_NONE = 0, BI_BUTTON, BI_STATIC, BI_EDIT, BI_COMBO, BI_LISTBOX, BI_SCROLLBAR, BI_DIALOG, BI_PROGRESS, BI_LINK, BI_COMBOLIST, BI_UNSUPPORTED, BI_MSGBOX, BI_MENU, BI_STATUS, BI_TOOLBAR, BI_TAB, BI_TREE };
+enum { CONT_WNDCREATE = 6 /* = CONT_CREATEWND in win32.c */, CONT_WNDDESTROY = 400, CONT_CTLPAINT = 401, CONT_DLGINIT = 402, CONT_MODAL = 403, CONT_DLGMSG = 404, CONT_SENDCMD = 405, CONT_DLGPROC = 406, CONT_ERASEBG = 407, CONT_SETPOS = 408, CONT_STREAMIN = 409, CONT_ILREAD = 410, CONT_WICREAD = 411, CONT_MENUOPEN = 412, CONT_MENUDRAW = 413, CONT_TABSEL = 414, CONT_SUBCLASS = 415, CONT_DIENUM = 416, CONT_TVSEL = 417, CONT_TVEXP = 418, CONT_TVDISP = 419, CONT_ANSIOUT = 420, CONT_RET_VAL_ = 5 };
 #define MAX_ITEMS 512
 typedef struct {
   int used, destroyed; int parent, owner; int builtin; int superclassed; /* app-registered class whose wndproc delegates to a built-in proc (VCL TNewButton …): behaves like the built-in for painting but all messages flow through the guest wndproc */ int pid;   /* owning process: messages from other processes are posted to its queue */ char clsname[40]; u64 wndproc; u64 cls_brush; u32 cls_style; int cls_extra;
   u32 style, exstyle; u64 id, inst;
   int x, y, w, h;            /* relative to the parent's client origin (top-level: framebuffer coordinates) */
   int ncx, ncy;              /* client offset inside the window (caption/border of secondary top-level windows) */
-  char *text; int textcap; char tbuf[1024]; u32 bgcol; int bgcol_set; /* EM_SETBKGNDCOLOR */ char *stream; int stream_len, stream_cap; u64 stream_buf; u32 stream_flags; /* EM_STREAMIN in progress */ void *cc; /* common-control state (comctl.inc) */ u64 sub_proc[8], sub_id[8], sub_ref[8], sub_orig; int nsub, subcur; /* comctl32 SetWindowSubclass chain: subcur = index of the subclass currently running (nsub = none) */   /* window text: inline buffer, grown on the heap for long edit contents (licence viewers) */
+  char *text; int textcap; char tbuf[1024]; u32 bgcol; int bgcol_set; /* EM_SETBKGNDCOLOR */ char *stream; int stream_len, stream_cap; u64 stream_buf; u32 stream_flags; /* EM_STREAMIN in progress */ void *cc; /* common-control state (comctl.inc) */ u64 sub_proc[8], sub_id[8], sub_ref[8], sub_orig; int nsub, subcur; int unicode_wnd; /* created through CreateWindowExW (decides A/W notifications of common controls) */ /* comctl32 SetWindowSubclass chain: subcur = index of the subclass currently running (nsub = none) */   /* window text: inline buffer, grown on the heap for long edit contents (licence viewers) */
   u64 userdata; u64 extra[16];
   int visible, enabled, invalid, erase;
   u64 font; u64 icon; u64 menu; u64 sysmenu; int bar_hot1;   /* menu bar: highlighted item + 1 */
@@ -47,6 +47,7 @@ static u32 g_sys_colors[31];
 static void edge_rect(Surf *s, int l, int t, int r, int b, u32 tl, u32 br);
 
 static int dlg_key_message(Cpu *c, int d, GuestMsg *m);
+/* tree view (treeview.inc) */ static void s_NebulaTreeProc(Cpu *c); static void tvsel_resume(Cpu *c, u64 rax); static void tvexp_resume(Cpu *c, u64 rax); static void tvdisp_resume(Cpu *c, u64 rax); static u64 g_slot_tree;
 /* game input (input.inc) */ static int raw_key(Win32 *w, int vk, int down); static int raw_mouse(Win32 *w, int dx, int dy, int ev, int wheel); static void di_key(Win32 *w, int vk, int down); static void di_mouse(Win32 *w, int dx, int dy, int ev, int wheel); static void dienum_resume(Cpu *c, u64 rax);
 /* common controls (comctl.inc) */ static void s_NebulaStatusProc(Cpu *c); static void s_NebulaToolbarProc(Cpu *c); static void s_NebulaTabProc(Cpu *c); static void tabsel_resume(Cpu *c, u64 rax);
 /* menus (menu.inc) */ static void menu_bar_draw(Win32 *w, Surf *f, GdiObj *d, int i, int wx, int wy); static int menu_bar_hit(Win32 *w, int i, int fx, int fy); static int menu_top_wnd(void); static int menu_bar_press(Cpu *c, int i, u64 lp); static int menu_bar_mnemonic(Cpu *c, int i, u32 ch); static void menu_apply_bar(Win32 *w, int i); static int menu_of(u64 h); static void s_NebulaMenuProc(Cpu *c); static void menuopen_resume(Cpu *c, u64 rax); static void menudraw_resume(Cpu *c, u64 rax);
@@ -130,7 +131,7 @@ void w32_key(Win32 *w, int vk, int down) {
 /* topmost visible window under a framebuffer point (children before parents, later siblings first) */
 static int hit_in(int i, int fx, int fy) {
   if (!g_wnd[i].visible) return -1; int wx, wy; wnd_window_origin(i, &wx, &wy); if (fx < wx || fy < wy || fx >= wx + g_wnd[i].w || fy >= wy + g_wnd[i].h) return -1;
-  int best = -1, bestz = -1; for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].parent == i && g_wnd[k].zseq > bestz) { int r = hit_in(k, fx, fy); if (r >= 0) { best = r; bestz = g_wnd[k].zseq; } }
+  int best = -1, bestz = -1; for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].parent == i && g_wnd[k].zseq > bestz) { int r = hit_in(k, fx, fy); if (r >= 0) { if (r == k && g_wnd[k].builtin == BI_BUTTON && (g_wnd[k].style & 0xF) == 7) continue; /* group boxes are HTTRANSPARENT */ best = r; bestz = g_wnd[k].zseq; } }
   return best >= 0 ? best : i;
 }
 static int hit_test(int fx, int fy) { int best = -1, bestz = -1; for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].parent < 0 && g_wnd[k].zseq > bestz) { int r = hit_in(k, fx, fy); if (r >= 0) { best = r; bestz = g_wnd[k].zseq; } } return best; }
@@ -208,7 +209,19 @@ static void dispatch_to_wndproc(Cpu *c, u64 hwnd, u32 msg, u64 wp, u64 lp) {
   send_to(c, i, msg, wp, lp, CONT_RET_RAX, 0);
 }
 static void s_DispatchMessageA(Cpu *c) { u64 a = ARG(0); dispatch_to_wndproc(c, rdp(c, a), rd32(c, MSG_MSG(a)), rdp(c, MSG_WP(a)), rdp(c, MSG_LP(a))); }
-static void s_SendMessageA(Cpu *c) { dispatch_to_wndproc(c, ARG(0), (u32)ARG(1), ARG(2), ARG(3)); }
+/* SendMessageA to a built-in control: the text of string messages is ANSI (PuTTY's LB_ADDSTRING/CB_ADDSTRING, WM_GETTEXT …) while
+   the controls store/expect UTF-16 — convert through a per-process scratch buffer; results of WM_GETTEXT/LB_GETTEXT/CB_GETLBTEXT come back
+   through CONT_ANSIOUT (data[0] = caller's buffer, data[1] = capacity, data[2] = scratch) */
+static struct { Win32 *w; u64 buf[4]; int rr; } g_ansi;
+static u64 ansi_scratch(Win32 *w) { if (g_ansi.w != w) { g_ansi.w = w; for (int k = 0; k < 4; k++) g_ansi.buf[k] = 0; } int k = g_ansi.rr++ & 3; if (!g_ansi.buf[k]) g_ansi.buf[k] = w32_heap_alloc(w, 4096, 1); return g_ansi.buf[k]; }
+static int ansi_in_msg(u32 m) { return m == 0x0C || m == 0x180 || m == 0x181 || m == 0x18C || m == 0x18F || m == 0x1A2 || m == 0x143 || m == 0x14A || m == 0x14C || m == 0x14D || m == 0x158 || m == 0xC2; }
+static void ansiout_resume(Cpu *c, u64 rax) { Win32 *w = W; int ci = w->ncont - 1; u64 dst = w->cont[ci].data[0]; u32 cap = (u32)w->cont[ci].data[1]; u64 scratch = w->cont[ci].data[2]; if ((s32)(u32)rax < 0) { w32_cont_finish(c, rax); return; } char t[2048]; wstr_to_utf8(c, scratch, t, sizeof t, (int)(u32)rax); u32 n = text_out_cap(c, dst, t, cap, 0); w32_cont_finish(c, n); }
+static void send_message_ansi(Cpu *c, u64 hwnd, u32 msg, u64 wp, u64 lp) { int i = wnd_of(hwnd); Win32 *w = W;
+  if (i >= 0 && g_wnd[i].builtin && g_wnd[i].builtin != BI_DIALOG && !g_wnd[i].destroyed && g_wnd[i].pid == w->pid) {
+    if (ansi_in_msg(msg) && lp >= 0x10000 && !((msg == 0x180 || msg == 0x181) && (g_wnd[i].style & 0x10) && !(g_wnd[i].style & 0x40))) { char t[2048]; text_in(c, lp, 0, t, sizeof t); u64 sc = ansi_scratch(w); put_w8(c, sc, t, 2048); dispatch_to_wndproc(c, hwnd, msg, wp, sc); return; }
+    if ((msg == 0x0D || msg == 0x189 || msg == 0x148) && lp >= 0x10000) { u64 sc = ansi_scratch(w); u32 cap = msg == 0x0D ? (u32)wp : 2048; if (cap > 2048) cap = 2048; w32_push_cont(c, CONT_ANSIOUT, lp); w->cont[w->ncont - 1].data[1] = cap; w->cont[w->ncont - 1].data[2] = sc; w32_guest_call(c, g_wnd[i].wndproc, hwnd, msg, msg == 0x0D ? (u64)cap : wp, sc); return; } }
+  dispatch_to_wndproc(c, hwnd, msg, wp, lp); }
+static void s_SendMessageA(Cpu *c) { send_message_ansi(c, ARG(0), (u32)ARG(1), ARG(2), ARG(3)); }
 static void s_SendMessageTimeoutW(Cpu *c) { if (ARG(6)) wrp(c, ARG(6), 0); dispatch_to_wndproc(c, ARG(0), (u32)ARG(1), ARG(2), ARG(3)); }
 static void s_SendNotifyMessageW(Cpu *c) { dispatch_to_wndproc(c, ARG(0), (u32)ARG(1), ARG(2), ARG(3)); }
 static void s_PostMessageA(Cpu *c) { u64 h = ARG(0); if (h == 0xffff || h == 0xffffffffull || h == ~0ull) { RET(1); return; } if (h && wnd_of(h) < 0) { W->last_error = 1400; RET(0); return; } post_msg_to(W, h, (u32)ARG(1), ARG(2), ARG(3)); RET(1); }
@@ -258,13 +271,13 @@ static int builtin_of_class(const char *n) {
   if (!e_stricmp(n, "Button")) return BI_BUTTON; if (!e_stricmp(n, "Static")) return BI_STATIC; if (!e_stricmp(n, "Edit")) return BI_EDIT; if (!e_stricmp(n, "ComboBox")) return BI_COMBO; if (!e_stricmp(n, "ListBox")) return BI_LISTBOX;
   if (!e_stricmp(n, "ScrollBar")) return BI_SCROLLBAR; if (!e_stricmp(n, "#32770")) return BI_DIALOG; if (!e_stricmp(n, "msctls_progress32")) return BI_PROGRESS; if (!e_stricmp(n, "SysLink")) return BI_LINK; if (!e_stricmp(n, "ComboLBox")) return BI_COMBOLIST; if (!e_strcmp(n, "#32768")) return BI_MENU;
   if (!e_stricmp(n, "msctls_statusbar32")) return BI_STATUS; if (!e_stricmp(n, "ToolbarWindow32")) return BI_TOOLBAR; if (!e_stricmp(n, "SysTabControl32")) return BI_TAB;
-  if (!e_stricmp(n, "SysListView32") || !e_stricmp(n, "SysTreeView32") || !e_stricmp(n, "ReBarWindow32") || !e_stricmp(n, "tooltips_class32") || !e_stricmp(n, "msctls_trackbar32") || !e_stricmp(n, "msctls_updown32") || !e_stricmp(n, "SysHeader32") || !e_stricmp(n, "SysAnimate32") || !e_stricmp(n, "SysDateTimePick32") || !e_stricmp(n, "SysMonthCal32") || !e_stricmp(n, "ComboBoxEx32") || !e_stricmp(n, "SysIPAddress32") || !e_stricmp(n, "SysPager") || !e_stricmp(n, "MDIClient")) return BI_UNSUPPORTED;
+  if (!e_stricmp(n, "SysTreeView32")) return BI_TREE; if (!e_stricmp(n, "SysListView32") || !e_stricmp(n, "ReBarWindow32") || !e_stricmp(n, "tooltips_class32") || !e_stricmp(n, "msctls_trackbar32") || !e_stricmp(n, "msctls_updown32") || !e_stricmp(n, "SysHeader32") || !e_stricmp(n, "SysAnimate32") || !e_stricmp(n, "SysDateTimePick32") || !e_stricmp(n, "SysMonthCal32") || !e_stricmp(n, "ComboBoxEx32") || !e_stricmp(n, "SysIPAddress32") || !e_stricmp(n, "SysPager") || !e_stricmp(n, "MDIClient")) return BI_UNSUPPORTED;
   return BI_NONE; }
-static u64 builtin_slot(int bi) { switch (bi) { case BI_BUTTON: return g_slot_button; case BI_STATIC: return g_slot_static; case BI_EDIT: return g_slot_edit; case BI_COMBO: return g_slot_combo; case BI_LISTBOX: return g_slot_listbox; case BI_MENU: return g_slot_menu; case BI_SCROLLBAR: return g_slot_scrollbar; case BI_DIALOG: return g_slot_dialog; case BI_PROGRESS: return g_slot_progress; case BI_STATUS: return g_slot_status; case BI_TOOLBAR: return g_slot_toolbar; case BI_TAB: return g_slot_tab; case BI_LINK: return g_slot_link; case BI_COMBOLIST: return g_slot_combolist; case BI_MSGBOX: return g_slot_dialog; default: return g_slot_unsupported; } }
+static u64 builtin_slot(int bi) { switch (bi) { case BI_BUTTON: return g_slot_button; case BI_STATIC: return g_slot_static; case BI_EDIT: return g_slot_edit; case BI_COMBO: return g_slot_combo; case BI_LISTBOX: return g_slot_listbox; case BI_MENU: return g_slot_menu; case BI_SCROLLBAR: return g_slot_scrollbar; case BI_DIALOG: return g_slot_dialog; case BI_PROGRESS: return g_slot_progress; case BI_STATUS: return g_slot_status; case BI_TOOLBAR: return g_slot_toolbar; case BI_TAB: return g_slot_tab; case BI_TREE: return g_slot_tree; case BI_LINK: return g_slot_link; case BI_COMBOLIST: return g_slot_combolist; case BI_MSGBOX: return g_slot_dialog; default: return g_slot_unsupported; } }
 static Win32 *g_slot_w;   /* slot addresses are per process (each process resolves shims in its own order) — recompute when another process asks */
 static void builtin_init_slots(Win32 *w) { if (g_slot_button && g_slot_w == w) return; g_slot_w = w;
   g_slot_button = w32_shim_slot(w, "user32", "NebulaButtonProc"); g_slot_static = w32_shim_slot(w, "user32", "NebulaStaticProc"); g_slot_edit = w32_shim_slot(w, "user32", "NebulaEditProc"); g_slot_combo = w32_shim_slot(w, "user32", "NebulaComboProc");
-  g_slot_listbox = w32_shim_slot(w, "user32", "NebulaListBoxProc"); g_slot_dialog = w32_shim_slot(w, "user32", "DefDlgProcW"); g_slot_progress = w32_shim_slot(w, "user32", "NebulaProgressProc"); g_slot_unsupported = w32_shim_slot(w, "user32", "NebulaUnsupportedProc"); g_slot_status = w32_shim_slot(w, "user32", "NebulaStatusProc"); g_slot_toolbar = w32_shim_slot(w, "user32", "NebulaToolbarProc"); g_slot_tab = w32_shim_slot(w, "user32", "NebulaTabProc"); g_slot_subclass = w32_shim_slot(w, "user32", "NebulaSubclassProc");
+  g_slot_listbox = w32_shim_slot(w, "user32", "NebulaListBoxProc"); g_slot_dialog = w32_shim_slot(w, "user32", "DefDlgProcW"); g_slot_progress = w32_shim_slot(w, "user32", "NebulaProgressProc"); g_slot_unsupported = w32_shim_slot(w, "user32", "NebulaUnsupportedProc"); g_slot_status = w32_shim_slot(w, "user32", "NebulaStatusProc"); g_slot_toolbar = w32_shim_slot(w, "user32", "NebulaToolbarProc"); g_slot_tab = w32_shim_slot(w, "user32", "NebulaTabProc"); g_slot_tree = w32_shim_slot(w, "user32", "NebulaTreeProc"); g_slot_subclass = w32_shim_slot(w, "user32", "NebulaSubclassProc");
   g_slot_scrollbar = w32_shim_slot(w, "user32", "NebulaScrollBarProc"); g_slot_msgbox = w32_shim_slot(w, "user32", "NebulaMsgBoxProc"); g_slot_combolist = w32_shim_slot(w, "user32", "NebulaComboListProc"); g_slot_menu = w32_shim_slot(w, "user32", "NebulaMenuProc"); g_slot_link = w32_shim_slot(w, "user32", "NebulaLinkProc");
   { GdiObj *f = gdi_new(w, K_FONT); f->font_h = 13; f->font_em = 11; g_dlg_font = f->handle; } }
 static void s_GetClassInfoExA(Cpu *c) { RET(0); }
@@ -297,7 +310,7 @@ static int wnd_create_obj(Cpu *c, const char *cls, const char *title, u32 style,
   if (ci < 0 && !bi) { w32_report(w, "CreateWindow: class \"%s\" is not registered", cls); W->last_error = 1407; return -1; }
   int i; if (!g_wnd[0].used && !(style & 0x40000000u)) i = 0; else i = wnd_alloc(); if (i >= 0) g_wnd[i].pid = W->pid; if (i < 0) { W->last_error = 8; return -1; }
   if (i == 0) { e_memset(&g_wnd[0], 0, sizeof g_wnd[0]); g_wnd[0].text = g_wnd[0].tbuf; g_wnd[0].textcap = sizeof g_wnd[0].tbuf; g_wnd[0].used = 1; g_wnd[0].pid = W->pid; g_wnd[0].parent = g_wnd[0].owner = -1; g_wnd[0].enabled = 1; g_wnd[0].cursel = -1; g_wnd[0].drop_wnd = -1; g_wnd[0].zseq = ++g_zseq; }
-  Wnd *n = &g_wnd[i]; n->builtin = bi; e_snprintf(n->clsname, sizeof n->clsname, "%s", cls); n->style = style; n->exstyle = exstyle; n->inst = inst; n->id = id; n->userdata = 0;
+  Wnd *n = &g_wnd[i]; n->builtin = bi; e_snprintf(n->clsname, sizeof n->clsname, "%s", cls); n->style = style; n->exstyle = exstyle; n->inst = inst; n->id = id; n->userdata = 0; n->unicode_wnd = wide;
   if (ci >= 0) { n->wndproc = g_cls[ci].proc; n->cls_brush = g_cls[ci].brush; n->cls_style = g_cls[ci].style; n->cls_extra = g_cls[ci].extra; n->icon = g_cls[ci].icon; } else { n->wndproc = builtin_slot(bi); n->cls_brush = bi == BI_DIALOG ? 0 : 0; n->cls_style = 0x0B; }
   if (bi == BI_DIALOG) n->is_dlg = 1;
   if (style & 0x40000000u) { n->parent = parent >= 0 ? parent : 0; if (parent < 0 && !g_wnd[0].used) n->parent = -1; } else { n->parent = -1; n->owner = parent; }
@@ -825,7 +838,7 @@ static void button_paint(Cpu *c, int i, u64 hdc, u64 hbr) { Win32 *w = W; Wnd *n
   if (bs == 0 || bs == 1 || bs == 8 || bs == 0xB || pushlike) { int def = (bs == 1 || (n->parent >= 0 && g_wnd[n->parent].def_id == (int)n->id && n->parent >= 0)) && en; int pressed = n->pushed || (pushlike && n->checked);
     fill_rect_px(&s, 0, 0, cw, ch, pressed ? 0xcce4f7 : n->hot && en ? 0xe5f1fb : 0xe1e1e1); u32 bc = !en ? 0xcccccc : pressed ? 0x005499 : (def || n->focus_draw) ? 0x0078d7 : 0xadadad; edge_rect(&s, 0, 0, cw, ch, bc, bc); if (def && en && !pressed) edge_rect(&s, 1, 1, cw - 1, ch - 1, 0x0078d7, 0x0078d7);
     ctl_text(c, hdc, i, 0, 0, cw, ch, 1 | 4 | 0x20, en ? 0x000000 : 0x6d6d6d, n->text); if (n->focus_draw && en) { for (int x = 3; x < cw - 3; x += 2) { put_px(&s, x, 3, 0x202020); put_px(&s, x, ch - 4, 0x202020); } for (int y = 3; y < ch - 3; y += 2) { put_px(&s, 3, y, 0x202020); put_px(&s, cw - 4, y, 0x202020); } } return; }
-  fill_rect_px(&s, 0, 0, cw, ch, face);
+  if (bs != 7) fill_rect_px(&s, 0, 0, cw, ch, face);   /* a group box is transparent: siblings created before it (PuTTY's panels) stay visible inside its frame */
   if (bs == 7) { /* group box: etched frame with the caption on the top line */ int ty = fh / 2; edge_rect(&s, 0, ty, cw, ch, 0xdcdcdc, 0xdcdcdc); edge_rect(&s, 1, ty + 1, cw - 1, ch - 1, 0xffffff, 0xffffff); if (n->text[0]) { int tw = utf8_len_chars(n->text, (int)e_strlen(n->text)) * fcw; fill_rect_px(&s, 6, 0, 6 + tw + 4, fh, face); ctl_text(c, hdc, i, 8, 0, 8 + tw + 2, fh, 0x20, en ? 0 : 0x6d6d6d, n->text); } return; }
   int by = (ch - 13) / 2; if (by < 0) by = 0; int radio = bs == 4 || bs == 9; int right = (n->style & 0x20) != 0; int bx = right ? cw - 13 : 0;
   if (radio) draw_radio(&s, bx, by, n->checked != 0, en); else { fill_rect_px(&s, bx, by, bx + 13, by + 13, en ? 0xffffff : 0xf0f0f0); u32 bc = en ? (n->focus_draw ? 0x0078d7 : 0x333333) : 0xbcbcbc; edge_rect(&s, bx, by, bx + 13, by + 13, bc, bc); if (n->checked == 1) draw_check_mark(&s, bx + 2, by + 1, en ? 0 : 0xa0a0a0); else if (n->checked == 2) fill_rect_px(&s, bx + 3, by + 3, bx + 10, by + 10, 0x0078d7); }
@@ -1145,14 +1158,14 @@ static void s_NebulaUnsupportedProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0)
   if (msg == 0x1002 || msg == 0x1032 || msg == 0x1104) { RET(0); return; }   /* LVM_GETITEMCOUNT ... */
   if (ctl_common(c, i, msg, ARG(2), ARG(3))) return; def_window_proc(c, i, msg, ARG(2), ARG(3)); }
 /* host-side direct invocation of a builtin class procedure (no guest round trip; used for WM_CREATE/WM_DESTROY/focus of builtins) */
-static void builtin_proc_direct(Cpu *c, int i, u32 msg, u64 wp, u64 lp) { switch (g_wnd[i].builtin) { case BI_MENU: call_shim_tail(c, s_NebulaMenuProc, HWND_OF(i), msg, wp, lp); break; case BI_BUTTON: call_shim_tail(c, s_NebulaButtonProc, HWND_OF(i), msg, wp, lp); break; case BI_STATIC: case BI_LINK: call_shim_tail(c, s_NebulaStaticProc, HWND_OF(i), msg, wp, lp); break; case BI_EDIT: call_shim_tail(c, s_NebulaEditProc, HWND_OF(i), msg, wp, lp); break; case BI_COMBO: call_shim_tail(c, s_NebulaComboProc, HWND_OF(i), msg, wp, lp); break; case BI_LISTBOX: case BI_COMBOLIST: call_shim_tail(c, s_NebulaListBoxProc, HWND_OF(i), msg, wp, lp); break; case BI_PROGRESS: call_shim_tail(c, s_NebulaProgressProc, HWND_OF(i), msg, wp, lp); break; case BI_STATUS: call_shim_tail(c, s_NebulaStatusProc, HWND_OF(i), msg, wp, lp); break; case BI_TOOLBAR: call_shim_tail(c, s_NebulaToolbarProc, HWND_OF(i), msg, wp, lp); break; case BI_TAB: call_shim_tail(c, s_NebulaTabProc, HWND_OF(i), msg, wp, lp); break; case BI_SCROLLBAR: call_shim_tail(c, s_NebulaScrollBarProc, HWND_OF(i), msg, wp, lp); break; case BI_DIALOG: case BI_MSGBOX: break; default: call_shim_tail(c, s_NebulaUnsupportedProc, HWND_OF(i), msg, wp, lp); break; } }
+static void builtin_proc_direct(Cpu *c, int i, u32 msg, u64 wp, u64 lp) { switch (g_wnd[i].builtin) { case BI_MENU: call_shim_tail(c, s_NebulaMenuProc, HWND_OF(i), msg, wp, lp); break; case BI_BUTTON: call_shim_tail(c, s_NebulaButtonProc, HWND_OF(i), msg, wp, lp); break; case BI_STATIC: case BI_LINK: call_shim_tail(c, s_NebulaStaticProc, HWND_OF(i), msg, wp, lp); break; case BI_EDIT: call_shim_tail(c, s_NebulaEditProc, HWND_OF(i), msg, wp, lp); break; case BI_COMBO: call_shim_tail(c, s_NebulaComboProc, HWND_OF(i), msg, wp, lp); break; case BI_LISTBOX: case BI_COMBOLIST: call_shim_tail(c, s_NebulaListBoxProc, HWND_OF(i), msg, wp, lp); break; case BI_PROGRESS: call_shim_tail(c, s_NebulaProgressProc, HWND_OF(i), msg, wp, lp); break; case BI_STATUS: call_shim_tail(c, s_NebulaStatusProc, HWND_OF(i), msg, wp, lp); break; case BI_TOOLBAR: call_shim_tail(c, s_NebulaToolbarProc, HWND_OF(i), msg, wp, lp); break; case BI_TAB: call_shim_tail(c, s_NebulaTabProc, HWND_OF(i), msg, wp, lp); break; case BI_TREE: call_shim_tail(c, s_NebulaTreeProc, HWND_OF(i), msg, wp, lp); break; case BI_SCROLLBAR: call_shim_tail(c, s_NebulaScrollBarProc, HWND_OF(i), msg, wp, lp); break; case BI_DIALOG: case BI_MSGBOX: break; default: call_shim_tail(c, s_NebulaUnsupportedProc, HWND_OF(i), msg, wp, lp); break; } }
 
 /* ---------- dialogs ---------- */
 static int dlg_find_id(int d, u64 id) { for (int k = 0; k < MAX_WND; k++) if (wnd_alive(k) && g_wnd[k].parent == d && g_wnd[k].id == id) return k; for (int k = 0; k < MAX_WND; k++) if (wnd_alive(k) && g_wnd[k].id == id && wnd_is_child_of(k, d)) return k; return -1; }
 static void s_GetDlgItem(Cpu *c) { int d = wnd_of(ARG(0)); if (d < 0) { RET(0); return; } int k = dlg_find_id(d, (u32)ARG(1)); RET(k >= 0 ? HWND_OF(k) : 0); }
 static void s_GetDlgCtrlID(Cpu *c) { int i = wnd_of(ARG(0)); RET(i >= 0 ? (u32)g_wnd[i].id : 0); }
 static void s_SendDlgItemMessageW(Cpu *c) { int d = wnd_of(ARG(0)); if (d < 0) { RET(0); return; } int k = dlg_find_id(d, (u32)ARG(1)); if (k < 0) { RET(0); return; } dispatch_to_wndproc(c, HWND_OF(k), (u32)ARG(2), ARG(3), ARG(4)); }
-static void s_SendDlgItemMessageA(Cpu *c) { s_SendDlgItemMessageW(c); }
+static void s_SendDlgItemMessageA(Cpu *c) { int d = wnd_of(ARG(0)); int i = d >= 0 ? dlg_find_id(d, (u32)ARG(1)) : -1; if (i < 0) { RET(0); return; } send_message_ansi(c, HWND_OF(i), (u32)ARG(2), ARG(3), ARG(4)); }
 static void s_SetDlgItemTextW(Cpu *c) { int d = wnd_of(ARG(0)); if (d < 0) { RET(0); return; } int k = dlg_find_id(d, (u32)ARG(1)); if (k < 0) { RET(0); return; } call_shim_tail(c, s_SetWindowTextW, HWND_OF(k), ARG(2), 0, 0); }
 static void s_SetDlgItemTextA(Cpu *c) { int d = wnd_of(ARG(0)); if (d < 0) { RET(0); return; } int k = dlg_find_id(d, (u32)ARG(1)); if (k < 0) { RET(0); return; } call_shim_tail(c, s_SetWindowTextA, HWND_OF(k), ARG(2), 0, 0); }
 static void s_GetDlgItemTextW(Cpu *c) { int d = wnd_of(ARG(0)); if (d < 0) { if (ARG(3)) wr16(c, ARG(2), 0); RET(0); return; } int k = dlg_find_id(d, (u32)ARG(1)); if (k < 0) { if (ARG(3)) wr16(c, ARG(2), 0); RET(0); return; } RET(text_out_cap(c, ARG(2), g_wnd[k].text, (u32)ARG(3), 1)); }
@@ -1372,6 +1385,10 @@ void gdi_cont_resume(Cpu *c, int kind, u64 rax) {
     case CONT_TABSEL: tabsel_resume(c, rax); return;
     case CONT_SUBCLASS: subclass_resume(c, rax); return;
     case CONT_DIENUM: dienum_resume(c, rax); return;
+    case CONT_TVSEL: tvsel_resume(c, rax); return;
+    case CONT_TVEXP: tvexp_resume(c, rax); return;
+    case CONT_TVDISP: tvdisp_resume(c, rax); return;
+    case CONT_ANSIOUT: ansiout_resume(c, rax); return;
     case CONT_DLGINIT: dlginit_resume(c, rax); return;
     case CONT_DLGPROC: dlgproc_resume(c, rax); return;
     case CONT_MODAL: { int m = g_nmodal - 1; if (m >= 0 && g_modal[m].phase == 2) { u64 res = modal_result(w, m); g_nmodal--; w32_cont_finish(c, res); return; } modal_resume(c, rax); return; }
