@@ -1,3 +1,45 @@
+# v1.21.0 — Nebula x64: the USER32 dialog manager (x64 **and** x86), standard controls, resources, real installers
+
+**Why.** Almost every Windows installer and most small GUI programs are built from *dialog templates* (`DialogBoxParam`,
+`CreateDialogParam`, `#32770`) with the standard controls (static/edit/button/checkbox/radio/listbox/combobox) and
+messages/strings/icons from the resource section. v1.20 ran 32-bit code but stopped at `CreateDialogParamW`; v1.21 adds
+the dialog manager to both bitnesses at once, so nothing that worked for x64 regresses for x86 and vice versa.
+
+**What is new** (`emu/x64/user.inc`, `win32_shell.inc`, `font8x8_ext.h`):
+
+| | |
+|---|---|
+| dialog templates (`DLGTEMPLATE` and `DLGTEMPLATEEX`), `DialogBoxParamA/W`, `DialogBoxIndirectParam`, `CreateDialogParamA/W`, `CreateDialogIndirectParam`, `EndDialog`, `IsDialogMessage`, `GetDlgItem*`, `SetDlgItemText/Int`, `GetDlgItemText/Int`, `CheckDlgButton`, `CheckRadioButton`, `IsDlgButtonChecked`, `MapDialogRect` (6×13 base units like Windows), `GetNextDlgTabItem`, `DefDlgProc`, `DS_CENTER`, `WM_INITDIALOG` focus rules | works, x64 + x86 |
+| **nested modal dialogs** and `MessageBoxA/W` (modal loop is a continuation, so a dialog proc that opens another dialog or a message box from inside `WM_COMMAND` works) | works |
+| standard controls as built-in window classes: `Button` (push/default/check/3-state/radio/group box/auto), `Static` (text/icon/frame), `Edit` (single line, multi-line read-only, password, caret, selection, `EM_*`), `ListBox` (`LB_*`), `ComboBox` (drop-down list with its popup), `ScrollBar`, `msctls_progress32`, `SysLink` | works |
+| `WM_COMMAND`/`EN_*`/`BN_*`/`LBN_*`/`CBN_*` notifications, `WM_CTLCOLOR*`, `WM_SETFONT`/`WM_GETFONT`, accelerators `&`, Tab/Shift+Tab/Enter/Escape navigation, `IDOK`/`IDCANCEL` defaults, `WM_DESTROY`/`WM_NCDESTROY` delivery, `PostQuitMessage` from a dialog | works |
+| resources: `LoadStringA/W`, `LoadIconA/W`, `LoadImage`, `FindResource`/`LoadResource`/`SizeofResource`, `EnumResourceNames`, string tables with **Cyrillic and Latin‑1** text | works |
+| shell: `SHGetFolderPathA/W`, `SHGetSpecialFolderPath`, `SHGetKnownFolderPath`, `SHBrowseForFolder` (returns the typed path), `IShellLink` + `IPersistFile` (`.lnk` shortcuts on the virtual disk), `ShellExecute` (`open` of files/folders is recorded, URLs are reported) | works |
+| **text**: the bitmap font now has **212 extra glyphs** — Latin‑1, Cyrillic (U+0400–045F, Ґґ), dashes/quotes/ellipsis/€/№/arrows/✓ — all user32/gdi32 text paths (`TextOut`, `DrawText`, controls, captions) decode UTF‑8/UTF‑16; dialog fonts have a 13 px cell with the glyph in an 11 px em like an 8 pt Tahoma, so multi-line text no longer overlaps | works |
+| `IsWow64Process`/`IsWow64Process2` report WOW64 for 32-bit processes — a 32-bit setup stub that checks for a 64-bit OS (7‑Zip's x64 setup) now takes its 64-bit path | works |
+| top-level windows that centre themselves on the 1280×720 "desktop" are kept inside the presented framebuffer (PuTTY's configuration dialog used to appear off-screen) | works |
+
+**Measured** (test suite section `[19]`, e2e scenarios `dlg.exe`, `dlg32.exe`; `docs/screenshots/x64-7zip-setup.png`,
+`docs/screenshots/x64-putty-dialogs.png`):
+
+* `emu/tests/dlg.c` — a self-driving dialog test built **twice**, as x64 `dlg.exe` and x86 `dlg32.exe`: **42/42 checks pass
+  in both bitnesses**, natively and in the browser (wasm64, headless Chromium): resources, `LoadString` with Cyrillic,
+  every standard control and its notifications, `MapDialogRect`, nested modal dialog + `MessageBox`, `SHGetFolderPath`,
+  `IShellLink`/`IPersistFile`, a modeless dialog driven by Tab/Escape, `WM_DESTROY` → `PostQuitMessage`.
+* **The official 7‑Zip 25.01 installers, both of them** (`7z2501.exe` x86 and `7z2501-x64.exe` x64): silent `/S` install
+  → exit 0 and `7z.exe`, `7z.dll`, `Lang\` on disk; the **installed `7z.exe`** (a 32-bit PE32 resp. a 64-bit PE32+ that loads
+  `7z.dll` through `GetProcAddress`) compresses and lists an archive; the **GUI install** — the setup dialog from the
+  resource template, *Install* clicked, progress, *Close* clicked — exits 0 and writes the same files (~16 s each).
+* **PuTTY 0.85 x64** (MSVC/clang‑cl, `putty.org`) now shows its configuration dialog and the About box opens and renders
+  (v1.20: stopped at `CreateDialogParamA`). The category tree is a `SysTreeView32`, which is reported as not implemented.
+
+**Honest limits.** Common controls beyond progress bar/SysLink (`SysTreeView32`, `SysListView32`, `SysTabControl32`,
+`RichEdit`, toolbars, status bars, up-down) are drawn as empty boxes and reported; menus are not drawn; no owner-draw
+buttons; the keyboard is US layout; edit selection offsets are UTF‑8 bytes (differ from UTF‑16 units for non-ASCII text in
+`EM_GETSEL`); the font is a scaled 8×8 bitmap font (ASCII + Latin‑1 + Cyrillic, other scripts show `?`); COM classes
+remain ShellLink/IMalloc/audio only, and the audio COM vtables are x64-only. Runtime packs (VC++/.NET/DirectX) are
+still x64-only.
+
 # v1.20.0 — Nebula x64: 32-bit x86 (PE32) processes
 
 **Why.** Most Windows installers and a large share of games/programs are still 32-bit; until now the emulator rejected every PE32 up front ("unsupported").
