@@ -358,6 +358,78 @@ static void treeview_tests(void) {
   chk(g_tv_quit && msg.message == WM_QUIT && msg.wParam == 10, "treeview: the window closed, WM_QUIT reached GetMessage");
 }
 
+
+/* list view (listview.inc): report view with columns, items/subitems, selection notifications, owner data + LVN_GETDISPINFO, sorting, hit test, keyboard */
+static HWND g_lv, g_lvod; static int g_lv_phase, g_lv_changing, g_lv_changed, g_lv_click, g_lv_dblclk, g_lv_activate, g_lv_colclick, g_lv_quit, g_lv_disp, g_lv_inserted, g_lv_deleted; static int g_lv_last_new, g_lv_last_item; static LPARAM g_lv_last_lp;
+static void lv_text(HWND lv, int item, int sub, WCHAR *buf, int cch);
+static int CALLBACK lv_cmp(LPARAM a, LPARAM b, LPARAM sort) { (void)sort; return (int)(a - b); }   /* ascending by lParam */
+static LRESULT CALLBACK lv_wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+  switch (m) {
+    case WM_NOTIFY: { NMHDR *nm = (NMHDR *)lp; NMLISTVIEW *nl = (NMLISTVIEW *)lp;
+      if (nm->hwndFrom == g_lvod && nm->code == LVN_GETDISPINFOW) { NMLVDISPINFOW *di = (NMLVDISPINFOW *)lp; g_lv_disp++; if (di->item.mask & LVIF_TEXT) { if (di->item.iSubItem == 0) swprintf(di->item.pszText, di->item.cchTextMax, L"Row %d", di->item.iItem); else swprintf(di->item.pszText, di->item.cchTextMax, L"v%d", di->item.iItem * 10 + di->item.iSubItem); } return 0; }
+      if (nm->hwndFrom != g_lv) return 0;
+      if (nm->code == LVN_ITEMCHANGING) { g_lv_changing++; return FALSE; }
+      if (nm->code == LVN_ITEMCHANGED) { g_lv_changed++; if ((nl->uNewState & LVIS_SELECTED) && !(nl->uOldState & LVIS_SELECTED)) { g_lv_last_new = nl->iItem; g_lv_last_lp = nl->lParam; } return 0; }
+      if (nm->code == NM_CLICK) { g_lv_click++; g_lv_last_item = nl->iItem; return 0; }
+      if (nm->code == NM_DBLCLK) { g_lv_dblclk++; return 0; }
+      if (nm->code == LVN_ITEMACTIVATE) { g_lv_activate++; return 0; }
+      if (nm->code == LVN_COLUMNCLICK) { g_lv_colclick = nl->iSubItem + 1; return 0; }
+      if (nm->code == LVN_INSERTITEM) { g_lv_inserted++; return 0; }
+      if (nm->code == LVN_DELETEITEM) { g_lv_deleted++; return 0; }
+      return 0; }
+    case WM_TIMER: {
+      g_lv_phase++;
+      switch (g_lv_phase) {
+        case 1: { /* click on row 1's label */ RECT r; ListView_GetItemRect(g_lv, 1, &r, LVIR_LABEL); LVHITTESTINFO ht; ht.pt.x = r.left + 3; ht.pt.y = (r.top + r.bottom) / 2; int hit = ListView_HitTest(g_lv, &ht); chk(hit == 1 && (ht.flags & LVHT_ONITEMLABEL), "listview: LVM_HITTEST on a row label");
+          SendMessageW(g_lv, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(ht.pt.x, ht.pt.y)); break; }
+        case 2: chk(g_lv_changing >= 1 && g_lv_changed >= 1 && g_lv_last_new == 1 && g_lv_last_lp == 10 && g_lv_click == 1 && g_lv_last_item == 1 && ListView_GetNextItem(g_lv, -1, LVNI_SELECTED) == 1 && ListView_GetSelectedCount(g_lv) == 1, "listview: click -> LVN_ITEMCHANGING/CHANGED (selected, lParam) + NM_CLICK, GetNextItem(LVNI_SELECTED) = 1");
+          SendMessageW(g_lv, WM_KEYDOWN, VK_DOWN, 0); break;
+        case 3: chk(ListView_GetNextItem(g_lv, -1, LVNI_SELECTED) == 2 && ListView_GetNextItem(g_lv, -1, LVNI_FOCUSED) == 2 && ListView_GetSelectedCount(g_lv) == 1, "listview: Down arrow moves the single selection + focus to row 2");
+          { RECT r; ListView_GetItemRect(g_lv, 0, &r, LVIR_LABEL); SendMessageW(g_lv, WM_LBUTTONDOWN, MK_LBUTTON | MK_CONTROL, MAKELPARAM(r.left + 3, (r.top + r.bottom) / 2)); } break;
+        case 4: chk(ListView_GetSelectedCount(g_lv) == 2 && (ListView_GetItemState(g_lv, 0, LVIS_SELECTED) & LVIS_SELECTED) && (ListView_GetItemState(g_lv, 2, LVIS_SELECTED) & LVIS_SELECTED), "listview: Ctrl+click adds row 0 to the selection (multi-select)");
+          { RECT r; ListView_GetItemRect(g_lv, 2, &r, LVIR_LABEL); SendMessageW(g_lv, WM_LBUTTONDBLCLK, MK_LBUTTON, MAKELPARAM(r.left + 3, (r.top + r.bottom) / 2)); } break;
+        case 5: chk(g_lv_dblclk == 1 && g_lv_activate == 1, "listview: double click -> NM_DBLCLK + LVN_ITEMACTIVATE"); SendMessageW(g_lv, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(ListView_GetColumnWidth(g_lv, 0) + 10, 5)); break;
+        case 6: chk(g_lv_colclick == 2, "listview: click in the header -> LVN_COLUMNCLICK with iSubItem = 1");
+          chk(ListView_SortItems(g_lv, lv_cmp, 0), "listview: LVM_SORTITEMS with a guest compare callback returns TRUE"); break;
+        case 7: { WCHAR b0[32], b1[32], b2[32]; lv_text(g_lv, 0, 0, b0, 32); lv_text(g_lv, 1, 0, b1, 32); lv_text(g_lv, 2, 0, b2, 32); LVITEMW it; memset(&it, 0, sizeof it); it.mask = LVIF_PARAM; it.iItem = 0; SendMessageW(g_lv, LVM_GETITEMW, 0, (LPARAM)&it);
+          chk(it.lParam == 5 && wcscmp(b0, L"Gamma") == 0 && wcscmp(b1, L"Beta") == 0 && wcscmp(b2, L"Alpha") == 0, "listview: items sorted ascending by lParam through the callback (Gamma=5, Beta=10, Alpha=20)");
+          chk(g_lv_disp >= 6, "listview: owner-data list fetched its visible cells through LVN_GETDISPINFOW"); WCHAR od[32]; lv_text(g_lvod, 3, 1, od, 32); chk(wcscmp(od, L"v31") == 0, "listview: LVM_GETITEMTEXT on an owner-data list returns the fetched callback text");
+          ListView_SetItemState(g_lvod, 4, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED); chk(ListView_GetNextItem(g_lvod, -1, LVNI_SELECTED) == 4 && (ListView_GetItemState(g_lvod, 4, LVIS_FOCUSED) & LVIS_FOCUSED), "listview: owner data keeps selection/focus state in the shadow array");
+          g_lv_quit = 1; KillTimer(h, 6); DestroyWindow(h); break; } }
+      return 0; }
+    case WM_DESTROY: PostQuitMessage(11); return 0; }
+  return DefWindowProcW(h, m, wp, lp);
+}
+static void lv_text(HWND lv, int item, int sub, WCHAR *buf, int cch) { LVITEMW it; memset(&it, 0, sizeof it); it.iSubItem = sub; it.pszText = buf; it.cchTextMax = cch; buf[0] = 0; SendMessageW(lv, LVM_GETITEMTEXTW, item, (LPARAM)&it); }
+static int lv_add(HWND lv, int idx, const WCHAR *t0, const WCHAR *t1, LPARAM lp) { LVITEMW it; memset(&it, 0, sizeof it); it.mask = LVIF_TEXT | LVIF_PARAM; it.iItem = idx; it.pszText = (LPWSTR)t0; it.lParam = lp; int k = (int)SendMessageW(lv, LVM_INSERTITEMW, 0, (LPARAM)&it); it.mask = LVIF_TEXT; it.iItem = k; it.iSubItem = 1; it.pszText = (LPWSTR)t1; SendMessageW(lv, LVM_SETITEMW, 0, (LPARAM)&it); return k; }
+static void listview_tests(void) {
+  WNDCLASSW wc; memset(&wc, 0, sizeof wc); wc.lpfnWndProc = lv_wnd_proc; wc.hInstance = g_inst; wc.lpszClassName = L"NebulaLvTest"; wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); RegisterClassW(&wc);
+  HWND h = CreateWindowExW(0, L"NebulaLvTest", L"ListView test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 140, 140, 520, 360, NULL, NULL, g_inst, NULL);
+  g_lv = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, NULL, WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS, 10, 10, 240, 200, h, (HMENU)305, g_inst, NULL);
+  chk(g_lv != NULL && ListView_GetItemCount(g_lv) == 0, "listview: SysListView32 created (real class)");
+  ListView_SetExtendedListViewStyle(g_lv, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES); chk(ListView_GetExtendedListViewStyle(g_lv) == (LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES), "listview: LVM_SET/GETEXTENDEDLISTVIEWSTYLE");
+  LVCOLUMNW col; memset(&col, 0, sizeof col); col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT; col.fmt = LVCFMT_LEFT; col.cx = 120; col.pszText = (LPWSTR)L"Name"; int c0 = (int)SendMessageW(g_lv, LVM_INSERTCOLUMNW, 0, (LPARAM)&col); col.cx = 80; col.fmt = LVCFMT_RIGHT; col.pszText = (LPWSTR)L"Size"; int c1 = (int)SendMessageW(g_lv, LVM_INSERTCOLUMNW, 1, (LPARAM)&col);
+  WCHAR cb[32]; memset(&col, 0, sizeof col); col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT; col.pszText = cb; col.cchTextMax = 32; SendMessageW(g_lv, LVM_GETCOLUMNW, 1, (LPARAM)&col);
+  chk(c0 == 0 && c1 == 1 && ListView_GetColumnWidth(g_lv, 0) == 120 && wcscmp(cb, L"Size") == 0 && col.cx == 80 && (col.fmt & LVCFMT_JUSTIFYMASK) == LVCFMT_RIGHT, "listview: LVM_INSERTCOLUMNW x2, LVM_GETCOLUMNW text/width/format");
+  int i0 = lv_add(g_lv, 0, L"Alpha", L"20 KB", 20), i1 = lv_add(g_lv, 1, L"Beta", L"10 KB", 10), i2 = lv_add(g_lv, 2, L"Gamma", L"5 KB", 5);
+  chk(i0 == 0 && i1 == 1 && i2 == 2 && ListView_GetItemCount(g_lv) == 3 && g_lv_inserted == 3, "listview: LVM_INSERTITEMW x3 (+ subitems via LVM_SETITEMW), LVN_INSERTITEM x3");
+  WCHAR tb[32]; lv_text(g_lv, 1, 1, tb, 32); chk(wcscmp(tb, L"10 KB") == 0, "listview: LVM_GETITEMTEXT of a subitem");
+  LVITEMW it; memset(&it, 0, sizeof it); it.mask = LVIF_TEXT | LVIF_PARAM; it.iItem = 2; it.pszText = tb; it.cchTextMax = 32; chk(SendMessageW(g_lv, LVM_GETITEMW, 0, (LPARAM)&it) && wcscmp(tb, L"Gamma") == 0 && it.lParam == 5, "listview: LVM_GETITEMW text + lParam");
+  LVFINDINFOW fi; memset(&fi, 0, sizeof fi); fi.flags = LVFI_STRING; fi.psz = L"Beta"; chk(SendMessageW(g_lv, LVM_FINDITEMW, (WPARAM)-1, (LPARAM)&fi) == 1, "listview: LVM_FINDITEMW by string"); fi.flags = LVFI_PARAM; fi.lParam = 5; chk(SendMessageW(g_lv, LVM_FINDITEMW, (WPARAM)-1, (LPARAM)&fi) == 2, "listview: LVM_FINDITEMW by lParam");
+  RECT r0, r1; ListView_GetItemRect(g_lv, 0, &r0, LVIR_BOUNDS); ListView_GetItemRect(g_lv, 1, &r1, LVIR_BOUNDS); chk(r0.top > 0 && r1.top == r0.bottom && r0.right >= 200, "listview: LVM_GETITEMRECT rows below the header, full width in report view");
+  chk(ListView_GetNextItem(g_lv, -1, LVNI_SELECTED) == -1 && ListView_GetSelectedCount(g_lv) == 0, "listview: nothing selected initially");
+  chk(ListView_DeleteItem(g_lv, 2) && ListView_GetItemCount(g_lv) == 2 && g_lv_deleted == 1, "listview: LVM_DELETEITEM + LVN_DELETEITEM"); lv_add(g_lv, 2, L"Gamma", L"5 KB", 5);
+  ListView_SetColumnWidth(g_lv, 1, LVSCW_AUTOSIZE_USEHEADER); chk(ListView_GetColumnWidth(g_lv, 1) > 40, "listview: LVSCW_AUTOSIZE_USEHEADER picks a sensible width");
+  /* owner-data list */
+  g_lvod = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, NULL, WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_OWNERDATA | LVS_SINGLESEL, 260, 10, 240, 200, h, (HMENU)306, g_inst, NULL);
+  memset(&col, 0, sizeof col); col.mask = LVCF_TEXT | LVCF_WIDTH; col.cx = 100; col.pszText = (LPWSTR)L"Item"; SendMessageW(g_lvod, LVM_INSERTCOLUMNW, 0, (LPARAM)&col); col.pszText = (LPWSTR)L"Value"; SendMessageW(g_lvod, LVM_INSERTCOLUMNW, 1, (LPARAM)&col);
+  ListView_SetItemCountEx(g_lvod, 1000, LVSICF_NOINVALIDATEALL); chk(ListView_GetItemCount(g_lvod) == 1000 && ListView_GetCountPerPage(g_lvod) > 5 && ListView_GetCountPerPage(g_lvod) < 1000, "listview: owner data: LVM_SETITEMCOUNT 1000, GetCountPerPage reflects the window height");
+  SetTimer(h, 6, 150, NULL);
+  MSG msg; DWORD t0 = GetTickCount();
+  while (GetMessageW(&msg, NULL, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessageW(&msg); if (GetTickCount() - t0 > 15000) { printf("FAIL listview: timeout\n"); g_fail++; break; } }
+  chk(g_lv_quit && msg.message == WM_QUIT && msg.wParam == 11, "listview: the window closed, WM_QUIT reached GetMessage");
+}
+
 int main(void) {
   g_inst = GetModuleHandleW(NULL);
   InitCommonControls();
@@ -384,6 +456,7 @@ int main(void) {
   menu_tests();
   comctl_tests();
   treeview_tests();
+  listview_tests();
   printf("%s %d/%d\n", g_fail ? "FAILED" : "ALL OK", g_ok, g_ok + g_fail);
   return g_fail ? 1 : 0;
 }
