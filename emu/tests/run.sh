@@ -347,6 +347,8 @@ check "7za.exe x86: error path = MSVC C++ throw/catch (__CxxFrameHandler)" "Syst
 echo "[19] dialog manager (user32 dialogs, standard controls, resources, shell folders, IShellLink) — same test built for x64 and x86"
 check "dlg.exe (x64): 88 checks (dialogs, controls, menus, status bar / toolbar / tab control)"    "ALL OK 88/88"   "$($X --quiet --no-stdin --max-ms 40000 tests/dlg.exe 2>&1 || true)"
 check "dlg32.exe (x86): 88 checks (dialogs, controls, menus, status bar / toolbar / tab control)"  "ALL OK 88/88"   "$($X --quiet --no-stdin --max-ms 40000 tests/dlg32.exe 2>&1 || true)"
+check "input.exe (x64): 30 checks (Raw Input WM_INPUT, DirectInput8 keyboard/mouse, buffered data)"  "ALL OK 30/30"   "$($X --quiet --no-stdin --max-ms 15000 --key 0x27@1000:1500 --key 0x28@3000:400 --move 300,300@4200 tests/input.exe 2>&1 || true)"
+check "input32.exe (x86): 30 checks (Raw Input WM_INPUT, DirectInput8 keyboard/mouse, buffered data)"  "ALL OK 30/30"   "$($X --quiet --no-stdin --max-ms 15000 --key 0x27@1000:1500 --key 0x28@3000:400 --move 300,300@4200 tests/input32.exe 2>&1 || true)"
 # the same real installer twice: the x86 build (32-bit files) and the x64 build (a 32-bit setup stub that probes
 # IsWow64Process and installs 64-bit files) — both bitnesses end-to-end: setup dialog → installed 7z.exe round trip
 inst_fetch() { [ -f tests/inst/$1 ] && return 0; mkdir -p tests/inst; curl -fsSL -o tests/inst/$1 https://www.7-zip.org/a/$1 2>/dev/null || curl -fsSL -o tests/inst/$1 https://github.com/ip7z/7zip/releases/download/25.01/$1 2>/dev/null || rm -f tests/inst/$1; }

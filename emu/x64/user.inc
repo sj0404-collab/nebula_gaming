@@ -18,7 +18,7 @@
 #define MENU_H 20
 #define SUPER_ADOPT(i, k) do { if (!g_wnd[i].builtin) { g_wnd[i].builtin = (k); g_wnd[i].superclassed = 1; } } while (0)
 enum { BI_NONE = 0, BI_BUTTON, BI_STATIC, BI_EDIT, BI_COMBO, BI_LISTBOX, BI_SCROLLBAR, BI_DIALOG, BI_PROGRESS, BI_LINK, BI_COMBOLIST, BI_UNSUPPORTED, BI_MSGBOX, BI_MENU, BI_STATUS, BI_TOOLBAR, BI_TAB };
-enum { CONT_WNDCREATE = 6 /* = CONT_CREATEWND in win32.c */, CONT_WNDDESTROY = 400, CONT_CTLPAINT = 401, CONT_DLGINIT = 402, CONT_MODAL = 403, CONT_DLGMSG = 404, CONT_SENDCMD = 405, CONT_DLGPROC = 406, CONT_ERASEBG = 407, CONT_SETPOS = 408, CONT_STREAMIN = 409, CONT_ILREAD = 410, CONT_WICREAD = 411, CONT_MENUOPEN = 412, CONT_MENUDRAW = 413, CONT_TABSEL = 414, CONT_SUBCLASS = 415, CONT_RET_VAL_ = 5 };
+enum { CONT_WNDCREATE = 6 /* = CONT_CREATEWND in win32.c */, CONT_WNDDESTROY = 400, CONT_CTLPAINT = 401, CONT_DLGINIT = 402, CONT_MODAL = 403, CONT_DLGMSG = 404, CONT_SENDCMD = 405, CONT_DLGPROC = 406, CONT_ERASEBG = 407, CONT_SETPOS = 408, CONT_STREAMIN = 409, CONT_ILREAD = 410, CONT_WICREAD = 411, CONT_MENUOPEN = 412, CONT_MENUDRAW = 413, CONT_TABSEL = 414, CONT_SUBCLASS = 415, CONT_DIENUM = 416, CONT_RET_VAL_ = 5 };
 #define MAX_ITEMS 512
 typedef struct {
   int used, destroyed; int parent, owner; int builtin; int superclassed; /* app-registered class whose wndproc delegates to a built-in proc (VCL TNewButton …): behaves like the built-in for painting but all messages flow through the guest wndproc */ int pid;   /* owning process: messages from other processes are posted to its queue */ char clsname[40]; u64 wndproc; u64 cls_brush; u32 cls_style; int cls_extra;
@@ -47,6 +47,7 @@ static u32 g_sys_colors[31];
 static void edge_rect(Surf *s, int l, int t, int r, int b, u32 tl, u32 br);
 
 static int dlg_key_message(Cpu *c, int d, GuestMsg *m);
+/* game input (input.inc) */ static int raw_key(Win32 *w, int vk, int down); static int raw_mouse(Win32 *w, int dx, int dy, int ev, int wheel); static void di_key(Win32 *w, int vk, int down); static void di_mouse(Win32 *w, int dx, int dy, int ev, int wheel); static void dienum_resume(Cpu *c, u64 rax);
 /* common controls (comctl.inc) */ static void s_NebulaStatusProc(Cpu *c); static void s_NebulaToolbarProc(Cpu *c); static void s_NebulaTabProc(Cpu *c); static void tabsel_resume(Cpu *c, u64 rax);
 /* menus (menu.inc) */ static void menu_bar_draw(Win32 *w, Surf *f, GdiObj *d, int i, int wx, int wy); static int menu_bar_hit(Win32 *w, int i, int fx, int fy); static int menu_top_wnd(void); static int menu_bar_press(Cpu *c, int i, u64 lp); static int menu_bar_mnemonic(Cpu *c, int i, u32 ch); static void menu_apply_bar(Win32 *w, int i); static int menu_of(u64 h); static void s_NebulaMenuProc(Cpu *c); static void menuopen_resume(Cpu *c, u64 rax); static void menudraw_resume(Cpu *c, u64 rax);
 static void modal_reexec(Cpu *c);
@@ -121,6 +122,7 @@ void w32_post_msg(Win32 *w, u32 msg, u64 wp, u64 lp) { post_msg(w, msg, wp, lp);
 static u64 key_target(void) { int mt = menu_top_wnd(); if (mt >= 0) return HWND_OF(mt); if (wnd_alive(g_focus)) return HWND_OF(g_focus); if (wnd_alive(g_active)) return HWND_OF(g_active); return g_wnd[0].used ? HWND_OF(0) : 0; }
 void w32_key(Win32 *w, int vk, int down) {
   if (vk < 0 || vk > 255) return; int prev = w->key_state[vk]; w->key_state[vk] = down;
+  if (prev != down) di_key(w, vk, down); if (raw_key(w, vk, down)) return;   /* Raw Input registered with RIDEV_NOLEGACY: no WM_KEY* */
   u64 lp = 1 | ((u64)(vk & 0x7f) << 16) | (prev ? 1ull << 30 : 0) | (down ? 0 : (1ull << 31) | (1ull << 30));
   int sys = (vk == 0x12) || (w->key_state[0x12] && vk != 0x12 && vk != 0x11);
   post_msg_to(w, key_target(), down ? (sys ? 0x104 : 0x100) : (sys ? 0x105 : 0x101), (u64)vk, lp);
@@ -133,8 +135,9 @@ static int hit_in(int i, int fx, int fy) {
 }
 static int hit_test(int fx, int fy) { int best = -1, bestz = -1; for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].parent < 0 && g_wnd[k].zseq > bestz) { int r = hit_in(k, fx, fy); if (r >= 0) { best = r; bestz = g_wnd[k].zseq; } } return best; }
 void w32_mouse(Win32 *w, int x, int y, int ev) {
-  g_mouse_x = x; g_mouse_y = y;
-  if (ev == 1) g_mouse_btn |= 1; else if (ev == 2) g_mouse_btn &= ~1; else if (ev == 3) g_mouse_btn |= 2; else if (ev == 4) g_mouse_btn &= ~2;
+  int dx = x - g_mouse_x, dy = y - g_mouse_y; g_mouse_x = x; g_mouse_y = y;
+  if (ev == 1) g_mouse_btn |= 1; else if (ev == 2) g_mouse_btn &= ~1; else if (ev == 3) g_mouse_btn |= 2; else if (ev == 4) g_mouse_btn &= ~2; else if (ev == 5) g_mouse_btn |= 4; else if (ev == 6) g_mouse_btn &= ~4;
+  di_mouse(w, dx, dy, ev == 7 ? 0 : ev, ev == 7 ? (x < 0 ? -120 : 120) : 0); if (raw_mouse(w, dx, dy, ev, ev == 7 ? (x < 0 ? -120 : 120) : 0)) return;   /* RIDEV_NOLEGACY */
   static const u32 msgs[] = { 0x200, 0x201, 0x202, 0x204, 0x205, 0x207, 0x208, 0x20A };
   int t = wnd_alive(g_capture) ? g_capture : hit_test(x, y); int mt = menu_top_wnd(); if (mt >= 0) t = mt;   /* an open menu takes all mouse input */ if (t < 0) t = g_wnd[0].used ? 0 : -1; if (t < 0) return;
   if (!wnd_enabled_chain(t)) { /* a disabled window (owner of a modal dialog): mouse input is dropped, like Windows */ if (ev != 0) return; }
@@ -143,7 +146,7 @@ void w32_mouse(Win32 *w, int x, int y, int ev) {
   if (ev == 7) { /* wheel: wParam high word = delta, lParam = screen coords */ post_msg_to(w, HWND_OF(t), 0x20A, ((u64)(u16)(x < 0 ? -120 : 120) << 16) | (u64)g_mouse_btn, (u64)(u16)(x + SCREEN_X0) | ((u64)(u16)(y + SCREEN_Y0) << 16)); return; }
   post_msg_to(w, HWND_OF(t), msgs[ev < 8 ? ev : 0], (u64)g_mouse_btn, lp);
 }
-void w32_wheel(Win32 *w, int delta) { int t = wnd_alive(g_focus) ? g_focus : hit_test(g_mouse_x, g_mouse_y); if (t < 0) return; post_msg_to(w, HWND_OF(t), 0x20A, ((u64)(u16)(s16)delta << 16) | (u64)g_mouse_btn, (u64)(u16)(g_mouse_x + SCREEN_X0) | ((u64)(u16)(g_mouse_y + SCREEN_Y0) << 16)); }
+void w32_wheel(Win32 *w, int delta) { di_mouse(w, 0, 0, 0, delta); if (raw_mouse(w, 0, 0, 7, delta)) return; int t = wnd_alive(g_focus) ? g_focus : hit_test(g_mouse_x, g_mouse_y); if (t < 0) return; post_msg_to(w, HWND_OF(t), 0x20A, ((u64)(u16)(s16)delta << 16) | (u64)g_mouse_btn, (u64)(u16)(g_mouse_x + SCREEN_X0) | ((u64)(u16)(g_mouse_y + SCREEN_Y0) << 16)); }
 void w32_tick(Win32 *w) { (void)w; }
 static void check_timers(Win32 *w) {
   double now = host_now_ms();
@@ -1368,6 +1371,7 @@ void gdi_cont_resume(Cpu *c, int kind, u64 rax) {
     case CONT_MENUDRAW: menudraw_resume(c, rax); return;
     case CONT_TABSEL: tabsel_resume(c, rax); return;
     case CONT_SUBCLASS: subclass_resume(c, rax); return;
+    case CONT_DIENUM: dienum_resume(c, rax); return;
     case CONT_DLGINIT: dlginit_resume(c, rax); return;
     case CONT_DLGPROC: dlgproc_resume(c, rax); return;
     case CONT_MODAL: { int m = g_nmodal - 1; if (m >= 0 && g_modal[m].phase == 2) { u64 res = modal_result(w, m); g_nmodal--; w32_cont_finish(c, res); return; } modal_resume(c, rax); return; }
