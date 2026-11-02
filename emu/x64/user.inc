@@ -212,7 +212,7 @@ static void msgwait_common(Cpu *c, u32 n, u64 arr, int all, u32 ms) { Win32 *w =
   w->blits_since_yield = 0; w32_retry_yield(c); }
 static void s_MsgWaitForMultipleObjects(Cpu *c) { msgwait_common(c, (u32)ARG(0), ARG(1), (u32)ARG(2) != 0, (u32)ARG(3)); }
 static void s_MsgWaitForMultipleObjectsEx(Cpu *c) { msgwait_common(c, (u32)ARG(0), ARG(1), (ARG(4) & 1) != 0, (u32)ARG(3)); }
-static void s_WaitMessage(Cpu *c) { s_MsgWaitForMultipleObjects(c); }
+static void s_WaitMessage(Cpu *c) { msgwait_common(c, 0, 0, 0, 0xffffffffu); }   /* no arguments: wait for any message (was reading garbage as n/handles/timeout) */
 static void s_GetQueueStatus(Cpu *c) { Win32 *w = W; RET(w->msg_head != w->msg_tail ? 0x00FF00FFull : 0); }
 static void s_GetInputState(Cpu *c) { Win32 *w = W; RET(w->msg_head != w->msg_tail); }
 static void s_InSendMessage(Cpu *c) { RET(0); }
@@ -289,7 +289,7 @@ static int wnd_create_obj(Cpu *c, const char *cls, const char *title, u32 style,
       int cw = cwdef ? cwdef : 800, ch = chdef ? chdef : 600; if (style & 0x00C00000u) { cw -= 16; ch -= 39; } if (cw < 16) cw = 16; if (ch < 16) ch = 16; if (cw > 4096) cw = 4096; if (ch > 4096) ch = 4096;
       n->x = 0; n->y = 0; n->ncx = 0; n->ncy = 0; n->w = cw; n->h = ch; screen_ensure(w, cw, ch); n->style &= ~0x40000000u; }
     else {   /* secondary top-level (dialog, message box, popup): drawn inside the framebuffer with a caption bar */
-      int cw = cwdef ? cwdef : 300, ch = chdef ? chdef : 200; int caption = (style & 0x00C00000u) == 0x00C00000u || bi == BI_DIALOG || bi == BI_MSGBOX;
+      int cw = (u32)cx == 0x80000000u ? 300 : cwdef, ch = (u32)cy == 0x80000000u ? 200 : chdef; /* only CW_USEDEFAULT means "pick a size": a 0x0 popup (Delphi's TApplication window) stays 0x0 */ int caption = (style & 0x00C00000u) == 0x00C00000u || bi == BI_DIALOG || bi == BI_MSGBOX;
       if (style & 0x80000000u && !caption) { n->ncx = 0; n->ncy = 0; } else { n->ncx = 1; n->ncy = CAPTION_H; }
       if (bi == BI_COMBOLIST) { n->ncx = 0; n->ncy = 0; }
       n->w = cw + 2 * n->ncx; n->h = ch + n->ncy + n->ncx; if (n->w > 4096) n->w = 4096; if (n->h > 4096) n->h = 4096;
@@ -362,7 +362,7 @@ static void wnd_erase(Cpu *c, int i) { Win32 *w = W; Wnd *n = &g_wnd[i]; u64 hb 
   if (!skip) { u64 hdc = wnd_dc(c, i); Surf s; if (hdc && dc_surf(c, hdc, &s)) { fill_rect_px(&s, 0, 0, s.w, s.h, px); mark_screen(w, hdc); } if (hdc) wnd_dc_free(w, hdc); }
   wnd_frame(c, i); }
 static void wnd_frame(Cpu *c, int i) { Win32 *w = W; Wnd *n = &g_wnd[i];
-  if (n->parent < 0 && i != 0 && n->ncy) { /* caption bar + border of a secondary top-level window */ u64 fdc = make_dc(w); GdiObj *d = gdi_get(w, fdc); if (d) { d->wnd = -1; Surf f; if (dc_surf(c, fdc, &f)) { int wx, wy; wnd_window_origin(i, &wx, &wy); int active = g_active == i; fill_rect_px(&f, wx, wy, wx + n->w, wy + n->ncy, active ? 0xffffff : 0xf0f0f0); edge_rect(&f, wx, wy, wx + n->w, wy + n->h, active ? 0x3c7fb1 : 0xa0a0a0, active ? 0x3c7fb1 : 0xa0a0a0);
+  if (n->parent < 0 && i != 0 && n->ncy && n->w > 2 * n->ncx && n->h > n->ncy + n->ncx) { /* caption bar + border of a secondary top-level window */ u64 fdc = make_dc(w); GdiObj *d = gdi_get(w, fdc); if (d) { d->wnd = -1; Surf f; if (dc_surf(c, fdc, &f)) { int wx, wy; wnd_window_origin(i, &wx, &wy); int active = g_active == i; fill_rect_px(&f, wx, wy, wx + n->w, wy + n->ncy, active ? 0xffffff : 0xf0f0f0); edge_rect(&f, wx, wy, wx + n->w, wy + n->h, active ? 0x3c7fb1 : 0xa0a0a0, active ? 0x3c7fb1 : 0xa0a0a0);
       d->text_color = px2cr(active ? 0x000000 : 0x6d6d6d); d->bk_mode = 1; GdiObj *fo = gdi_get(w, g_dlg_font); d->font = fo ? g_dlg_font : d->font; draw_text(&f, d, w, wx + 8, wy + (n->ncy - 13) / 2, n->text, (int)e_strlen(n->text)); draw_text(&f, d, w, wx + n->w - 20, wy + (n->ncy - 13) / 2, "x", 1); w->dirty = 1; } d->kind = 0; } } }
 static void beginpaint_fill(Cpu *c, int i, u64 ps, u64 hdc, int erased) { u64 r = ps + (c->mode32 ? 8 : 12); wrp(c, ps, hdc); wr32(c, ps + (c->mode32 ? 4 : 8), erased ? 0 : 1); wr32(c, r, 0); wr32(c, r + 4, 0); wr32(c, r + 8, (u32)wnd_client_w(i)); wr32(c, r + 12, (u32)wnd_client_h(i)); }
 static void erasebg_resume(Cpu *c, u64 rax) { Win32 *w = W; int ci = w->ncont - 1; int i = (int)w->cont[ci].data[0]; u64 hdc = w->cont[ci].data[1], ps = w->cont[ci].data[2];

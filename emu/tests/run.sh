@@ -410,6 +410,11 @@ if [ -f $IS ]; then
   GD=$(mktemp -d); out=$(X64_LOG=1 X64_WNDDUMP=1 $X --no-stdin --max-ms 45000 --mount-rw "$GD=C:\\inst" $IS '/DIR=C:\inst\is' 2>&1 3>&1 | grep -a "^\[wnd\]\|frames" || true); rm -rf $GD
   check "Inno Setup GUI: the 'Select Setup Language' form (VCL) is created, laid out and painted"   '"TSelectLanguageForm" "Select Setup Language" parent=-1 at [0-9]*,[0-9]* 3[0-9][0-9]x1[0-9][0-9] nc=1,24 style=[0-9a-f]* vis=1 inv=0'   "$out"
   check "Inno Setup GUI: combo box, OK/Cancel buttons and the prompt are visible"   '"TNewComboBox" "English".*vis=1 inv=0'   "$(echo "$out" | tr '\n' ' ')"
+  # drive the wizard with the mouse: OK (language), "I accept" radio, Next x7 -> the installation runs from the GUI (clicks are repeated: the forms appear at different times on different hosts)
+  GD=$(mktemp -d); out=$(X64_LOG=1 X64_WNDDUMP=1 $X --no-stdin --max-ms 200000 --click 628,350@30000 --click 628,350@38000 --click 246,434@44000 --click 246,434@48000 --click 666,497@52000 --click 666,497@58000 --click 666,497@64000 --click 666,497@70000 --click 666,497@76000 --click 666,497@82000 --click 666,497@88000 --click 666,497@94000 --mount-rw "$GD=C:\\inst" $IS '/DIR=C:\inst\is' 2>&1 3>&1 | grep -a "^\[wnd\]\|frames" || true)
+  check "Inno Setup GUI: the wizard form (TWizardForm, notebook pages, buttons) is shown"   '"TWizardForm" "Setup - Inno Setup version 6.5.4" parent=-1 at [0-9]*,[0-9]* [0-9]*x[0-9]* nc=1,24 style=[0-9a-f]* vis=1'   "$out"
+  check "Inno Setup GUI: license accepted + Next through the pages -> files are being installed from the GUI"   "ISCC.exe\|ISCmplr.dll\|islzma.dll\|Examples\|Setup.e32\|Languages"   "$(ls $GD/is 2>/dev/null | tr '\n' ' ')"
+  rm -rf $GD
 else echo "  skip Inno Setup (no network)"; fi
 # a real MSVC x64 GUI program with dialog templates + common controls: PuTTY reaches its configuration dialog
 # (About box opens through the dialog manager); SysTreeView32 is still reported as not implemented
