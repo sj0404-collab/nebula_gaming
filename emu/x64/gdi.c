@@ -1,6 +1,11 @@
 /* user32 + gdi32 personality: one top-level window, message queue, software GDI on a BGRA framebuffer. */
 #include "emu.h"
 #include "font8x8_basic.h"
+#include "font8x8_ext.h"
+/* UTF-8 → code point (advances *i); glyph lookup falls back to '?' */
+static unsigned utf8_next(const char *str, int len, int *i) { unsigned char c0 = (unsigned char)str[*i]; (*i)++; if (c0 < 0x80) return c0; int extra = c0 >= 0xF0 ? 3 : c0 >= 0xE0 ? 2 : c0 >= 0xC0 ? 1 : 0; unsigned cp = c0 & (0x3F >> extra); for (int k = 0; k < extra; k++) { if (*i >= len || ((unsigned char)str[*i] & 0xC0) != 0x80) return '?'; cp = (cp << 6) | ((unsigned char)str[*i] & 0x3F); (*i)++; } return cp; }
+static int utf8_cols(const char *str, int len) { int i = 0, n = 0; while (i < len) { utf8_next(str, len, &i); n++; } return n; }
+static const unsigned char *glyph_of(unsigned cp) { if (cp < 128) return font8x8_basic[cp]; const unsigned char *g = font8x8_ext_lookup(cp); return g ? g : font8x8_basic[(int)'?']; }
 
 #define ARG(n) w32_arg(c, n)
 #define RET(v) (c->r[RAX] = (u64)(v))
@@ -78,8 +83,8 @@ static void draw_text(Surf *s, GdiObj *dc, Win32 *w, int x, int y, const char *s
   GdiObj *f = gdi_get(w, dc->font); int fh = f && f->kind == K_FONT ? f->font_h : 16; int bold = f && f->kind == K_FONT ? f->font_bold : 0;
   if (fh < 4) fh = 4; int cw = (fh * 11 + 10) / 20; if (cw < 3) cw = 3;
   u32 fg = cr2px(dc->text_color), bg = cr2px(dc->bk_color); int opaque = dc->bk_mode != 1;
-  if (opaque) fill_rect_px(s, x, y, x + cw * len, y + fh, bg);
-  for (int i = 0; i < len; i++) { u8 ch = (u8)str[i]; if (ch >= 128) ch = '?'; const unsigned char *g = font8x8_basic[ch]; int gx0 = x + i * cw;
+  if (opaque) fill_rect_px(s, x, y, x + cw * utf8_cols(str, len), y + fh, bg);
+  for (int i = 0, col = 0; i < len; col++) { unsigned cp = utf8_next(str, len, &i); const unsigned char *g = glyph_of(cp); int gx0 = x + col * cw;
     for (int py = 0; py < fh; py++) { int gy = py * 8 / fh; int yy = y + py; if (yy < 0 || yy >= s->h) continue; u32 *row = srow(s, yy);
       for (int px = 0; px < cw; px++) { int gx = px * 8 / cw; int on = (g[gy] >> gx) & 1; if (!on && bold && gx > 0) on = (g[gy] >> (gx - 1)) & 1; if (on) { int xx = gx0 + px; if (xx >= 0 && xx < s->w) row[xx] = fg; } } } }
 }
@@ -150,9 +155,10 @@ static void s_GetObjectA(Cpu *c) { GdiObj *o = gdi_get(W, ARG(0)); if (!o) { RET
   RET(0); }
 static void s_GetTextExtentPoint32A(Cpu *c) { GdiObj *dc = gdi_get(W, ARG(0)); GdiObj *f = dc ? gdi_get(W, dc->font) : 0; int fh = f ? f->font_h : 16; int cw = (fh * 11 + 10) / 20; wr32(c, ARG(3), (u32)(cw * (int)ARG(2))); wr32(c, ARG(3) + 4, (u32)fh); RET(1); }
 static void s_GetTextMetricsA(Cpu *c) { GdiObj *dc = gdi_get(W, ARG(0)); GdiObj *f = dc ? gdi_get(W, dc->font) : 0; int fh = f ? f->font_h : 16; int cw = (fh * 11 + 10) / 20; u64 a = ARG(1); u8 *p = mem_ptr(c->mem, a, 56, 1); if (p) e_memset(p, 0, 56); wr32(c, a, (u32)fh); wr32(c, a + 4, (u32)(fh - 3)); wr32(c, a + 8, 3); wr32(c, a + 20, (u32)cw); wr32(c, a + 24, (u32)cw); wr32(c, a + 28, f && f->font_bold ? 700 : 400); RET(1); }
-static void text_out(Cpu *c, u64 hdc, int x, int y, u64 str, int len, int wide) { Win32 *w = W; Surf s; GdiObj *dc = gdi_get(w, hdc); if (!dc || !dc_surf(c, hdc, &s)) { RET(0); return; } char buf[1024]; int n = 0;
+static void text_out(Cpu *c, u64 hdc, int x, int y, u64 str, int len, int wide) { Win32 *w = W; Surf s; GdiObj *dc = gdi_get(w, hdc); if (!dc || !dc_surf(c, hdc, &s)) { RET(0); return; } char buf[4100]; int n = 0;
   if (len < 0) len = 0; if (len > 1000) len = 1000;
-  for (int i = 0; i < len; i++) { u32 ch = wide ? rd16(c, str + i * 2) : rd8(c, str + i); if (c->status) return; buf[n++] = ch < 128 ? (char)ch : '?'; }
+  for (int i = 0; i < len && n < 1000; i++) { u32 ch = wide ? rd16(c, str + i * 2) : rd8(c, str + i); if (c->status) return; if (wide && ch >= 0xD800 && ch < 0xDC00 && i + 1 < len) { u32 lo = rd16(c, str + (i + 1) * 2); if (lo >= 0xDC00 && lo < 0xE000) { ch = 0x10000 + ((ch - 0xD800) << 10) + (lo - 0xDC00); i++; } }
+    if (ch < 0x80) buf[n++] = (char)ch; else if (ch < 0x800) { buf[n++] = (char)(0xC0 | ch >> 6); buf[n++] = (char)(0x80 | (ch & 0x3f)); } else if (ch < 0x10000) { buf[n++] = (char)(0xE0 | ch >> 12); buf[n++] = (char)(0x80 | ((ch >> 6) & 0x3f)); buf[n++] = (char)(0x80 | (ch & 0x3f)); } else { buf[n++] = (char)(0xF0 | ch >> 18); buf[n++] = (char)(0x80 | ((ch >> 12) & 0x3f)); buf[n++] = (char)(0x80 | ((ch >> 6) & 0x3f)); buf[n++] = (char)(0x80 | (ch & 0x3f)); } }   /* ANSI bytes ≥ 0x80 are taken as Latin-1 */
   draw_text(&s, dc, w, x, y, buf, n); mark_screen(w, hdc); RET(1); }
 static void s_TextOutA(Cpu *c) { text_out(c, ARG(0), (int)(s32)ARG(1), (int)(s32)ARG(2), ARG(3), (int)(s32)ARG(4), 0); }
 static void s_TextOutW(Cpu *c) { text_out(c, ARG(0), (int)(s32)ARG(1), (int)(s32)ARG(2), ARG(3), (int)(s32)ARG(4), 1); }

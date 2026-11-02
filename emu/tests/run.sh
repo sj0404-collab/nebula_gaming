@@ -344,4 +344,23 @@ check "7za.exe x86: compress (LZMA2, threads)" "Everything is Ok" "$($X --quiet 
 check "7za.exe x86: extract"      "Everything is Ok"                             "$($X --quiet --max-ms 120000 --mount-rw $W32='C:\w' $Z7/7za.exe x -y '-oC:\w\out' 'C:\w\out.7z' 2>&1 | grep -m1 'Everything' || true)"
 check "7za.exe x86: round-trip identical" "same" "$(cmp -s $W32/src/rand.bin $W32/out/src/rand.bin && cmp -s $W32/src/nums.txt $W32/out/src/nums.txt && echo same || echo different)"
 check "7za.exe x86: error path = MSVC C++ throw/catch (__CxxFrameHandler)" "System ERROR:" "$($X --quiet --max-ms 30000 --mount-rw $W32='C:\w' $Z7/7za.exe x '-oC:\w\o2' 'C:\w\nope.7z' 2>&1 || true)"
+echo "[19] dialog manager (user32 dialogs, standard controls, resources, shell folders, IShellLink) — same test built for x64 and x86"
+check "dlg.exe (x64): 42 checks"    "ALL OK 42/42"   "$($X --quiet --no-stdin --max-ms 30000 tests/dlg.exe 2>&1 || true)"
+check "dlg32.exe (x86): 42 checks"  "ALL OK 42/42"   "$($X --quiet --no-stdin --max-ms 30000 tests/dlg32.exe 2>&1 || true)"
+INST=tests/inst/7z2501.exe
+if [ ! -f $INST ]; then mkdir -p tests/inst; curl -fsSL -o $INST https://www.7-zip.org/a/7z2501.exe 2>/dev/null || true; fi
+if [ -f $INST ]; then
+  echo "  real installer: 7-Zip 25.01 x86 (7z2501.exe, the official 32-bit setup program)"
+  ID=$(mktemp -d); rc=0; $X --quiet --no-stdin --max-ms 120000 --mount-rw "$ID=C:\\inst" $INST /S '/D=C:\inst\7z' >/dev/null 2>&1 || rc=$?
+  check "silent install (/S) exit code"   "rc=0"   "rc=$rc"
+  check "silent install wrote 7z.exe + 7z.dll + Lang"   "7z.dll 7z.exe .*Lang"   "$(ls $ID/7z 2>/dev/null | tr '\n' ' ')"
+  echo "round trip" > $ID/in.txt
+  check "installed 7z.exe (x86, loads 7z.dll through COM-style GetProcAddress) compresses"   "Everything is Ok"   "$($X --quiet --no-stdin --max-ms 60000 --mount-rw "$ID=C:\\inst" $ID/7z/7z.exe a 'C:\inst\in.7z' 'C:\inst\in.txt' 2>&1 || true)"
+  rm -rf $ID; ID=$(mktemp -d); rc=0
+  out=$($X --no-stdin --max-ms 120000 --mount-rw "$ID=C:\\inst" --click 130,153@1500 --click 130,153@8000 --click 130,153@16000 --click 130,153@26000 --click 130,153@40000 --click 130,153@60000 --click 130,153@90000 $INST '/D=C:\inst\7z' 2>&1 | grep -v "last blocks" || true)
+  check "GUI install: dialog from the resource template, Install clicked, Close clicked → exit 0"   "exit code 0"   "$out"
+  check "GUI install: frames were presented while installing"   "[1-9][0-9]* frames"   "$out"
+  check "GUI install: files written through the dialog flow"   "7z.exe"   "$(ls $ID/7z 2>/dev/null | tr '\n' ' ')"
+  rm -rf $ID
+else echo "  skip (no 7z2501.exe and no network)"; fi
 [ $fail = 0 ] && echo "ALL OK" || { echo "FAILURES"; exit 1; }
