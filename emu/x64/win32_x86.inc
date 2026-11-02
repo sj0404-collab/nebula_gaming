@@ -11,6 +11,11 @@ static inline double fpop(Cpu *c) { double v = c->fp[c->ftop]; c->ftag &= ~(1u <
 
 /* signature letters: i 32-bit int/pointer, q 64-bit int (two slots), d double, f float; "ret:args" */
 static const struct { const char *n; const char *sig; } sig32_tab[] = {
+  /* built-in window procedures and COM methods implemented as shims: stdcall from 32-bit callers */
+  { "NebulaButtonProc", "i:iiii" }, { "NebulaStaticProc", "i:iiii" }, { "NebulaLinkProc", "i:iiii" }, { "NebulaEditProc", "i:iiii" }, { "NebulaListBoxProc", "i:iiii" }, { "NebulaComboListProc", "i:iiii" }, { "NebulaComboProc", "i:iiii" }, { "NebulaProgressProc", "i:iiii" }, { "NebulaScrollBarProc", "i:iiii" }, { "NebulaUnsupportedProc", "i:iiii" }, { "NebulaMsgBoxProc", "i:iiii" }, { "NebulaBrowseProc", "i:iiii" },
+  { "IShellLink::QueryInterface", "i:iii" }, { "IShellLink::AddRef", "i:i" }, { "IShellLink::Release", "i:i" }, { "IShellLink::GetPath", "i:iiiii" }, { "IShellLink::GetIDList", "i:ii" }, { "IShellLink::SetIDList", "i:ii" }, { "IShellLink::GetDescription", "i:iii" }, { "IShellLink::SetDescription", "i:ii" }, { "IShellLink::GetWorkingDirectory", "i:iii" }, { "IShellLink::SetWorkingDirectory", "i:ii" }, { "IShellLink::GetArguments", "i:iii" }, { "IShellLink::SetArguments", "i:ii" }, { "IShellLink::GetHotkey", "i:ii" }, { "IShellLink::SetHotkey", "i:ii" }, { "IShellLink::GetShowCmd", "i:ii" }, { "IShellLink::SetShowCmd", "i:ii" }, { "IShellLink::GetIconLocation", "i:iiii" }, { "IShellLink::SetIconLocation", "i:iii" }, { "IShellLink::SetRelativePath", "i:iii" }, { "IShellLink::Resolve", "i:iii" }, { "IShellLink::SetPath", "i:ii" },
+  { "IPersistFile::QueryInterface", "i:iii" }, { "IPersistFile::AddRef", "i:i" }, { "IPersistFile::Release", "i:i" }, { "IPersistFile::GetClassID", "i:ii" }, { "IPersistFile::IsDirty", "i:i" }, { "IPersistFile::Load", "i:iii" }, { "IPersistFile::Save", "i:iii" }, { "IPersistFile::SaveCompleted", "i:ii" }, { "IPersistFile::GetCurFile", "i:ii" },
+  { "IMalloc::QueryInterface", "i:iii" }, { "IMalloc::AddRef", "i:i" }, { "IMalloc::Release", "i:i" }, { "IMalloc::Alloc", "i:ii" }, { "IMalloc::Realloc", "i:iii" }, { "IMalloc::Free", "i:ii" }, { "IMalloc::GetSize", "i:ii" }, { "IMalloc::DidAlloc", "i:ii" }, { "IMalloc::HeapMinimize", "i:i" },
 #define D1(n) { #n, "d:d" }, { #n "f", "f:f" }, { #n "l", "d:d" },
 #define D2(n) { #n, "d:dd" }, { #n "f", "f:ff" }, { #n "l", "d:dd" },
   D1(sin) D1(cos) D1(tan) D1(asin) D1(acos) D1(atan) D1(sinh) D1(cosh) D1(tanh) D1(asinh) D1(acosh) D1(atanh) D1(exp) D1(exp2) D1(expm1) D1(log) D1(log2) D1(log10) D1(log1p)
@@ -83,6 +88,14 @@ void call_shim(Cpu *c, ShimFn fn, u64 a0, u64 a1, u64 a2, u64 a3) {
   c->r[RCX] = a0; c->r[RDX] = a1; c->r[R8] = a2; c->r[R9] = a3;
   fn(c);
   c->r[RCX] = sv[0]; c->r[RDX] = sv[1]; c->r[R8] = sv[2]; c->r[R9] = sv[3];
+  if (c->mode32) { for (int k = 0; k < 4; k++) g_a32[k] = so[k]; g_a32_n = sn; }
+}
+
+void call_shim_tail(Cpu *c, ShimFn fn, u64 a0, u64 a1, u64 a2, u64 a3) {
+  u64 so[4] = { 0, 0, 0, 0 }; int sn = g_a32_n;
+  if (c->mode32) { for (int k = 0; k < 4; k++) so[k] = g_a32[k]; g_a32[0] = a0; g_a32[1] = a1; g_a32[2] = a2; g_a32[3] = a3; g_a32_n = 4; }
+  else { c->r[RCX] = a0; c->r[RDX] = a1; c->r[R8] = a2; c->r[R9] = a3; }
+  fn(c);
   if (c->mode32) { for (int k = 0; k < 4; k++) g_a32[k] = so[k]; g_a32_n = sn; }
 }
 

@@ -142,7 +142,6 @@ static void s_GetFileVersionInfoSizeExW(Cpu *c) { if (ARG(2)) wr32(c, ARG(2), 0)
 /* combase / WinRT: no Windows Runtime here */
 static void s_RoInitialize(Cpu *c) { RET(0); }
 static void s_RoGetActivationFactory(Cpu *c) { if (ARG(2)) wrp(c, ARG(2), 0); RET(0x80040154); }   /* REGDB_E_CLASSNOTREG */
-static void s_LoadStringW(Cpu *c) { if (ARG(3)) wr16(c, ARG(2), 0); RET(0); }
 
 static void s_GetThreadIOPendingFlag(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), 0); RET(1); }   /* no outstanding I/O requests on this thread */
 #define CLR_SHIMS \
@@ -160,4 +159,4 @@ static void s_GetThreadIOPendingFlag(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), 0); R
   S(WinHttpGetIEProxyConfigForCurrentUser), S(WinHttpGetDefaultProxyConfiguration), S(WinHttpOpen), S(WinHttpGetProxyForUrl), S(WinHttpCloseHandle), SA("WinHttpConnect", WinHttpFail), SA("WinHttpOpenRequest", WinHttpFail), SA("WinHttpSendRequest", WinHttpFail), SA("WinHttpReceiveResponse", WinHttpFail), SA("WinHttpSetOption", ret1), SA("WinHttpQueryOption", WinHttpFail), SA("WinHttpSetStatusCallback", ret0), SA("WinHttpSetTimeouts", ret1), SA("WinHttpQueryHeaders", WinHttpFail), SA("WinHttpQueryDataAvailable", WinHttpFail), SA("WinHttpReadData", WinHttpFail), SA("WinHttpWriteData", WinHttpFail), SA("WinHttpAddRequestHeaders", WinHttpFail), SA("WinHttpCrackUrl", WinHttpFail), SA("WinHttpCreateUrl", WinHttpFail), SA("WinHttpResetAutoProxy", ret0), SA("WinHttpGetProxyForUrlEx", WinHttpFail), SA("WinHttpCreateProxyResolver", WinHttpFail), SA("WinHttpFreeProxyResult", ret0), \
   S(GetFileVersionInfoSizeExW), SA("GetFileVersionInfoSizeW", GetFileVersionInfoSizeExW), SA("GetFileVersionInfoExW", ret0), SA("GetFileVersionInfoW", ret0), SA("VerQueryValueW", ret0), \
   S(RoInitialize), SA("RoUninitialize", ret0), S(RoGetActivationFactory), SA("RoOriginateLanguageException", ret0), SA("RoOriginateError", ret0), SA("RoOriginateErrorW", ret0), SA("SetRestrictedErrorInfo", ret0), SA("GetRestrictedErrorInfo", ret1), SA("RoGetErrorReportingFlags", ret0), SA("RoSetErrorReportingFlags", ret0), SA("RoReportUnhandledError", ret0), \
-  S(LoadStringW), S(GetThreadIOPendingFlag),
+  S(GetThreadIOPendingFlag),

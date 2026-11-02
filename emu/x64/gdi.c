@@ -5,15 +5,14 @@
 #define ARG(n) w32_arg(c, n)
 #define RET(v) (c->r[RAX] = (u64)(v))
 #define W (c->w)
-#define HWND_MAIN 0x10042ull
 #define GDI_TAG   0x01000000ull
 #define CONT_RET_RAX 4
 #define CONT_RET_VAL 5
 #define CONT_CREATEWND 6
-#define CONT_DESTROYWND 100
 #define SLOT_CONT_ADDR (G_SHIM_BASE + 16)
 
 int w32_format_args(Cpu *c, char *out, size_t n, u64 fmt, int wide, int first_arg);
+int wstr_to_utf8(Cpu *c, u64 addr, char *out, size_t cap, int maxchars);
 void w32_retry_yield(Cpu *c);
 void w32_push_cont(Cpu *c, int kind, u64 val);
 void w32_guest_call(Cpu *c, u64 fn, u64 a0, u64 a1, u64 a2, u64 a3);
@@ -32,16 +31,18 @@ static u64 window_dc;
 static u32 cr2px(u32 cr) { return ((cr & 0xff) << 16) | (cr & 0xff00) | ((cr >> 16) & 0xff); }
 static u32 px2cr(u32 px) { return ((px & 0xff) << 16) | (px & 0xff00) | ((px >> 16) & 0xff); }
 
-typedef struct { u32 *px; int w, h; int bottom_up; } Surf;
-static inline u32 *srow(Surf *s, int y) { return s->bottom_up ? s->px + (size_t)(s->h - 1 - y) * s->w : s->px + (size_t)y * s->w; }
+typedef struct { u32 *px; int w, h; int bottom_up; int stride; } Surf;
+static inline u32 *srow(Surf *s, int y) { return s->bottom_up ? s->px + (size_t)(s->h - 1 - y) * s->stride : s->px + (size_t)y * s->stride; }
 static int dc_surf(Cpu *c, u64 hdc, Surf *s) {
   Win32 *w = W; GdiObj *dc = gdi_get(w, hdc); if (!dc || dc->kind != K_DC) return 0;
-  if (hdc == window_dc) { s->px = w->screen; s->w = w->screen_w; s->h = w->screen_h; s->bottom_up = 0; return s->px != 0; }
+  if (hdc == window_dc || dc->wnd < 0) { s->px = w->screen; s->w = w->screen_w; s->h = w->screen_h; s->stride = w->screen_w; s->bottom_up = 0; return s->px != 0; }
+  if (dc->wnd > 0) { if (!w->screen) return 0; int ox = dc->ox, oy = dc->oy, vw = dc->vw, vh = dc->vh; if (ox + vw > w->screen_w) vw = w->screen_w - ox; if (oy + vh > w->screen_h) vh = w->screen_h - oy; if (vw < 0) vw = 0; if (vh < 0) vh = 0;
+    s->px = w->screen + (size_t)oy * w->screen_w + ox; s->w = vw; s->h = vh; s->stride = w->screen_w; s->bottom_up = 0; return 1; }
   GdiObj *bm = gdi_get(w, dc->bitmap); if (!bm || bm->kind != K_BITMAP) return 0;
-  s->px = (u32 *)mem_ptr(w->mem, bm->bits, (u64)bm->bw * bm->bh * 4, 1); s->w = bm->bw; s->h = bm->bh; s->bottom_up = bm->font_bold; /* font_bold reused as bottom-up flag for bitmaps */
+  s->px = (u32 *)mem_ptr(w->mem, bm->bits, (u64)bm->bw * bm->bh * 4, 1); s->w = bm->bw; s->h = bm->bh; s->stride = bm->bw; s->bottom_up = bm->font_bold; /* font_bold reused as bottom-up flag for bitmaps */
   return s->px != 0;
 }
-static void mark_screen(Win32 *w, u64 hdc) { if (hdc == window_dc) { w->dirty = 1; w->blits_since_yield++; } }
+static void mark_screen(Win32 *w, u64 hdc) { if (hdc == window_dc) { w->dirty = 1; w->blits_since_yield++; return; } GdiObj *dc = gdi_get(w, hdc); if (dc && dc->wnd) { w->dirty = 1; w->blits_since_yield++; } }
 static u32 dc_brush_px(Win32 *w, GdiObj *dc, int *null_brush) { GdiObj *b = gdi_get(w, dc->brush); *null_brush = 0; if (!b) return 0xffffff; if (b->kind == K_BRUSH && b->pen_width == -1) { *null_brush = 1; return 0; } return b->color; }
 static u32 dc_pen_px(Win32 *w, GdiObj *dc, int *null_pen) { GdiObj *p = gdi_get(w, dc->pen); *null_pen = 0; if (!p) return 0; if (p->pen_width == -1) { *null_pen = 1; return 0; } return p->color; }
 
@@ -83,179 +84,6 @@ static void draw_text(Surf *s, GdiObj *dc, Win32 *w, int x, int y, const char *s
       for (int px = 0; px < cw; px++) { int gx = px * 8 / cw; int on = (g[gy] >> gx) & 1; if (!on && bold && gx > 0) on = (g[gy] >> (gx - 1)) & 1; if (on) { int xx = gx0 + px; if (xx >= 0 && xx < s->w) row[xx] = fg; } } } }
 }
 
-/* ---------- messages ---------- */
-static void post_msg(Win32 *w, u32 msg, u64 wp, u64 lp) {
-  int next = (w->msg_tail + 1) % MAX_MSGS; if (next == w->msg_head) return;
-  GuestMsg *m = &w->msgs[w->msg_tail]; m->hwnd = HWND_MAIN; m->msg = msg; m->wparam = wp; m->lparam = lp; m->time = (u32)(host_now_ms() - w->start_ms); w->msg_tail = next;
-}
-void w32_post_msg(Win32 *w, u32 msg, u64 wp, u64 lp) { post_msg(w, msg, wp, lp); }
-void w32_key(Win32 *w, int vk, int down) {
-  if (vk < 0 || vk > 255) return; int prev = w->key_state[vk]; w->key_state[vk] = down;
-  u64 lp = 1 | ((u64)(vk & 0x7f) << 16) | (prev ? 1ull << 30 : 0) | (down ? 0 : (1ull << 31) | (1ull << 30));
-  int sys = (vk == 0x12) || (w->key_state[0x12] && vk != 0x12 && vk != 0x11);
-  post_msg(w, down ? (sys ? 0x104 : 0x100) : (sys ? 0x105 : 0x101), (u64)vk, lp);
-}
-static int g_mouse_x, g_mouse_y, g_mouse_btn;
-void w32_mouse(Win32 *w, int x, int y, int ev) {
-  g_mouse_x = x; g_mouse_y = y;
-  if (ev == 1) g_mouse_btn |= 1; else if (ev == 2) g_mouse_btn &= ~1; else if (ev == 3) g_mouse_btn |= 2; else if (ev == 4) g_mouse_btn &= ~2;
-  u64 lp = (u64)(u16)x | ((u64)(u16)y << 16);
-  static const u32 msgs[] = { 0x200, 0x201, 0x202, 0x204, 0x205 };
-  post_msg(w, msgs[ev < 5 ? ev : 0], (u64)g_mouse_btn, lp);
-}
-void w32_tick(Win32 *w) { (void)w; }
-static int timers_n; static struct { u64 id; u32 ms; double next; u64 proc; } timers[16];
-static void check_timers(Win32 *w) {
-  double now = host_now_ms();
-  for (int i = 0; i < timers_n; i++) if (now >= timers[i].next) { timers[i].next = now + timers[i].ms; post_msg(w, 0x113, timers[i].id, timers[i].proc); }
-}
-/* MSG: x64 hwnd@0 message@8 wParam@16 lParam@24 time@32 pt@36 (48 B); x86 hwnd@0 message@4 wParam@8 lParam@12 time@16 pt@20 (28 B) */
-#define MSG_MSG(a) ((a) + (c->mode32 ? 4 : 8))
-#define MSG_WP(a) ((a) + (c->mode32 ? 8 : 16))
-#define MSG_LP(a) ((a) + (c->mode32 ? 12 : 24))
-static void write_msg(Cpu *c, u64 a, GuestMsg *m) {
-  if (c->mode32) { wr32(c, a, (u32)m->hwnd); wr32(c, a + 4, m->msg); wr32(c, a + 8, (u32)m->wparam); wr32(c, a + 12, (u32)m->lparam); wr32(c, a + 16, m->time); wr32(c, a + 20, (u32)g_mouse_x); wr32(c, a + 24, (u32)g_mouse_y); return; }
-  wr64(c, a, m->hwnd); wr32(c, a + 8, m->msg); wr32(c, a + 12, 0); wr64(c, a + 16, m->wparam); wr64(c, a + 24, m->lparam); wr32(c, a + 32, m->time); wr32(c, a + 36, (u32)g_mouse_x); wr32(c, a + 40, (u32)g_mouse_y); wr32(c, a + 44, 0); }
-static int next_message(Cpu *c, GuestMsg *out, int remove) {
-  Win32 *w = W; check_timers(w);
-  if (w->msg_head != w->msg_tail) { *out = w->msgs[w->msg_head]; if (remove) w->msg_head = (w->msg_head + 1) % MAX_MSGS; return 1; }
-  if (w->quit_posted) { out->hwnd = 0; out->msg = 0x12; out->wparam = (u64)(u32)c->exit_code; out->lparam = 0; out->time = 0; if (remove) w->quit_posted = 0; return 1; }
-  if (w->win.created && w->win.style & 0x40000000u) { out->hwnd = HWND_MAIN; out->msg = 0xF; out->wparam = out->lparam = 0; out->time = 0; return 1; }   /* 0x40000000 = our "invalid" flag */
-  return 0;
-}
-static void s_PeekMessageA(Cpu *c) {
-  Win32 *w = W; GuestMsg m; u32 flags = (u32)ARG(4);
-  if (next_message(c, &m, flags & 1)) { write_msg(c, ARG(0), &m); RET(1); return; }
-  if (w->blits_since_yield || w->yield_frames++ > 20000) { w->blits_since_yield = 0; w->yield_frames = 0; w32_retry_yield(c); return; }
-  RET(0);
-}
-static void s_GetMessageA(Cpu *c) {
-  GuestMsg m; if (next_message(c, &m, 1)) { write_msg(c, ARG(0), &m); RET(m.msg == 0x12 ? 0 : 1); return; }
-  W->blits_since_yield = 0; w32_retry_yield(c);
-}
-static void s_TranslateMessage(Cpu *c) {
-  u64 a = ARG(0); u32 msg = rd32(c, MSG_MSG(a)); u64 vk = rdp(c, MSG_WP(a));
-  if (msg == 0x100) { int shift = W->key_state[0x10]; u32 ch = 0;
-    if (vk >= 'A' && vk <= 'Z') ch = shift ? (u32)vk : (u32)vk + 32; else if (vk >= '0' && vk <= '9') ch = (u32)vk; else if (vk == 0x20 || vk == 0x0D || vk == 0x08 || vk == 0x1B || vk == 0x09) ch = (u32)vk; else if (vk >= 0x60 && vk <= 0x69) ch = '0' + (u32)vk - 0x60;
-    if (ch) post_msg(W, 0x102, ch, rdp(c, MSG_LP(a))); RET(1); return; }
-  RET(0);
-}
-static void dispatch_to_wndproc(Cpu *c, u64 hwnd, u32 msg, u64 wp, u64 lp) {
-  Win32 *w = W;
-  if (msg == 0x113 && lp) { w32_push_cont(c, CONT_RET_RAX, 0); w32_guest_call(c, lp, hwnd, msg, wp, (u64)(u32)(host_now_ms() - w->start_ms)); return; }
-  if (hwnd != HWND_MAIN || !w->win.wndproc) { RET(0); return; }
-  w32_push_cont(c, CONT_RET_RAX, 0); w32_guest_call(c, w->win.wndproc, hwnd, msg, wp, lp);
-}
-static void s_DispatchMessageA(Cpu *c) { u64 a = ARG(0); dispatch_to_wndproc(c, rdp(c, a), rd32(c, MSG_MSG(a)), rdp(c, MSG_WP(a)), rdp(c, MSG_LP(a))); }
-static void s_SendMessageA(Cpu *c) { dispatch_to_wndproc(c, ARG(0), (u32)ARG(1), ARG(2), ARG(3)); }
-static void s_PostMessageA(Cpu *c) { if (ARG(0) == HWND_MAIN || ARG(0) == 0) post_msg(W, (u32)ARG(1), ARG(2), ARG(3)); RET(1); }
-static void s_PostQuitMessage(Cpu *c) { W->quit_posted = 1; c->exit_code = (int)ARG(0); }
-static void s_SetTimer(Cpu *c) { u64 id = ARG(1) ? ARG(1) : 1; u32 ms = (u32)ARG(2); if (ms < 10) ms = 10; for (int i = 0; i < timers_n; i++) if (timers[i].id == id) { timers[i].ms = ms; timers[i].next = host_now_ms() + ms; timers[i].proc = ARG(3); RET(id); return; } if (timers_n < 16) { timers[timers_n].id = id; timers[timers_n].ms = ms; timers[timers_n].next = host_now_ms() + ms; timers[timers_n].proc = ARG(3); timers_n++; } RET(id); }
-static void s_KillTimer(Cpu *c) { for (int i = 0; i < timers_n; i++) if (timers[i].id == ARG(1)) { timers[i] = timers[--timers_n]; break; } RET(1); }
-static void s_MsgWaitForMultipleObjects(Cpu *c) { Win32 *w = W; if (w->msg_head != w->msg_tail || w->quit_posted) { RET(ARG(0)); return; } w->blits_since_yield = 0; w32_retry_yield(c); }
-static void s_WaitMessage(Cpu *c) { s_MsgWaitForMultipleObjects(c); }
-
-/* ---------- window ---------- */
-/* WNDCLASS(EX): x64 proc@8(16) brush@48(56) name@64(72); x86 proc@4(8) brush@28(32) name@36(40) */
-static void register_class(Cpu *c, u64 a, int ex) { Win32 *w = W; int m = c->mode32; u64 off = ex ? (m ? 4 : 8) : 0;
-  w->wndclass_proc = rdp(c, a + off + (m ? 4 : 8)); w->wndclass_registered = 1; const char *n = rd_str(c, rdp(c, a + off + (m ? 36 : 64)), 63); e_snprintf(w->wndclass_name, sizeof w->wndclass_name, "%s", n ? n : "?"); w->win.brush = rdp(c, a + off + (m ? 28 : 48)); RET(0xC001); }
-static void s_RegisterClassA(Cpu *c) { register_class(c, ARG(0), 0); }
-static void s_RegisterClassExA(Cpu *c) { register_class(c, ARG(0), 1); }
-static void s_RegisterClassW(Cpu *c) { s_RegisterClassA(c); }
-static void s_RegisterClassExW(Cpu *c) { s_RegisterClassExA(c); }
-static void s_UnregisterClassA(Cpu *c) { RET(1); }
-static void s_GetClassInfoExA(Cpu *c) { RET(0); }
-static void s_AdjustWindowRectEx(Cpu *c) { u64 r = ARG(0); u32 style = (u32)ARG(1); if (style & 0x00C00000u) { wr32(c, r, rd32(c, r) - 8); wr32(c, r + 4, rd32(c, r + 4) - 31); wr32(c, r + 8, rd32(c, r + 8) + 8); wr32(c, r + 12, rd32(c, r + 12) + 8); } RET(1); }
-static void s_AdjustWindowRect(Cpu *c) { s_AdjustWindowRectEx(c); }
-static void create_window(Cpu *c, u64 title_a, int wide, u32 style, int x, int y, int cx, int cy, u64 param) {
-  Win32 *w = W; (void)x; (void)y;
-  if (w->win.created) { w32_report(w, "second top-level window requested — only one window is supported; returning the same HWND"); RET(HWND_MAIN); return; }
-  if (!w->wndclass_registered) { w32_report(w, "CreateWindow before RegisterClass"); RET(0); return; }
-  int cw = cx, ch = cy; if ((u32)cx == 0x80000000u || cx <= 0) cw = 800; if ((u32)cy == 0x80000000u || cy <= 0) ch = 600;
-  if (style & 0x00C00000u) { cw -= 16; ch -= 39; } if (cw < 16) cw = 16; if (ch < 16) ch = 16; if (cw > 4096) cw = 4096; if (ch > 4096) ch = 4096;
-  w->win.hwnd = HWND_MAIN; w->win.w = cw; w->win.h = ch; w->win.style = style & ~0x40000000u; w->win.wndproc = w->wndclass_proc; w->win.created = 1; w->win.shown = 0;
-  if (wide) { char t[128]; int n = 0; for (int i = 0; i < 127; i++) { u16 chh = rd16(c, title_a + i * 2); if (!chh) break; t[n++] = chh < 128 ? (char)chh : '?'; } t[n] = 0; e_snprintf(w->win.title, sizeof w->win.title, "%s", t); }
-  else { const char *t = rd_str(c, title_a, 127); e_snprintf(w->win.title, sizeof w->win.title, "%s", t ? t : ""); }
-  w->screen_w = cw; w->screen_h = ch; w->screen = emu_alloc((size_t)cw * ch * 4); w->dirty = 1;
-  /* CREATESTRUCT for WM_CREATE */
-  u64 cs = w32_heap_alloc(w, 80, 1);
-  if (c->mode32) { wr32(c, cs, (u32)param); wr32(c, cs + 4, (u32)w->image_base); wr32(c, cs + 12, HWND_MAIN); wr32(c, cs + 16, ch); wr32(c, cs + 20, cw); wr32(c, cs + 24, 64); wr32(c, cs + 28, 64); wr32(c, cs + 32, style); wr32(c, cs + 36, (u32)title_a); }   /* CREATESTRUCT32 */
-  else { wr64(c, cs, param); wr64(c, cs + 8, w->image_base); wr64(c, cs + 32, HWND_MAIN); wr32(c, cs + 40, ch); wr32(c, cs + 44, cw); wr32(c, cs + 48, 64); wr32(c, cs + 52, 64); wr32(c, cs + 56, style); wr64(c, cs + 64, title_a); }
-  w32_push_cont(c, CONT_CREATEWND, 0);
-  w32_guest_call(c, w->win.wndproc, HWND_MAIN, 0x0001 /* WM_CREATE */, 0, cs);
-}
-static void s_CreateWindowExA(Cpu *c) { create_window(c, ARG(2), 0, (u32)ARG(3), (int)ARG(4), (int)ARG(5), (int)ARG(6), (int)ARG(7), ARG(11)); }
-static void s_CreateWindowExW(Cpu *c) { create_window(c, ARG(2), 1, (u32)ARG(3), (int)ARG(4), (int)ARG(5), (int)ARG(6), (int)ARG(7), ARG(11)); }
-static void s_DefWindowProcA(Cpu *c) {
-  Win32 *w = W; u32 msg = (u32)ARG(1);
-  switch (msg) {
-    case 0x81: RET(1); return;                                           /* WM_NCCREATE */
-    case 0x0F: w->win.style &= ~0x40000000u; RET(0); return;             /* WM_PAINT: validate */
-    case 0x14: { Surf s; if (dc_surf(c, window_dc, &s)) { GdiObj *b = gdi_get(w, w->win.brush); fill_rect_px(&s, 0, 0, s.w, s.h, b ? b->color : 0); mark_screen(w, window_dc); } RET(1); return; } /* WM_ERASEBKGND */
-    case 0x10: { w32_push_cont(c, CONT_DESTROYWND, 0); w32_guest_call(c, w->win.wndproc, HWND_MAIN, 0x0002, 0, 0); return; }   /* WM_CLOSE → WM_DESTROY */
-    default: RET(0); return;
-  }
-}
-static void s_DefWindowProcW(Cpu *c) { s_DefWindowProcA(c); }
-static void s_DestroyWindow(Cpu *c) { Win32 *w = W; if (!w->win.created) { RET(0); return; } w32_push_cont(c, CONT_DESTROYWND, 0); w32_guest_call(c, w->win.wndproc, HWND_MAIN, 0x0002, 0, 0); }
-void gdi_cont_resume(Cpu *c, int kind, u64 rax) { (void)rax; if (kind == CONT_DESTROYWND) { W->win.created = 0; W->win.style = 0; w32_cont_finish(c, 1); return; } cpu_fault(c, "bad continuation kind %d", kind); }
-static void s_ShowWindow(Cpu *c) { Win32 *w = W; int prev = w->win.shown; w->win.shown = ARG(1) != 0; if (w->win.shown && !prev) { w->win.style |= 0x40000000u; w->dirty = 1; } RET(prev); }
-static void s_UpdateWindow(Cpu *c) { Win32 *w = W; if (w->win.created && (w->win.style & 0x40000000u)) { w->win.style &= ~0x40000000u; w32_push_cont(c, CONT_RET_VAL, 1); w32_guest_call(c, w->win.wndproc, HWND_MAIN, 0x0F, 0, 0); return; } RET(1); }
-static void s_InvalidateRect(Cpu *c) { W->win.style |= 0x40000000u; RET(1); }
-static void s_InvalidateRgn(Cpu *c) { W->win.style |= 0x40000000u; RET(1); }
-static void s_ValidateRect(Cpu *c) { W->win.style &= ~0x40000000u; RET(1); }
-static void s_RedrawWindow(Cpu *c) { W->win.style |= 0x40000000u; RET(1); }
-static void s_GetClientRect(Cpu *c) { u64 r = ARG(1); wr32(c, r, 0); wr32(c, r + 4, 0); wr32(c, r + 8, (u32)W->win.w); wr32(c, r + 12, (u32)W->win.h); RET(1); }
-static void s_GetWindowRect(Cpu *c) { u64 r = ARG(1); wr32(c, r, 64); wr32(c, r + 4, 64); wr32(c, r + 8, 64 + (u32)W->win.w); wr32(c, r + 12, 64 + (u32)W->win.h); RET(1); }
-static void s_BeginPaint(Cpu *c) { Win32 *w = W; u64 ps = ARG(1); w->win.style &= ~0x40000000u; u64 r = ps + (c->mode32 ? 8 : 12); wrp(c, ps, window_dc); wr32(c, ps + (c->mode32 ? 4 : 8), 0); wr32(c, r, 0); wr32(c, r + 4, 0); wr32(c, r + 8, (u32)w->win.w); wr32(c, r + 12, (u32)w->win.h); RET(window_dc); }
-static void s_EndPaint(Cpu *c) { W->dirty = 1; W->blits_since_yield++; RET(1); }
-static void s_GetDC(Cpu *c) { RET(window_dc); }
-static void s_GetWindowDC(Cpu *c) { RET(window_dc); }
-static void s_ReleaseDC(Cpu *c) { W->dirty = 1; RET(1); }
-static void s_SetWindowTextA(Cpu *c) { const char *t = rd_str(c, ARG(1), 127); e_snprintf(W->win.title, sizeof W->win.title, "%s", t ? t : ""); RET(1); }
-static void s_GetWindowTextA(Cpu *c) { size_t l = e_strlen(W->win.title); u32 n = (u32)ARG(2); if (l + 1 > n) l = n ? n - 1 : 0; u8 *p = mem_ptr(c->mem, ARG(1), l + 1, 1); if (p) { e_memcpy(p, W->win.title, l); p[l] = 0; } RET(l); }
-static void s_SetWindowPos(Cpu *c) { RET(1); }
-static void s_MoveWindow(Cpu *c) { RET(1); }
-static u64 wnd_userdata, wnd_long[8];
-static void s_SetWindowLongPtrA(Cpu *c) { int idx = (int)(s32)ARG(1); u64 old; if (idx == -21) { old = wnd_userdata; wnd_userdata = ARG(2); } else if (idx == -4) { old = W->win.wndproc; W->win.wndproc = ARG(2); } else if (idx == -16) { old = W->win.style; W->win.style = (u32)ARG(2) | (W->win.style & 0x40000000u); } else { old = wnd_long[idx & 7]; wnd_long[idx & 7] = ARG(2); } RET(old); }
-static void s_GetWindowLongPtrA(Cpu *c) { int idx = (int)(s32)ARG(1); if (idx == -21) RET(wnd_userdata); else if (idx == -4) RET(W->win.wndproc); else if (idx == -16) RET(W->win.style & ~0x40000000u); else if (idx == -20) RET(0); else RET(wnd_long[idx & 7]); }
-static void s_SetFocus(Cpu *c) { RET(HWND_MAIN); }
-static void s_GetFocus(Cpu *c) { RET(W->win.created ? HWND_MAIN : 0); }
-static void s_SetForegroundWindow(Cpu *c) { RET(1); }
-static void s_GetForegroundWindow(Cpu *c) { RET(W->win.created ? HWND_MAIN : 0); }
-static void s_GetActiveWindow(Cpu *c) { RET(W->win.created ? HWND_MAIN : 0); }
-static void s_SetActiveWindow(Cpu *c) { RET(HWND_MAIN); }
-static void s_IsWindow(Cpu *c) { RET(ARG(0) == HWND_MAIN && W->win.created); }
-static void s_IsWindowVisible(Cpu *c) { RET(W->win.shown); }
-static void s_IsIconic(Cpu *c) { RET(0); }
-static void s_IsZoomed(Cpu *c) { RET(0); }
-static void s_GetDesktopWindow(Cpu *c) { RET(0x10001); }
-static void s_GetParent(Cpu *c) { RET(0); }
-static void s_FindWindowA(Cpu *c) { RET(0); }
-static void s_EnableWindow(Cpu *c) { RET(0); }
-static void s_BringWindowToTop(Cpu *c) { RET(1); }
-static void s_SetCapture(Cpu *c) { RET(0); }
-static void s_ReleaseCapture(Cpu *c) { RET(1); }
-static void s_ClientToScreen(Cpu *c) { u64 p = ARG(1); wr32(c, p, rd32(c, p) + 64); wr32(c, p + 4, rd32(c, p + 4) + 64); RET(1); }
-static void s_ScreenToClient(Cpu *c) { u64 p = ARG(1); wr32(c, p, rd32(c, p) - 64); wr32(c, p + 4, rd32(c, p + 4) - 64); RET(1); }
-static void s_MapWindowPoints(Cpu *c) { RET(0); }
-static void s_GetCursorPos(Cpu *c) { wr32(c, ARG(0), (u32)(g_mouse_x + 64)); wr32(c, ARG(0) + 4, (u32)(g_mouse_y + 64)); RET(1); }
-static void s_SetCursorPos(Cpu *c) { RET(1); }
-static void s_ShowCursor(Cpu *c) { RET(ARG(0) ? 1 : (u64)-1); }
-static void s_SetCursor(Cpu *c) { RET(0); }
-static void s_ClipCursor(Cpu *c) { RET(1); }
-static void s_LoadCursorA(Cpu *c) { RET(0x7A001); }
-static void s_LoadIconA(Cpu *c) { RET(0x7B001); }
-static void s_LoadImageA(Cpu *c) { RET(0x7C001); }
-static void s_DestroyCursor(Cpu *c) { RET(1); }
-static void s_GetAsyncKeyState(Cpu *c) { int vk = (int)ARG(0) & 0xff; RET(W->key_state[vk] ? 0x8000 : 0); }
-static void s_GetKeyState(Cpu *c) { s_GetAsyncKeyState(c); }
-static void s_GetKeyboardState(Cpu *c) { for (int i = 0; i < 256; i++) wr8(c, ARG(0) + i, W->key_state[i] ? 0x80 : 0); RET(1); }
-static void s_MapVirtualKeyA(Cpu *c) { RET(ARG(0)); }
-static void s_GetSystemMetrics(Cpu *c) { int i = (int)ARG(0); RET(i == 0 ? 1280 : i == 1 ? 720 : i == 4 ? 23 : i == 7 ? 1 : i == 8 ? 1 : i == 32 ? 8 : i == 33 ? 8 : i == 15 ? 1 : i == 16 ? 1280 : i == 17 ? 720 : i == 61 ? 1280 : i == 62 ? 720 : i == 78 ? 1280 : i == 79 ? 720 : 0); }
-static void s_SystemParametersInfoA(Cpu *c) { if ((u32)ARG(0) == 0x30 && ARG(2)) { wr32(c, ARG(2), 0); wr32(c, ARG(2) + 4, 0); wr32(c, ARG(2) + 8, 1280); wr32(c, ARG(2) + 12, 680); RET(1); return; } RET(0); }
-static void s_MessageBoxA(Cpu *c) { const char *t = rd_str(c, ARG(1), 2048), *cap = rd_str(c, ARG(2), 256); w32_report(W, "MessageBox [%s]: %s", cap ? cap : "", t ? t : ""); e_log("MessageBox [%s]: %s\n", cap ? cap : "", t ? t : ""); RET(1); }
-static void s_MessageBoxW(Cpu *c) { char t[1024], cap[128]; int n = 0; for (int i = 0; i < 1023; i++) { u16 ch = rd16(c, ARG(1) + i * 2); if (!ch) break; t[n++] = ch < 128 ? (char)ch : '?'; } t[n] = 0; n = 0; if (ARG(2)) for (int i = 0; i < 127; i++) { u16 ch = rd16(c, ARG(2) + i * 2); if (!ch) break; cap[n++] = ch < 128 ? (char)ch : '?'; } cap[n] = 0; w32_report(W, "MessageBox [%s]: %s", cap, t); e_log("MessageBox [%s]: %s\n", cap, t); RET(1); }
 static void s_wsprintfA(Cpu *c) { char out[1024]; int n = w32_format_args(c, out, sizeof out, ARG(1), 0, 2); if (c->status) return; u8 *p = mem_ptr(c->mem, ARG(0), n + 1, 1); if (p) e_memcpy(p, out, n + 1); RET(n); }
 static void s_SetProcessDPIAware(Cpu *c) { RET(1); }
 static void s_SetProcessDpiAwarenessContext(Cpu *c) { RET(1); }
@@ -263,19 +91,11 @@ static void s_GetDpiForWindow(Cpu *c) { RET(96); }
 static void s_GetDpiForSystem(Cpu *c) { RET(96); }
 static void s_EnumDisplaySettingsA(Cpu *c) { RET(0); }
 static void s_ChangeDisplaySettingsA(Cpu *c) { RET(0); }
-static void s_RegisterClipboardFormatA(Cpu *c) { RET(0xC100); }
-static void s_GetDlgItem(Cpu *c) { RET(0); }
 static void s_SetRect(Cpu *c) { u64 r = ARG(0); wr32(c, r, (u32)ARG(1)); wr32(c, r + 4, (u32)ARG(2)); wr32(c, r + 8, (u32)ARG(3)); wr32(c, r + 12, (u32)ARG(4)); RET(1); }
 static void s_PtInRect(Cpu *c) { u64 r = ARG(0); s32 x = (s32)(u32)ARG(1), y = (s32)(u32)(ARG(1) >> 32); RET(x >= (s32)rd32(c, r) && x < (s32)rd32(c, r + 8) && y >= (s32)rd32(c, r + 4) && y < (s32)rd32(c, r + 12)); }
 static void s_FillRect(Cpu *c) { Win32 *w = W; Surf s; if (!dc_surf(c, ARG(0), &s)) { RET(0); return; } u64 r = ARG(1); u64 hb = ARG(2); u32 px = 0;
-  GdiObj *b = gdi_get(w, hb); if (b) px = b->color; else if (hb < 32) { static const u32 sys[] = { 0xc0c0c0, 0x000000, 0x000080, 0x808080, 0xc0c0c0, 0xffffff, 0x000000, 0x000000, 0x000000, 0xffffff, 0xc0c0c0, 0xc0c0c0, 0x808080, 0x000080, 0xffffff, 0xc0c0c0 }; px = sys[(hb - 1) & 15]; }
+  GdiObj *b = gdi_get(w, hb); if (b) { if (b->kind == K_BRUSH && b->pen_width == -1) { RET(1); return; } px = b->color; } else if (hb >= 1 && hb <= 31) { extern u32 sys_color_px(u32); px = sys_color_px((u32)hb - 1); }
   fill_rect_px(&s, (s32)rd32(c, r), (s32)rd32(c, r + 4), (s32)rd32(c, r + 8), (s32)rd32(c, r + 12), px); mark_screen(w, ARG(0)); RET(1); }
-static void s_DrawTextA(Cpu *c) { Win32 *w = W; Surf s; if (!dc_surf(c, ARG(0), &s)) { RET(0); return; } GdiObj *dc = gdi_get(w, ARG(0)); const char *t = rd_str(c, ARG(1), 4096); int len = (int)(s32)ARG(2); if (!t) { RET(0); return; } if (len < 0) len = (int)e_strlen(t); u64 r = ARG(3); u32 fmt = (u32)ARG(4);
-  int x = (s32)rd32(c, r), y = (s32)rd32(c, r + 4), rw = (s32)rd32(c, r + 8) - x, rh = (s32)rd32(c, r + 12) - y; GdiObj *f = gdi_get(w, dc->font); int fh = f ? f->font_h : 16; int cw = (fh * 11 + 10) / 20;
-  if (fmt & 1) x += (rw - cw * len) / 2; else if (fmt & 2) x += rw - cw * len; if (fmt & 4) y += (rh - fh) / 2; else if (fmt & 8) y += rh - fh;
-  if (!(fmt & 0x400)) draw_text(&s, dc, w, x, y, t, len); mark_screen(w, ARG(0)); RET(fh); }
-
-/* ---------- gdi32 ---------- */
 static u64 make_dc(Win32 *w) { GdiObj *dc = gdi_new(w, K_DC); if (!dc) return 0; dc->text_color = 0; dc->bk_color = 0xffffff; dc->bk_mode = 2; dc->pen = stock[7]; dc->brush = stock[0]; dc->font = stock[13]; return dc->handle; }
 static void s_CreateCompatibleDC(Cpu *c) { RET(make_dc(W)); }
 static void s_CreateDCA(Cpu *c) { RET(window_dc); }
@@ -394,8 +214,6 @@ static void s_PaintRgn(Cpu *c) { GdiObj *dc = gdi_get(W, ARG(0)); if (!dc) { RET
 static void s_OffsetRgn(Cpu *c) { GdiObj *r = gdi_get(W, ARG(0)); if (!r) { RET(0); return; } int dx = (s32)ARG(1), dy = (s32)ARG(2); r->rx += dx; r->ry += dy; for (int i = 0; i < r->npts; i++) { r->pts[i * 2] += dx; r->pts[i * 2 + 1] += dy; } RET(2); }
 static void s_PtInRegion(Cpu *c) { GdiObj *r = gdi_get(W, ARG(0)); if (!r) { RET(0); return; } int x = (s32)ARG(1), y = (s32)ARG(2); if (r->npts <= 0) { RET(x >= r->rx && x < r->rx + r->rw && y >= r->ry && y < r->ry + r->rh); return; } int in = 0; for (int i = 0, j = r->npts - 1; i < r->npts; j = i++) { int xi = r->pts[i * 2], yi = r->pts[i * 2 + 1], xj = r->pts[j * 2], yj = r->pts[j * 2 + 1]; if (((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi + (yj == yi)) + xi)) in = !in; } RET(in); }
 static void s_GetRgnBox(Cpu *c) { GdiObj *r = gdi_get(W, ARG(0)); if (!r) { RET(0); return; } u64 a = ARG(1); if (r->npts > 0) { int x0 = r->pts[0], y0 = r->pts[1], x1 = x0, y1 = y0; for (int i = 1; i < r->npts; i++) { if (r->pts[i * 2] < x0) x0 = r->pts[i * 2]; if (r->pts[i * 2] > x1) x1 = r->pts[i * 2]; if (r->pts[i * 2 + 1] < y0) y0 = r->pts[i * 2 + 1]; if (r->pts[i * 2 + 1] > y1) y1 = r->pts[i * 2 + 1]; } wr32(c, a, (u32)x0); wr32(c, a + 4, (u32)y0); wr32(c, a + 8, (u32)x1); wr32(c, a + 12, (u32)y1); } else { wr32(c, a, (u32)r->rx); wr32(c, a + 4, (u32)r->ry); wr32(c, a + 8, (u32)(r->rx + r->rw)); wr32(c, a + 12, (u32)(r->ry + r->rh)); } RET(2); }
-static void s_GetSysColor(Cpu *c) { static const u32 sys[] = { 0xc0c0c0, 0x000000, 0x800000, 0x808080, 0xc0c0c0, 0xffffff, 0x000000, 0x000000, 0x000000, 0xffffff, 0xc0c0c0, 0xc0c0c0, 0x808080, 0x800000, 0xffffff, 0xf0f0f0 }; RET(sys[ARG(0) & 15]); }
-static void s_GetSysColorBrush(Cpu *c) { RET(stock[(ARG(0) & 15) == 0 ? 1 : 0]); }
 static void s_GetNearestColor(Cpu *c) { RET(ARG(1)); }
 static void s_GetTextFaceA(Cpu *c) { const char *n = "Nebula Mono"; size_t l = e_strlen(n) + 1; if ((u32)ARG(1) >= l && ARG(2)) { u8 *p = mem_ptr(c->mem, ARG(2), l, 1); if (p) e_memcpy(p, n, l); } RET(l); }
 static void s_GetCharWidth32A(Cpu *c) { GdiObj *dc = gdi_get(W, ARG(0)); GdiObj *f = dc ? gdi_get(W, dc->font) : 0; int fh = f ? f->font_h : 16; int cw = (fh * 11 + 10) / 20; for (u64 i = ARG(1); i <= ARG(2) && i - ARG(1) < 256; i++) wr32(c, ARG(3) + (i - ARG(1)) * 4, (u32)cw); RET(1); }
@@ -404,21 +222,6 @@ static void s_CreateFontIndirectW(Cpu *c) { s_CreateFontIndirectA(c); }
 static void s_GetTextMetricsW(Cpu *c) { s_GetTextMetricsA(c); }
 static void s_GetTextExtentPoint32W(Cpu *c) { s_GetTextExtentPoint32A(c); }
 static void s_GetObjectW(Cpu *c) { s_GetObjectA(c); }
-static void s_PeekMessageW(Cpu *c) { s_PeekMessageA(c); }
-static void s_GetMessageW(Cpu *c) { s_GetMessageA(c); }
-static void s_DispatchMessageW(Cpu *c) { s_DispatchMessageA(c); }
-static void s_SendMessageW(Cpu *c) { s_SendMessageA(c); }
-static void s_PostMessageW(Cpu *c) { s_PostMessageA(c); }
-static void s_LoadCursorW(Cpu *c) { s_LoadCursorA(c); }
-static void s_LoadIconW(Cpu *c) { s_LoadIconA(c); }
-static void s_SetWindowTextW(Cpu *c) { Win32 *w = W; char t[128]; int n = 0; for (int i = 0; i < 127; i++) { u16 ch = rd16(c, ARG(1) + i * 2); if (!ch) break; t[n++] = ch < 128 ? (char)ch : '?'; } t[n] = 0; e_snprintf(w->win.title, sizeof w->win.title, "%s", t); RET(1); }
-static void s_SetWindowLongPtrW(Cpu *c) { s_SetWindowLongPtrA(c); }
-static void s_GetWindowLongPtrW(Cpu *c) { s_GetWindowLongPtrA(c); }
-static void s_SetWindowLongA(Cpu *c) { s_SetWindowLongPtrA(c); }
-static void s_GetWindowLongA(Cpu *c) { s_GetWindowLongPtrA(c); }
-static void s_DrawTextW(Cpu *c) { RET(16); }
-static void s_GetClassNameA(Cpu *c) { size_t l = e_strlen(W->wndclass_name); u32 n = (u32)ARG(2); if (l + 1 > n) l = n ? n - 1 : 0; u8 *p = mem_ptr(c->mem, ARG(1), l + 1, 1); if (p) { e_memcpy(p, W->wndclass_name, l); p[l] = 0; } RET(l); }
-static void s_GetUpdateRect(Cpu *c) { Win32 *w = W; if (ARG(1)) { wr32(c, ARG(1), 0); wr32(c, ARG(1) + 4, 0); wr32(c, ARG(1) + 8, (u32)w->win.w); wr32(c, ARG(1) + 12, (u32)w->win.h); } RET((w->win.style & 0x40000000u) != 0); }
 static void s_timeGetTime(Cpu *c) { RET((u32)(host_now_ms() - W->start_ms + 100000.0)); }
 static void s_timeBeginPeriod(Cpu *c) { RET(0); }
 static void s_timeEndPeriod(Cpu *c) { RET(0); }
@@ -428,13 +231,19 @@ static void s_CoInitialize(Cpu *c) { RET(0); }
 static void s_CoInitializeEx(Cpu *c) { RET(0); }
 static void s_CoUninitialize(Cpu *c) { }
 static void s_CoCreateInstance(Cpu *c) { w32_report(W, "CoCreateInstance: COM objects are not available"); RET(0x80040154u); }
-static void s_RegOpenKeyExA(Cpu *c) { RET(2); }
-static void s_RegQueryValueExA(Cpu *c) { RET(2); }
-static void s_RegCloseKey(Cpu *c) { RET(0); }
-static void s_ShellExecuteA(Cpu *c) { RET(42); }
 static void s_CommandLineToArgvW(Cpu *c) { wr32(c, ARG(1), rd32(c, W->ubuf + 0x200)); RET(rd64(c, W->ubuf + 0x218)); }
 
+#define PSZ_OF(cpu) ((cpu)->mode32 ? 4 : 8)
+#include "user.inc"
+static void s_PeekMessageW(Cpu *c) { s_PeekMessageA(c); }
+static void s_GetMessageW(Cpu *c) { s_GetMessageA(c); }
+static void s_DispatchMessageW(Cpu *c) { s_DispatchMessageA(c); }
+static void s_SendMessageW(Cpu *c) { s_SendMessageA(c); }
+static void s_PostMessageW(Cpu *c) { s_PostMessageA(c); }
+static void s_LoadCursorW(Cpu *c) { s_LoadCursorA(c); }
+static void s_LoadIconW(Cpu *c) { s_LoadIconA(c); }
 #define S(n) { "", #n, s_##n }
+#define SA(api, fn) { "", api, s_##fn }
 static const ShimDef gdi_shims[] = {
   S(PeekMessageA), S(PeekMessageW), S(GetMessageA), S(GetMessageW), S(TranslateMessage), S(DispatchMessageA), S(DispatchMessageW), S(SendMessageA), S(SendMessageW), S(PostMessageA), S(PostMessageW), S(PostQuitMessage), S(SetTimer), S(KillTimer), S(MsgWaitForMultipleObjects), S(WaitMessage),
   S(RegisterClassA), S(RegisterClassExA), S(RegisterClassW), S(RegisterClassExW), S(UnregisterClassA), S(GetClassInfoExA), S(AdjustWindowRect), S(AdjustWindowRectEx), S(CreateWindowExA), S(CreateWindowExW), S(DefWindowProcA), S(DefWindowProcW), S(DestroyWindow), S(ShowWindow), S(UpdateWindow), S(InvalidateRect), S(InvalidateRgn), S(ValidateRect), S(RedrawWindow), S(GetClientRect), S(GetWindowRect), S(BeginPaint), S(EndPaint), S(GetDC), S(GetWindowDC), S(ReleaseDC),
@@ -443,7 +252,8 @@ static const ShimDef gdi_shims[] = {
   S(CreateCompatibleDC), S(CreateDCA), S(DeleteDC), S(CreateDIBSection), S(CreateCompatibleBitmap), S(CreateBitmap), S(DeleteObject), S(SelectObject), S(GetStockObject), S(GetCurrentObject), S(CreateSolidBrush), S(CreateHatchBrush), S(CreatePatternBrush), S(CreateBrushIndirect), S(CreatePen), S(ExtCreatePen), S(CreateFontA), S(CreateFontW), S(CreateFontIndirectA), S(CreateFontIndirectW), S(SetTextColor), S(SetBkColor), S(SetBkMode), S(GetTextColor), S(GetBkColor), S(SetTextAlign), S(SetROP2), S(SetStretchBltMode), S(SetBrushOrgEx), S(GdiFlush), S(SaveDC), S(RestoreDC), S(SelectClipRgn), S(IntersectClipRect), S(SetMapMode), S(SetViewportOrgEx), S(SetWindowOrgEx), S(GetDeviceCaps), S(GetObjectA), S(GetObjectW),
   S(GetTextExtentPoint32A), S(GetTextExtentPoint32W), S(GetTextMetricsA), S(GetTextMetricsW), S(TextOutA), S(TextOutW), S(ExtTextOutA), S(ExtTextOutW), S(BitBlt), S(StretchBlt), S(PatBlt), S(StretchDIBits), S(SetDIBitsToDevice), S(GetDIBits), S(Rectangle), S(RoundRect), S(Ellipse), S(MoveToEx), S(LineTo), S(Polyline), S(Polygon), S(SetPixel), S(SetPixelV), S(GetPixel),
   S(CreatePolygonRgn), S(CreateRectRgn), S(CreateRectRgnIndirect), S(CreateEllipticRgn), S(CombineRgn), S(FillRgn), S(PaintRgn), S(OffsetRgn), S(PtInRegion), S(GetRgnBox), S(GetNearestColor), S(GetTextFaceA), S(GetCharWidth32A),
-  S(timeGetTime), S(timeBeginPeriod), S(timeEndPeriod), S(PlaySoundA), S(waveOutGetNumDevs), S(CoInitialize), S(CoInitializeEx), S(CoUninitialize), S(CoCreateInstance), S(RegOpenKeyExA), S(RegQueryValueExA), S(RegCloseKey), S(ShellExecuteA), S(CommandLineToArgvW),
+  S(timeGetTime), S(timeBeginPeriod), S(timeEndPeriod), S(PlaySoundA), S(waveOutGetNumDevs), S(CoInitialize), S(CoInitializeEx), S(CoUninitialize), S(CoCreateInstance), S(CommandLineToArgvW),
+  USER_SHIMS
 };
 ShimFn gdi_find_shim(const char *name) { for (size_t i = 0; i < sizeof gdi_shims / sizeof gdi_shims[0]; i++) if (!e_strcmp(gdi_shims[i].name, name)) return gdi_shims[i].fn; return 0; }
 

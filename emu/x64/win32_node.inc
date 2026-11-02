@@ -42,10 +42,6 @@ static void s_DeleteFiber(Cpu *c) { }
 static void s_SwitchToFiber(Cpu *c) { }
 
 /* ---- resources: node.exe only looks for a single-executable-application blob — none ---- */
-static void s_FindResourceA(Cpu *c) { W->last_error = 1814; RET(0); }
-static void s_LoadResource(Cpu *c) { RET(0); }
-static void s_LockResource(Cpu *c) { RET(0); }
-static void s_SizeofResource(Cpu *c) { RET(0); }
 
 /* ---- pipes / files ---- */
 static void s_GetNamedPipeClientProcessId(Cpu *c) { wr32(c, ARG(1), (u32)W->pid); RET(1); }
@@ -92,6 +88,6 @@ static void s_UnregisterWait(Cpu *c) { s_UnregisterWaitEx(c); }
   S(NeedCurrentDirectoryForExePathW), S(CancelSynchronousIo), S(K32EnumProcessModules), S(K32GetModuleBaseNameW), \
   S(CreateJobObjectW), S(SetInformationJobObject), S(AssignProcessToJobObject), \
   S(ConvertThreadToFiberEx), S(ConvertFiberToThread), S(CreateFiberEx), S(DeleteFiber), S(SwitchToFiber), \
-  S(FindResourceA), S(LoadResource), S(LockResource), S(SizeofResource), \
+  \
   S(GetNamedPipeClientProcessId), S(GetNamedPipeServerProcessId), S(GetNamedPipeHandleStateA), S(WaitNamedPipeW), S(ReOpenFile), S(ReadDirectoryChangesW), S(SetFileInformationByHandle), \
   S(nebula_regwait_thunk), S(RegisterWaitForSingleObject), S(UnregisterWaitEx), S(UnregisterWait)

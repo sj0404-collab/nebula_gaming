@@ -280,3 +280,5 @@ hit:;
   if (pb >= r->base && pb + 4096 <= r->base + r->size) { Tlb *t = &m->tlb[pg & (TLB_N - 1)]; t->tag = pg + 1; t->host = r->host + (pb - r->base); }
   return r->host + (addr - r->base);
 }
+
+int e_strnicmp(const char *a, const char *b, size_t n) { for (size_t i = 0; i < n; i++) { int x = (u8)a[i], y = (u8)b[i]; if (x >= 'A' && x <= 'Z') x += 32; if (y >= 'A' && y <= 'Z') y += 32; if (x != y) return x - y; if (!x) return 0; } return 0; }

@@ -186,6 +186,7 @@ typedef struct {
 typedef struct {
   u64 handle; int kind;               /* 1 DC, 2 BITMAP, 3 BRUSH, 4 PEN, 5 FONT, 6 RGN */
   /* DC */ u64 bitmap; u32 text_color, bk_color; int bk_mode; u64 font, brush, pen;
+  int wnd, ox, oy, vw, vh;            /* window DC: window index+1 (-1 = whole screen), framebuffer origin and visible size */
   /* BITMAP */ int bw, bh; u64 bits; /* guest address of BGRA pixels */
   /* BRUSH/PEN */ u32 color; int pen_width;
   /* FONT */ int font_h; int font_bold;
@@ -252,7 +253,7 @@ int  proc_enum(int idx, int *pid, int *ppid, const char **name);   /* 1 if idx v
 #define THREAD_MAX 64
 #define THREAD_CTX_FIELDS \
   u64 last_error; \
-  struct { int kind; u64 ret_addr, rsp, data[16]; int idx; u32 clean32; } cont[64]; int ncont;   /* continuation stack for guest callbacks (clean32: 32-bit stdcall bytes popped when the shim finally returns) */ \
+  struct { int kind; u64 ret_addr, rsp, data[16]; int idx; u32 clean32; u32 seq; u8 chain; } cont[64]; int ncont; u32 cont_seq;   /* seq: guest-entry generation when pushed; chain: result goes to the continuation below (pushed by the same shim step) */   /* continuation stack for guest callbacks (clean32: 32-bit stdcall bytes popped when the shim finally returns) */ \
   int sleeping; double sleep_until_ms; \
   int block; int block_pids[8]; int nblock_pids; int block_pipe; \
   u64 block_addr, block_val; int block_flag;                                       /* CS / SRW / CV / WaitOnAddress waits */ \
@@ -312,7 +313,7 @@ struct Win32 {
   int wndclass_registered; u64 wndclass_proc; char wndclass_name[64];
   u64 ubuf;                              /* small scratch buffer in guest memory */
   u64 rt_scratch;                        /* win32_rt.inc: zeroed block for the real msvcp140's locale-name / processing-throw pointers */
-  int quit_posted;
+  int quit_posted; int shortcuts;   /* .lnk files written through IShellLink (reported after install) */
   /* x87 / misc */
   u32 rand_state;
   /* process */
@@ -333,6 +334,16 @@ void   w32_io_drop(Win32 *w);                                      /* process ex
 void   w32_tick(Win32 *w);                                         /* called by host once per frame: input + timers */
 void   w32_key(Win32 *w, int vk, int down);
 void   w32_mouse(Win32 *w, int x, int y, int event);                 /* event: 0 move, 1 ldown, 2 lup, 3 rdown, 4 rup */
+void   w32_wheel(Win32 *w, int delta);
+u64    w32_cur_slot(void);
+void   call_shim_tail(Cpu *c, ShimFn fn, u64 a0, u64 a1, u64 a2, u64 a3);   /* like call_shim but leaves registers as the callee set them (callee may start a guest call) */
+void   gdi_set_msgbox_auto(int on);
+u32    put_w8(Cpu *c, u64 dst, const char *s, u32 cap);        /* UTF-8 → UTF-16 guest string (cap in u16 units, 0 = unlimited); returns chars written */
+u32    utf8_u16len(const char *s);
+u64    rsrc_lookup(Cpu *c, u64 hmod, u64 name_a, u64 type_a, int wide, u16 lang);   /* IMAGE_RESOURCE_DATA_ENTRY guest address or 0 */
+void   shell_mkdirs(const char *path);
+u64    pidl_make(Win32 *w, const char *path);
+const char *pidl_path(Cpu *c, u64 pidl);
 void   w32_start(Win32 *w, const char *cmdline);
 void   w32_cont_resume(Cpu *c);
 u64    w32_arg(Cpu *c, int n);
@@ -358,6 +369,7 @@ int  pe_inspect(const u8 *bytes, size_t len, char *out, size_t out_sz);
 
 /* tiny libc replacements (we are freestanding in wasm) */
 size_t e_strlen(const char *s); int e_strcmp(const char *a, const char *b); int e_stricmp(const char *a, const char *b);
+int    e_strnicmp(const char *a, const char *b, size_t n);
 int e_strncmp(const char *a, const char *b, size_t n);
 void *e_memcpy(void *d, const void *s, size_t n); void *e_memset(void *d, int c, size_t n); int e_memcmp(const void *a, const void *b, size_t n);
 void *e_memmove(void *d, const void *s, size_t n);

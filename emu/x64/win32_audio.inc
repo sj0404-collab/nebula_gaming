@@ -417,15 +417,15 @@ static int aud_iid_ok(int kind, u32 d1) {
 static void aud_QueryInterface(Cpu *c) {
   AObj *o = aobj_of(c, ARG(0), 0); u64 riid = ARG(1), out = ARG(2); if (!o || !out) { RET(E_INVALIDARG_); return; }
   u32 d1 = rd32(c, riid);
-  if (aud_iid_ok(o->kind, d1)) { wr32(c, o->addr + 12, rd32(c, o->addr + 12) + 1); wr64(c, out, o->addr); RET(0); return; }
+  if (aud_iid_ok(o->kind, d1)) { wr32(c, o->addr + 12, rd32(c, o->addr + 12) + 1); wrp(c, out, o->addr); RET(0); return; }
   /* secondary interfaces of a DirectSound buffer: notify / 3-D buffer; of the device: 3-D listener via the primary buffer */
   if (o->kind == AK_DSBUF && (d1 == 0xB0210783u || d1 == 0x279AFA86u || d1 == 0x279AFA84u)) {
     u64 a; AObj *n = aobj_new(c, d1 == 0xB0210783u ? AK_DSNOTIFY : d1 == 0x279AFA86u ? AK_DS3DB : AK_DS3DL, &a); if (!n) { RET(E_OUTOFMEMORY_); return; } n->stream = o->stream;
     if (d1 != 0xB0210783u && !g_aud_log3d++) aud_log("[audio] DirectSound 3-D buffers/listener: accepted, but positioning is not applied (sounds play at their set volume/pan)\n");
-    wr64(c, out, a); RET(0); return;
+    wrp(c, out, a); RET(0); return;
   }
-  if (o->kind == AK_DEV && d1 == 0x1BE09788u) { u64 a; AObj *n = aobj_new(c, AK_ENDPOINT, &a); if (!n) { RET(E_OUTOFMEMORY_); return; } n->ds = o->kind == AK_CAPTURE_DEV; wr64(c, out, a); RET(0); return; }
-  wr64(c, out, 0); aud_log("[audio] QueryInterface on %s for {%08x-…}: E_NOINTERFACE\n", g_aif[o->kind].name, d1); RET(E_NOINTERFACE_);
+  if (o->kind == AK_DEV && d1 == 0x1BE09788u) { u64 a; AObj *n = aobj_new(c, AK_ENDPOINT, &a); if (!n) { RET(E_OUTOFMEMORY_); return; } n->ds = o->kind == AK_CAPTURE_DEV; wrp(c, out, a); RET(0); return; }
+  wrp(c, out, 0); aud_log("[audio] QueryInterface on %s for {%08x-…}: E_NOINTERFACE\n", g_aif[o->kind].name, d1); RET(E_NOINTERFACE_);
 }
 static void aud_AddRef(Cpu *c) { AObj *o = aobj_of(c, ARG(0), 0); if (!o) { RET(0); return; } u32 r = rd32(c, o->addr + 12) + 1; wr32(c, o->addr + 12, r); RET(r); }
 static void aud_Release(Cpu *c) {
@@ -545,7 +545,7 @@ static void dsn_SetNotificationPositions(Cpu *c) {
 #define E_NOTIMPL_ 0x80004001u
 static const char *AUD_RENDER_ID = "{0.0.0.00000000}.{6f1a3c5e-4b2d-4e8a-9c1f-2e7d5a6b8c90}";
 static u64 aud_wstr_cotask(Cpu *c, const char *s) { size_t n = e_strlen(s); u64 p = w32_heap_alloc(W, (n + 1) * 2, 1); if (p) for (size_t i = 0; i <= n; i++) wr16(c, p + 2 * i, (u16)(u8)s[i]); return p; }
-static void mme_create_enum(Cpu *c, u64 ppv) { u64 a; AObj *o = aobj_new(c, AK_ENUM, &a); if (!o) { RET(E_OUTOFMEMORY_); return; } wr64(c, ppv, a); RET(0); }
+static void mme_create_enum(Cpu *c, u64 ppv) { u64 a; AObj *o = aobj_new(c, AK_ENUM, &a); if (!o) { RET(E_OUTOFMEMORY_); return; } wrp(c, ppv, a); RET(0); }
 static void mme_EnumAudioEndpoints(Cpu *c) {   /* (dataFlow, stateMask, ppDevices): eRender 0, eCapture 1, eAll 2 */
   u32 flow = (u32)ARG(1), mask = (u32)ARG(2); u64 pp = ARG(3); if (!pp) { RET(E_INVALIDARG_); return; }
   u64 a; AObj *o = aobj_new(c, AK_COLL, &a); if (!o) { RET(E_OUTOFMEMORY_); return; } o->ds = (flow == 1 || !(mask & 1)) ? 0 : 1;   /* number of devices in the collection: one active render endpoint */
@@ -692,14 +692,16 @@ static const ComClass g_com_classes[] = {
   { 0xe21a7345u, "XAudio2_1.dll", "XAudio2 2.1" }, { 0xf7a76c21u, "XAudio2_1.dll", "XAudio2 2.1 (debug)" }, { 0xfac23f48u, "XAudio2_0.dll", "XAudio2 2.0" }, { 0xfac23f49u, "XAudio2_0.dll", "XAudio2 2.0 (debug)" },
   { 0xbcc782bcu, "xactengine3_7.dll", "XACT3 3.7" }, { 0x248d8a3bu, "xactengine3_6.dll", "XACT3 3.6" }, { 0x074b110fu, "xactengine3_5.dll", "XACT3 3.5" }, { 0xbc3e0fc6u, "xactengine3_4.dll", "XACT3 3.4" }, { 0x94c1affau, "xactengine3_3.dll", "XACT3 3.3" }, { 0xd3332f02u, "xactengine3_2.dll", "XACT3 3.2" }, { 0x962f5027u, "xactengine3_1.dll", "XACT3 3.1" }, { 0x3b80ee2au, "xactengine3_0.dll", "XACT3 3.0" },
   { 0, 0, 0 } };
+static int shell_cocreate(Cpu *c, u32 clsid_d1, u64 riid, u64 ppv);
 static void s_CoCreateInstance(Cpu *c) {
   u64 clsid = ARG(0), riid = ARG(3), ppv = ARG(4); if (!clsid || !riid || !ppv) { RET(E_INVALIDARG_); return; }   /* (rclsid, pUnkOuter, dwClsContext, riid, ppv) */
-  u32 d1 = rd32(c, clsid), i1 = rd32(c, riid); wr64(c, ppv, 0);
+  u32 d1 = rd32(c, clsid), i1 = rd32(c, riid); wrp(c, ppv, 0);
+  if (shell_cocreate(c, d1, riid, ppv)) return;
   const ComClass *k = 0; for (int i = 0; g_com_classes[i].what; i++) if (g_com_classes[i].d1 == d1) { k = &g_com_classes[i]; break; }
   if (!k) { aud_log("[com] CoCreateInstance({%08x-…}): class not registered — the emulator provides MMDeviceEnumerator, DirectSound(8) and routes XAudio2/XACT to the DirectX-pack DLLs\n", d1); RET(0x80040154u); return; }
   if (!k->dll) {
     if (d1 == 0xBCDE0395u) { if (i1 != 0xA95664D2u && i1 != 0) { RET(E_NOINTERFACE_); return; } mme_create_enum(c, ppv); return; }
-    if (d1 == 0x47D4D946u || d1 == 0x3901CC3Fu) { u64 a; AObj *o = aobj_new(c, AK_DS, &a); if (!o) { RET(E_OUTOFMEMORY_); return; } o->ds = d1 == 0x3901CC3Fu; wr64(c, ppv, a); RET(0); return; }   /* needs Initialize() like Windows */
+    if (d1 == 0x47D4D946u || d1 == 0x3901CC3Fu) { u64 a; AObj *o = aobj_new(c, AK_DS, &a); if (!o) { RET(E_OUTOFMEMORY_); return; } o->ds = d1 == 0x3901CC3Fu; wrp(c, ppv, a); RET(0); return; }   /* needs Initialize() like Windows */
     aud_log("[audio] CoCreateInstance(%s): no capture device (REGDB_E_CLASSNOTREG)\n", k->what); RET(0x80040154u); return;
   }
   /* a COM class served by a real DLL from the DirectX pack: load it (DllMain via the CONT_DLLMAIN continuation) → DllGetClassObject → IClassFactory::CreateInstance → Release (guest code, one continuation step each) */
@@ -715,7 +717,7 @@ static void s_CoCreateInstance(Cpu *c) {
   guest_call(c, fn, slot + 32, slot + 8, slot, 0);
 }
 static void s_CoCreateInstanceEx(Cpu *c) { aud_log("[com] CoCreateInstanceEx: not supported (use CoCreateInstance)\n"); RET(0x80040154u); }
-static void s_PropVariantClear(Cpu *c) { u64 pv = ARG(0); if (!pv) { RET(0); return; } u16 vt = rd16(c, pv); if (vt == 31 || vt == 30) { u64 p = rd64(c, pv + 8); if (p) w32_heap_free(W, p); } else if (vt == 65) { u64 p = rd64(c, pv + 16); if (p) w32_heap_free(W, p); } for (int i = 0; i < 24; i++) wr8(c, pv + i, 0); RET(0); }
+static void s_PropVariantClear(Cpu *c) { u64 pv = ARG(0); if (!pv) { RET(0); return; } u16 vt = rd16(c, pv); if (vt == 31 || vt == 30) { u64 p = rdp(c, pv + 8); if (p) w32_heap_free(W, p); } else if (vt == 65) { u64 p = rdp(c, pv + 8 + PSZ_OF(c)); if (p) w32_heap_free(W, p); } for (u32 i = 0; i < (c->mode32 ? 16u : 24u); i++) wr8(c, pv + i, 0); RET(0); }
 static void s_CLSIDFromString(Cpu *c) {   /* "{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}" (wide) → GUID */
   char s[64]; wstr_to_utf8(c, ARG(0), s, sizeof s, -1); u64 out = ARG(1); if (!out) { RET(E_INVALIDARG_); return; }
   const char *p = s; if (*p == '{') p++; u32 v[11]; int vi = 0; static const int lens[] = { 8, 4, 4, 2, 2, 2, 2, 2, 2, 2, 2 };

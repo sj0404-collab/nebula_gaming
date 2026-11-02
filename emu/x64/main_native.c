@@ -8,7 +8,7 @@
 
 int x64_load(const u8 *bytes, size_t len, const char *name, const char *cmdline);
 static int g_apitrace;
-int x64_run(u64 budget); void x64_trace(int on); const char *x64_inspect(const u8 *b, size_t n); const char *x64_error(void); u64 x64_error_rip(void); const char *x64_report(void); u64 x64_icount(void); int x64_exit_code(void); const char *x64_error_bytes(void); const char *x64_regs(void); const char *x64_history(void); int x64_mem_copy(u64 addr, unsigned char *dst, unsigned n); void x64_key(int vk, int down); double x64_sleep_ms(void); const char *x64_api_stats(void); int x64_has_window(void);
+int x64_run(u64 budget); void x64_trace(int on); const char *x64_inspect(const u8 *b, size_t n); const char *x64_error(void); u64 x64_error_rip(void); const char *x64_report(void); u64 x64_icount(void); int x64_exit_code(void); const char *x64_error_bytes(void); const char *x64_regs(void); const char *x64_history(void); int x64_mem_copy(u64 addr, unsigned char *dst, unsigned n); void x64_key(int vk, int down); void x64_mouse(int x, int y, int ev); double x64_sleep_ms(void); const char *x64_api_stats(void); int x64_has_window(void);
 int x64_vfs_add(const char *path, const u8 *data, size_t n); int x64_vfs_mkdir(const char *path); const char *x64_vfs_list(void); void x64_stdin_write(const u8 *data, size_t n); void x64_stdin_eof(void); int x64_wants_stdin(void);
 void host_set_dump(int every, const char *prefix); int host_frames(void); double host_now_ms(void);
 
@@ -48,6 +48,7 @@ int main(int argc, char **argv) {
   int inspect = 0, dump_every = 0; double max_ms = 60000; const char *prefix = "frame"; int quiet = 0;
   const char *mounts[16][2]; int nmounts = 0; int no_stdin = 0;
   struct { int vk; double at; int down; } keys[64]; int nkeys = 0; int ai = 1; int stats = 0;
+  struct { int x, y; double at; int ev; } clicks[64]; int nclicks = 0;   /* --click x,y@ms: move + left down + up (ev 0 move, 1 down, 2 up) */
   for (; ai < argc && argv[ai][0] == '-'; ai++) {
     if (!strcmp(argv[ai], "--inspect")) inspect = 1;
     else if (!strcmp(argv[ai], "--frames") && ai + 1 < argc) dump_every = atoi(argv[++ai]);
@@ -61,9 +62,10 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[ai], "--no-stdin")) no_stdin = 1;
     else if (!strcmp(argv[ai], "--stats")) stats = 1;
     else if (!strcmp(argv[ai], "--key") && ai + 1 < argc) { int vk; double at; int dur = 100; if (sscanf(argv[++ai], "%i@%lf:%d", &vk, &at, &dur) >= 2 && nkeys < 62) { keys[nkeys].vk = vk; keys[nkeys].at = at; keys[nkeys].down = 1; nkeys++; keys[nkeys].vk = vk; keys[nkeys].at = at + dur; keys[nkeys].down = 0; nkeys++; } }
+    else if (!strcmp(argv[ai], "--click") && ai + 1 < argc) { int x, y; double at; if (sscanf(argv[++ai], "%d,%d@%lf", &x, &y, &at) == 3 && nclicks < 61) { clicks[nclicks].x = x; clicks[nclicks].y = y; clicks[nclicks].at = at; clicks[nclicks].ev = 0; nclicks++; clicks[nclicks] = clicks[nclicks - 1]; clicks[nclicks].ev = 1; clicks[nclicks].at = at + 1; nclicks++; clicks[nclicks] = clicks[nclicks - 1]; clicks[nclicks].ev = 2; clicks[nclicks].at = at + 60; nclicks++; } }
     else { fprintf(stderr, "unknown option %s\n", argv[ai]); return 2; }
   }
-  if (ai >= argc) { fprintf(stderr, "usage: x64run [--inspect] [--frames N] [--max-ms T] [--key VK@ms[:dur]] file.exe [args]\n"); return 2; }
+  if (ai >= argc) { fprintf(stderr, "usage: x64run [--inspect] [--frames N] [--max-ms T] [--key VK@ms[:dur]] [--click x,y@ms] file.exe [args]\n"); return 2; }
   const char *path = argv[ai];
   size_t flen = 0; u8 *bytes = map_file(path, &flen); if (!bytes) { perror(path); return 2; } long len = (long)flen;
   if (inspect) { puts(x64_inspect(bytes, len)); return 0; }
@@ -86,11 +88,12 @@ int main(int argc, char **argv) {
   if (rc) { fprintf(stderr, "load failed (%d): %s", rc, x64_report()); return 3; }
   g_prof = getenv("X64_PROF") != 0;
   u64 trace_after = getenv("X64_TRACE_AFTER") ? strtoull(getenv("X64_TRACE_AFTER"), 0, 10) : 0; int trace_on = 0;
-  double t0 = host_now_ms(); int r; int ki = 0; u64 yields = 0; int stdin_eof = 0;
+  double t0 = host_now_ms(); int r; int ki = 0, ci = 0; u64 yields = 0; int stdin_eof = 0;
   for (;;) {
     double el = host_now_ms() - t0;
     if (el > max_ms) { if (!quiet) { fprintf(stderr, "[x64run] time limit reached\n"); if (getenv("X64_HIST")) { extern u64 x64_rip(void); fprintf(stderr, "[x64run] rip=%llx regs: %s\n[x64run] last blocks: %s\n", (unsigned long long)x64_rip(), x64_regs(), x64_history()); unsigned char b[512]; u64 a = (x64_rip() & ~0xfull) - 256; if (x64_mem_copy(a, b, 512)) { FILE *f = fopen("/tmp/rip_tl.bin", "wb"); if (f) { fwrite(b, 1, 512, f); fclose(f); fprintf(stderr, "[x64run] dumped 512 bytes from 0x%llx to /tmp/rip_tl.bin\n", (unsigned long long)a); } } } } r = -1; break; }
     while (ki < nkeys && keys[ki].at <= el) { x64_key(keys[ki].vk, keys[ki].down); ki++; }
+    while (ci < nclicks && clicks[ci].at <= el) { x64_mouse(clicks[ci].x, clicks[ci].y, clicks[ci].ev); ci++; }
     if (g_prof) { extern u64 x64_rip(void); r = x64_run(20000); prof_sample(x64_rip()); } else r = x64_run(2000000);
     if (trace_after && !trace_on && x64_icount() >= trace_after) { extern void w32_api_trace(int); w32_api_trace(1); trace_on = 1; fprintf(stderr, "[x64run] apitrace enabled at %llu instructions\n", (unsigned long long)x64_icount()); }
     if (!no_stdin && !stdin_eof) {   /* feed host stdin as raw bytes whenever some arrive (TUIs read single key presses; never block the emulator on the terminal) */

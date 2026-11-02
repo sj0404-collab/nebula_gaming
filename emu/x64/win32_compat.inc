@@ -54,9 +54,10 @@ static void s_SysFreeString(Cpu *c) { if (ARG(0)) w32_heap_free(W, ARG(0) - 4); 
 static void s_SysStringLen(Cpu *c) { RET(ARG(0) ? rd32(c, ARG(0) - 4) / 2 : 0); }
 static void s_SysStringByteLen(Cpu *c) { RET(ARG(0) ? rd32(c, ARG(0) - 4) : 0); }
 static void s_SysReAllocStringLen(Cpu *c) { u64 pb = ARG(0); u64 nb = bstr_alloc(c, 0, ARG(1), (u32)ARG(2)); if (!nb) { RET(0); return; } u64 old = rd64(c, pb); if (old) w32_heap_free(W, old - 4); wr64(c, pb, nb); RET(1); }
-static void s_VariantInit(Cpu *c) { u8 *p = mem_ptr(c->mem, ARG(0), 24, 1); if (p) e_memset(p, 0, 24); }
-static void s_VariantClear(Cpu *c) { u64 v = ARG(0); u16 vt = rd16(c, v); if (vt == 8) { u64 b = rd64(c, v + 8); if (b) w32_heap_free(W, b - 4); } u8 *p = mem_ptr(c->mem, v, 24, 1); if (p) e_memset(p, 0, 24); RET(0); }
-static void s_VariantCopy(Cpu *c) { u64 d = ARG(0), s = ARG(1); if (d == s) { RET(0); return; } call_shim(c, s_VariantClear, d, 0, 0, 0); u8 *sp = mem_ptr(c->mem, s, 24, 0), *dp = mem_ptr(c->mem, d, 24, 1); if (sp && dp) e_memcpy(dp, sp, 24);
+#define VARSZ(c) ((c)->mode32 ? 16u : 24u)   /* VARIANT/PROPVARIANT: 16 bytes on x86, 24 on x64 (union at +8 in both) */
+static void s_VariantInit(Cpu *c) { u8 *p = mem_ptr(c->mem, ARG(0), VARSZ(c), 1); if (p) e_memset(p, 0, VARSZ(c)); }
+static void s_VariantClear(Cpu *c) { u64 v = ARG(0); u16 vt = rd16(c, v); if (vt == 8) { u64 b = rdp(c, v + 8); if (b) w32_heap_free(W, b - 4); } u8 *p = mem_ptr(c->mem, v, VARSZ(c), 1); if (p) e_memset(p, 0, VARSZ(c)); RET(0); }
+static void s_VariantCopy(Cpu *c) { u64 d = ARG(0), s = ARG(1); if (d == s) { RET(0); return; } call_shim(c, s_VariantClear, d, 0, 0, 0); u8 *sp = mem_ptr(c->mem, s, VARSZ(c), 0), *dp = mem_ptr(c->mem, d, VARSZ(c), 1); if (sp && dp) e_memcpy(dp, sp, VARSZ(c));
   if (rd16(c, s) == 8) { call_shim(c, s_SysAllocString, rdp(c, s + 8), 0, 0, 0); wrp(c, d + 8, c->r[RAX]); } RET(0); }
 
 /* ---------- ADVAPI32: privileges / security / registry → "not available", never a crash ---------- */
@@ -64,13 +65,6 @@ static void s_LookupPrivilegeValueW(Cpu *c) { W->last_error = 1313; RET(0); }   
 static void s_AdjustTokenPrivileges(Cpu *c) { W->last_error = 0; RET(1); }
 static void s_GetFileSecurityW(Cpu *c) { W->last_error = 50; RET(0); }            /* ERROR_NOT_SUPPORTED */
 static void s_SetFileSecurityW(Cpu *c) { W->last_error = 50; RET(0); }
-static void s_RegOpenKeyExW(Cpu *c) { RET(2); }                                     /* ERROR_FILE_NOT_FOUND */
-static void s_RegOpenKeyExA(Cpu *c) { RET(2); }
-static void s_RegQueryValueExW(Cpu *c) { RET(2); }
-static void s_RegQueryValueExA(Cpu *c) { RET(2); }
-static void s_RegCloseKey(Cpu *c) { RET(0); }
-static void s_RegCreateKeyExW(Cpu *c) { RET(5); }                                   /* ERROR_ACCESS_DENIED */
-static void s_RegSetValueExW(Cpu *c) { RET(5); }
 
 /* ---------- KERNEL32 odds and ends ---------- */
 static void s_GetLargePageMinimum(Cpu *c) { RET(0); }
@@ -231,7 +225,7 @@ static void s_XInputEnable(Cpu *c) { RET(0); }
   SA("FileTimeToSystemTime", FileTimeToSystemTime2), SA("SystemTimeToFileTime", SystemTimeToFileTime2), S(SystemTimeToTzSpecificLocalTime), S(TzSpecificLocalTimeToSystemTime), \
   S(FileTimeToDosDateTime), S(DosDateTimeToFileTime), S(CompareFileTime), SA("_mkgmtime64", mkgmtime64), SA("_mkgmtime", mkgmtime64), \
   S(SysAllocString), S(SysAllocStringLen), S(SysAllocStringByteLen), S(SysFreeString), S(SysStringLen), S(SysStringByteLen), S(SysReAllocStringLen), S(VariantInit), S(VariantClear), S(VariantCopy), \
-  S(LookupPrivilegeValueW), S(AdjustTokenPrivileges), S(GetFileSecurityW), S(SetFileSecurityW), S(RegOpenKeyExW), S(RegOpenKeyExA), S(RegQueryValueExW), S(RegQueryValueExA), S(RegCloseKey), S(RegCreateKeyExW), S(RegSetValueExW), \
+  S(LookupPrivilegeValueW), S(AdjustTokenPrivileges), S(GetFileSecurityW), S(SetFileSecurityW), \
   S(GetLargePageMinimum), S(OpenFileMappingW), S(GetLogicalDriveStringsW), S(GetLogicalDriveStringsA), S(GetDriveTypeW), S(GetDiskFreeSpaceExW), S(GetDiskFreeSpaceW), S(GetDiskFreeSpaceA), \
   S(CreateHardLinkW), S(FindFirstStreamW), S(FindNextStreamW), S(DeviceIoControl), S(GetLogicalProcessorInformation), S(GetLogicalProcessorInformationEx), \
   S(CharUpperW), S(CharLowerW), S(CharPrevExA), S(CharPrevA), S(CharNextA), S(PathIsRelativeA), S(PathIsRelativeW), \

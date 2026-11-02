@@ -109,7 +109,6 @@ static void s_wcsrtombs(Cpu *c) { u64 d = ARG(0), sp = ARG(1), n = ARG(2); u64 s
   RET(o); }
 /* node.exe static imports that are only reached on error/crypto-store paths: honest failure stubs instead of "unimplemented API" faults */
 static void s_GetUserProfileDirectoryW(Cpu *c) { static const char p[] = "C:\\Users\\user"; u64 lp = ARG(2); u32 cap = lp ? rd32(c, lp) : 0; if (cap < 14) { if (lp) wr32(c, lp, 14); W->last_error = 122; RET(0); return; } put_w(c, ARG(1), p, 0); if (lp) wr32(c, lp, 14); RET(1); }
-static void s_SHGetKnownFolderPath(Cpu *c) { if (ARG(3)) wr64(c, ARG(3), 0); RET(0x80004005u); }   /* E_FAIL: node falls back to USERPROFILE */
 static void s_CoTaskMemFree(Cpu *c) { RET(0); }
 static void s_GetBestRoute2(Cpu *c) { RET(1168); }   /* ERROR_NOT_FOUND */
 static void s_SymInitialize(Cpu *c) { W->last_error = 87; RET(0); }
@@ -128,7 +127,7 @@ static void s_CreateMemoryResourceNotification(Cpu *c) { KObj *k = 0; int ex = 0
 static void s_GetTimeZoneInformationForYear(Cpu *c) { u8 *p = mem_ptr(c->mem, ARG(2), 172, 1); if (p) { e_memset(p, 0, 172); static const char n[] = "UTC"; for (int i = 0; i < 4; i++) { p[4 + 2 * i] = (u8)n[i]; p[88 + 2 * i] = (u8)n[i]; } } RET(1); }
 
 #define BUN_SHIMS \
-  S(GetUserProfileDirectoryW), S(SHGetKnownFolderPath), S(CoTaskMemFree), S(GetBestRoute2), S(SymInitialize), SA("SymCleanup", ret0), SA("SymFromAddr", ret0), SA("SymFunctionTableAccess64", ret0), SA("SymGetLineFromAddr64", ret0), \
+  S(GetUserProfileDirectoryW), S(CoTaskMemFree), S(GetBestRoute2), S(SymInitialize), SA("SymCleanup", ret0), SA("SymFromAddr", ret0), SA("SymFunctionTableAccess64", ret0), SA("SymGetLineFromAddr64", ret0), \
   SA("SymGetModuleBase64", ret0), SA("SymGetOptions", ret0), SA("SymSetOptions", ret0), SA("SymGetSearchPathW", ret0), SA("SymSetSearchPathW", ret0), SA("StackWalk64", ret0), SA("MiniDumpWriteDump", ret0), SA("UnDecorateSymbolName", ret0), \
   SA("CertOpenStore", ret0), SA("CertOpenSystemStoreW", ret0), SA("CertCloseStore", ret1), SA("CertEnumCertificatesInStore", ret0), SA("CertFindCertificateInStore", ret0), SA("CertDuplicateCertificateContext", ret0), SA("CertFreeCertificateContext", ret1), \
   SA("CertGetCertificateContextProperty", ret0), SA("CertGetEnhancedKeyUsage", ret0), SA("CryptCreateHash", ret0), SA("CryptDecrypt", ret0), SA("CryptDestroyHash", ret1), SA("CryptDestroyKey", ret1), SA("CryptEnumProvidersW", ret0), \
@@ -140,4 +139,4 @@ static void s_GetTimeZoneInformationForYear(Cpu *c) { u8 *p = mem_ptr(c->mem, AR
   SA("RtlWakeAddressAll", WakeByAddressAll), SA("RtlWakeAddressSingle", WakeByAddressSingle), S(IsThreadAFiber), S(GetHostNameW), SA("RtlDllShutdownInProgress", ret0), S(GlobalSize), S(IsProcessInJob), S(QueryDosDeviceW), S(K32GetModuleFileNameExW), \
   S(CreateDirectoryExW), S(CreatePseudoConsole), S(ResizePseudoConsole), S(ClosePseudoConsole), S(CreateMemoryResourceNotification), S(GetTimeZoneInformationForYear), \
   SA("CreateJobObjectA", CreateJobObjectW), SA("AttachConsole", ret0), SA("BeginUpdateResourceW", ret0), SA("EndUpdateResourceW", ret0), SA("UpdateResourceW", ret0), \
-  SA("EnumResourceLanguagesW", ret0), SA("EnumResourceNamesW", ret0), SA("FindResourceExW", ret0), SA("FindResourceW", ret0), SA("FreeResource", ret1),
+  SA("EnumResourceLanguagesW", ret0),

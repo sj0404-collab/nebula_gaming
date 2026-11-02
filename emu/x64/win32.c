@@ -121,7 +121,7 @@ int w32_data_import_off(const char *name) {
   static const struct { const char *n; u32 off; } tab[] = {
     { "__argc", 0x200 }, { "__argv", 0x208 }, { "__wargv", 0x218 }, { "_environ", 0x228 }, { "__initenv", 0x228 }, { "_wenviron", 0x230 }, { "__winitenv", 0x230 },
     { "_fmode", 0x240 }, { "_commode", 0x248 }, { "_pgmptr", 0x250 }, { "_wpgmptr", 0x258 }, { "_iob", 0x000 }, { "__mb_cur_max", 0x268 }, { "_timezone", 0x270 }, { "_daylight", 0x274 }, { "_tzname", 0x278 },
-    { "_sys_nerr", 0x288 }, { "_sys_errlist", 0x290 }, { "_HUGE", 0x298 }, { "_acmdln", 0x220 }, { "_wcmdln", 0x210 }, { "__lc_codepage", 0x2a0 }, { "_pctype", 0x2a8 }, { "_osplatform", 0x2b0 }, { "_osver", 0x2b4 }, { "_winmajor", 0x2b8 }, { "_winminor", 0x2bc }, { "_winver", 0x2c0 },
+    { "_sys_nerr", 0x288 }, { "_sys_errlist", 0x290 }, { "_HUGE", 0x298 }, { "_acmdln", 0x220 }, { "_wcmdln", 0x210 }, { "__lc_codepage", 0x2a0 }, { "_pctype", 0x2a8 }, { "_osplatform", 0x2b0 }, { "_osver", 0x2b4 }, { "_winmajor", 0x2b8 }, { "_winminor", 0x2bc }, { "_winver", 0x2c0 }, { "_adjust_fdiv", 0x2c4 },
   };
   for (size_t i = 0; i < sizeof tab / sizeof tab[0]; i++) if (!e_strcmp(tab[i].n, name)) return (int)tab[i].off + 1;
   return 0;
@@ -154,6 +154,7 @@ void w32_enter_mode32(Win32 *w) {
 
 /* ---------- continuations ---------- */
 static void guest_call(Cpu *c, u64 fn, u64 a0, u64 a1, u64 a2, u64 a3) {
+  W->cont_seq++;   /* guest code is about to run: continuations pushed afterwards belong to a new step */
   if (c->mode32) {   /* 32-bit callback: arguments pushed right to left; the continuation's saved esp covers both stdcall and cdecl callees */
     c->r[RSP] &= ~15ull; cpu_push(c, a3); cpu_push(c, a2); cpu_push(c, a1); cpu_push(c, a0); cpu_push(c, SLOT_ADDR(SLOT_CONT)); c->rip = fn; return;
   }
@@ -166,11 +167,18 @@ static int cont_push(Cpu *c, int kind) {
   Win32 *w = W; while (w->ncont && w->cont[w->ncont - 1].rsp < c->r[RSP]) w->ncont--;   /* continuations abandoned by a non-local exit (exception caught above them) */
   if (w->ncont >= 64) { cpu_fault(c, "guest callback nesting too deep"); return -1; }
   int i = w->ncont++; w->cont[i].kind = kind; w->cont[i].ret_addr = c->rip; w->cont[i].rsp = c->r[RSP]; w->cont[i].idx = 0;
-  w->cont[i].data[0] = w->cont[i].data[1] = w->cont[i].data[2] = w->cont[i].data[3] = 0; w->cont[i].clean32 = 0; return i;
+  if (w->api_trace) e_log("[cont] push kind=%d depth=%d rsp=%llx ret=%llx\n", kind, i + 1, (unsigned long long)c->r[RSP], (unsigned long long)c->rip);
+  w->cont[i].data[0] = w->cont[i].data[1] = w->cont[i].data[2] = w->cont[i].data[3] = 0; w->cont[i].clean32 = 0; w->cont[i].seq = w->cont_seq;
+  /* a second continuation pushed by the same shim step (no guest code ran in between) on the same frame chains into the first one */
+  w->cont[i].chain = i > 0 && w->cont[i - 1].seq == w->cont_seq && w->cont[i - 1].rsp == c->r[RSP] && w->cont[i - 1].ret_addr == c->rip; return i;
 }
+void w32_cont_resume(Cpu *c);
 static void cont_finish(Cpu *c, u64 rax) {
   Win32 *w = W; if (!w->ncont) { cpu_fault(c, "continuation underflow"); return; }
-  int i = --w->ncont; c->r[RSP] = w->cont[i].rsp + w->cont[i].clean32; c->rip = w->cont[i].ret_addr; c->r[RAX] = rax; if (c->mode32) c->r[RDX] = rax >> 32;
+  int i = --w->ncont;
+  if (w->ncont && w->cont[i].chain) {   /* chained continuation pushed by the same shim step: it receives the result */
+    c->r[RAX] = rax; if (c->mode32) c->r[RDX] = rax >> 32; c->r[RSP] = w->cont[i].rsp; w32_cont_resume(c); return; }
+  c->r[RSP] = w->cont[i].rsp + w->cont[i].clean32; c->rip = w->cont[i].ret_addr; c->r[RAX] = rax; if (c->mode32) c->r[RDX] = rax >> 32; w->cont_seq++;
 }
 static void do_exit(Cpu *c, int code) { W->exited = 1; c->exit_code = code; c->status = RUN_EXIT; }
 static void retry_and_yield(Cpu *c, u64 slot) { cpu_push(c, c->rip); c->rip = slot; c->status = RUN_YIELD; }
@@ -216,6 +224,9 @@ void w32_cont_resume(Cpu *c) {
   Win32 *w = W; while (w->ncont && w->cont[w->ncont - 1].rsp < c->r[RSP]) w->ncont--;
   if (!w->ncont) { cpu_fault(c, "stray continuation"); return; }
   int i = w->ncont - 1; u64 rax = c->mode32 ? (u32)c->r[RAX] : c->r[RAX];   /* 32-bit callbacks return in eax */
+  g_a32_n = 0;   /* continuation code reads its state from the cont record, never from a stale argument override */
+  if (w->api_trace) e_log("[cont] resume kind=%d depth=%d rax=%llx\n", w->cont[i].kind, w->ncont, (unsigned long long)rax);
+  w->cont[i].seq = ++w->cont_seq;   /* the resumed step owns a fresh generation: continuations it pushes on this frame chain into it */
   c->r[RSP] = w->cont[i].rsp;   /* every callback of one continuation starts from the same stack pointer (qsort with 10^6 comparisons must not drift) */
   switch (w->cont[i].kind) {
     case CONT_STARTUP:
@@ -233,13 +244,7 @@ void w32_cont_resume(Cpu *c) {
       cont_finish(c, 0); return;
     case CONT_RET_RAX: cont_finish(c, rax); return;
     case CONT_RET_VAL: cont_finish(c, w->cont[i].data[0]); return;
-    case CONT_CREATEWND: {
-      int step = w->cont[i].idx++;
-      if (step == 0 && (int)rax == -1) { w->win.created = 0; cont_finish(c, 0); return; }
-      if (step == 0) { guest_call(c, w->win.wndproc, w->win.hwnd, 0x0005 /* WM_SIZE */, 0, ((u64)(w->win.h & 0xffff) << 16) | (w->win.w & 0xffff)); return; }
-      if (step == 1) { guest_call(c, w->win.wndproc, w->win.hwnd, 0x0003 /* WM_MOVE */, 0, (64 << 16) | 64); return; }
-      if (step == 2 && (w->win.style & 0x10000000)) { w->win.shown = 1; guest_call(c, w->win.wndproc, w->win.hwnd, 0x0018 /* WM_SHOWWINDOW */, 1, 0); return; }
-      cont_finish(c, w->win.hwnd); return; }
+    case CONT_CREATEWND: { extern void gdi_cont_resume(Cpu *c, int kind, u64 rax); gdi_cont_resume(c, CONT_CREATEWND, rax); return; }
     case CONT_DLLMAIN: if (attach_next_module(c)) return; cont_finish(c, w->cont[i].data[0]); return;
     case CONT_QSORT: qsort_step(c, 1, rax); return;
     case CONT_BSEARCH: {
@@ -263,6 +268,7 @@ void w32_cont_resume(Cpu *c) {
 }
 /* exported helpers for gdi.c */
 void w32_retry_yield(Cpu *c) { retry_and_yield(c, g_cur_slot); }
+u64 w32_cur_slot(void) { return g_cur_slot; }
 void w32_push_cont(Cpu *c, int kind, u64 val) { int i = cont_push(c, kind); if (i >= 0) W->cont[i].data[0] = val; }
 void w32_guest_call(Cpu *c, u64 fn, u64 a0, u64 a1, u64 a2, u64 a3) { guest_call(c, fn, a0, a1, a2, a3); }
 void w32_cont_finish(Cpu *c, u64 rax) { cont_finish(c, rax); }
@@ -271,9 +277,9 @@ void w32_cont_finish(Cpu *c, u64 rax) { cont_finish(c, rax); }
    continuation it pushed (guest callback in progress); a retry/yield leaves the frame intact so the slot is re-entered unchanged.
    Doubles returned by the x64 shim in xmm0 go to x87 ST(0); 64-bit results to edx:eax. */
 static void w32_call32(Cpu *c, ShimSlot *s, u64 ret) {
-  Win32 *w = W; int nc0 = w->ncont; u64 sp0 = c->r[RSP];
+  Win32 *w = W; int nc0 = w->ncont; u64 sp0 = c->r[RSP]; g_a32_n = 0;   /* a call from guest code: arguments are on the stack (no override left over from a shim that started a guest call) */
   if (s->sig32) w32_marshal32_in(c, s);
-  s->fn(c);
+  s->fn(c); g_a32_n = 0;
   if (c->status == RUN_OK && c->rip == ret && w->ncont == nc0 && c->r[RSP] == sp0) c->r[RSP] = (u32)(c->r[RSP] + s->clean32);
   else if (w->ncont > nc0 && c->rip != ret) w->cont[nc0].clean32 = s->clean32;
   c->r[RDX] = c->r[RAX] >> 32;
@@ -307,7 +313,7 @@ typedef struct { Cpu *c; int kind; int idx; u64 va; } ArgSrc;   /* kind 0: regis
 static u64 arg_next(ArgSrc *s) { if (s->kind == 1) { u64 v = rdp(s->c, s->va); s->va += PSZ_OF(s->c); return v; } return w32_arg(s->c, s->idx++); }
 /* 8-byte argument (long long / double): one slot in x64, two 4-byte slots in a 32-bit process */
 static u64 arg_next64(ArgSrc *s) { if (!s->c->mode32) return arg_next(s); if (s->kind == 1) { u64 v = rd64(s->c, s->va); s->va += 8; return v; } u64 lo = w32_arg(s->c, s->idx++), hi = w32_arg(s->c, s->idx++); return lo | hi << 32; }
-static int wstr_to_utf8(Cpu *c, u64 a, char *out, size_t n, int maxchars) {
+int wstr_to_utf8(Cpu *c, u64 a, char *out, size_t n, int maxchars) {
   size_t p = 0; for (int i = 0; maxchars < 0 || i < maxchars; i++) { u16 ch = rd16(c, a + (u64)i * 2); if (!ch || c->status) break;
     if (ch < 0x80) { if (p + 1 < n) out[p++] = (char)ch; } else if (ch < 0x800) { if (p + 2 < n) { out[p++] = (char)(0xC0 | ch >> 6); out[p++] = (char)(0x80 | (ch & 0x3f)); } }
     else { if (p + 3 < n) { out[p++] = (char)(0xE0 | ch >> 12); out[p++] = (char)(0x80 | ((ch >> 6) & 0x3f)); out[p++] = (char)(0x80 | (ch & 0x3f)); } } }
@@ -408,6 +414,7 @@ static void iocp_handle_closed(int pid, int fd); static void iocp_kobj_closed(in
 static void s_CancelIo(Cpu *c) { sock_cancel_io(c, ARG(0)); RET(1); }   /* pipes: parked ReadFile/WriteFile stay (libuv cancels those only on close) */
 static void s_ret0(Cpu *c); static void s_atexit(Cpu *c); static void s_setjmp(Cpu *c);
 #include "win32_compat.inc"
+#include "win32_shell.inc"
 #include "seh.inc"
 #include "cxx.inc"
 #include "seh32.inc"
@@ -944,8 +951,6 @@ static void s_AllocateAndInitializeSid(Cpu *c) { u64 sid = w32_heap_alloc(W, 68,
 static void s_FreeSid(Cpu *c) { w32_heap_free(W, ARG(0)); RET(0); }
 static void s_SetEntriesInAclA(Cpu *c) { if (ARG(3)) wrp(c, ARG(3), w32_heap_alloc(W, 64, 1)); RET(0); }
 static void s_SetEntriesInAclW(Cpu *c) { s_SetEntriesInAclA(c); }
-static void s_RegQueryInfoKeyW(Cpu *c) { for (int i = 2; i <= 10; i++) if (ARG(i)) wr32(c, ARG(i), 0); RET(0); }
-static void s_RegGetValueW(Cpu *c) { if (ARG(5)) wr32(c, ARG(5), 0); RET(2); }
 static void s_GetAdaptersAddresses(Cpu *c) { if (ARG(4)) wr32(c, ARG(4), 0); RET(232); }   /* ERROR_NO_DATA: no interfaces */
 static void s_GetUnicastIpAddressTable(Cpu *c) { RET(50); }
 static void s_MapVirtualKeyW(Cpu *c) { RET(0); }
@@ -1257,6 +1262,7 @@ static void s_dsign(Cpu *c) { RET(c->x[0].f64[0] < 0 ? 1 : 0); }
 #define S(n) { "", #n, s_##n }
 #define SA(api, fn) { "", api, s_##fn }
 static const ShimDef shims[] = {
+  SHELL_SHIMS
   COMPAT_SHIMS
   X86_SHIMS
   RT_SHIMS
@@ -1289,7 +1295,7 @@ static const ShimDef shims[] = {
   SA("RegisterEventSourceW", ret1), SA("RegisterEventSourceA", ret1), SA("DeregisterEventSource", ret1), SA("ReportEventW", ret1), SA("ReportEventA", ret1),
   S(GetProcessWindowStation), S(GetUserObjectInformationW), SA("GetUserObjectInformationA", GetUserObjectInformationW), S(MapVirtualKeyW),
   S(AllocateAndInitializeSid), S(FreeSid), S(SetEntriesInAclA), S(SetEntriesInAclW), SA("SetSecurityInfo", ret0), SA("SetNamedSecurityInfoW", ret0), SA("GetSecurityInfo", ret50), SA("ConvertStringSecurityDescriptorToSecurityDescriptorW", ret0), SA("ConvertStringSecurityDescriptorToSecurityDescriptorA", ret0),
-  SA("RegEnumKeyExA", ret2), SA("RegEnumKeyExW", ret2), SA("RegEnumValueW", ret2), SA("RegEnumValueA", ret2), S(RegGetValueW), SA("RegGetValueA", RegGetValueW), SA("RegNotifyChangeKeyValue", ret0), S(RegQueryInfoKeyW), SA("RegQueryInfoKeyA", RegQueryInfoKeyW), SA("RegDeleteKeyW", ret2), SA("RegDeleteValueW", ret2), SA("RegFlushKey", ret0),
+  SA("RegEnumKeyExA", ret2), SA("RegEnumKeyExW", ret2), SA("RegEnumValueW", ret2), SA("RegEnumValueA", ret2), SA("RegGetValueA", RegGetValueW), SA("RegNotifyChangeKeyValue", ret0), SA("RegQueryInfoKeyA", RegQueryInfoKeyW), SA("RegDeleteKeyW", ret2), SA("RegDeleteValueW", ret2), SA("RegFlushKey", ret0),
   S(GetAdaptersAddresses), S(GetUnicastIpAddressTable), SA("FreeMibTable", ret0), SA("CancelMibChangeNotify2", ret0), SA("NotifyIpInterfaceChange", ret50), SA("ConvertInterfaceIndexToLuid", ret50), SA("ConvertInterfaceLuidToNameW", ret50), SA("ConvertInterfaceLuidToIndex", ret50), SA("GetBestInterfaceEx", ret50), SA("GetIfEntry2", ret50), SA("GetIpForwardTable2", ret50), SA("GetAdaptersInfo", ret50), SA("GetNetworkParams", ret50), SA("NotifyAddrChange", ret50), SA("NotifyRouteChange", ret50), SA("GetPerAdapterInfo", ret50), SA("if_nametoindex", ret0), SA("if_indextoname", ret0), SA("ConvertInterfaceLuidToGuid", ret50), SA("ConvertInterfaceGuidToLuid", ret50),
   S(GetThreadLocale), S(GetUserDefaultLCID), S(GetUserDefaultLangID), S(GetSystemDefaultLangID), S(GetUserDefaultUILanguage), S(GetLocaleInfoA), S(GetLocaleInfoW), S(GetLocaleInfoEx), S(IsValidLocale), S(IsValidCodePage), S(EnumSystemLocalesW), S(GetUserDefaultLocaleName), S(LCMapStringW), S(LCMapStringEx), S(LCMapStringA), S(CompareStringW), S(CompareStringA), S(CompareStringEx), S(CompareStringOrdinal), S(GetStringTypeW), S(GetStringTypeA), S(MultiByteToWideChar), S(WideCharToMultiByte), S(CharUpperA),
   S(lstrlenA), S(lstrlenW), S(lstrcpyA), S(lstrcmpiA), S(lstrcmpA), S(InterlockedCompareExchange), S(InterlockedExchange), S(InterlockedIncrement), S(InterlockedDecrement), S(InterlockedExchangeAdd), S(QueueUserAPC),
