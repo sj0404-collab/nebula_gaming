@@ -273,6 +273,10 @@ void w32_retry_yield(Cpu *c) { retry_and_yield(c, g_cur_slot); }
 u64 w32_cur_slot(void) { return g_cur_slot; }
 void w32_push_cont(Cpu *c, int kind, u64 val) { int i = cont_push(c, kind); if (i >= 0) W->cont[i].data[0] = val; }
 void w32_guest_call(Cpu *c, u64 fn, u64 a0, u64 a1, u64 a2, u64 a3) { guest_call(c, fn, a0, a1, a2, a3); }
+void w32_guest_call6(Cpu *c, u64 fn, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5) {   /* six arguments: SUBCLASSPROC and friends */
+  W->cont_seq++;
+  if (c->mode32) { c->r[RSP] &= ~15ull; cpu_push(c, a5); cpu_push(c, a4); cpu_push(c, a3); cpu_push(c, a2); cpu_push(c, a1); cpu_push(c, a0); cpu_push(c, SLOT_ADDR(SLOT_CONT)); c->rip = fn; return; }
+  c->r[RCX] = a0; c->r[RDX] = a1; c->r[R8] = a2; c->r[R9] = a3; c->r[RSP] = (c->r[RSP] & ~15ull) - 48; wr64(c, c->r[RSP] + 32, a4); wr64(c, c->r[RSP] + 40, a5); cpu_push(c, SLOT_ADDR(SLOT_CONT)); c->rip = fn; }
 void w32_cont_finish(Cpu *c, u64 rax) { cont_finish(c, rax); }
 
 /* 32-bit call of a shim: stack arguments (read through ARG), stdcall cleanup when the shim returns — immediately, or later through the
@@ -654,6 +658,10 @@ static void s_GetWindowsDirectoryA(Cpu *c) { const char *d = "C:\\Windows"; size
 static void s_GetVersion(Cpu *c) { RET(0x23f00206); }
 static void s_GetVersionExA(Cpu *c) { u64 a = ARG(0); u32 sz = rd32(c, a); wr32(c, a + 4, 10); wr32(c, a + 8, 0); wr32(c, a + 12, 19045); wr32(c, a + 16, 2); if (sz >= 20) { u8 *p = mem_ptr(c->mem, a + 20, 128, 1); if (p) e_memset(p, 0, 128); } RET(1); }
 static void s_GetVersionExW(Cpu *c) { s_GetVersionExA(c); }
+static void s_GetApplicationRestartSettings(Cpu *c) { RET(0x80070490); /* E_ELEMENT_NOT_FOUND: nothing registered */ }
+static void s_RegisterApplicationRestart(Cpu *c) { RET(0); }
+static void s_UnregisterApplicationRestart(Cpu *c) { RET(0); }
+static void s_GetProductInfo(Cpu *c) { if (ARG(4)) wr32(c, ARG(4), 0x30 /* PRODUCT_PROFESSIONAL */); RET(1); }
 static void s_IsProcessorFeaturePresent(Cpu *c) { u32 f = (u32)ARG(0); RET(f == 6 || f == 10 || f == 0 || f == 3 || f == 1 || f == 2 || f == 4 || f == 5 ? 1 : 0); /* sse, sse2, cmpxchg, rdtsc... ; no sse3/avx/xsave(17) */ }
 static void s_IsDebuggerPresent(Cpu *c) { RET(0); }
 static void s_IsDBCSLeadByte(Cpu *c) { RET(0); }
@@ -1320,7 +1328,7 @@ static const ShimDef shims[] = {
   S(CreateFileA), S(CreateFileW), S(GetFileAttributesA), S(GetFileAttributesW), S(GetFileAttributesExW), S(FindFirstFileA), S(FindFirstFileW), S(FindClose), S(DeleteFileA), S(GetFullPathNameA), S(GetFinalPathNameByHandleA), S(GetLongPathNameW), S(GetLongPathNameA), S(GetShortPathNameW), S(GetVolumePathNameW), S(PathCchSkipRoot), S(PathCchCombineEx), S(PathCchCanonicalizeEx), S(CreateWaitableTimerW), S(CreateWaitableTimerA), S(CreateWaitableTimerExW), S(CreateWaitableTimerExA), S(SetWaitableTimer), S(SetWaitableTimerEx), S(CancelWaitableTimer), S(NtReadFile), S(NtWriteFile), S(GetFinalPathNameByHandleW), S(GetCurrentDirectoryA), S(GetCurrentDirectoryW), S(GetTempPathA), S(SetFilePointer), S(GetFileSize),
   S(GetCommandLineA), S(GetCommandLineW), S(GetEnvironmentStrings), S(GetEnvironmentStringsW), S(FreeEnvironmentStringsW), S(FreeEnvironmentStringsA), S(GetEnvironmentVariableA), S(GetEnvironmentVariableW), S(SetEnvironmentVariableA), S(ExpandEnvironmentStringsA), S(GetStartupInfoA), S(GetStartupInfoW),
   S(GetModuleHandleA), S(GetModuleHandleW), S(GetModuleHandleExW), S(GetModuleHandleExA), S(LoadLibraryA), S(LoadLibraryW), S(LoadLibraryExA), S(LoadLibraryExW), S(FreeLibrary), S(GetProcAddress), S(GetModuleFileNameA), S(GetModuleFileNameW), S(GetSystemDirectoryA), S(GetWindowsDirectoryA),
-  S(GetVersion), S(GetVersionExA), S(GetVersionExW), S(IsProcessorFeaturePresent), S(IsDebuggerPresent), S(IsDBCSLeadByte), S(IsDBCSLeadByteEx), S(GetACP), S(GetOEMCP), S(GetCPInfo), S(GetSystemInfo), S(GetNativeSystemInfo), S(GlobalMemoryStatusEx),
+  S(GetVersion), S(GetVersionExA), S(GetVersionExW), S(GetProductInfo), S(GetApplicationRestartSettings), S(RegisterApplicationRestart), S(UnregisterApplicationRestart), S(IsProcessorFeaturePresent), S(IsDebuggerPresent), S(IsDBCSLeadByte), S(IsDBCSLeadByteEx), S(GetACP), S(GetOEMCP), S(GetCPInfo), S(GetSystemInfo), S(GetNativeSystemInfo), S(GlobalMemoryStatusEx),
   NODE_SHIMS,
   S(RtlAddFunctionTable), S(RtlAddGrowableFunctionTable), S(RtlGrowFunctionTable), S(RtlDeleteGrowableFunctionTable), S(RtlInstallFunctionTableCallback), S(RtlDeleteFunctionTable), S(EncodePointer), S(DecodePointer),
   S(OutputDebugStringA), S(OutputDebugStringW), S(FormatMessageA), S(FormatMessageW), S(SetErrorMode), S(GetErrorMode), S(SetThreadErrorMode), S(GetLogicalProcessorInformation), S(GetProcessAffinityMask), S(SetThreadAffinityMask), S(SetProcessAffinityMask), S(GetSystemTimeAdjustment), S(SetSystemTime), S(GetThreadPriority), S(SetThreadPriority), S(SetPriorityClass), S(GetPriorityClass), S(GetThreadTimes),

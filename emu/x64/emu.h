@@ -346,6 +346,7 @@ void   call_shim_tail(Cpu *c, ShimFn fn, u64 a0, u64 a1, u64 a2, u64 a3);   /* l
 void   gdi_set_msgbox_auto(int on);
 u32    put_w8(Cpu *c, u64 dst, const char *s, u32 cap);        /* UTF-8 → UTF-16 guest string (cap in u16 units, 0 = unlimited); returns chars written */
 u32    utf8_u16len(const char *s);
+int    vfs_glob_match(const char *pat, const char *s);   /* case-insensitive * ? wildcard match */
 u64    rsrc_lookup(Cpu *c, u64 hmod, u64 name_a, u64 type_a, int wide, u16 lang);   /* IMAGE_RESOURCE_DATA_ENTRY guest address or 0 */
 void   shell_mkdirs(const char *path);
 u64    pidl_make(Win32 *w, const char *path);

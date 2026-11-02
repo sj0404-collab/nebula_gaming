@@ -110,6 +110,22 @@ static void s_CharNextA(Cpu *c) { RET(rd8(c, ARG(0)) ? ARG(0) + 1 : ARG(0)); }
 
 /* ---------- SHLWAPI ---------- */
 static void s_PathIsRelativeA(Cpu *c) { const char *s = rd_str(c, ARG(0), 1024); RET(!s || !s[0] ? 1 : (s[0] == '\\' || s[0] == '/' || (s[1] == ':')) ? 0 : 1); }
+/* shlwapi colour helpers: HLS in the Windows 0..240 range */
+static void rgb_to_hls(u32 cr, int *H, int *L, int *S) { int r = cr & 255, g = cr >> 8 & 255, b = cr >> 16 & 255; int mx = r > g ? (r > b ? r : b) : (g > b ? g : b), mn = r < g ? (r < b ? r : b) : (g < b ? g : b); int sum = mx + mn, d = mx - mn; *L = (sum * 240 + 255) / 510; if (!d) { *S = 0; *H = 160; return; }
+  *S = *L <= 120 ? (d * 240 + sum / 2) / sum : (d * 240 + (510 - sum) / 2) / (510 - sum); int rd = ((mx - r) * 40 + d / 2) / d, gd = ((mx - g) * 40 + d / 2) / d, bd = ((mx - b) * 40 + d / 2) / d; int h = r == mx ? bd - gd : g == mx ? 80 + rd - bd : 160 + gd - rd; h %= 240; if (h < 0) h += 240; *H = h; }
+static int hue_to_rgb(int n1, int n2, int hue) { hue %= 240; if (hue < 0) hue += 240; if (hue < 40) return n1 + ((n2 - n1) * hue + 20) / 40; if (hue < 120) return n2; if (hue < 160) return n1 + ((n2 - n1) * (160 - hue) + 20) / 40; return n1; }
+static u32 hls_to_rgb(int h, int l, int s) { if (s == 0) { int v = (l * 255 + 120) / 240; return (u32)v | (u32)v << 8 | (u32)v << 16; } int n2 = l <= 120 ? (l * (240 + s) + 120) / 240 : l + s - (l * s + 120) / 240; int n1 = 2 * l - n2; int r = (hue_to_rgb(n1, n2, h + 80) * 255 + 120) / 240, g = (hue_to_rgb(n1, n2, h) * 255 + 120) / 240, b = (hue_to_rgb(n1, n2, h - 80) * 255 + 120) / 240; return (u32)r | (u32)g << 8 | (u32)b << 16; }
+static void s_ColorRGBToHLS(Cpu *c) { int H, L, S; rgb_to_hls((u32)ARG(0), &H, &L, &S); if (ARG(1)) wr16(c, ARG(1), (u16)H); if (ARG(2)) wr16(c, ARG(2), (u16)L); if (ARG(3)) wr16(c, ARG(3), (u16)S); RET(0); }
+static void s_ColorHLSToRGB(Cpu *c) { RET(hls_to_rgb((int)(u16)ARG(0), (int)(u16)ARG(1), (int)(u16)ARG(2))); }
+static void s_ColorAdjustLuma(Cpu *c) { int H, L, S; rgb_to_hls((u32)ARG(0), &H, &L, &S); int n = (int)(s32)ARG(1); if (ARG(2)) { if (n > 0) L += (240 - L) * n / 1000; else L += L * n / 1000; } else L += n; if (L < 0) L = 0; if (L > 240) L = 240; RET(hls_to_rgb(H, L, S)); }
+/* PathMatchSpec: ';'-separated wildcard list */
+static void pm_in(Cpu *c, u64 a, int wide, char *out, size_t cap) { out[0] = 0; if (!a) return; if (wide) wstr_to_utf8(c, a, out, cap, -1); else { const char *s = rd_str(c, a, cap - 1); if (s) e_snprintf(out, cap, "%s", s); } }
+static void path_match_spec(Cpu *c, int wide) { char file[1024], spec[1024]; pm_in(c, ARG(0), wide, file, sizeof file); pm_in(c, ARG(1), wide, spec, sizeof spec); const char *base = file; for (const char *p = file; *p; p++) if (*p == '\\' || *p == '/') base = p + 1;
+  char *p = spec; while (*p) { while (*p == ' ') p++; char *e = p; while (*e && *e != ';') e++; char save = *e; *e = 0; if (*p && (vfs_glob_match(p, base) || vfs_glob_match(p, file))) { RET(1); return; } if (!save) break; p = e + 1; } RET(0); }
+static void s_PathMatchSpecW(Cpu *c) { path_match_spec(c, 1); }
+static void s_PathMatchSpecA(Cpu *c) { path_match_spec(c, 0); }
+static void s_PathIsNetworkPathW(Cpu *c) { u16 a = ARG(0) ? rd16(c, ARG(0)) : 0, b = a ? rd16(c, ARG(0) + 2) : 0; RET(a == '\\' && b == '\\'); }
+static void s_PathIsNetworkPathA(Cpu *c) { u8 a = ARG(0) ? rd8(c, ARG(0)) : 0, b = a ? rd8(c, ARG(0) + 1) : 0; RET(a == '\\' && b == '\\'); }
 static void s_PathIsRelativeW(Cpu *c) { u16 a = rd16(c, ARG(0)), b = a ? rd16(c, ARG(0) + 2) : 0; RET(!a ? 1 : (a == '\\' || a == '/' || b == ':') ? 0 : 1); }
 
 /* ---------- CRT ---------- */
@@ -232,7 +248,7 @@ static void s_XInputEnable(Cpu *c) { RET(0); }
   S(LookupPrivilegeValueW), S(AdjustTokenPrivileges), S(GetFileSecurityW), S(SetFileSecurityW), \
   S(GetLargePageMinimum), S(OpenFileMappingW), S(GetLogicalDriveStringsW), S(GetLogicalDriveStringsA), S(GetDriveTypeW), S(GetDiskFreeSpaceExW), S(GetDiskFreeSpaceW), S(GetDiskFreeSpaceA), \
   S(CreateHardLinkW), S(FindFirstStreamW), S(FindNextStreamW), S(DeviceIoControl), S(GetLogicalProcessorInformation), S(GetLogicalProcessorInformationEx), \
-  S(CharUpperW), S(CharLowerW), S(CharPrevExA), S(CharPrevA), S(CharNextA), S(PathIsRelativeA), S(PathIsRelativeW), \
+  S(CharUpperW), S(CharLowerW), S(CharPrevExA), S(CharPrevA), S(CharNextA), S(PathIsRelativeA), S(PathIsRelativeW), S(PathIsNetworkPathW), S(PathIsNetworkPathA), S(PathMatchSpecW), S(PathMatchSpecA), S(ColorRGBToHLS), S(ColorHLSToRGB), S(ColorAdjustLuma), \
   SA("_XcptFilter", XcptFilter), SA("__dllonexit", dllonexit), SA("?terminate@@YAXXZ", cxx_terminate), SA("??1type_info@@UEAA@XZ", ret0), \
   S(wcsstr), S(wcsnlen), SA("_lock_file", lock_file), SA("_unlock_file", unlock_file), SA("_utime64", utime64), SA("_utime", utime64), S(perror), SA("_assert", assert_fail), SA("_wassert", wassert_fail), S(mbrtowc), S(wcrtomb), \
   SA("__intrinsic_setjmpex", setjmp), \

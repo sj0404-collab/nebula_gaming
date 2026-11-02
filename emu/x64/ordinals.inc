@@ -81,6 +81,8 @@ static const struct { const char *dll; unsigned short ord; const char *name; } g
   { "comctl32", 375, "StrCSpnIW" },
   { "comctl32", 376, "IntlStrEqWorkerA" },
   { "comctl32", 377, "IntlStrEqWorkerW" },
+  { "comctl32", 380, "LoadIconMetric" },
+  { "comctl32", 381, "LoadIconWithScaleDown" },
   { "comctl32", 382, "SmoothScrollWindow" },
   { "comctl32", 384, "SetPathWordBreakProc" },
   { "comctl32", 385, "DPA_EnumCallback" },

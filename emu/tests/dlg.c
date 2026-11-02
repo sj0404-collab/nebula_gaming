@@ -215,6 +215,88 @@ static void menu_tests(void) {
   DestroyMenu(g_bar);
 }
 
+
+/* common controls: status bar, toolbar, tab control (real classes from comctl.inc), driven by a timer like the menu test */
+static int g_cc_cmd, g_cc_drop, g_cc_changing, g_cc_change, g_cc_phase, g_cc_quit; static HWND g_sb, g_tb, g_tab;
+static LRESULT CALLBACK cc_wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+  switch (m) {
+    case WM_COMMAND: if (lp == (LPARAM)g_tb) g_cc_cmd = LOWORD(wp); return 0;
+    case WM_NOTIFY: { NMHDR *nm = (NMHDR *)lp; if (nm->hwndFrom == g_tb && nm->code == TBN_DROPDOWN) { g_cc_drop = ((NMTOOLBAR *)nm)->iItem; return TBDDRET_DEFAULT; }
+      if (nm->hwndFrom == g_tab && nm->code == TCN_SELCHANGING) { g_cc_changing++; return g_cc_changing == 1 ? TRUE : FALSE; /* veto the first change */ }
+      if (nm->hwndFrom == g_tab && nm->code == TCN_SELCHANGE) { g_cc_change = TabCtrl_GetCurSel(g_tab); return 0; } return 0; }
+    case WM_SIZE: SendMessageW(g_sb, WM_SIZE, 0, 0); return 0;
+    case WM_TIMER: {
+      g_cc_phase++;
+      switch (g_cc_phase) {
+        case 1: { RECT r; SendMessageW(g_tb, TB_GETITEMRECT, 0, (LPARAM)&r); POINT pt = { (r.left + r.right) / 2, (r.top + r.bottom) / 2 }; int idx = (int)SendMessageW(g_tb, TB_HITTEST, 0, (LPARAM)&pt); POINT away = { 2000, 2 }; int fidx = (int)SendMessageW(g_tb, TB_HITTEST, 0, (LPARAM)&away); chk(idx == 0 && fidx < 0, "comctl: TB_HITTEST (on a button -> index, past the end -> negative)");
+          RECT br; SendMessageW(g_tb, TB_GETITEMRECT, 1, (LPARAM)&br); LPARAM at = MAKELPARAM((br.left + br.right) / 2, (br.top + br.bottom) / 2); SendMessageW(g_tb, WM_LBUTTONDOWN, MK_LBUTTON, at); SendMessageW(g_tb, WM_LBUTTONUP, 0, at); break; }
+        case 2: chk(g_cc_cmd == 202, "comctl: toolbar click -> WM_COMMAND(id) with lParam = toolbar hwnd"); g_cc_cmd = 0;
+          { RECT br; SendMessageW(g_tb, TB_GETITEMRECT, 3, (LPARAM)&br); LPARAM at = MAKELPARAM((br.left + br.right) / 2, (br.top + br.bottom) / 2); SendMessageW(g_tb, WM_LBUTTONDOWN, MK_LBUTTON, at); SendMessageW(g_tb, WM_LBUTTONUP, 0, at); } break;
+        case 3: chk(g_cc_drop == 204 && g_cc_cmd == 0, "comctl: whole drop-down button -> TBN_DROPDOWN(iItem) and no WM_COMMAND");
+          { RECT tr; TabCtrl_GetItemRect(g_tab, 1, &tr); LPARAM at = MAKELPARAM((tr.left + tr.right) / 2, (tr.top + tr.bottom) / 2); SendMessageW(g_tab, WM_LBUTTONDOWN, MK_LBUTTON, at); } break;
+        case 4: chk(g_cc_changing == 1 && TabCtrl_GetCurSel(g_tab) == 0 && g_cc_change == 0, "comctl: TCN_SELCHANGING returning TRUE vetoed the tab click");
+          { RECT tr; TabCtrl_GetItemRect(g_tab, 2, &tr); LPARAM at = MAKELPARAM((tr.left + tr.right) / 2, (tr.top + tr.bottom) / 2); SendMessageW(g_tab, WM_LBUTTONDOWN, MK_LBUTTON, at); } break;
+        case 5: chk(g_cc_changing == 2 && TabCtrl_GetCurSel(g_tab) == 2 && g_cc_change == 2, "comctl: tab click -> TCN_SELCHANGING + TCN_SELCHANGE, GetCurSel = 2"); SendMessageW(g_tab, WM_KEYDOWN, VK_LEFT, 0); break;
+        case 6: chk(TabCtrl_GetCurSel(g_tab) == 1 && g_cc_change == 1, "comctl: Left arrow moved the tab selection with notifications"); KillTimer(h, 4); DestroyWindow(h); break;
+      } return 0; }
+    case WM_DESTROY: g_cc_quit = 1; PostQuitMessage(9); return 0;
+  }
+  return DefWindowProcW(h, m, wp, lp);
+}
+static void comctl_tests(void) {
+  WNDCLASSW wc; memset(&wc, 0, sizeof wc); wc.lpfnWndProc = cc_wnd_proc; wc.hInstance = g_inst; wc.lpszClassName = L"NebulaCcTest"; wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); RegisterClassW(&wc);
+  HWND h = CreateWindowExW(0, L"NebulaCcTest", L"Common controls", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 120, 120, 420, 300, NULL, NULL, g_inst, NULL);
+  /* status bar */
+  g_sb = CreateWindowExW(0, STATUSCLASSNAMEW, NULL, WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP, 0, 0, 0, 0, h, (HMENU)301, g_inst, NULL);
+  int parts[3] = { 100, 220, -1 }; SendMessageW(g_sb, SB_SETPARTS, 3, (LPARAM)parts); SendMessageW(g_sb, SB_SETTEXTW, 0, (LPARAM)L"Ready"); SendMessageW(g_sb, SB_SETTEXTW, 1 | SBT_NOBORDERS, (LPARAM)L"Ln 12, Col 4"); SendMessageW(g_sb, SB_SETTEXTW, 2, (LPARAM)L"UTF-8");
+  int got[3] = { 0, 0, 0 }; int np = (int)SendMessageW(g_sb, SB_GETPARTS, 3, (LPARAM)got); WCHAR buf[64]; LRESULT tl = SendMessageW(g_sb, SB_GETTEXTW, 1, (LPARAM)buf); RECT sr; GetWindowRect(g_sb, &sr); RECT cr; GetClientRect(h, &cr); POINT bl = { 0, cr.bottom }; ClientToScreen(h, &bl); RECT pr; SendMessageW(g_sb, SB_GETRECT, 1, (LPARAM)&pr);
+  chk(np == 3 && got[0] == 100 && got[1] == 220 && got[2] == -1, "comctl: SB_SETPARTS / SB_GETPARTS");
+  chk(LOWORD(tl) == 12 && HIWORD(tl) == SBT_NOBORDERS && wcscmp(buf, L"Ln 12, Col 4") == 0, "comctl: SB_GETTEXTW returns length | style and the text");
+  chk(sr.bottom == bl.y && sr.right - sr.left == cr.right && sr.bottom - sr.top >= 16, "comctl: the status bar sized itself along the bottom of the parent");
+  chk(pr.left == 100 && pr.right == 220, "comctl: SB_GETRECT of the middle part");
+  SendMessageW(g_sb, SB_SIMPLE, TRUE, 0); chk(SendMessageW(g_sb, SB_ISSIMPLE, 0, 0) == TRUE, "comctl: SB_SIMPLE / SB_ISSIMPLE"); SendMessageW(g_sb, SB_SIMPLE, FALSE, 0);
+  /* toolbar */
+  g_tb = CreateWindowExW(0, TOOLBARCLASSNAMEW, NULL, WS_CHILD | WS_VISIBLE | TBSTYLE_FLAT | TBSTYLE_TOOLTIPS | CCS_TOP, 0, 0, 0, 0, h, (HMENU)302, g_inst, NULL);
+  SendMessageW(g_tb, TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0); SendMessageW(g_tb, TB_SETBITMAPSIZE, 0, MAKELPARAM(16, 16));
+  HIMAGELIST il = ImageList_Create(16, 16, ILC_COLOR32, 4, 0); { HDC dc = GetDC(NULL); HDC m = CreateCompatibleDC(dc); HBITMAP bm = CreateCompatibleBitmap(dc, 16, 16); HGDIOBJ old = SelectObject(m, bm); RECT fr = { 0, 0, 16, 16 }; HBRUSH b = CreateSolidBrush(RGB(200, 40, 40)); FillRect(m, &fr, b); DeleteObject(b); SelectObject(m, old); ImageList_Add(il, bm, NULL); DeleteObject(bm); DeleteDC(m); ReleaseDC(NULL, dc); }
+  SendMessageW(g_tb, TB_SETIMAGELIST, 0, (LPARAM)il);
+  int sidx = (int)SendMessageW(g_tb, TB_ADDSTRINGW, 0, (LPARAM)L"New\0Open\0Save\0Tools\0");
+  TBBUTTON tbb[5]; memset(tbb, 0, sizeof tbb);
+  tbb[0].iBitmap = 0; tbb[0].idCommand = 201; tbb[0].fsState = TBSTATE_ENABLED; tbb[0].fsStyle = BTNS_BUTTON; tbb[0].iString = sidx;
+  tbb[1].iBitmap = 0; tbb[1].idCommand = 202; tbb[1].fsState = TBSTATE_ENABLED; tbb[1].fsStyle = BTNS_BUTTON; tbb[1].iString = sidx + 1;
+  tbb[2].fsStyle = BTNS_SEP;
+  tbb[3].iBitmap = 0; tbb[3].idCommand = 204; tbb[3].fsState = TBSTATE_ENABLED; tbb[3].fsStyle = BTNS_WHOLEDROPDOWN; tbb[3].iString = sidx + 3;
+  tbb[4].iBitmap = 0; tbb[4].idCommand = 205; tbb[4].fsState = 0; tbb[4].fsStyle = BTNS_CHECK; tbb[4].iString = sidx + 2;
+  SendMessageW(g_tb, TB_ADDBUTTONSW, 5, (LPARAM)tbb); SendMessageW(g_tb, TB_AUTOSIZE, 0, 0);
+  chk(sidx == 0 && SendMessageW(g_tb, TB_BUTTONCOUNT, 0, 0) == 5 && SendMessageW(g_tb, TB_COMMANDTOINDEX, 204, 0) == 3, "comctl: TB_ADDSTRINGW list, TB_ADDBUTTONSW, TB_BUTTONCOUNT, TB_COMMANDTOINDEX");
+  TBBUTTON gb; memset(&gb, 0, sizeof gb); SendMessageW(g_tb, TB_GETBUTTON, 1, (LPARAM)&gb); chk(gb.idCommand == 202 && gb.fsStyle == BTNS_BUTTON && (gb.fsState & TBSTATE_ENABLED) && gb.iString == 1, "comctl: TB_GETBUTTON");
+  chk(!SendMessageW(g_tb, TB_ISBUTTONENABLED, 205, 0) && SendMessageW(g_tb, TB_ENABLEBUTTON, 205, TRUE) && SendMessageW(g_tb, TB_ISBUTTONENABLED, 205, 0) && SendMessageW(g_tb, TB_CHECKBUTTON, 205, TRUE) && SendMessageW(g_tb, TB_ISBUTTONCHECKED, 205, 0) && (SendMessageW(g_tb, TB_GETSTATE, 205, 0) & TBSTATE_CHECKED), "comctl: TB_ENABLEBUTTON / TB_CHECKBUTTON / TB_GETSTATE");
+  TBBUTTONINFOW bi; memset(&bi, 0, sizeof bi); bi.cbSize = sizeof bi; bi.dwMask = TBIF_TEXT | TBIF_STATE | TBIF_COMMAND; bi.pszText = buf; bi.cchText = 64; int bidx = (int)SendMessageW(g_tb, TB_GETBUTTONINFOW, 201, (LPARAM)&bi);
+  chk(bidx == 0 && wcscmp(buf, L"New") == 0 && bi.idCommand == 201, "comctl: TB_GETBUTTONINFOW (text from the string pool, id)");
+  memset(&bi, 0, sizeof bi); bi.cbSize = sizeof bi; bi.dwMask = TBIF_TEXT; bi.pszText = (LPWSTR)L"Create"; SendMessageW(g_tb, TB_SETBUTTONINFOW, 201, (LPARAM)&bi); LRESULT tlen = SendMessageW(g_tb, TB_GETBUTTONTEXTW, 201, (LPARAM)buf);
+  chk(tlen == 6 && wcscmp(buf, L"Create") == 0, "comctl: TB_SETBUTTONINFOW text, TB_GETBUTTONTEXTW");
+  RECT r0, r1, r3; SendMessageW(g_tb, TB_GETITEMRECT, 0, (LPARAM)&r0); SendMessageW(g_tb, TB_GETITEMRECT, 1, (LPARAM)&r1); SendMessageW(g_tb, TB_GETITEMRECT, 3, (LPARAM)&r3); SIZE ms; SendMessageW(g_tb, TB_GETMAXSIZE, 0, (LPARAM)&ms);
+  chk(r0.right <= r1.left && r1.right <= r3.left && r0.right - r0.left >= 16 && ms.cx >= r3.right && ms.cy >= 16, "comctl: TB_GETITEMRECT laid the buttons out left to right, TB_GETMAXSIZE");
+  LRESULT bsz = SendMessageW(g_tb, TB_GETBUTTONSIZE, 0, 0); chk(LOWORD(bsz) >= 16 && HIWORD(bsz) >= 16, "comctl: TB_GETBUTTONSIZE");
+  chk(SendMessageW(g_tb, TB_DELETEBUTTON, 4, 0) && SendMessageW(g_tb, TB_BUTTONCOUNT, 0, 0) == 4, "comctl: TB_DELETEBUTTON");
+  /* tab control */
+  g_tab = CreateWindowExW(0, WC_TABCONTROLW, NULL, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 10, 40, 380, 160, h, (HMENU)303, g_inst, NULL);
+  TCITEMW ti; memset(&ti, 0, sizeof ti); ti.mask = TCIF_TEXT | TCIF_PARAM; ti.pszText = (LPWSTR)L"General"; ti.lParam = 11; int i0 = (int)SendMessageW(g_tab, TCM_INSERTITEMW, 0, (LPARAM)&ti); ti.pszText = (LPWSTR)L"Compiler"; ti.lParam = 22; int i1 = (int)SendMessageW(g_tab, TCM_INSERTITEMW, 1, (LPARAM)&ti); ti.pszText = (LPWSTR)L"Output"; ti.lParam = 33; int i2 = (int)SendMessageW(g_tab, TCM_INSERTITEMW, 2, (LPARAM)&ti);
+  chk(i0 == 0 && i1 == 1 && i2 == 2 && TabCtrl_GetItemCount(g_tab) == 3 && TabCtrl_GetCurSel(g_tab) == 0, "comctl: TCM_INSERTITEMW x3, TCM_GETITEMCOUNT, first item selected");
+  memset(&ti, 0, sizeof ti); ti.mask = TCIF_TEXT | TCIF_PARAM; ti.pszText = buf; ti.cchTextMax = 64; chk(SendMessageW(g_tab, TCM_GETITEMW, 1, (LPARAM)&ti) && wcscmp(buf, L"Compiler") == 0 && ti.lParam == 22, "comctl: TCM_GETITEMW text + lParam");
+  RECT t0r, t1r, ar = { 0, 0, 380, 160 }; TabCtrl_GetItemRect(g_tab, 0, &t0r); TabCtrl_GetItemRect(g_tab, 1, &t1r); TabCtrl_AdjustRect(g_tab, FALSE, &ar);
+  chk(t0r.right <= t1r.left && t0r.bottom > t0r.top && t0r.bottom <= 40, "comctl: TCM_GETITEMRECT tabs along the top row");
+  chk(ar.top >= t0r.bottom && ar.left > 0 && ar.right < 380 && ar.bottom < 160, "comctl: TCM_ADJUSTRECT shrinks to the display area below the tabs");
+  TCHITTESTINFO ht; ht.pt.x = (t1r.left + t1r.right) / 2; ht.pt.y = (t1r.top + t1r.bottom) / 2; chk(TabCtrl_HitTest(g_tab, &ht) == 1 && (ht.flags & TCHT_ONITEM), "comctl: TCM_HITTEST");
+  chk(TabCtrl_SetCurSel(g_tab, 1) == 0 && TabCtrl_GetCurSel(g_tab) == 1 && g_cc_changing == 0, "comctl: TCM_SETCURSEL returns the previous index and sends no notification"); TabCtrl_SetCurSel(g_tab, 0);
+  chk(TabCtrl_DeleteItem(g_tab, 2) && TabCtrl_GetItemCount(g_tab) == 2, "comctl: TCM_DELETEITEM"); ti.mask = TCIF_TEXT; ti.pszText = (LPWSTR)L"Output"; SendMessageW(g_tab, TCM_INSERTITEMW, 2, (LPARAM)&ti);
+  SetTimer(h, 4, 150, NULL);
+  MSG msg; DWORD t0 = GetTickCount();
+  while (GetMessageW(&msg, NULL, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessageW(&msg); if (GetTickCount() - t0 > 15000) { printf("FAIL comctl: timeout\n"); g_fail++; break; } }
+  chk(g_cc_quit && msg.message == WM_QUIT && msg.wParam == 9, "comctl: the window closed, WM_QUIT reached GetMessage");
+  ImageList_Destroy(il);
+}
+
 int main(void) {
   g_inst = GetModuleHandleW(NULL);
   InitCommonControls();
@@ -239,6 +321,7 @@ int main(void) {
   if (msg.message == WM_QUIT) quit_code = (int)msg.wParam;
   chk(quit_code == 5, "modeless: PostQuitMessage code reached GetMessage");
   menu_tests();
+  comctl_tests();
   printf("%s %d/%d\n", g_fail ? "FAILED" : "ALL OK", g_ok, g_ok + g_fail);
   return g_fail ? 1 : 0;
 }

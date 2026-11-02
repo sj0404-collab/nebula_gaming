@@ -345,8 +345,8 @@ check "7za.exe x86: extract"      "Everything is Ok"                            
 check "7za.exe x86: round-trip identical" "same" "$(cmp -s $W32/src/rand.bin $W32/out/src/rand.bin && cmp -s $W32/src/nums.txt $W32/out/src/nums.txt && echo same || echo different)"
 check "7za.exe x86: error path = MSVC C++ throw/catch (__CxxFrameHandler)" "System ERROR:" "$($X --quiet --max-ms 30000 --mount-rw $W32='C:\w' $Z7/7za.exe x '-oC:\w\o2' 'C:\w\nope.7z' 2>&1 || true)"
 echo "[19] dialog manager (user32 dialogs, standard controls, resources, shell folders, IShellLink) — same test built for x64 and x86"
-check "dlg.exe (x64): 61 checks (dialogs, controls, menus)"    "ALL OK 61/61"   "$($X --quiet --no-stdin --max-ms 30000 tests/dlg.exe 2>&1 || true)"
-check "dlg32.exe (x86): 61 checks (dialogs, controls, menus)"  "ALL OK 61/61"   "$($X --quiet --no-stdin --max-ms 30000 tests/dlg32.exe 2>&1 || true)"
+check "dlg.exe (x64): 88 checks (dialogs, controls, menus, status bar / toolbar / tab control)"    "ALL OK 88/88"   "$($X --quiet --no-stdin --max-ms 40000 tests/dlg.exe 2>&1 || true)"
+check "dlg32.exe (x86): 88 checks (dialogs, controls, menus, status bar / toolbar / tab control)"  "ALL OK 88/88"   "$($X --quiet --no-stdin --max-ms 40000 tests/dlg32.exe 2>&1 || true)"
 # the same real installer twice: the x86 build (32-bit files) and the x64 build (a 32-bit setup stub that probes
 # IsWow64Process and installs 64-bit files) — both bitnesses end-to-end: setup dialog → installed 7z.exe round trip
 inst_fetch() { [ -f tests/inst/$1 ] && return 0; mkdir -p tests/inst; curl -fsSL -o tests/inst/$1 https://www.7-zip.org/a/$1 2>/dev/null || curl -fsSL -o tests/inst/$1 https://github.com/ip7z/7zip/releases/download/25.01/$1 2>/dev/null || rm -f tests/inst/$1; }
@@ -378,6 +378,11 @@ if [ -f tests/inst/npp32.exe ] && [ -f tests/inst/npp64.exe ]; then
   ID=$(mktemp -d); rc=0; $X --quiet --no-stdin --max-ms 150000 --mount-rw "$ID=C:\\inst" tests/inst/npp64.exe /S '/D=C:\inst\npp' >/dev/null 2>&1 || rc=$?
   check "NSIS x64 setup: silent install exit code"   "rc=0"   "rc=$rc"
   check "NSIS x64 setup: notepad++.exe is a 64-bit PE, plugins/themes/localization written"   "PE32+ .*localization.*plugins.*themes"   "$(python3 -c "import struct;d=open('$ID/npp/notepad++.exe','rb').read();pe=struct.unpack_from('<I',d,0x3c)[0];print('PE32+' if struct.unpack_from('<H',d,pe+24)[0]==0x20b else 'PE32 ')" 2>/dev/null) $(ls $ID/npp 2>/dev/null | tr '\n' ' ')"
+  # the installed 64-bit Notepad++ itself: Scintilla (statically linked) registers its class, the document tab bar is a real
+  # SysTabControl32, the status bar a real msctls_statusbar32, comctl32 subclass chains (SetWindowSubclass x2 per window) hold
+  out=$(X64_LOG=1 X64_WNDDUMP=1 $X --no-stdin --max-ms 25000 --mount-rw "$ID/npp=C:\\nebula" $ID/npp/notepad++.exe 2>&1 3>&1 | grep -a "^\[wnd\]\|FAULT\|MessageBox\|not registered" || true)
+  check "Notepad++ x64 (installed): starts to the main window — Scintilla editors, tab bar, status bar created, no fault / error box"   '"Scintilla" "Notepad++".*"SysTabControl32" "Tab".* builtin=16 .*"msctls_statusbar32" "" parent=0 .* vis=1 .* builtin=14'   "$(echo "$out" | grep -v "FAULT\|MessageBox\|not registered" | tr '\n' ' ')"
+  check "Notepad++ x64: no fault, no exception message box during start-up"   "errors=0"   "errors=$(echo "$out" | grep -a -c "FAULT\|MessageBox\|not registered") $(echo "$out" | grep -a "FAULT\|MessageBox\|not registered" | head -1)"
   rm -rf $ID; ID=$(mktemp -d)
   out=$($X --no-stdin --max-ms 150000 --mount-rw "$ID=C:\\inst" --click 357,337@3000 --click 357,337@6000 --click 357,337@9000 --click 357,337@12000 --click 357,337@70000 --click 357,337@80000 --click 357,337@90000 --click 357,337@110000 tests/inst/npp32.exe '/D=C:\inst\npp' 2>&1 | grep -v "last blocks" || true)
   check "NSIS x86 setup: GUI wizard (license → components → directory → install → finish) exit 0"   "exit code 0"   "$out"
@@ -409,6 +414,7 @@ if [ -f $IS ]; then
     out=$(X64_LOG=1 X64_WNDDUMP=1 $X --no-stdin --max-ms 42000 --click 274,111@12000 --click 674,477@15000 --click 274,111@24000 --click 674,477@27000 --click 270,221@36000 --mount "$ID/is=C:\\nebula" $ID/is/Compil32.exe 2>&1 3>&1 | grep -a "^\[wnd\]\|\[wic\]\|\[imagelist\]\|FAULT\|RaiseException" || true)
     check "Compil32.exe (Inno IDE): PNG icons decoded by the built-in WIC and the TImageList stream read"   "decoded PNG.*ImageList_Read: 4 images\|ImageList_Read: 4 images.*decoded PNG"   "$(echo "$out" | tr '\n' ' ')"
     check "Compil32.exe: Welcome dialog driven with the mouse -> main IDE form with the Scintilla editor is visible, no fault"   '"TMainForm" "Untitled - Inno Setup Compiler.*vis=1.*"TIDEScintFileEdit".*vis=1'   "$(echo "$out" | grep -v FAULT | tr '\n' ' ')"
+    check "Compil32.exe: TToolBar (ToolbarWindow32) and TStatusBar (msctls_statusbar32) are real built-in common controls (builtin=15/14), not placeholders"   '"TToolBar" "" parent=[0-9]* at [0-9,]* 35[0-9]x2[0-9] .* builtin=15 .*"TStatusBar" "" parent=[0-9]* at 0,[0-9]* 36[0-9]x2[0-9] .* builtin=14'   "$(echo "$out" | tr '\n' ' ')"
     check "Compil32.exe: the VCL TMainMenu bar is drawn in the frame (nc=1,44) and a click on File opens a popup menu window (#32768)"   '"TMainForm" .* nc=1,44 .*"#32768" "" parent=-1 .* vis=1'   "$(echo "$out" | tr '\n' ' ')"
   fi
   rm -rf $ID

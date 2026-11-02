@@ -17,15 +17,15 @@
 #define CAPTION_H 24
 #define MENU_H 20
 #define SUPER_ADOPT(i, k) do { if (!g_wnd[i].builtin) { g_wnd[i].builtin = (k); g_wnd[i].superclassed = 1; } } while (0)
-enum { BI_NONE = 0, BI_BUTTON, BI_STATIC, BI_EDIT, BI_COMBO, BI_LISTBOX, BI_SCROLLBAR, BI_DIALOG, BI_PROGRESS, BI_LINK, BI_COMBOLIST, BI_UNSUPPORTED, BI_MSGBOX, BI_MENU };
-enum { CONT_WNDCREATE = 6 /* = CONT_CREATEWND in win32.c */, CONT_WNDDESTROY = 400, CONT_CTLPAINT = 401, CONT_DLGINIT = 402, CONT_MODAL = 403, CONT_DLGMSG = 404, CONT_SENDCMD = 405, CONT_DLGPROC = 406, CONT_ERASEBG = 407, CONT_SETPOS = 408, CONT_STREAMIN = 409, CONT_ILREAD = 410, CONT_WICREAD = 411, CONT_MENUOPEN = 412, CONT_MENUDRAW = 413, CONT_RET_VAL_ = 5 };
+enum { BI_NONE = 0, BI_BUTTON, BI_STATIC, BI_EDIT, BI_COMBO, BI_LISTBOX, BI_SCROLLBAR, BI_DIALOG, BI_PROGRESS, BI_LINK, BI_COMBOLIST, BI_UNSUPPORTED, BI_MSGBOX, BI_MENU, BI_STATUS, BI_TOOLBAR, BI_TAB };
+enum { CONT_WNDCREATE = 6 /* = CONT_CREATEWND in win32.c */, CONT_WNDDESTROY = 400, CONT_CTLPAINT = 401, CONT_DLGINIT = 402, CONT_MODAL = 403, CONT_DLGMSG = 404, CONT_SENDCMD = 405, CONT_DLGPROC = 406, CONT_ERASEBG = 407, CONT_SETPOS = 408, CONT_STREAMIN = 409, CONT_ILREAD = 410, CONT_WICREAD = 411, CONT_MENUOPEN = 412, CONT_MENUDRAW = 413, CONT_TABSEL = 414, CONT_SUBCLASS = 415, CONT_RET_VAL_ = 5 };
 #define MAX_ITEMS 512
 typedef struct {
   int used, destroyed; int parent, owner; int builtin; int superclassed; /* app-registered class whose wndproc delegates to a built-in proc (VCL TNewButton …): behaves like the built-in for painting but all messages flow through the guest wndproc */ int pid;   /* owning process: messages from other processes are posted to its queue */ char clsname[40]; u64 wndproc; u64 cls_brush; u32 cls_style; int cls_extra;
   u32 style, exstyle; u64 id, inst;
   int x, y, w, h;            /* relative to the parent's client origin (top-level: framebuffer coordinates) */
   int ncx, ncy;              /* client offset inside the window (caption/border of secondary top-level windows) */
-  char *text; int textcap; char tbuf[1024]; u32 bgcol; int bgcol_set; /* EM_SETBKGNDCOLOR */ char *stream; int stream_len, stream_cap; u64 stream_buf; u32 stream_flags; /* EM_STREAMIN in progress */   /* window text: inline buffer, grown on the heap for long edit contents (licence viewers) */
+  char *text; int textcap; char tbuf[1024]; u32 bgcol; int bgcol_set; /* EM_SETBKGNDCOLOR */ char *stream; int stream_len, stream_cap; u64 stream_buf; u32 stream_flags; /* EM_STREAMIN in progress */ void *cc; /* common-control state (comctl.inc) */ u64 sub_proc[8], sub_id[8], sub_ref[8], sub_orig; int nsub, subcur; /* comctl32 SetWindowSubclass chain: subcur = index of the subclass currently running (nsub = none) */   /* window text: inline buffer, grown on the heap for long edit contents (licence viewers) */
   u64 userdata; u64 extra[16];
   int visible, enabled, invalid, erase;
   u64 font; u64 icon; u64 menu; u64 sysmenu; int bar_hot1;   /* menu bar: highlighted item + 1 */
@@ -35,7 +35,7 @@ typedef struct {
 static Wnd g_wnd[MAX_WND]; static int g_zseq;
 static int g_focus = -1, g_capture = -1, g_active = -1;
 static int g_mouse_x, g_mouse_y, g_mouse_btn;
-static u64 g_slot_button, g_slot_static, g_slot_edit, g_slot_combo, g_slot_listbox, g_slot_dialog, g_slot_progress, g_slot_unsupported, g_slot_scrollbar, g_slot_msgbox, g_slot_combolist, g_slot_link, g_slot_menu;
+static u64 g_slot_button, g_slot_static, g_slot_edit, g_slot_combo, g_slot_listbox, g_slot_dialog, g_slot_progress, g_slot_unsupported, g_slot_scrollbar, g_slot_msgbox, g_slot_combolist, g_slot_link, g_slot_menu, g_slot_status, g_slot_toolbar, g_slot_tab, g_slot_subclass;
 static u64 g_dlg_font; static int g_msgbox_auto = 1;
 /* registered window classes */
 typedef struct { int used; int pid; char name[64]; u64 proc, brush, cursor, icon; u32 style; int extra; u64 inst; } WndClass;   /* pid: classes are per process (the procedure address only means something in its own address space) */
@@ -47,6 +47,7 @@ static u32 g_sys_colors[31];
 static void edge_rect(Surf *s, int l, int t, int r, int b, u32 tl, u32 br);
 
 static int dlg_key_message(Cpu *c, int d, GuestMsg *m);
+/* common controls (comctl.inc) */ static void s_NebulaStatusProc(Cpu *c); static void s_NebulaToolbarProc(Cpu *c); static void s_NebulaTabProc(Cpu *c); static void tabsel_resume(Cpu *c, u64 rax);
 /* menus (menu.inc) */ static void menu_bar_draw(Win32 *w, Surf *f, GdiObj *d, int i, int wx, int wy); static int menu_bar_hit(Win32 *w, int i, int fx, int fy); static int menu_top_wnd(void); static int menu_bar_press(Cpu *c, int i, u64 lp); static int menu_bar_mnemonic(Cpu *c, int i, u32 ch); static void menu_apply_bar(Win32 *w, int i); static int menu_of(u64 h); static void s_NebulaMenuProc(Cpu *c); static void menuopen_resume(Cpu *c, u64 rax); static void menudraw_resume(Cpu *c, u64 rax);
 static void modal_reexec(Cpu *c);
 static int wnd_of(u64 h) { if (h < HWND_FIRST || (h - HWND_FIRST) % 16) return -1; u64 i = (h - HWND_FIRST) / 16; if (i >= MAX_WND || !g_wnd[i].used) return -1; return (int)i; }
@@ -237,11 +238,11 @@ static void s_GetMessageExtraInfo(Cpu *c) { RET(0); }
 /* ---------- window classes ---------- */
 static int cls_find(Win32 *w, const char *name) { for (int i = 0; i < 64; i++) if (g_cls[i].used && g_cls[i].pid == w->pid && !e_stricmp(g_cls[i].name, name)) return i; return -1; }
 /* WNDCLASS(EX): x64 proc@8(16) extra@20(28) inst@24(32) icon@32(40) cursor@40(48) brush@48(56) menu@56(64) name@64(72); x86 proc@4(8) extra@12(16) inst@16(20) icon@20(24) cursor@24(28) brush@28(32) name@36(40) */
-static void register_class(Cpu *c, u64 a, int ex, int wide) { Win32 *w = W; int m = c->mode32; u64 off = ex ? (m ? 4 : 8) : 0; char name[64]; u64 np = rdp(c, a + off + (m ? 36 : 64));
+static void register_class(Cpu *c, u64 a, int ex, int wide) { Win32 *w = W; int m = c->mode32; u64 off = ex ? (m ? 4 : 0) : 0; /* WNDCLASSEX: x86 shifts every field by cbSize; x64 keeps the WNDCLASS offsets (style moves into the padding at +4) */ char name[64]; u64 np = rdp(c, a + off + (m ? 36 : 64));
   if (np < 0x10000) e_snprintf(name, sizeof name, "#%u", (u32)np); else text_in(c, np, wide, name, sizeof name);
   int i = cls_find(W, name); if (i >= 0 && g_cls[i].inst == rdp(c, a + off + (m ? 16 : 24))) { W->last_error = 1410; RET(0); return; }   /* ERROR_CLASS_ALREADY_EXISTS */
   if (i < 0) for (int k = 0; k < 64; k++) if (!g_cls[k].used) { i = k; break; } if (i < 0) { RET(0); return; }
-  WndClass *k = &g_cls[i]; k->used = 1; k->pid = w->pid; e_snprintf(k->name, sizeof k->name, "%s", name); k->style = rd32(c, a + off); k->proc = rdp(c, a + off + (m ? 4 : 8)); k->extra = (int)rd32(c, a + off + (m ? 12 : 20)); k->inst = rdp(c, a + off + (m ? 16 : 24)); k->icon = rdp(c, a + off + (m ? 20 : 32)); k->cursor = rdp(c, a + off + (m ? 24 : 40)); k->brush = rdp(c, a + off + (m ? 28 : 48));
+  WndClass *k = &g_cls[i]; k->used = 1; k->pid = w->pid; e_snprintf(k->name, sizeof k->name, "%s", name); k->style = rd32(c, a + off + (ex && !m ? 4 : 0)); k->proc = rdp(c, a + off + (m ? 4 : 8)); k->extra = (int)rd32(c, a + off + (m ? 12 : 20)); k->inst = rdp(c, a + off + (m ? 16 : 24)); k->icon = rdp(c, a + off + (m ? 20 : 32)); k->cursor = rdp(c, a + off + (m ? 24 : 40)); k->brush = rdp(c, a + off + (m ? 28 : 48));
   w->wndclass_proc = k->proc; w->wndclass_registered = 1; e_snprintf(w->wndclass_name, sizeof w->wndclass_name, "%s", name); RET(0xC001 + i); }
 static void s_RegisterClassA(Cpu *c) { register_class(c, ARG(0), 0, 0); }
 static void s_RegisterClassExA(Cpu *c) { register_class(c, ARG(0), 1, 0); }
@@ -253,20 +254,21 @@ static int builtin_of_class(const char *n) {
   if (!e_strnicmp(n, "RichEdit", 8) || !e_stricmp(n, "RICHEDIT50W")) return BI_EDIT;   /* rich edit = multi-line edit that understands RTF streams (licence viewers) */
   if (!e_stricmp(n, "Button")) return BI_BUTTON; if (!e_stricmp(n, "Static")) return BI_STATIC; if (!e_stricmp(n, "Edit")) return BI_EDIT; if (!e_stricmp(n, "ComboBox")) return BI_COMBO; if (!e_stricmp(n, "ListBox")) return BI_LISTBOX;
   if (!e_stricmp(n, "ScrollBar")) return BI_SCROLLBAR; if (!e_stricmp(n, "#32770")) return BI_DIALOG; if (!e_stricmp(n, "msctls_progress32")) return BI_PROGRESS; if (!e_stricmp(n, "SysLink")) return BI_LINK; if (!e_stricmp(n, "ComboLBox")) return BI_COMBOLIST; if (!e_strcmp(n, "#32768")) return BI_MENU;
-  if (!e_stricmp(n, "SysListView32") || !e_stricmp(n, "SysTreeView32") || !e_stricmp(n, "ToolbarWindow32") || !e_stricmp(n, "msctls_statusbar32") || !e_stricmp(n, "SysTabControl32") || !e_stricmp(n, "ReBarWindow32") || !e_stricmp(n, "tooltips_class32") || !e_stricmp(n, "msctls_trackbar32") || !e_stricmp(n, "msctls_updown32") || !e_stricmp(n, "SysHeader32") || !e_stricmp(n, "SysAnimate32") || !e_stricmp(n, "SysDateTimePick32") || !e_stricmp(n, "SysMonthCal32") || !e_stricmp(n, "ComboBoxEx32") || !e_stricmp(n, "SysIPAddress32") || !e_stricmp(n, "SysPager") || !e_stricmp(n, "MDIClient")) return BI_UNSUPPORTED;
+  if (!e_stricmp(n, "msctls_statusbar32")) return BI_STATUS; if (!e_stricmp(n, "ToolbarWindow32")) return BI_TOOLBAR; if (!e_stricmp(n, "SysTabControl32")) return BI_TAB;
+  if (!e_stricmp(n, "SysListView32") || !e_stricmp(n, "SysTreeView32") || !e_stricmp(n, "ReBarWindow32") || !e_stricmp(n, "tooltips_class32") || !e_stricmp(n, "msctls_trackbar32") || !e_stricmp(n, "msctls_updown32") || !e_stricmp(n, "SysHeader32") || !e_stricmp(n, "SysAnimate32") || !e_stricmp(n, "SysDateTimePick32") || !e_stricmp(n, "SysMonthCal32") || !e_stricmp(n, "ComboBoxEx32") || !e_stricmp(n, "SysIPAddress32") || !e_stricmp(n, "SysPager") || !e_stricmp(n, "MDIClient")) return BI_UNSUPPORTED;
   return BI_NONE; }
-static u64 builtin_slot(int bi) { switch (bi) { case BI_BUTTON: return g_slot_button; case BI_STATIC: return g_slot_static; case BI_EDIT: return g_slot_edit; case BI_COMBO: return g_slot_combo; case BI_LISTBOX: return g_slot_listbox; case BI_MENU: return g_slot_menu; case BI_SCROLLBAR: return g_slot_scrollbar; case BI_DIALOG: return g_slot_dialog; case BI_PROGRESS: return g_slot_progress; case BI_LINK: return g_slot_link; case BI_COMBOLIST: return g_slot_combolist; case BI_MSGBOX: return g_slot_dialog; default: return g_slot_unsupported; } }
+static u64 builtin_slot(int bi) { switch (bi) { case BI_BUTTON: return g_slot_button; case BI_STATIC: return g_slot_static; case BI_EDIT: return g_slot_edit; case BI_COMBO: return g_slot_combo; case BI_LISTBOX: return g_slot_listbox; case BI_MENU: return g_slot_menu; case BI_SCROLLBAR: return g_slot_scrollbar; case BI_DIALOG: return g_slot_dialog; case BI_PROGRESS: return g_slot_progress; case BI_STATUS: return g_slot_status; case BI_TOOLBAR: return g_slot_toolbar; case BI_TAB: return g_slot_tab; case BI_LINK: return g_slot_link; case BI_COMBOLIST: return g_slot_combolist; case BI_MSGBOX: return g_slot_dialog; default: return g_slot_unsupported; } }
 static Win32 *g_slot_w;   /* slot addresses are per process (each process resolves shims in its own order) — recompute when another process asks */
 static void builtin_init_slots(Win32 *w) { if (g_slot_button && g_slot_w == w) return; g_slot_w = w;
   g_slot_button = w32_shim_slot(w, "user32", "NebulaButtonProc"); g_slot_static = w32_shim_slot(w, "user32", "NebulaStaticProc"); g_slot_edit = w32_shim_slot(w, "user32", "NebulaEditProc"); g_slot_combo = w32_shim_slot(w, "user32", "NebulaComboProc");
-  g_slot_listbox = w32_shim_slot(w, "user32", "NebulaListBoxProc"); g_slot_dialog = w32_shim_slot(w, "user32", "DefDlgProcW"); g_slot_progress = w32_shim_slot(w, "user32", "NebulaProgressProc"); g_slot_unsupported = w32_shim_slot(w, "user32", "NebulaUnsupportedProc");
+  g_slot_listbox = w32_shim_slot(w, "user32", "NebulaListBoxProc"); g_slot_dialog = w32_shim_slot(w, "user32", "DefDlgProcW"); g_slot_progress = w32_shim_slot(w, "user32", "NebulaProgressProc"); g_slot_unsupported = w32_shim_slot(w, "user32", "NebulaUnsupportedProc"); g_slot_status = w32_shim_slot(w, "user32", "NebulaStatusProc"); g_slot_toolbar = w32_shim_slot(w, "user32", "NebulaToolbarProc"); g_slot_tab = w32_shim_slot(w, "user32", "NebulaTabProc"); g_slot_subclass = w32_shim_slot(w, "user32", "NebulaSubclassProc");
   g_slot_scrollbar = w32_shim_slot(w, "user32", "NebulaScrollBarProc"); g_slot_msgbox = w32_shim_slot(w, "user32", "NebulaMsgBoxProc"); g_slot_combolist = w32_shim_slot(w, "user32", "NebulaComboListProc"); g_slot_menu = w32_shim_slot(w, "user32", "NebulaMenuProc"); g_slot_link = w32_shim_slot(w, "user32", "NebulaLinkProc");
   { GdiObj *f = gdi_new(w, K_FONT); f->font_h = 13; f->font_em = 11; g_dlg_font = f->handle; } }
 static void s_GetClassInfoExA(Cpu *c) { RET(0); }
-static void s_GetClassInfoExW(Cpu *c) { char name[64]; if (ARG(1) < 0x10000) { RET(0); return; } text_in(c, ARG(1), 1, name, sizeof name); int i = cls_find(W, name); int bi = builtin_of_class(name); u64 a = ARG(2); int m = c->mode32; u64 off = m ? 4 : 8;
+static void s_GetClassInfoExW(Cpu *c) { char name[64]; if (ARG(1) < 0x10000) { RET(0); return; } text_in(c, ARG(1), 1, name, sizeof name); int i = cls_find(W, name); int bi = builtin_of_class(name); u64 a = ARG(2); int m = c->mode32; u64 off = m ? 4 : 0, so = m ? 4 : 4; /* WNDCLASSEX layout: see register_class */
   if (i < 0 && !bi) { W->last_error = 1411; RET(0); return; } u8 *p = mem_ptr(c->mem, a, m ? 48 : 80, 1); if (p) e_memset(p, 0, m ? 48 : 80); wr32(c, a, m ? 48 : 80);
-  if (i >= 0) { wr32(c, a + off, g_cls[i].style); wrp(c, a + off + (m ? 4 : 8), g_cls[i].proc); wr32(c, a + off + (m ? 12 : 20), (u32)g_cls[i].extra); wrp(c, a + off + (m ? 16 : 24), g_cls[i].inst); wrp(c, a + off + (m ? 28 : 48), g_cls[i].brush); }
-  else { builtin_init_slots(W); wrp(c, a + off + (m ? 4 : 8), builtin_slot(bi)); wr32(c, a + off, 0x0008 | 0x0003); }
+  if (i >= 0) { wr32(c, a + so, g_cls[i].style); wrp(c, a + off + (m ? 4 : 8), g_cls[i].proc); wr32(c, a + off + (m ? 12 : 20), (u32)g_cls[i].extra); wrp(c, a + off + (m ? 16 : 24), g_cls[i].inst); wrp(c, a + off + (m ? 28 : 48), g_cls[i].brush); }
+  else { builtin_init_slots(W); wrp(c, a + off + (m ? 4 : 8), builtin_slot(bi)); wr32(c, a + so, 0x0008 | 0x0003); }
   wrp(c, a + off + (m ? 36 : 64), ARG(1)); RET(1); }
 static void s_GetClassInfoW(Cpu *c) { char name[64]; if (ARG(1) < 0x10000) { RET(0); return; } text_in(c, ARG(1), 1, name, sizeof name); int i = cls_find(W, name); int bi = builtin_of_class(name); u64 a = ARG(2); int m = c->mode32; if (i < 0 && !bi) { RET(0); return; } u8 *p = mem_ptr(c->mem, a, m ? 40 : 72, 1); if (p) e_memset(p, 0, m ? 40 : 72);
   builtin_init_slots(W); if (i >= 0) { wr32(c, a, g_cls[i].style); wrp(c, a + (m ? 4 : 8), g_cls[i].proc); wrp(c, a + (m ? 28 : 48), g_cls[i].brush); } else wrp(c, a + (m ? 4 : 8), builtin_slot(bi)); wrp(c, a + (m ? 36 : 64), ARG(1)); RET(1); }
@@ -349,7 +351,7 @@ static void wndcreate_resume(Cpu *c, u64 rax) {
 /* DestroyWindow: WM_DESTROY to the window, then to its descendants, then WM_NCDESTROY (guest classes only), then free */
 static struct { int list[64]; int n, pos, phase; int root; } g_destroy[6]; static int g_ndestroy;
 static void destroy_collect(int i, int *list, int *n) { if (*n >= 64) return; list[(*n)++] = i; for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].parent == i) destroy_collect(k, list, n); }
-static void wnd_free(int i) { Wnd *n = &g_wnd[i]; items_free(n); if (n->text && n->text != n->tbuf) emu_free(n->text); if (n->stream) { emu_free(n->stream); n->stream = 0; } n->text = n->tbuf; n->textcap = sizeof n->tbuf; n->tbuf[0] = 0; kill_timers_of(i); if (g_focus == i) g_focus = -1; if (g_capture == i) g_capture = -1; if (g_active == i) g_active = -1; n->used = 0; n->destroyed = 1; }
+static void wnd_free(int i) { Wnd *n = &g_wnd[i]; items_free(n); if (n->text && n->text != n->tbuf) emu_free(n->text); if (n->stream) { emu_free(n->stream); n->stream = 0; } if (n->cc) { emu_free(n->cc); n->cc = 0; } n->nsub = 0; n->subcur = 0; n->sub_orig = 0; n->text = n->tbuf; n->textcap = sizeof n->tbuf; n->tbuf[0] = 0; kill_timers_of(i); if (g_focus == i) g_focus = -1; if (g_capture == i) g_capture = -1; if (g_active == i) g_active = -1; n->used = 0; n->destroyed = 1; }
 /* process exit: its windows vanish without WM_DESTROY (no code left to run them) and its window classes are released */
 void user_proc_exit(Win32 *w) { for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].pid == w->pid && w->pid != 0) { g_wnd[k].destroyed = 1; g_wnd[k].visible = 0; wnd_free(k); if (k == 0) sync_main(w); }
   for (int i = 0; i < 64; i++) if (g_cls[i].used && g_cls[i].pid == w->pid && w->pid != 0) g_cls[i].used = 0; wnd_invalidate_all(); }
@@ -592,6 +594,8 @@ static void s_GetClipCursor(Cpu *c) { u64 r = ARG(0); wr32(c, r, 0); wr32(c, r +
 static void s_LoadCursorA(Cpu *c) { RET(0x7A001); }
 static void s_LoadCursorFromFileW(Cpu *c) { RET(0x7A001); }
 static void s_LoadIconA(Cpu *c) { RET(0x7B001 + (ARG(1) & 0xfff) * 0x10); }
+static void s_LoadIconWithScaleDown(Cpu *c) { if (!ARG(4)) { RET(0x80070057); return; } wrp(c, ARG(4), 0x7B001 + (ARG(1) & 0xfff) * 0x10); RET(0); }
+static void s_LoadIconMetric(Cpu *c) { if (!ARG(3)) { RET(0x80070057); return; } wrp(c, ARG(3), 0x7B001 + (ARG(1) & 0xfff) * 0x10); RET(0); }
 static void s_LoadImageA(Cpu *c) { RET(0x7C001 + (ARG(1) & 0xfff) * 0x10); }
 static void s_LoadImageW(Cpu *c) { u32 type = (u32)ARG(2); if (type == 0 /* IMAGE_BITMAP */ && ARG(1) < 0x10000) { /* RT_BITMAP → a DIB at any depth becomes a real 32-bpp surface */ u64 e = rsrc_lookup(c, ARG(0), ARG(1), 2, 1, 0); if (e) { u64 base = ARG(0) ? ARG(0) : W->image_base; u64 bmi = base + rd32(c, e); u32 hsz = rd32(c, bmi); s32 bw = (s32)rd32(c, bmi + 4), bh = (s32)rd32(c, bmi + 8); u16 bpp = rd16(c, bmi + 14); u32 comp = rd32(c, bmi + 16), clr = rd32(c, bmi + 32); if (bh < 0) bh = -bh;
       if (bw > 0 && bh > 0 && bw < 4096 && bh < 4096 && (comp == 0 || comp == 3)) { u64 bits; u64 h = make_bitmap(c, bw, bh, 0, &bits); if (h) { u64 pal = bpp <= 8 ? (u64)(clr ? clr : 1u << bpp) * 4 : (comp == 3 ? 12 : 0); u32 *px = (u32 *)mem_ptr(c->mem, bits, (u64)bw * bh * 4, 1); if (px) dib_decode(c, bmi, bmi + hsz + pal, px, bw, bh, 0); RET(h); return; } } } }
@@ -751,10 +755,20 @@ static void s_InitCommonControls(Cpu *c) { (void)c; }
 static void s_InitCommonControlsEx(Cpu *c) { RET(1); }
 static void s_CreateStatusWindowW(Cpu *c) { call_shim_tail(c, s_CreateWindowExW, 0, 0, 0, 0); RET(0); }
 static void s_CreateToolbarEx(Cpu *c) { RET(0); }
-static void s_SetWindowSubclass(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } /* chain through the extra slots: subclass proc + the previous proc */ g_wnd[i].extra[14] = g_wnd[i].wndproc; g_wnd[i].extra[15] = ARG(3); g_wnd[i].wndproc = ARG(1); RET(1); }
-static void s_RemoveWindowSubclass(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } if (g_wnd[i].wndproc == ARG(1) && g_wnd[i].extra[14]) { g_wnd[i].wndproc = g_wnd[i].extra[14]; g_wnd[i].extra[14] = 0; } RET(1); }
-static void s_DefSubclassProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } u64 prev = g_wnd[i].extra[14]; if (!prev) { def_window_proc(c, i, (u32)ARG(1), ARG(2), ARG(3)); return; } w32_push_cont(c, CONT_RET_RAX, 0); w32_guest_call(c, prev, ARG(0), ARG(1), ARG(2), ARG(3)); }
-static void s_GetWindowSubclass(Cpu *c) { int i = wnd_of(ARG(0)); if (i >= 0 && ARG(3)) wrp(c, ARG(3), g_wnd[i].extra[15]); RET(i >= 0 && g_wnd[i].extra[14] != 0); }
+/* comctl32 window subclassing: a chain of SUBCLASSPROCs (newest first) in front of the original window procedure; the window's
+   wndproc becomes the NebulaSubclassProc slot, DefSubclassProc walks to the next older entry, then to the original procedure. */
+static int sub_find(Wnd *n, u64 proc, u64 id) { for (int k = 0; k < n->nsub; k++) if (n->sub_proc[k] == proc && n->sub_id[k] == id) return k; return -1; }
+static void sub_call(Cpu *c, int i, int k, u64 hwnd, u64 msg, u64 wp, u64 lp) { Wnd *n = &g_wnd[i]; if (k < 0 && !n->sub_orig) { def_window_proc(c, i, (u32)msg, wp, lp); return; } w32_push_cont(c, CONT_SUBCLASS, (u64)i); W->cont[W->ncont - 1].data[1] = (u64)n->subcur;
+  if (k < 0) { n->subcur = -1; w32_guest_call(c, n->sub_orig, hwnd, msg, wp, lp); return; }
+  n->subcur = k; w32_guest_call6(c, n->sub_proc[k], hwnd, msg, wp, lp, n->sub_id[k], n->sub_ref[k]); }
+static void subclass_resume(Cpu *c, u64 rax) { Win32 *w = W; int ci = w->ncont - 1; int i = (int)w->cont[ci].data[0]; if (wnd_alive(i)) g_wnd[i].subcur = (int)(s64)w->cont[ci].data[1]; w32_cont_finish(c, rax); }
+static void s_NebulaSubclassProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } sub_call(c, i, g_wnd[i].nsub - 1, ARG(0), ARG(1), ARG(2), ARG(3)); }
+static void s_SetWindowSubclass(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } Wnd *n = &g_wnd[i]; int k = sub_find(n, ARG(1), ARG(2)); if (k >= 0) { n->sub_ref[k] = ARG(3); RET(1); return; } if (n->nsub >= 8) { RET(0); return; }
+  builtin_init_slots(W); if (n->nsub == 0) { n->sub_orig = n->wndproc; n->wndproc = g_slot_subclass; } k = n->nsub++; n->sub_proc[k] = ARG(1); n->sub_id[k] = ARG(2); n->sub_ref[k] = ARG(3); n->subcur = n->nsub; RET(1); }
+static void s_RemoveWindowSubclass(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } Wnd *n = &g_wnd[i]; int k = sub_find(n, ARG(1), ARG(2)); if (k < 0) { RET(0); return; } for (int q = k; q + 1 < n->nsub; q++) { n->sub_proc[q] = n->sub_proc[q + 1]; n->sub_id[q] = n->sub_id[q + 1]; n->sub_ref[q] = n->sub_ref[q + 1]; } n->nsub--; if (n->subcur > k) n->subcur--;
+  if (n->nsub == 0 && n->wndproc == g_slot_subclass) { n->wndproc = n->sub_orig; n->sub_orig = 0; } RET(1); }
+static void s_DefSubclassProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } Wnd *n = &g_wnd[i]; int k = n->subcur; if (k < 0) { if (n->sub_orig) { w32_push_cont(c, CONT_RET_RAX, 0); w32_guest_call(c, n->sub_orig, ARG(0), ARG(1), ARG(2), ARG(3)); } else def_window_proc(c, i, (u32)ARG(1), ARG(2), ARG(3)); return; } if (k > n->nsub) k = n->nsub; sub_call(c, i, k - 1, ARG(0), ARG(1), ARG(2), ARG(3)); }
+static void s_GetWindowSubclass(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } int k = sub_find(&g_wnd[i], ARG(1), ARG(2)); if (k >= 0 && ARG(3)) wrp(c, ARG(3), g_wnd[i].sub_ref[k]); RET(k >= 0); }
 static void s_TaskDialogIndirect(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), 1); if (ARG(2)) wr32(c, ARG(2), 0); if (ARG(3)) wr32(c, ARG(3), 0); RET(0); }
 static void s_TaskDialog(Cpu *c) { if (ARG(6)) wr32(c, ARG(6), 1); RET(0); }
 
@@ -1128,7 +1142,7 @@ static void s_NebulaUnsupportedProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0)
   if (msg == 0x1002 || msg == 0x1032 || msg == 0x1104) { RET(0); return; }   /* LVM_GETITEMCOUNT ... */
   if (ctl_common(c, i, msg, ARG(2), ARG(3))) return; def_window_proc(c, i, msg, ARG(2), ARG(3)); }
 /* host-side direct invocation of a builtin class procedure (no guest round trip; used for WM_CREATE/WM_DESTROY/focus of builtins) */
-static void builtin_proc_direct(Cpu *c, int i, u32 msg, u64 wp, u64 lp) { switch (g_wnd[i].builtin) { case BI_MENU: call_shim_tail(c, s_NebulaMenuProc, HWND_OF(i), msg, wp, lp); break; case BI_BUTTON: call_shim_tail(c, s_NebulaButtonProc, HWND_OF(i), msg, wp, lp); break; case BI_STATIC: case BI_LINK: call_shim_tail(c, s_NebulaStaticProc, HWND_OF(i), msg, wp, lp); break; case BI_EDIT: call_shim_tail(c, s_NebulaEditProc, HWND_OF(i), msg, wp, lp); break; case BI_COMBO: call_shim_tail(c, s_NebulaComboProc, HWND_OF(i), msg, wp, lp); break; case BI_LISTBOX: case BI_COMBOLIST: call_shim_tail(c, s_NebulaListBoxProc, HWND_OF(i), msg, wp, lp); break; case BI_PROGRESS: call_shim_tail(c, s_NebulaProgressProc, HWND_OF(i), msg, wp, lp); break; case BI_SCROLLBAR: call_shim_tail(c, s_NebulaScrollBarProc, HWND_OF(i), msg, wp, lp); break; case BI_DIALOG: case BI_MSGBOX: break; default: call_shim_tail(c, s_NebulaUnsupportedProc, HWND_OF(i), msg, wp, lp); break; } }
+static void builtin_proc_direct(Cpu *c, int i, u32 msg, u64 wp, u64 lp) { switch (g_wnd[i].builtin) { case BI_MENU: call_shim_tail(c, s_NebulaMenuProc, HWND_OF(i), msg, wp, lp); break; case BI_BUTTON: call_shim_tail(c, s_NebulaButtonProc, HWND_OF(i), msg, wp, lp); break; case BI_STATIC: case BI_LINK: call_shim_tail(c, s_NebulaStaticProc, HWND_OF(i), msg, wp, lp); break; case BI_EDIT: call_shim_tail(c, s_NebulaEditProc, HWND_OF(i), msg, wp, lp); break; case BI_COMBO: call_shim_tail(c, s_NebulaComboProc, HWND_OF(i), msg, wp, lp); break; case BI_LISTBOX: case BI_COMBOLIST: call_shim_tail(c, s_NebulaListBoxProc, HWND_OF(i), msg, wp, lp); break; case BI_PROGRESS: call_shim_tail(c, s_NebulaProgressProc, HWND_OF(i), msg, wp, lp); break; case BI_STATUS: call_shim_tail(c, s_NebulaStatusProc, HWND_OF(i), msg, wp, lp); break; case BI_TOOLBAR: call_shim_tail(c, s_NebulaToolbarProc, HWND_OF(i), msg, wp, lp); break; case BI_TAB: call_shim_tail(c, s_NebulaTabProc, HWND_OF(i), msg, wp, lp); break; case BI_SCROLLBAR: call_shim_tail(c, s_NebulaScrollBarProc, HWND_OF(i), msg, wp, lp); break; case BI_DIALOG: case BI_MSGBOX: break; default: call_shim_tail(c, s_NebulaUnsupportedProc, HWND_OF(i), msg, wp, lp); break; } }
 
 /* ---------- dialogs ---------- */
 static int dlg_find_id(int d, u64 id) { for (int k = 0; k < MAX_WND; k++) if (wnd_alive(k) && g_wnd[k].parent == d && g_wnd[k].id == id) return k; for (int k = 0; k < MAX_WND; k++) if (wnd_alive(k) && g_wnd[k].id == id && wnd_is_child_of(k, d)) return k; return -1; }
@@ -1352,6 +1366,8 @@ void gdi_cont_resume(Cpu *c, int kind, u64 rax) {
     case CONT_WICREAD: wicread_resume(c, rax); return;
     case CONT_MENUOPEN: menuopen_resume(c, rax); return;
     case CONT_MENUDRAW: menudraw_resume(c, rax); return;
+    case CONT_TABSEL: tabsel_resume(c, rax); return;
+    case CONT_SUBCLASS: subclass_resume(c, rax); return;
     case CONT_DLGINIT: dlginit_resume(c, rax); return;
     case CONT_DLGPROC: dlgproc_resume(c, rax); return;
     case CONT_MODAL: { int m = g_nmodal - 1; if (m >= 0 && g_modal[m].phase == 2) { u64 res = modal_result(w, m); g_nmodal--; w32_cont_finish(c, res); return; } modal_resume(c, rax); return; }
@@ -1373,7 +1389,7 @@ void gdi_set_msgbox_auto(int on) { g_msgbox_auto = on; }
   S(OpenClipboard), S(CloseClipboard), S(EmptyClipboard), S(SetClipboardData), S(GetClipboardData), S(IsClipboardFormatAvailable), S(GetClipboardSequenceNumber), S(CountClipboardFormats), S(EnumClipboardFormats), S(GetClipboardOwner), S(SetClipboardViewer), S(ChangeClipboardChain), S(AddClipboardFormatListener), S(RemoveClipboardFormatListener), S(GetClipboardFormatNameW), SA("GetClipboardFormatNameA", GetClipboardFormatNameW), S(RegisterClipboardFormatW), S(RegisterWindowMessageW), S(RegisterWindowMessageA), \
   S(SetScrollInfo), S(GetScrollInfo), S(SetScrollPos), S(GetScrollPos), S(SetScrollRange), S(GetScrollRange), S(ShowScrollBar), S(EnableScrollBar), S(ScrollWindowEx), S(ScrollWindow), S(LoadAcceleratorsW), S(LoadAcceleratorsA), S(CreateAcceleratorTableW), SA("CreateAcceleratorTableA", CreateAcceleratorTableW), S(DestroyAcceleratorTable), S(TranslateAcceleratorW), S(TranslateAcceleratorA), SA("TranslateAccelerator", TranslateAcceleratorA), \
   S(CreateCaret), S(DestroyCaret), S(ShowCaret), S(HideCaret), S(SetCaretPos), S(GetCaretPos), S(SetCaretBlinkTime), S(GetCaretBlinkTime), S(InitCommonControls), S(InitCommonControlsEx), \
-  S(CreateStatusWindowW), S(CreateToolbarEx), S(SetWindowSubclass), S(RemoveWindowSubclass), S(DefSubclassProc), S(GetWindowSubclass), S(TaskDialogIndirect), S(TaskDialog), S(SetSysColors), \
+  S(CreateStatusWindowW), S(CreateToolbarEx), S(LoadIconWithScaleDown), S(LoadIconMetric), S(SetWindowSubclass), S(RemoveWindowSubclass), S(NebulaSubclassProc), S(DefSubclassProc), S(GetWindowSubclass), S(TaskDialogIndirect), S(TaskDialog), S(SetSysColors), \
   S(NebulaButtonProc), S(NebulaStaticProc), S(NebulaLinkProc), S(NebulaEditProc), S(NebulaListBoxProc), S(NebulaComboListProc), S(NebulaComboProc), S(NebulaProgressProc), S(NebulaScrollBarProc), S(NebulaUnsupportedProc), S(NebulaMsgBoxProc), S(NebulaBrowseProc), \
   S(GetDlgCtrlID), S(SendDlgItemMessageW), S(SendDlgItemMessageA), S(SetDlgItemTextW), S(SetDlgItemTextA), S(GetDlgItemTextW), S(GetDlgItemTextA), S(SetDlgItemInt), S(GetDlgItemInt), S(CheckDlgButton), S(IsDlgButtonChecked), S(CheckRadioButton), S(MapDialogRect), S(GetDialogBaseUnits), S(GetNextDlgTabItem), S(GetNextDlgGroupItem), \
   S(DefDlgProcW), S(DefDlgProcA), S(CreateDialogIndirectParamW), S(CreateDialogIndirectParamA), S(CreateDialogParamW), S(CreateDialogParamA), S(DialogBoxIndirectParamW), S(DialogBoxIndirectParamA), S(DialogBoxParamW), S(DialogBoxParamA), S(EndDialog), S(IsDialogMessageW), S(IsDialogMessageA), S(IsDialogMessage), \

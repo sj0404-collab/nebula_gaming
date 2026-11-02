@@ -112,6 +112,8 @@ static void s_GetUserProfileDirectoryW(Cpu *c) { static const char p[] = "C:\\Us
 static void s_CoTaskMemFree(Cpu *c) { RET(0); }
 static void s_GetBestRoute2(Cpu *c) { RET(1168); }   /* ERROR_NOT_FOUND */
 static void s_SymInitialize(Cpu *c) { W->last_error = 87; RET(0); }
+static void s_ImageNtHeader(Cpu *c) { u64 base = ARG(0); if (!base || rd16(c, base) != 0x5A4D) { RET(0); return; } u32 e = rd32(c, base + 0x3c); if (e > 0x1000 || rd32(c, base + e) != 0x4550) { RET(0); return; } RET(base + e); }
+static void s_ImageRvaToVa(Cpu *c) { u64 nt = ARG(0), base = ARG(1), rva = ARG(2); if (!nt) { RET(0); return; } u16 nsec = rd16(c, nt + 6), opt = rd16(c, nt + 20); u64 sec = nt + 24 + opt; for (int k = 0; k < nsec; k++, sec += 40) { u32 va = rd32(c, sec + 12), vs = rd32(c, sec + 8), raw = rd32(c, sec + 20); if (rva >= va && rva < va + vs) { RET(base + raw + (rva - va)); return; } } RET(0); }
 static void s_IsThreadAFiber(Cpu *c) { RET(0); }
 static void s_GetHostNameW(Cpu *c) { static const char h[] = "nebula"; if ((u32)ARG(1) > 6) { for (int i = 0; i < 7; i++) wr16(c, ARG(0) + 2 * i, (u8)h[i]); RET(0); return; } W->last_error = 10014; RET(-1); }
 static void s_GlobalSize(Cpu *c) { RET(w32_heap_size(W, ARG(0))); }
@@ -127,9 +129,9 @@ static void s_CreateMemoryResourceNotification(Cpu *c) { KObj *k = 0; int ex = 0
 static void s_GetTimeZoneInformationForYear(Cpu *c) { u8 *p = mem_ptr(c->mem, ARG(2), 172, 1); if (p) { e_memset(p, 0, 172); static const char n[] = "UTC"; for (int i = 0; i < 4; i++) { p[4 + 2 * i] = (u8)n[i]; p[88 + 2 * i] = (u8)n[i]; } } RET(1); }
 
 #define BUN_SHIMS \
-  S(GetUserProfileDirectoryW), S(CoTaskMemFree), S(GetBestRoute2), S(SymInitialize), SA("SymCleanup", ret0), SA("SymFromAddr", ret0), SA("SymFunctionTableAccess64", ret0), SA("SymGetLineFromAddr64", ret0), \
+  S(GetUserProfileDirectoryW), S(CoTaskMemFree), S(GetBestRoute2), S(SymInitialize), S(ImageNtHeader), S(ImageRvaToVa), SA("SymCleanup", ret0), SA("SymFromAddr", ret0), SA("SymFunctionTableAccess64", ret0), SA("SymGetLineFromAddr64", ret0), \
   SA("SymGetModuleBase64", ret0), SA("SymGetOptions", ret0), SA("SymSetOptions", ret0), SA("SymGetSearchPathW", ret0), SA("SymSetSearchPathW", ret0), SA("StackWalk64", ret0), SA("MiniDumpWriteDump", ret0), SA("UnDecorateSymbolName", ret0), \
-  SA("CertOpenStore", ret0), SA("CertOpenSystemStoreW", ret0), SA("CertCloseStore", ret1), SA("CertEnumCertificatesInStore", ret0), SA("CertFindCertificateInStore", ret0), SA("CertDuplicateCertificateContext", ret0), SA("CertFreeCertificateContext", ret1), \
+  SA("CertOpenStore", ret0), SA("CryptQueryObject", ret0), SA("CryptMsgGetParam", ret0), SA("CryptMsgClose", ret1), SA("CertGetNameStringW", ret0), SA("CertGetCertificateChain", ret0), SA("CertFreeCertificateChain", ret1), SA("CertVerifyCertificateChainPolicy", ret0), SA("CryptDecodeObject", ret0), SA("CertOpenSystemStoreW", ret0), SA("CertCloseStore", ret1), SA("CertEnumCertificatesInStore", ret0), SA("CertFindCertificateInStore", ret0), SA("CertDuplicateCertificateContext", ret0), SA("CertFreeCertificateContext", ret1), \
   SA("CertGetCertificateContextProperty", ret0), SA("CertGetEnhancedKeyUsage", ret0), SA("CryptCreateHash", ret0), SA("CryptDecrypt", ret0), SA("CryptDestroyHash", ret1), SA("CryptDestroyKey", ret1), SA("CryptEnumProvidersW", ret0), \
   SA("CryptExportKey", ret0), SA("CryptGetProvParam", ret0), SA("CryptGetUserKey", ret0), SA("CryptSetHashParam", ret0), SA("CryptSignHashW", ret0), \
   S(RtlGetFullPathName_U), S(RtlEqualUnicodeString), S(RtlUpcaseUnicodeChar), S(RtlGetSystemTimePrecise), S(NtLockFile), S(NtUnlockFile), S(Module32First), SA("Module32Next", Module32First), SA("Module32FirstW", Module32First), SA("Module32NextW", Module32First), S(GetNamedPipeInfo), S(wcsrtombs), \

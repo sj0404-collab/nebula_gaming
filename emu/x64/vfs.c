@@ -346,6 +346,8 @@ void vfs_release_proc(ProcFs *p) { ProcFs *save = vfs_P; vfs_P = p; for (int k =
 void vfs_close_all(void) { vfs_release_proc(&g_root_fs); e_snprintf(g_root_fs.cwd, sizeof g_root_fs.cwd, "C:\\nebula"); g_root_fs.nenv = 0; g_root_fs.env_dirty = 1; for (int i = 0; i < PIPE_MAX; i++) g_pipes[i].used = 0; for (int i = 0; i < KOBJ_MAX; i++) g_kobjs[i].used = 0; for (int i = 0; i < MAP_MAX; i++) g_maps[i].used = 0; g_in_pos = 0; g_in_len = 0; g_in_eof = 0; g_in_wait = 0; vfs_P = &g_root_fs; }
 
 /* ---------- directory enumeration (FindFirstFile semantics) ---------- */
+static int glob_match(const char *pat, const char *s);
+int vfs_glob_match(const char *pat, const char *s) { return glob_match(pat, s); }
 static int glob_match(const char *pat, const char *s) {
   if (!*pat) return !*s;
   if (*pat == '*') { for (;; s++) { if (glob_match(pat + 1, s)) return 1; if (!*s) return 0; } }
