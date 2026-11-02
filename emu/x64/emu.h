@@ -189,7 +189,7 @@ typedef struct {
   int wnd, ox, oy, vw, vh;            /* window DC: window index+1 (-1 = whole screen), framebuffer origin and visible size */
   /* BITMAP */ int bw, bh; u64 bits; /* guest address of BGRA pixels */
   /* BRUSH/PEN */ u32 color; int pen_width;
-  /* FONT */ int font_h; int font_bold;
+  /* FONT */ int font_h; int font_bold; int font_em;   /* font_h = cell (line) height; font_em = em height the character width is derived from (0 = same as font_h) */
   /* RGN */ int rx, ry, rw, rh; int npts; s32 pts[64];
 } GdiObj;
 

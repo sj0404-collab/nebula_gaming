@@ -369,4 +369,13 @@ for V in "7z2501.exe x86 32-bit" "7z2501-x64.exe x64 64-bit"; do
     rm -rf $ID
   else echo "  skip $B (no $1 and no network)"; fi
 done
+# a real MSVC x64 GUI program with dialog templates + common controls: PuTTY reaches its configuration dialog
+# (About box opens through the dialog manager); SysTreeView32 is still reported as not implemented
+PT=tests/inst/putty.exe; [ -f $PT ] || curl -fsSL -m 60 -o $PT https://the.earth.li/~sgtatham/putty/latest/w64/putty.exe 2>/dev/null || rm -f $PT
+if [ -f $PT ]; then
+  out=$($X --no-stdin --max-ms 4000 --click 50,415@2000 $PT 2>&1 | grep -v "last blocks" || true)
+  check "putty.exe (x64, MSVC): configuration dialog + About box are shown, no fault"   "time limit reached"   "$out"
+  check "putty.exe: frames presented"   "[1-9][0-9]* frames"   "$out"
+  check "putty.exe: the missing common control is reported honestly"   "SysTreeView32.*not implemented"   "$out"
+else echo "  skip putty.exe (no network)"; fi
 [ $fail = 0 ] && echo "ALL OK" || { echo "FAILURES"; exit 1; }
