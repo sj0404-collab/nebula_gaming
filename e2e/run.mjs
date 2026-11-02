@@ -406,6 +406,25 @@ await test('x64: hello32.exe (32-bit x86 PE32) runs as a 32-bit process to exit 
   await page.screenshot({ path: resolve(SHOTS, 'x64-hello32.png') });
   await closeAll();
 });
+await test('x64: dlg.exe — user32 dialog manager (resource template, standard controls, nested modal, MessageBox, IShellLink) passes 42/42 as a 64-bit process', async () => {
+  const w = await x64Open();
+  await w.locator('[data-x64-exe="dlg.exe"]').click();
+  await w.locator('[data-x64-run]').click();
+  await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout: 90_000 });
+  const con = await w.locator('[data-x64-console]').innerText();
+  expect(/ALL OK 42\/42/.test(con), 'dlg.exe checks failed: ' + con.slice(0, 800));
+  await page.screenshot({ path: resolve(SHOTS, 'x64-dlg.png') });
+  await closeAll();
+});
+await test('x64: dlg32.exe — the same dialog-manager test as a 32-bit PE32 process passes 42/42', async () => {
+  const w = await x64Open();
+  await w.locator('[data-x64-exe="dlg32.exe"]').click();
+  await w.locator('[data-x64-run]').click();
+  await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout: 90_000 });
+  const con = await w.locator('[data-x64-console]').innerText();
+  expect(/ALL OK 42\/42/.test(con), 'dlg32.exe checks failed: ' + con.slice(0, 800));
+  await closeAll();
+});
 await test('x64: seh32.exe — 32-bit structured exception handling (fs:[0] chain, RtlUnwind, context fix-up, VEH)', async () => {
   const w = await x64Open();
   await w.locator('[data-x64-exe="seh32.exe"]').click();
