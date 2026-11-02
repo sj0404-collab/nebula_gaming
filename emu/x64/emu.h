@@ -191,6 +191,7 @@ typedef struct {
   int clip_on, cl, ct, cr, cb;        /* DC: clip rectangle in device coordinates (IntersectClipRect / BeginPaint) */
   int save_depth;                     /* DC: SaveDC nesting */
   /* BITMAP */ int bw, bh; u64 bits; /* guest address of BGRA pixels */
+  int dib_bpp, dib_stride, dib_section; u64 dib_native; u32 *dib_pal; int dib_ncol; u8 *dib_native_prev; u32 *dib_shadow_prev; /* non-32-bpp DIB section: guest-visible native bits + 32-bpp shadow at `bits`, synced in dib_sync() */
   /* BRUSH/PEN */ u32 color; int pen_width;
   /* FONT */ int font_h; int font_bold; int font_em;   /* font_h = cell (line) height; font_em = em height the character width is derived from (0 = same as font_h) */
   /* RGN */ int rx, ry, rw, rh; int npts; s32 pts[64];

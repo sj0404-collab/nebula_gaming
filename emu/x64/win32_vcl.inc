@@ -72,14 +72,14 @@ static int dib_decode(Cpu *c, u64 bmi, u64 bits, u32 *dst, int dw, int dh, int f
         case 24: v = row[x * 3] | (row[x * 3 + 1] << 8) | (row[x * 3 + 2] << 16); break; default: v = *(const u32 *)(row + x * 4); break; }
       d[x] = v; } }
   return 1; }
-static void s_SetDIBits(Cpu *c) { /* (hdc, hbm, start, lines, bits, bmi, usage) */ GdiObj *bm = gdi_get(W, ARG(1)); u64 bmi = ARG(5); if (!bm || bm->kind != K_BITMAP || !bmi) { RET(0); return; }
+static void s_SetDIBits(Cpu *c) { /* (hdc, hbm, start, lines, bits, bmi, usage) */ GdiObj *bm = gdi_get(W, ARG(1)); u64 bmi = ARG(5); if (!bm || bm->kind != K_BITMAP || !bmi) { RET(0); return; } dib_sync(W, bm);
   u32 *tmp = emu_alloc((size_t)bm->bw * bm->bh * 4); if (!tmp) { RET(0); return; } e_memset(tmp, 0, (size_t)bm->bw * bm->bh * 4);
   if (!dib_decode(c, bmi, ARG(4), tmp, bm->bw, bm->bh, 0)) { emu_free(tmp); w32_report(W, "SetDIBits: compressed DIB not supported"); RET(0); return; }
   u32 *px = (u32 *)mem_ptr(c->mem, bm->bits, (u64)bm->bw * bm->bh * 4, 1); if (px) for (int y = 0; y < bm->bh; y++) e_memcpy(px + (size_t)(bm->font_bold ? bm->bh - 1 - y : y) * bm->bw, tmp + (size_t)y * bm->bw, (size_t)bm->bw * 4);
   emu_free(tmp); RET((u32)ARG(3)); }
 static void s_CreateDIBitmap(Cpu *c) { /* (hdc, bmih, flags, bits, bmi, usage) */ u64 h = ARG(1); u32 hs = rd32(c, h); int core = hs == 12; s32 bw = core ? (s16)rd16(c, h + 4) : (s32)rd32(c, h + 4), bh = core ? (s16)rd16(c, h + 6) : (s32)rd32(c, h + 8); if (bh < 0) bh = -bh;
   u64 bits = 0; u64 hb = make_bitmap(c, bw, bh, 0, &bits); if (!hb) { RET(0); return; } if ((ARG(2) & 4) && ARG(3) && ARG(4)) { u32 *px = (u32 *)mem_ptr(c->mem, bits, (u64)bw * bh * 4, 1); if (px && !dib_decode(c, ARG(4), ARG(3), px, bw, bh, 0)) w32_report(W, "CreateDIBitmap: compressed DIB not supported"); } RET(hb); }
-static void s_GetDIBits(Cpu *c) { /* (hdc, hbm, start, lines, bits, bmi, usage) */ GdiObj *bm = gdi_get(W, ARG(1)); u64 bmi = ARG(5), bits = ARG(4); if (!bm || bm->kind != K_BITMAP || !bmi) { RET(0); return; }
+static void s_GetDIBits(Cpu *c) { /* (hdc, hbm, start, lines, bits, bmi, usage) */ GdiObj *bm = gdi_get(W, ARG(1)); u64 bmi = ARG(5), bits = ARG(4); if (!bm || bm->kind != K_BITMAP || !bmi) { RET(0); return; } dib_sync(W, bm);
   u32 hs = rd32(c, bmi); u16 bpp = rd16(c, bmi + 14); s32 rh = (s32)rd32(c, bmi + 8);
   if (!bits) { wr32(c, bmi + 4, (u32)bm->bw); wr32(c, bmi + 8, (u32)bm->bh); wr16(c, bmi + 12, 1); if (!bpp) wr16(c, bmi + 14, 32); wr32(c, bmi + 16, 0); wr32(c, bmi + 20, (u32)(((bm->bw * (bpp ? bpp : 32) + 31) / 32) * 4 * bm->bh)); RET(bm->bh); return; }
   if (bpp != 32 && bpp != 24) { w32_report(W, "GetDIBits: %u bpp not supported", bpp); RET(0); return; } (void)hs;
@@ -88,8 +88,9 @@ static void s_GetDIBits(Cpu *c) { /* (hdc, hbm, start, lines, bits, bmi, usage) 
     for (int x = 0; x < bm->bw; x++) { u32 v = s[x]; if (bpp == 32) wr32(c, drow + x * 4, v); else { wr8(c, drow + x * 3, (u8)v); wr8(c, drow + x * 3 + 1, (u8)(v >> 8)); wr8(c, drow + x * 3 + 2, (u8)(v >> 16)); } } done++; }
   RET(done); }
 static void s_GetBitmapBits(Cpu *c) { GdiObj *bm = gdi_get(W, ARG(0)); u32 n = (u32)ARG(1); u64 dst = ARG(2); if (!bm || bm->kind != K_BITMAP) { RET(0); return; } u64 total = (u64)bm->bw * bm->bh * 4; if (n > total) n = (u32)total; const u8 *p = mem_ptr(c->mem, bm->bits, total, 0); u8 *d = mem_ptr(c->mem, dst, n, 1); if (p && d) e_memcpy(d, p, n); RET(n); }
-static void s_GetDIBColorTable(Cpu *c) { RET(0); }
-static void s_SetDIBColorTable(Cpu *c) { RET(0); }
+static GdiObj *dc_dib(Cpu *c, u64 hdc) { GdiObj *dc = gdi_get(W, hdc); if (!dc || dc->kind != K_DC) return 0; GdiObj *bm = gdi_get(W, dc->bitmap); return bm && bm->kind == K_BITMAP && bm->dib_section && bm->dib_pal ? bm : 0; }
+static void s_GetDIBColorTable(Cpu *c) { GdiObj *bm = dc_dib(c, ARG(0)); u32 st = (u32)ARG(1), n = (u32)ARG(2); if (!bm || st >= (u32)bm->dib_ncol) { RET(0); return; } if (st + n > (u32)bm->dib_ncol) n = (u32)bm->dib_ncol - st; for (u32 i = 0; i < n; i++) wr32(c, ARG(3) + i * 4, bm->dib_pal[st + i]); RET(n); }
+static void s_SetDIBColorTable(Cpu *c) { GdiObj *bm = dc_dib(c, ARG(0)); u32 st = (u32)ARG(1), n = (u32)ARG(2); if (!bm || st >= (u32)bm->dib_ncol) { RET(0); return; } if (st + n > (u32)bm->dib_ncol) n = (u32)bm->dib_ncol - st; for (u32 i = 0; i < n; i++) bm->dib_pal[st + i] = rd32(c, ARG(3) + i * 4) & 0xffffff; if (bm->dib_native_prev) { e_memset(bm->dib_native_prev, bm->dib_native_prev[0] ^ 1, 1); } RET(n); }
 /* ---- GDI: curves drawn as straight segments (good enough for frames/rounded corners), metafiles rejected cleanly ---- */
 static void s_Arc(Cpu *c) { RET(1); }
 static void s_ArcTo(Cpu *c) { RET(1); }

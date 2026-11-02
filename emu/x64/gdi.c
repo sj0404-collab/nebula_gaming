@@ -38,12 +38,13 @@ static u32 px2cr(u32 px) { return ((px & 0xff) << 16) | (px & 0xff00) | ((px >> 
 
 typedef struct { u32 *px; int w, h; int bottom_up; int stride; int x0, y0; } Surf;   /* valid pixels: x0 ≤ x < w, y0 ≤ y < h (x0/y0 > 0 when the DC origin is shifted or clipped) */
 static inline u32 *srow(Surf *s, int y) { return s->bottom_up ? s->px + (size_t)(s->h - 1 - y) * s->stride : s->px + (size_t)y * s->stride; }
+static void dib_sync(Win32 *w, GdiObj *bm);
 static int dc_surf_raw(Cpu *c, u64 hdc, Surf *s) {
   Win32 *w = W; GdiObj *dc = gdi_get(w, hdc); if (!dc || dc->kind != K_DC) return 0; s->x0 = s->y0 = 0;
   if (hdc == window_dc || dc->wnd < 0) { s->px = w->screen; s->w = w->screen_w; s->h = w->screen_h; s->stride = w->screen_w; s->bottom_up = 0; return s->px != 0; }
   if (dc->wnd > 0) { if (!w->screen) return 0; int ox = dc->ox, oy = dc->oy, vw = dc->vw, vh = dc->vh; if (ox + vw > w->screen_w) vw = w->screen_w - ox; if (oy + vh > w->screen_h) vh = w->screen_h - oy; if (vw < 0) vw = 0; if (vh < 0) vh = 0;
     s->px = w->screen + (size_t)oy * w->screen_w + ox; s->w = vw; s->h = vh; s->stride = w->screen_w; s->bottom_up = 0; return 1; }
-  GdiObj *bm = gdi_get(w, dc->bitmap); if (!bm || bm->kind != K_BITMAP) return 0;
+  GdiObj *bm = gdi_get(w, dc->bitmap); if (!bm || bm->kind != K_BITMAP) return 0; if (bm->dib_section && bm->dib_bpp != 32) dib_sync(w, bm);
   s->px = (u32 *)mem_ptr(w->mem, bm->bits, (u64)bm->bw * bm->bh * 4, 1); s->w = bm->bw; s->h = bm->bh; s->stride = bm->bw; s->bottom_up = bm->font_bold; /* font_bold reused as bottom-up flag for bitmaps */
   return s->px != 0;
 }
@@ -133,12 +134,36 @@ static u64 make_bitmap(Cpu *c, int bw, int bh, int bottom_up, u64 *bits_out) {
   u64 sz = (u64)bw * bh * 4; u64 addr = w->fb_cur; if (!mem_map(w->mem, addr, sz, "dib")) return 0; w->fb_cur += (sz + 0xffff) & ~0xffffull;
   GdiObj *bm = gdi_new(w, K_BITMAP); if (!bm) return 0; bm->bw = bw; bm->bh = bh; bm->bits = addr; bm->font_bold = bottom_up; if (bits_out) *bits_out = addr; return bm->handle;
 }
-static void s_CreateDIBSection(Cpu *c) { u64 bmi = ARG(1); s32 bw = (s32)rd32(c, bmi + 4), bh = (s32)rd32(c, bmi + 8); u16 bpp = rd16(c, bmi + 14); u32 comp = rd32(c, bmi + 16);
-  if (bpp != 32 || (comp != 0 && comp != 3)) w32_report(W, "CreateDIBSection: %u bpp (compression %u) treated as 32 bpp — colours will be wrong", bpp, comp);
-  int bottom_up = bh > 0; if (bh < 0) bh = -bh; u64 bits = 0; u64 h = make_bitmap(c, bw, bh, bottom_up, &bits); if (ARG(3)) wrp(c, ARG(3), bits); RET(h); }
+/* ---- DIB sections below 32 bpp: the guest sees (and may write) the bits in their native format at dib_native; GDI draws into a 32-bpp shadow at `bits`.
+   dib_sync() reconciles both before every use: guest writes to the native bits are expanded into the shadow, GDI drawing into the shadow is packed back. ---- */
+static u32 dib_nearest(GdiObj *bm, u32 v) { int best = 0; u32 bd = 0xffffffffu; v &= 0xffffff; for (int i = 0; i < bm->dib_ncol; i++) { u32 p = bm->dib_pal[i]; if (p == v) return (u32)i; int dr = (int)((p >> 16) & 255) - (int)((v >> 16) & 255), dg = (int)((p >> 8) & 255) - (int)((v >> 8) & 255), db = (int)(p & 255) - (int)(v & 255); u32 d = (u32)(dr * dr + dg * dg + db * db); if (d < bd) { bd = d; best = i; } } return (u32)best; }
+static u32 dib_expand_px(GdiObj *bm, const u8 *row, int x) { switch (bm->dib_bpp) { case 1: return bm->dib_pal[(row[x >> 3] >> (7 - (x & 7))) & 1]; case 4: return bm->dib_pal[(row[x >> 1] >> ((x & 1) ? 0 : 4)) & 15]; case 8: return bm->dib_pal[row[x]];
+  case 16: { u32 s = row[x * 2] | (row[x * 2 + 1] << 8); u32 r = (s >> 10) & 31, g = (s >> 5) & 31, b = s & 31; return (r * 255 / 31) << 16 | (g * 255 / 31) << 8 | (b * 255 / 31); } case 24: return row[x * 3] | row[x * 3 + 1] << 8 | row[x * 3 + 2] << 16; default: return ((const u32 *)row)[x]; } }
+static void dib_pack_px(GdiObj *bm, u8 *row, int x, u32 v) { switch (bm->dib_bpp) { case 1: { u32 i = dib_nearest(bm, v); u8 m = (u8)(0x80 >> (x & 7)); if (i) row[x >> 3] |= m; else row[x >> 3] &= (u8)~m; break; } case 4: { u32 i = dib_nearest(bm, v); if (x & 1) row[x >> 1] = (u8)((row[x >> 1] & 0xf0) | i); else row[x >> 1] = (u8)((row[x >> 1] & 0x0f) | (i << 4)); break; } case 8: row[x] = (u8)dib_nearest(bm, v); break;
+  case 16: { u32 s = ((v >> 19) & 31) << 10 | ((v >> 11) & 31) << 5 | ((v >> 3) & 31); row[x * 2] = (u8)s; row[x * 2 + 1] = (u8)(s >> 8); break; } case 24: row[x * 3] = (u8)v; row[x * 3 + 1] = (u8)(v >> 8); row[x * 3 + 2] = (u8)(v >> 16); break; default: ((u32 *)row)[x] = v; } }
+static void dib_sync(Win32 *w, GdiObj *bm) {
+  if (!bm->dib_section || bm->dib_bpp == 32) return; size_t nb = (size_t)bm->dib_stride * bm->bh, npx = (size_t)bm->bw * bm->bh;
+  u8 *nat = mem_ptr(w->mem, bm->dib_native, nb, 1); u32 *sh = (u32 *)mem_ptr(w->mem, bm->bits, npx * 4, 1); if (!nat || !sh) return;
+  if (!bm->dib_native_prev) { bm->dib_native_prev = emu_alloc(nb); bm->dib_shadow_prev = emu_alloc(npx * 4); if (!bm->dib_native_prev || !bm->dib_shadow_prev) return; e_memcpy(bm->dib_native_prev, nat, nb); e_memset(bm->dib_native_prev, nat[0] ^ 1, 1); /* force the first expand */ }
+  if (e_memcmp(nat, bm->dib_native_prev, nb) != 0) { /* guest wrote the native bits (or first use): expand everything */
+    for (int y = 0; y < bm->bh; y++) { const u8 *row = nat + (size_t)y * bm->dib_stride; u32 *d = sh + (size_t)y * bm->bw; for (int x = 0; x < bm->bw; x++) d[x] = dib_expand_px(bm, row, x); }
+  } else if (e_memcmp(sh, bm->dib_shadow_prev, npx * 4) != 0) { /* GDI drew into the shadow: pack the changed pixels */
+    for (int y = 0; y < bm->bh; y++) { u8 *row = nat + (size_t)y * bm->dib_stride; const u32 *s2 = sh + (size_t)y * bm->bw, *pv = bm->dib_shadow_prev + (size_t)y * bm->bw; for (int x = 0; x < bm->bw; x++) if (s2[x] != pv[x]) dib_pack_px(bm, row, x, s2[x]); }
+  } else return;
+  e_memcpy(bm->dib_native_prev, nat, nb); e_memcpy(bm->dib_shadow_prev, sh, npx * 4);
+}
+static void dib_free(GdiObj *bm) { if (bm->dib_pal) emu_free(bm->dib_pal); if (bm->dib_native_prev) emu_free(bm->dib_native_prev); if (bm->dib_shadow_prev) emu_free(bm->dib_shadow_prev); bm->dib_pal = 0; bm->dib_native_prev = 0; bm->dib_shadow_prev = 0; bm->dib_section = 0; bm->dib_bpp = 0; }
+static void s_CreateDIBSection(Cpu *c) { Win32 *w = W; u64 bmi = ARG(1); u32 hs = rd32(c, bmi); s32 bw = (s32)rd32(c, bmi + 4), bh = (s32)rd32(c, bmi + 8); u16 bpp = rd16(c, bmi + 14); u32 comp = rd32(c, bmi + 16); u32 clr = rd32(c, bmi + 32); u32 usage = (u32)ARG(2);
+  if (!(bpp == 1 || bpp == 4 || bpp == 8 || bpp == 16 || bpp == 24 || bpp == 32) || (comp != 0 && comp != 3)) { w32_report(w, "CreateDIBSection: %u bpp (compression %u) treated as 32 bpp — colours will be wrong", bpp, comp); bpp = 32; }
+  int bottom_up = bh > 0; if (bh < 0) bh = -bh; u64 bits = 0; u64 h = make_bitmap(c, bw, bh, bottom_up, &bits); if (!h) { RET(0); return; } GdiObj *bm = gdi_get(w, h); bm->dib_section = 1; bm->dib_bpp = bpp; bm->dib_stride = (int)((((u64)(bw > 0 ? bw : 1) * bpp + 31) / 32) * 4); bm->dib_native = bits;
+  if (bpp != 32) { u64 nb = (u64)bm->dib_stride * bm->bh; u64 addr = w->fb_cur; if (!mem_map(w->mem, addr, nb, "dib8")) { RET(0); return; } w->fb_cur += (nb + 0xffff) & ~0xffffull; bm->dib_native = addr;
+    if (bpp <= 8) { int n = 1 << bpp; if (clr && (int)clr < n) n = (int)clr; bm->dib_pal = emu_alloc(256 * 4); bm->dib_ncol = n; e_memset(bm->dib_pal, 0, 1024);
+      for (int i = 0; i < n; i++) { if (usage == 1) { u32 idx = rd16(c, bmi + hs + i * 2); GdiObj *pl = gdi_get(w, stock[15]); u8 *p = pl ? mem_ptr(w->mem, pl->bits + idx * 4, 4, 0) : 0; bm->dib_pal[i] = p ? (u32)p[0] << 16 | (u32)p[1] << 8 | p[2] : 0; } else bm->dib_pal[i] = rd32(c, bmi + hs + i * 4) & 0xffffff; }
+      if (bpp == 1 && !clr && n == 2 && !bm->dib_pal[0] && !bm->dib_pal[1]) bm->dib_pal[1] = 0xffffff; } }
+  if (ARG(3)) wrp(c, ARG(3), bm->dib_native); RET(h); }
 static void s_CreateCompatibleBitmap(Cpu *c) { RET(make_bitmap(c, (int)ARG(1), (int)ARG(2), 0, 0)); }
 static void s_CreateBitmap(Cpu *c) { u64 bits; u64 h = make_bitmap(c, (int)ARG(0), (int)ARG(1), 0, &bits); if (ARG(4) && h) { u32 bpp = (u32)ARG(3) * (u32)ARG(2); if (bpp == 32) { u64 n = (u64)(int)ARG(0) * (int)ARG(1) * 4; u8 *s = mem_ptr(c->mem, ARG(4), n, 0), *d = mem_ptr(c->mem, bits, n, 1); if (s && d) e_memcpy(d, s, (size_t)n); } } RET(h); }
-static void s_DeleteObject(Cpu *c) { GdiObj *o = gdi_get(W, ARG(0)); if (!o) { RET(0); return; } for (int i = 0; i < 20; i++) if (stock[i] == ARG(0)) { RET(1); return; } o->kind = 0; RET(1); }
+static void s_DeleteObject(Cpu *c) { GdiObj *o = gdi_get(W, ARG(0)); if (!o) { RET(0); return; } for (int i = 0; i < 20; i++) if (stock[i] == ARG(0)) { RET(1); return; } if (o->kind == K_BITMAP) dib_free(o); o->kind = 0; RET(1); }
 static void s_SelectObject(Cpu *c) { Win32 *w = W; GdiObj *dc = gdi_get(w, ARG(0)), *o = gdi_get(w, ARG(1)); if (!dc || dc->kind != K_DC || !o) { RET(0); return; } u64 prev = 0;
   switch (o->kind) { case K_BITMAP: prev = dc->bitmap ? dc->bitmap : stock[19]; dc->bitmap = ARG(1); break; case K_BRUSH: prev = dc->brush; dc->brush = ARG(1); break; case K_PEN: prev = dc->pen; dc->pen = ARG(1); break; case K_FONT: prev = dc->font; dc->font = ARG(1); break; case K_RGN: prev = 1; break; default: prev = 0; }
   RET(prev); }
@@ -210,7 +235,10 @@ static void s_PtVisible(Cpu *c) { Surf s; if (!dc_surf(c, ARG(0), &s)) { RET(0);
 static void s_SetMapMode(Cpu *c) { RET(1); }
 static void s_GetDeviceCaps(Cpu *c) { int i = (int)ARG(1); RET(i == 8 ? W->screen_w : i == 10 ? W->screen_h : i == 12 ? 32 : i == 14 ? 1 : i == 88 ? 96 : i == 90 ? 96 : i == 116 ? 60 : i == 4 ? 1 : i == 24 ? 0x4000000 : i == 2 ? 0x4000 : 0); }
 static void s_GetObjectA(Cpu *c) { GdiObj *o = gdi_get(W, ARG(0)); if (!o) { RET(0); return; } u64 a = ARG(2);
-  if (o->kind == K_BITMAP) { if (!a) { RET(32); return; } wr32(c, a, 0); wr32(c, a + 4, (u32)o->bw); wr32(c, a + 8, (u32)o->bh); wr32(c, a + 12, (u32)o->bw * 4); wr16(c, a + 16, 1); wr16(c, a + 18, 32); if (c->mode32) { wr32(c, a + 20, (u32)o->bits); RET(24); return; } wr64(c, a + 24, o->bits); RET(32); return; }
+  if (o->kind == K_BITMAP) { int bsz = c->mode32 ? 24 : 32, dsz = c->mode32 ? 84 : 104; int bpp = o->dib_section ? o->dib_bpp : 32; u32 stride = o->dib_section ? (u32)o->dib_stride : (u32)o->bw * 4; u64 bits = o->dib_section ? o->dib_native : o->bits; u32 cb = (u32)ARG(1);
+    if (!a) { RET(o->dib_section ? dsz : bsz); return; } if (cb < (u32)bsz) { RET(0); return; } wr32(c, a, 0); wr32(c, a + 4, (u32)o->bw); wr32(c, a + 8, (u32)o->bh); wr32(c, a + 12, stride); wr16(c, a + 16, 1); wr16(c, a + 18, (u16)bpp); if (c->mode32) wr32(c, a + 20, (u32)bits); else wr64(c, a + 24, bits);
+    if (!o->dib_section || cb < (u32)dsz) { RET(bsz); return; } u64 ih = a + bsz; wr32(c, ih, 40); wr32(c, ih + 4, (u32)o->bw); wr32(c, ih + 8, (u32)(o->font_bold ? o->bh : -o->bh)); wr16(c, ih + 12, 1); wr16(c, ih + 14, (u16)bpp); wr32(c, ih + 16, 0); wr32(c, ih + 20, stride * (u32)o->bh); wr32(c, ih + 24, 3780); wr32(c, ih + 28, 3780); wr32(c, ih + 32, (u32)(bpp <= 8 ? o->dib_ncol : 0)); wr32(c, ih + 36, 0);
+    u64 bf = ih + 40; wr32(c, bf, 0xff0000); wr32(c, bf + 4, 0xff00); wr32(c, bf + 8, 0xff); if (c->mode32) { wr32(c, bf + 12, 0); wr32(c, bf + 16, 0); } else { wr64(c, bf + 16, 0); wr32(c, bf + 24, 0); } RET(dsz); return; }
   if (o->kind == K_BRUSH) { if (a) { wr32(c, a, 0); wr32(c, a + 4, px2cr(o->color)); wrp(c, a + 8, 0); } RET(c->mode32 ? 12 : 16); return; }
   if (o->kind == K_PEN) { if (a) { wr32(c, a, 0); wr32(c, a + 4, (u32)o->pen_width); wr32(c, a + 12, px2cr(o->color)); } RET(16); return; }
   if (o->kind == K_FONT) { if (a) { u8 *p = mem_ptr(c->mem, a, 92, 1); if (p) e_memset(p, 0, 92); wr32(c, a, (u32)-(o->font_em ? o->font_em : o->font_h)); wr32(c, a + 16, o->font_bold ? 700 : 400); } RET(92); return; }
