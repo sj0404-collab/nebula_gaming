@@ -330,6 +330,7 @@ u64    w32_shim_slot(Win32 *w, const char *dll, const char *name);   /* returns 
 int    w32_dispatch(Cpu *c, u64 addr);                              /* called by cpu when RIP enters the shim region */
 u64    w32_heap_alloc(Win32 *w, u64 size, int zero);
 int    w32_heap_free(Win32 *w, u64 addr);
+int    gdi_wic_cocreate(Cpu *c, u32 clsid_d1, u64 riid, u64 ppv);   /* win32_wic.inc: IWICImagingFactory; returns 1 when handled (RET set) */
 u64    w32_heap_size(Win32 *w, u64 addr);
 u64    w32_guest_strdup(Win32 *w, const char *s);
 void   w32_report(Win32 *w, const char *fmt, ...);

@@ -697,8 +697,9 @@ static void s_CoCreateInstance(Cpu *c) {
   u64 clsid = ARG(0), riid = ARG(3), ppv = ARG(4); if (!clsid || !riid || !ppv) { RET(E_INVALIDARG_); return; }   /* (rclsid, pUnkOuter, dwClsContext, riid, ppv) */
   u32 d1 = rd32(c, clsid), i1 = rd32(c, riid); wrp(c, ppv, 0);
   if (shell_cocreate(c, d1, riid, ppv)) return;
+  if (gdi_wic_cocreate(c, d1, riid, ppv)) return;
   const ComClass *k = 0; for (int i = 0; g_com_classes[i].what; i++) if (g_com_classes[i].d1 == d1) { k = &g_com_classes[i]; break; }
-  if (!k) { aud_log("[com] CoCreateInstance({%08x-…}): class not registered — the emulator provides MMDeviceEnumerator, DirectSound(8) and routes XAudio2/XACT to the DirectX-pack DLLs\n", d1); RET(0x80040154u); return; }
+  if (!k) { aud_log("[com] CoCreateInstance({%08x-…}): class not registered — the emulator provides MMDeviceEnumerator, DirectSound(8), WICImagingFactory, ShellLink and routes XAudio2/XACT to the DirectX-pack DLLs\n", d1); RET(0x80040154u); return; }
   if (!k->dll) {
     if (d1 == 0xBCDE0395u) { if (i1 != 0xA95664D2u && i1 != 0) { RET(E_NOINTERFACE_); return; } mme_create_enum(c, ppv); return; }
     if (d1 == 0x47D4D946u || d1 == 0x3901CC3Fu) { u64 a; AObj *o = aobj_new(c, AK_DS, &a); if (!o) { RET(E_OUTOFMEMORY_); return; } o->ds = d1 == 0x3901CC3Fu; wrp(c, ppv, a); RET(0); return; }   /* needs Initialize() like Windows */

@@ -148,13 +148,6 @@ static void s_FlatSB_SetScrollRange(Cpu *c) { RET(1); }
 static void s_FlatSB_ShowScrollBar(Cpu *c) { RET(1); }
 static void s_FlatSB_EnableScrollBar(Cpu *c) { RET(1); }
 static void s_TrackMouseEvent_(Cpu *c) { RET(1); }   /* WM_MOUSELEAVE/hover are not generated */
-static void s_ImageList_GetDragImage(Cpu *c) { RET(0); }
-static void s_ImageList_Write(Cpu *c) { RET(0); }
-static void s_ImageList_Read(Cpu *c) { RET(0); }
-static void s_ImageList_DrawIndirect(Cpu *c) { RET(1); }
-static void s_ImageList_GetBkColor(Cpu *c) { RET(0xffffffffu); }   /* CLR_NONE */
-static void s_ImageList_SetIconSize(Cpu *c) { RET(1); }
-static void s_ImageList_SetOverlayImage(Cpu *c) { RET(1); }
 /* ---- kernel32 / advapi32 / mpr / wtsapi32 / winhttp / comdlg32 ---- */
 static void s_TransactNamedPipe(Cpu *c) { W->last_error = 50; RET(0); }
 static void s_InitializeSecurityDescriptor(Cpu *c) { u64 sd = ARG(0); if (sd) { u8 *p = mem_ptr(c->mem, sd, 20, 1); if (p) e_memset(p, 0, 20); wr8(c, sd, 1); } RET(1); }
@@ -200,7 +193,7 @@ static void s_GetActiveObject(Cpu *c) { RET(0x800401E3); }   /* MK_E_UNAVAILABLE
   S(GetWindowOrgEx), S(GetBrushOrgEx), S(GetCurrentPositionEx), S(GetStretchBltMode), S(CreatePenIndirect), S(GetTextExtentPointW), S(GetTextExtentPointA), S(EnumFontsW), S(EnumFontsA), S(EnumFontFamiliesExW), S(EnumFontFamiliesExA), S(EnumFontFamiliesW), S(EnumFontFamiliesA), \
   S(AddFontResourceW), S(AddFontResourceA), S(RemoveFontResourceW), S(RemoveFontResourceA), S(CreateHalftonePalette), S(GetEnhMetaFileHeader), S(GetEnhMetaFileBits), S(SetEnhMetaFileBits), S(GetWinMetaFileBits), S(SetWinMetaFileBits), S(PlayEnhMetaFile), S(DeleteEnhMetaFile), S(CopyEnhMetaFileW), S(GetEnhMetaFileDescriptionW), S(GetEnhMetaFilePaletteEntries), S(CreateEnhMetaFileW), S(CloseEnhMetaFile), \
   S(InitializeFlatSB), S(UninitializeFlatSB), S(FlatSB_SetScrollInfo), S(FlatSB_GetScrollInfo), S(FlatSB_SetScrollPos), S(FlatSB_GetScrollPos), S(FlatSB_SetScrollProp), S(FlatSB_SetScrollRange), S(FlatSB_ShowScrollBar), S(FlatSB_EnableScrollBar), SA("_TrackMouseEvent", TrackMouseEvent_), SA("TrackMouseEvent", TrackMouseEvent_), \
-  S(ImageList_GetDragImage), S(ImageList_Write), S(ImageList_Read), S(ImageList_DrawIndirect), S(ImageList_GetBkColor), S(ImageList_SetIconSize), S(ImageList_SetOverlayImage), \
+  \
   S(TransactNamedPipe), S(InitializeSecurityDescriptor), S(SetSecurityDescriptorDacl), S(SetSecurityDescriptorOwner), S(SetSecurityDescriptorGroup), S(WNetOpenEnumW), S(WNetEnumResourceW), S(WNetCloseEnum), S(WNetGetConnectionW), S(WNetGetUniversalNameW), S(WNetOpenEnumA), S(WNetGetConnectionA), \
   S(WTSRegisterSessionNotification), S(WTSUnRegisterSessionNotification), S(WinHttpQueryAuthSchemes), S(WinHttpSetCredentials), S(GetOpenFileNameW), S(GetSaveFileNameW), S(GetOpenFileNameA), S(GetSaveFileNameA), S(CommDlgExtendedError), \
   S(IsEqualGUID), S(StringFromGUID2), S(StringFromCLSID), S(CoFreeUnusedLibraries), S(CoDisconnectObject), S(StgCreateDocfileOnILockBytes), S(CreateILockBytesOnHGlobal), S(LoadTypeLib), S(LoadTypeLibEx), S(RegisterTypeLib), S(GetErrorInfo), S(SetErrorInfo), S(GetActiveObject)

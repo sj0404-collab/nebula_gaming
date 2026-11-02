@@ -187,6 +187,7 @@ static void w32_marshal32_in(Cpu *c, ShimSlot *s); static void w32_marshal32_out
 static int thread_cont_resume(Cpu *c, int kind, u64 rax);
 static int tp_cont_resume(Cpu *c, int kind, u64 rax);
 static int audio_cont_resume(Cpu *c, int kind, u64 rax);
+static int shell_cont_resume(Cpu *c, int kind, u64 rax);
 static int seh_cont_resume(Cpu *c, int kind, u64 rax);
 static int cxx_cont_resume(Cpu *c, int kind, u64 rax);
 static int seh32_cont_resume(Cpu *c, int kind, u64 rax);
@@ -263,6 +264,7 @@ void w32_cont_resume(Cpu *c) {
   if (tp_cont_resume(c, w->cont[i].kind, rax)) return;
   if (audio_cont_resume(c, w->cont[i].kind, rax)) return;
   if (thread_cont_resume(c, w->cont[i].kind, rax)) return;
+  if (shell_cont_resume(c, w->cont[i].kind, rax)) return;
   extern void gdi_cont_resume(Cpu *c, int kind, u64 rax);
   gdi_cont_resume(c, w->cont[i].kind, rax);
 }
