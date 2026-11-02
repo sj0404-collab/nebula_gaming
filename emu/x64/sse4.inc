@@ -25,7 +25,7 @@ static void pcmpstr(Ins *i, int explicit_len, int want_mask) {
       case 0: for (int k = 0; k < la; k++) if (j < lb && ELT(a, k) == ELT(&b, j)) { bit = 1; break; } break;                             /* equal any */
       case 1: for (int k = 0; k + 1 < la; k += 2) if (j < lb && ELT(&b, j) >= ELT(a, k) && ELT(&b, j) <= ELT(a, k + 1)) { bit = 1; break; } break;   /* ranges */
       case 2: bit = (j < la && j < lb) ? ELT(a, j) == ELT(&b, j) : (j >= la && j >= lb); break;                                           /* equal each */
-      default: { bit = 1; for (int k = 0; k < la; k++) { int jb = j + k; int eq = (jb < lb) ? ELT(a, k) == ELT(&b, jb) : 0; if (!eq) { bit = 0; break; } } break; }   /* equal ordered */
+      default: { bit = 1; for (int k = 0; k < la; k++) { int jb = j + k; if (jb >= n) break; /* needle elements past the end of the register are not compared: a prefix match at the tail counts (SDM: i = 0..UpperBound-j) */ int eq = (jb < lb) ? ELT(a, k) == ELT(&b, jb) : 0; if (!eq) { bit = 0; break; } } break; }   /* equal ordered */
     }
     if (bit) res |= 1u << j;
   }

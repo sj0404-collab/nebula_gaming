@@ -56,7 +56,6 @@ static void s_DefMDIChildProcA(Cpu *c) { call_shim_tail(c, s_DefWindowProcA, ARG
 static void s_TranslateMDISysAccel(Cpu *c) { RET(0); }
 static void s_ShowOwnedPopups(Cpu *c) { RET(1); }
 static void s_GetScrollBarInfo(Cpu *c) { W->last_error = 1400; RET(0); }
-static void s_CreateIcon(Cpu *c) { RET(0x7B801); }   /* same pseudo icon as CreateIconIndirect: drawn as the generic app icon */
 /* ---- DIB decoding at any BI_RGB depth → BGRA; used by SetDIBits / CreateDIBitmap / GetDIBits ---- */
 static u32 dib_pal(Cpu *c, u64 bmi, u32 idx, int core) { u32 hs = rd32(c, bmi); if (core) { u64 e = bmi + 12 + idx * 3; return (u32)rd8(c, e) | (u32)rd8(c, e + 1) << 8 | (u32)rd8(c, e + 2) << 16; } u64 e = bmi + hs + idx * 4; return rd32(c, e) & 0xffffff; }
 static int dib_decode(Cpu *c, u64 bmi, u64 bits, u32 *dst, int dw, int dh, int flip_only_rows) {
@@ -186,7 +185,7 @@ static void s_GetActiveObject(Cpu *c) { RET(0x800401E3); }   /* MK_E_UNAVAILABLE
 #define VCL_SHIMS S(SetRectEmpty), S(OffsetRect), S(InflateRect), S(IntersectRect), S(UnionRect), S(SubtractRect), \
   S(GlobalAddAtomW), S(GlobalAddAtomA), S(GlobalFindAtomW), S(GlobalFindAtomA), S(GlobalDeleteAtom), S(GlobalGetAtomNameW), S(GlobalGetAtomNameA), S(AddAtomW), S(AddAtomA), S(FindAtomW), S(FindAtomA), S(DeleteAtom), S(GetAtomNameW), S(GetAtomNameA), \
   S(SetWindowsHookExW), S(SetWindowsHookExA), S(UnhookWindowsHookEx), S(CallNextHookEx), S(GetKeyboardLayoutNameW), S(GetKeyboardLayoutNameA), S(LoadKeyboardLayoutW), S(LoadKeyboardLayoutA), \
-  S(OemToCharBuffA), S(CharToOemBuffA), S(OemToCharBuffW), S(CharToOemBuffW), S(DefFrameProcW), S(DefFrameProcA), S(DefMDIChildProcW), S(DefMDIChildProcA), S(TranslateMDISysAccel), S(ShowOwnedPopups), S(GetScrollBarInfo), S(CreateIcon), \
+  S(OemToCharBuffA), S(CharToOemBuffA), S(OemToCharBuffW), S(CharToOemBuffW), S(DefFrameProcW), S(DefFrameProcA), S(DefMDIChildProcW), S(DefMDIChildProcA), S(TranslateMDISysAccel), S(ShowOwnedPopups), S(GetScrollBarInfo), \
   S(SetDIBits), S(CreateDIBitmap), S(GetDIBits), S(GetBitmapBits), S(GetDIBColorTable), S(SetDIBColorTable), \
   S(Arc), S(ArcTo), S(AngleArc), S(Pie), S(Chord), S(PolyBezier), S(PolyBezierTo), S(LineDDA), S(ExtFloodFill), S(FloodFill), S(MaskBlt), S(ExcludeClipRect), S(RectVisible), S(PtVisible), S(GetClipBox), S(GetClipRgn), S(SetRectRgn), S(FrameRgn), \
   S(GetWindowOrgEx), S(GetBrushOrgEx), S(GetCurrentPositionEx), S(GetStretchBltMode), S(CreatePenIndirect), S(GetTextExtentPointW), S(GetTextExtentPointA), S(EnumFontsW), S(EnumFontsA), S(EnumFontFamiliesExW), S(EnumFontFamiliesExA), S(EnumFontFamiliesW), S(EnumFontFamiliesA), \

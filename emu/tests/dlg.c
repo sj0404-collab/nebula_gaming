@@ -208,6 +208,17 @@ static void menu_tests(void) {
   WNDCLASSW wc; memset(&wc, 0, sizeof wc); wc.lpfnWndProc = menu_wnd_proc; wc.hInstance = g_inst; wc.lpszClassName = L"NebulaMenuTest"; wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); RegisterClassW(&wc);
   HWND h = CreateWindowExW(0, L"NebulaMenuTest", L"Menu test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 100, 100, 320, 200, NULL, g_bar, g_inst, NULL);
   chk(h != NULL && GetMenu(h) == g_bar, "menu: CreateWindowEx with hMenu, GetMenu");
+  { WNDCLASSW cc; memset(&cc, 0, sizeof cc); cc.lpfnWndProc = DefWindowProcW; cc.hInstance = g_inst; cc.lpszClassName = L"NebulaClassMenuTest"; cc.lpszMenuName = MAKEINTRESOURCEW(IDM_MAIN); cc.hIcon = LoadIconW(g_inst, MAKEINTRESOURCEW(IDI_APP)); cc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); RegisterClassW(&cc);
+    HWND cm = CreateWindowExW(0, L"NebulaClassMenuTest", L"class menu", WS_OVERLAPPEDWINDOW, 500, 100, 200, 120, NULL, NULL, g_inst, NULL); HMENU m = GetMenu(cm);
+    chk(cm && m && GetMenuItemCount(m) == 2 && GetMenuItemCount(GetSubMenu(m, 0)) == 3 && (HICON)GetClassLongPtrW(cm, GCLP_HICON) == cc.hIcon && cc.hIcon != NULL, "menu: WNDCLASS lpszMenuName loads the class menu (GetMenu on a window created without hMenu), GCLP_HICON");
+    /* icons: the RT_GROUP_ICON of this exe is a real image; DrawIconEx paints it; an image list can hold it */
+    HICON hi = (HICON)LoadImageW(g_inst, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON, 32, 32, 0); ICONINFO ii; memset(&ii, 0, sizeof ii); BITMAP bmi; memset(&bmi, 0, sizeof bmi); int gi = GetIconInfo(hi, &ii); if (gi && ii.hbmColor) GetObjectW(ii.hbmColor, sizeof bmi, &bmi);
+    HDC dc = GetDC(NULL); HDC md = CreateCompatibleDC(dc); HBITMAP cv = CreateCompatibleBitmap(dc, 40, 40); HGDIOBJ old = SelectObject(md, cv); RECT fr = { 0, 0, 40, 40 }; FillRect(md, &fr, (HBRUSH)GetStockObject(WHITE_BRUSH)); DrawIconEx(md, 4, 4, hi, 32, 32, 0, NULL, DI_NORMAL);
+    int painted = 0, outside = 0; for (int y = 0; y < 40; y++) for (int x = 0; x < 40; x++) { COLORREF px = GetPixel(md, x, y); if (px != RGB(255, 255, 255)) { if (x >= 4 && x < 36 && y >= 4 && y < 36) painted++; else outside++; } }
+    chk(hi && gi && ii.fIcon && bmi.bmWidth == 32 && bmi.bmHeight == 32 && painted >= 100 && outside == 0, "icon: LoadImage(IMAGE_ICON 32x32) from RT_GROUP_ICON, GetIconInfo bitmaps, DrawIconEx paints inside the 32x32 box only");
+    HIMAGELIST il = ImageList_Create(32, 32, ILC_COLOR32 | ILC_MASK, 2, 2); int ai = ImageList_AddIcon(il, hi); HICON back = ImageList_GetIcon(il, ai, ILD_NORMAL); ICONINFO i2; memset(&i2, 0, sizeof i2); int g2 = back ? GetIconInfo(back, &i2) : 0;
+    chk(ai == 0 && ImageList_GetImageCount(il) == 1 && back && g2 && i2.hbmColor, "icon: ImageList_AddIcon / ImageList_GetIcon round trip");
+    if (ii.hbmColor) DeleteObject(ii.hbmColor); if (ii.hbmMask) DeleteObject(ii.hbmMask); if (i2.hbmColor) DeleteObject(i2.hbmColor); if (i2.hbmMask) DeleteObject(i2.hbmMask); if (back) DestroyIcon(back); ImageList_Destroy(il); DestroyIcon(hi); SelectObject(md, old); DeleteObject(cv); DeleteDC(md); ReleaseDC(NULL, dc); DestroyWindow(cm); }
   SetTimer(h, 3, 150, NULL);
   MSG msg; DWORD t0 = GetTickCount();
   while (GetMessageW(&msg, NULL, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessageW(&msg); if (GetTickCount() - t0 > 15000) { printf("FAIL menu: timeout\n"); g_fail++; break; } }
@@ -279,6 +290,29 @@ static void comctl_tests(void) {
   chk(r0.right <= r1.left && r1.right <= r3.left && r0.right - r0.left >= 16 && ms.cx >= r3.right && ms.cy >= 16, "comctl: TB_GETITEMRECT laid the buttons out left to right, TB_GETMAXSIZE");
   LRESULT bsz = SendMessageW(g_tb, TB_GETBUTTONSIZE, 0, 0); chk(LOWORD(bsz) >= 16 && HIWORD(bsz) >= 16, "comctl: TB_GETBUTTONSIZE");
   chk(SendMessageW(g_tb, TB_DELETEBUTTON, 4, 0) && SendMessageW(g_tb, TB_BUTTONCOUNT, 0, 0) == 4, "comctl: TB_DELETEBUTTON");
+  /* TB_ADDBITMAP: the standard comctl32 sets, then an app bitmap strip (what Notepad++ / 7-Zip do) */
+  { TBADDBITMAP ab; ab.hInst = HINST_COMMCTRL; ab.nID = IDB_STD_SMALL_COLOR; HWND tb2 = CreateWindowExW(0, TOOLBARCLASSNAMEW, NULL, WS_CHILD | WS_VISIBLE | TBSTYLE_FLAT, 0, 0, 0, 0, h, (HMENU)307, g_inst, NULL);
+    SendMessageW(tb2, TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0); LRESULT std0 = SendMessageW(tb2, TB_ADDBITMAP, 0, (LPARAM)&ab);
+    HDC dc = GetDC(NULL); HDC m = CreateCompatibleDC(dc); HBITMAP strip = CreateCompatibleBitmap(dc, 48, 16); HGDIOBJ old = SelectObject(m, strip); RECT fr = { 0, 0, 48, 16 }; HBRUSH mag = CreateSolidBrush(RGB(255, 0, 255)); FillRect(m, &fr, mag); DeleteObject(mag); RECT cell = { 16, 0, 32, 16 }; HBRUSH blue = CreateSolidBrush(RGB(0, 0, 200)); FillRect(m, &cell, blue); DeleteObject(blue); SelectObject(m, old); DeleteDC(m); ReleaseDC(NULL, dc);
+    ab.hInst = NULL; ab.nID = (UINT_PTR)strip; LRESULT app0 = SendMessageW(tb2, TB_ADDBITMAP, 3, (LPARAM)&ab);
+    TBBUTTON b2[2]; memset(b2, 0, sizeof b2); b2[0].iBitmap = (int)app0 + 1; b2[0].idCommand = 251; b2[0].fsState = TBSTATE_ENABLED; b2[0].fsStyle = BTNS_BUTTON; b2[1].iBitmap = (int)std0 + STD_FILENEW; b2[1].idCommand = 252; b2[1].fsState = TBSTATE_ENABLED; b2[1].fsStyle = BTNS_BUTTON;
+    SendMessageW(tb2, TB_ADDBUTTONSW, 2, (LPARAM)b2); SendMessageW(tb2, TB_AUTOSIZE, 0, 0);
+    chk(std0 == 0 && app0 == 15 && SendMessageW(tb2, TB_GETBITMAP, 251, 0) == app0 + 1, "comctl: TB_ADDBITMAP (HINST_COMMCTRL standard set = 15 images, then an app strip of 3), TB_GETBITMAP");
+    HIMAGELIST own = (HIMAGELIST)SendMessageW(tb2, TB_GETIMAGELIST, 0, 0); int ocx = 0, ocy = 0; ImageList_GetIconSize(own, &ocx, &ocy);
+    chk(own != NULL && ImageList_GetImageCount(own) == 18 && ocx == 16, "comctl: TB_ADDBITMAP fed the toolbar's own image list (18 x 16px images)");
+    /* draw the toolbar into a memory DC through WM_PRINTCLIENT (double-buffering subclasses do this) and look for the blue cell */
+    RECT tr; GetClientRect(tb2, &tr); dc = GetDC(NULL); m = CreateCompatibleDC(dc); HBITMAP shot = CreateCompatibleBitmap(dc, tr.right, tr.bottom); old = SelectObject(m, shot); RECT all = { 0, 0, tr.right, tr.bottom }; FillRect(m, &all, (HBRUSH)GetStockObject(BLACK_BRUSH));
+    SendMessageW(tb2, WM_PRINTCLIENT, (WPARAM)m, PRF_CLIENT); int blue_px = 0, nonblack = 0; for (int y = 0; y < tr.bottom; y++) for (int x = 0; x < tr.right; x++) { COLORREF px = GetPixel(m, x, y); if (px != 0) nonblack++; if (GetBValue(px) >= 180 && GetRValue(px) < 60 && GetGValue(px) < 60) blue_px++; }
+    chk(tr.right >= 40 && tr.bottom >= 20 && nonblack > tr.right * tr.bottom / 2 && blue_px >= 200, "comctl: WM_PRINTCLIENT renders the toolbar into a memory DC (background + the app bitmap cell drawn)");
+    SelectObject(m, old); DeleteObject(shot); DeleteDC(m); ReleaseDC(NULL, dc);
+    /* rebar: the toolbar becomes a band child; the bar sizes its own height (Notepad++ relies on this after MoveWindow(..., 0)) */
+    HWND rb = CreateWindowExW(0, REBARCLASSNAMEW, NULL, WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | CCS_NODIVIDER | CCS_NOPARENTALIGN | RBS_VARHEIGHT, 0, 0, 0, 0, h, (HMENU)308, g_inst, NULL);
+    REBARBANDINFOW rbi; memset(&rbi, 0, sizeof rbi); rbi.cbSize = sizeof rbi; rbi.fMask = RBBIM_CHILD | RBBIM_CHILDSIZE | RBBIM_STYLE | RBBIM_ID | RBBIM_SIZE; rbi.fStyle = RBBS_CHILDEDGE | RBBS_USECHEVRON; rbi.hwndChild = tb2; rbi.cxMinChild = 0; rbi.cyMinChild = 25; rbi.cx = 200; rbi.wID = 1;
+    LRESULT ins = SendMessageW(rb, RB_INSERTBANDW, (WPARAM)-1, (LPARAM)&rbi); MoveWindow(rb, 0, 0, 400, 0, TRUE); RECT rr; GetClientRect(rb, &rr); LRESULT bh = SendMessageW(rb, RB_GETBARHEIGHT, 0, 0); RECT br; SendMessageW(rb, RB_GETRECT, 0, (LPARAM)&br);
+    chk(ins && SendMessageW(rb, RB_GETBANDCOUNT, 0, 0) == 1 && GetParent(tb2) == rb && bh >= 25 && rr.bottom == bh && rr.right == 400 && br.right > br.left, "comctl: RB_INSERTBANDW adopts the child, RB_GETBANDCOUNT, RB_GETBARHEIGHT, the bar keeps its own height after MoveWindow(h=0), RB_GETRECT");
+    memset(&rbi, 0, sizeof rbi); rbi.cbSize = sizeof rbi; rbi.fMask = RBBIM_CHILD | RBBIM_ID | RBBIM_CHILDSIZE; SendMessageW(rb, RB_GETBANDINFOW, 0, (LPARAM)&rbi); RECT tr2; GetWindowRect(tb2, &tr2); POINT tp = { tr2.left, tr2.top }; ScreenToClient(rb, &tp);
+    chk(rbi.hwndChild == tb2 && rbi.wID == 1 && rbi.cyMinChild == 25 && tp.x >= 0 && tp.y >= 0 && tr2.bottom - tr2.top >= 25 && SendMessageW(rb, RB_IDTOINDEX, 1, 0) == 0, "comctl: RB_GETBANDINFOW, the child sits inside the band at its minimum height, RB_IDTOINDEX");
+    DestroyWindow(rb); DeleteObject(strip); }
   /* tab control */
   g_tab = CreateWindowExW(0, WC_TABCONTROLW, NULL, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 10, 40, 380, 160, h, (HMENU)303, g_inst, NULL);
   TCITEMW ti; memset(&ti, 0, sizeof ti); ti.mask = TCIF_TEXT | TCIF_PARAM; ti.pszText = (LPWSTR)L"General"; ti.lParam = 11; int i0 = (int)SendMessageW(g_tab, TCM_INSERTITEMW, 0, (LPARAM)&ti); ti.pszText = (LPWSTR)L"Compiler"; ti.lParam = 22; int i1 = (int)SendMessageW(g_tab, TCM_INSERTITEMW, 1, (LPARAM)&ti); ti.pszText = (LPWSTR)L"Output"; ti.lParam = 33; int i2 = (int)SendMessageW(g_tab, TCM_INSERTITEMW, 2, (LPARAM)&ti);
