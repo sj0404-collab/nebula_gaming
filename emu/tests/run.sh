@@ -404,6 +404,11 @@ if [ -f $IS ]; then
     check "compiled setup: silent install exit code"   "rc=0"   "rc=$rc"
     check "compiled setup: MyProg.exe identical after the LZMA2 round trip, uninstaller written"   "same.*unins000.exe"   "$(cmp -s $RT/nt/MyProg.exe $SRC/MyProg.exe && echo same) $(ls $RT/nt 2>/dev/null | tr '\n' ' ')"
     rm -rf $SRC $OUT $RT
+    # the Inno Setup Compiler IDE (heavy Delphi VCL app): 253 PNG icons through WIC (IWICImagingFactory), TImageList streams (ImageList_Read),
+    # a RichEdit-less startup dialog driven with the mouse -> the main IDE form with the Scintilla editor (isscint.dll) comes up
+    out=$(X64_LOG=1 X64_WNDDUMP=1 $X --no-stdin --max-ms 40000 --click 274,111@12000 --click 674,477@15000 --click 274,111@24000 --click 674,477@27000 --mount "$ID/is=C:\\nebula" $ID/is/Compil32.exe 2>&1 3>&1 | grep -a "^\[wnd\]\|\[wic\]\|\[imagelist\]\|FAULT\|RaiseException" || true)
+    check "Compil32.exe (Inno IDE): PNG icons decoded by the built-in WIC and the TImageList stream read"   "decoded PNG.*ImageList_Read: 4 images\|ImageList_Read: 4 images.*decoded PNG"   "$(echo "$out" | tr '\n' ' ')"
+    check "Compil32.exe: Welcome dialog driven with the mouse -> main IDE form with the Scintilla editor is visible, no fault"   '"TMainForm" "Untitled - Inno Setup Compiler.*vis=1.*"TIDEScintFileEdit".*vis=1'   "$(echo "$out" | grep -v FAULT | tr '\n' ' ')"
   fi
   rm -rf $ID
   # the GUI wizard (Delphi VCL: superclassed controls, WM_ERASEBKGND through the window procedure, synchronous WM_SIZE, DC origins/clipping)

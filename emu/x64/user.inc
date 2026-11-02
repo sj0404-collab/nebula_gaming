@@ -17,7 +17,7 @@
 #define CAPTION_H 24
 #define SUPER_ADOPT(i, k) do { if (!g_wnd[i].builtin) { g_wnd[i].builtin = (k); g_wnd[i].superclassed = 1; } } while (0)
 enum { BI_NONE = 0, BI_BUTTON, BI_STATIC, BI_EDIT, BI_COMBO, BI_LISTBOX, BI_SCROLLBAR, BI_DIALOG, BI_PROGRESS, BI_LINK, BI_COMBOLIST, BI_UNSUPPORTED, BI_MSGBOX };
-enum { CONT_WNDCREATE = 6 /* = CONT_CREATEWND in win32.c */, CONT_WNDDESTROY = 400, CONT_CTLPAINT = 401, CONT_DLGINIT = 402, CONT_MODAL = 403, CONT_DLGMSG = 404, CONT_SENDCMD = 405, CONT_DLGPROC = 406, CONT_ERASEBG = 407, CONT_SETPOS = 408, CONT_STREAMIN = 409, CONT_RET_VAL_ = 5 };
+enum { CONT_WNDCREATE = 6 /* = CONT_CREATEWND in win32.c */, CONT_WNDDESTROY = 400, CONT_CTLPAINT = 401, CONT_DLGINIT = 402, CONT_MODAL = 403, CONT_DLGMSG = 404, CONT_SENDCMD = 405, CONT_DLGPROC = 406, CONT_ERASEBG = 407, CONT_SETPOS = 408, CONT_STREAMIN = 409, CONT_ILREAD = 410, CONT_WICREAD = 411, CONT_RET_VAL_ = 5 };
 #define MAX_ITEMS 512
 typedef struct {
   int used, destroyed; int parent, owner; int builtin; int superclassed; /* app-registered class whose wndproc delegates to a built-in proc (VCL TNewButton …): behaves like the built-in for painting but all messages flow through the guest wndproc */ int pid;   /* owning process: messages from other processes are posted to its queue */ char clsname[40]; u64 wndproc; u64 cls_brush; u32 cls_style; int cls_extra;
@@ -364,6 +364,7 @@ static void s_DestroyWindow(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0 || g_wnd
 /* ---------- painting: BeginPaint/GetDC hand out window DCs; a pending erase fills the client with the class brush ---------- */
 static void wnd_frame(Cpu *c, int i);
 static int looks_like_rtf(const char *t); static char *rtf_to_text(const char *r, size_t n);
+static void ilr_resume(Cpu *c, u64 rax); static void wicread_resume(Cpu *c, u64 rax); static int dib_decode(Cpu *c, u64 bmi, u64 bits, u32 *dst, int dw, int dh, int flip_only_rows);
 static void wnd_erase(Cpu *c, int i) { Win32 *w = W; Wnd *n = &g_wnd[i]; u64 hb = n->cls_brush; u32 px = 0xf0f0f0; int skip = 0;
   if (n->is_dlg || n->builtin == BI_MSGBOX) px = 0xf0f0f0; else { GdiObj *b = gdi_get(w, hb); if (b) { if (b->kind == K_BRUSH && b->pen_width == -1) skip = 1; px = b->color; } else if (hb >= 1 && hb <= 31) px = g_sys_colors[hb - 1]; else if (!hb) skip = 1; }
   if (!skip) { u64 hdc = wnd_dc(c, i); Surf s; if (hdc && dc_surf(c, hdc, &s)) { fill_rect_px(&s, 0, 0, s.w, s.h, px); mark_screen(w, hdc); } if (hdc) wnd_dc_free(w, hdc); }
@@ -468,7 +469,7 @@ static void s_DeferWindowPos(Cpu *c) { int i = wnd_of(ARG(1)); if (i >= 0 && wnd
 static void s_EndDeferWindowPos(Cpu *c) { RET(1); }
 static void s_GetWindowPlacement(Cpu *c) { int i = wnd_of(ARG(0)); u64 p = ARG(1); if (i < 0) { RET(0); return; } int sx, sy; wnd_window_origin(i, &sx, &sy); wr32(c, p, 44); wr32(c, p + 4, 0); wr32(c, p + 8, g_wnd[i].visible ? 1 : 0); wr32(c, p + 28, (u32)(sx + SCREEN_X0)); wr32(c, p + 32, (u32)(sy + SCREEN_Y0)); wr32(c, p + 36, (u32)(sx + SCREEN_X0 + g_wnd[i].w)); wr32(c, p + 40, (u32)(sy + SCREEN_Y0 + g_wnd[i].h)); RET(1); }
 static void s_SetWindowPlacement(Cpu *c) { int i = wnd_of(ARG(0)); u64 p = ARG(1); if (i < 0) { RET(0); return; } u32 show = rd32(c, p + 8); int l = (s32)rd32(c, p + 28), t = (s32)rd32(c, p + 32), r = (s32)rd32(c, p + 36), b = (s32)rd32(c, p + 40); if (show && show != 0) wnd_show_now(c, i); if (wnd_set_pos(c, i, l, t, r - l, b - t, 0, 1)) return; RET(1); }
-static void s_EnableWindow(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } int prev = !g_wnd[i].enabled; int en = ARG(1) != 0; if (g_wnd[i].enabled != en) { g_wnd[i].enabled = en; wnd_invalidate(i, 1); if (!en && (g_focus == i || (g_focus >= 0 && wnd_is_child_of(g_focus, i)))) g_focus = -1; if (!g_wnd[i].builtin) post_msg_to(W, HWND_OF(i), 0x0A, en, 0); } RET(prev); }
+static void s_EnableWindow(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } int prev = !g_wnd[i].enabled; int en = ARG(1) != 0; if (g_wnd[i].enabled != en) { g_wnd[i].enabled = en; wnd_invalidate(i, 1); if (!en && (g_focus == i || (g_focus >= 0 && wnd_is_child_of(g_focus, i)))) g_focus = -1; if (!g_wnd[i].builtin) { Wnd *n = &g_wnd[i]; if (n->pid == W->pid && n->wndproc) { /* WM_ENABLE is sent synchronously, like Windows: VCL's TApplication reacts to it inside DisableTaskWindows */ w32_push_cont(c, CONT_RET_VAL_, (u64)prev); w32_guest_call(c, n->wndproc, HWND_OF(i), 0x0A, (u64)en, 0); return; } post_msg_to(W, HWND_OF(i), 0x0A, en, 0); } } RET(prev); }
 static void s_IsWindowEnabled(Cpu *c) { int i = wnd_of(ARG(0)); RET(i >= 0 && wnd_enabled_chain(i)); }
 static void s_IsWindow(Cpu *c) { int i = wnd_of(ARG(0)); RET(i >= 0 && !g_wnd[i].destroyed); }
 static void s_IsWindowVisible(Cpu *c) { int i = wnd_of(ARG(0)); RET(i >= 0 && wnd_visible_chain(i)); }
@@ -579,8 +580,8 @@ static void s_LoadCursorA(Cpu *c) { RET(0x7A001); }
 static void s_LoadCursorFromFileW(Cpu *c) { RET(0x7A001); }
 static void s_LoadIconA(Cpu *c) { RET(0x7B001 + (ARG(1) & 0xfff) * 0x10); }
 static void s_LoadImageA(Cpu *c) { RET(0x7C001 + (ARG(1) & 0xfff) * 0x10); }
-static void s_LoadImageW(Cpu *c) { u32 type = (u32)ARG(2); if (type == 0 /* IMAGE_BITMAP */ && ARG(1) < 0x10000) { /* RT_BITMAP → a DIB: 32/24-bit bitmaps become real surfaces */ u64 e = rsrc_lookup(c, ARG(0), ARG(1), 2, 1, 0); if (e) { u64 base = ARG(0) ? ARG(0) : W->image_base; u64 bmi = base + rd32(c, e); u32 hsz = rd32(c, bmi); s32 bw = (s32)rd32(c, bmi + 4), bh = (s32)rd32(c, bmi + 8); u16 bpp = rd16(c, bmi + 14); int bottom_up = bh > 0; if (bh < 0) bh = -bh;
-      if ((bpp == 32 || bpp == 24) && bw > 0 && bh > 0 && bw < 4096 && bh < 4096) { u64 bits; u64 h = make_bitmap(c, bw, bh, 0, &bits); if (h) { u64 src = bmi + hsz + (bpp == 24 ? 0 : (rd32(c, bmi + 16) == 3 ? 12 : 0)); int stride = bpp == 32 ? bw * 4 : ((bw * 3 + 3) & ~3); for (int y = 0; y < bh; y++) { int sy = bottom_up ? bh - 1 - y : y; for (int x = 0; x < bw; x++) { u32 px = bpp == 32 ? rd32(c, src + (u64)sy * stride + x * 4) : (rd8(c, src + (u64)sy * stride + x * 3) | rd8(c, src + (u64)sy * stride + x * 3 + 1) << 8 | rd8(c, src + (u64)sy * stride + x * 3 + 2) << 16); wr32(c, bits + ((u64)y * bw + x) * 4, px & 0xffffff); } } RET(h); return; } } } }
+static void s_LoadImageW(Cpu *c) { u32 type = (u32)ARG(2); if (type == 0 /* IMAGE_BITMAP */ && ARG(1) < 0x10000) { /* RT_BITMAP → a DIB at any depth becomes a real 32-bpp surface */ u64 e = rsrc_lookup(c, ARG(0), ARG(1), 2, 1, 0); if (e) { u64 base = ARG(0) ? ARG(0) : W->image_base; u64 bmi = base + rd32(c, e); u32 hsz = rd32(c, bmi); s32 bw = (s32)rd32(c, bmi + 4), bh = (s32)rd32(c, bmi + 8); u16 bpp = rd16(c, bmi + 14); u32 comp = rd32(c, bmi + 16), clr = rd32(c, bmi + 32); if (bh < 0) bh = -bh;
+      if (bw > 0 && bh > 0 && bw < 4096 && bh < 4096 && (comp == 0 || comp == 3)) { u64 bits; u64 h = make_bitmap(c, bw, bh, 0, &bits); if (h) { u64 pal = bpp <= 8 ? (u64)(clr ? clr : 1u << bpp) * 4 : (comp == 3 ? 12 : 0); u32 *px = (u32 *)mem_ptr(c->mem, bits, (u64)bw * bh * 4, 1); if (px) dib_decode(c, bmi, bmi + hsz + pal, px, bw, bh, 0); RET(h); return; } } } }
   RET(0x7C001 + (ARG(1) & 0xfff) * 0x10); }
 static void s_LoadBitmapW(Cpu *c) { call_shim_tail(c, s_LoadImageW, ARG(0), ARG(1), 0, 0); }
 static void s_LoadBitmapA(Cpu *c) { call_shim_tail(c, s_LoadImageW, ARG(0), ARG(1), 0, 0); }
@@ -769,27 +770,6 @@ static void s_SetCaretBlinkTime(Cpu *c) { RET(1); }
 static void s_GetCaretBlinkTime(Cpu *c) { RET(530); }
 static void s_InitCommonControls(Cpu *c) { (void)c; }
 static void s_InitCommonControlsEx(Cpu *c) { RET(1); }
-static void s_ImageList_Create(Cpu *c) { RET(0x7D001); }
-static void s_ImageList_Destroy(Cpu *c) { RET(1); }
-static void s_ImageList_Add(Cpu *c) { RET(0); }
-static void s_ImageList_AddMasked(Cpu *c) { RET(0); }
-static void s_ImageList_ReplaceIcon(Cpu *c) { RET(0); }
-static void s_ImageList_GetImageCount(Cpu *c) { RET(0); }
-static void s_ImageList_SetImageCount(Cpu *c) { RET(1); }
-static void s_ImageList_Draw(Cpu *c) { RET(1); }
-static void s_ImageList_DrawEx(Cpu *c) { RET(1); }
-static void s_ImageList_GetIconSize(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), 16); if (ARG(2)) wr32(c, ARG(2), 16); RET(1); }
-static void s_ImageList_SetBkColor(Cpu *c) { RET(0xffffffff); }
-static void s_ImageList_Remove(Cpu *c) { RET(1); }
-static void s_ImageList_GetIcon(Cpu *c) { RET(0); }
-static void s_ImageList_LoadImageW(Cpu *c) { RET(0x7D002); }
-static void s_ImageList_BeginDrag(Cpu *c) { RET(0); }
-static void s_ImageList_EndDrag(Cpu *c) { (void)c; }
-static void s_ImageList_SetDragCursorImage(Cpu *c) { RET(0); }
-static void s_ImageList_DragEnter(Cpu *c) { RET(0); }
-static void s_ImageList_DragLeave(Cpu *c) { RET(0); }
-static void s_ImageList_DragMove(Cpu *c) { RET(0); }
-static void s_ImageList_DragShowNolock(Cpu *c) { RET(0); }
 static void s_CreateStatusWindowW(Cpu *c) { call_shim_tail(c, s_CreateWindowExW, 0, 0, 0, 0); RET(0); }
 static void s_CreateToolbarEx(Cpu *c) { RET(0); }
 static void s_SetWindowSubclass(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } /* chain through the extra slots: subclass proc + the previous proc */ g_wnd[i].extra[14] = g_wnd[i].wndproc; g_wnd[i].extra[15] = ARG(3); g_wnd[i].wndproc = ARG(1); RET(1); }
@@ -1389,6 +1369,8 @@ void gdi_cont_resume(Cpu *c, int kind, u64 rax) {
     case CONT_ERASEBG: erasebg_resume(c, rax); return;
     case CONT_SETPOS: setpos_resume(c, rax); return;
     case CONT_STREAMIN: streamin_resume(c, rax); return;
+    case CONT_ILREAD: ilr_resume(c, rax); return;
+    case CONT_WICREAD: wicread_resume(c, rax); return;
     case CONT_DLGINIT: dlginit_resume(c, rax); return;
     case CONT_DLGPROC: dlgproc_resume(c, rax); return;
     case CONT_MODAL: { int m = g_nmodal - 1; if (m >= 0 && g_modal[m].phase == 2) { u64 res = modal_result(w, m); g_nmodal--; w32_cont_finish(c, res); return; } modal_resume(c, rax); return; }
@@ -1410,7 +1392,7 @@ void gdi_set_msgbox_auto(int on) { g_msgbox_auto = on; }
   S(OpenClipboard), S(CloseClipboard), S(EmptyClipboard), S(SetClipboardData), S(GetClipboardData), S(IsClipboardFormatAvailable), S(GetClipboardSequenceNumber), S(CountClipboardFormats), S(EnumClipboardFormats), S(GetClipboardOwner), S(SetClipboardViewer), S(ChangeClipboardChain), S(AddClipboardFormatListener), S(RemoveClipboardFormatListener), S(GetClipboardFormatNameW), SA("GetClipboardFormatNameA", GetClipboardFormatNameW), S(RegisterClipboardFormatW), S(RegisterWindowMessageW), S(RegisterWindowMessageA), \
   S(CreateMenu), S(CreatePopupMenu), S(LoadMenuW), S(LoadMenuA), S(LoadMenuIndirectW), S(DestroyMenu), S(AppendMenuW), S(AppendMenuA), S(InsertMenuW), S(InsertMenuA), S(InsertMenuItemW), S(InsertMenuItemA), S(SetMenuItemInfoW), SA("SetMenuItemInfoA", SetMenuItemInfoW), S(GetMenuItemInfoW), S(GetMenuItemInfoA), S(ModifyMenuW), SA("ModifyMenuA", ModifyMenuW), S(RemoveMenu), S(DeleteMenu), S(SetMenu), S(GetMenu), S(GetSystemMenu), S(GetSubMenu), S(GetMenuItemCount), S(GetMenuItemID), S(GetMenuState), S(GetMenuStringW), SA("GetMenuStringA", GetMenuStringW), S(EnableMenuItem), S(CheckMenuItem), S(CheckMenuRadioItem), S(SetMenuDefaultItem), S(DrawMenuBar), S(TrackPopupMenu), S(TrackPopupMenuEx), S(IsMenu), S(SetMenuInfo), S(GetMenuInfo), S(HiliteMenuItem), S(GetMenuBarInfo), \
   S(SetScrollInfo), S(GetScrollInfo), S(SetScrollPos), S(GetScrollPos), S(SetScrollRange), S(GetScrollRange), S(ShowScrollBar), S(EnableScrollBar), S(ScrollWindowEx), S(ScrollWindow), S(LoadAcceleratorsW), S(LoadAcceleratorsA), S(CreateAcceleratorTableW), SA("CreateAcceleratorTableA", CreateAcceleratorTableW), S(DestroyAcceleratorTable), S(TranslateAcceleratorW), S(TranslateAcceleratorA), SA("TranslateAccelerator", TranslateAcceleratorA), \
-  S(CreateCaret), S(DestroyCaret), S(ShowCaret), S(HideCaret), S(SetCaretPos), S(GetCaretPos), S(SetCaretBlinkTime), S(GetCaretBlinkTime), S(InitCommonControls), S(InitCommonControlsEx), S(ImageList_Create), S(ImageList_Destroy), S(ImageList_Add), S(ImageList_AddMasked), S(ImageList_ReplaceIcon), S(ImageList_GetImageCount), S(ImageList_SetImageCount), S(ImageList_Draw), S(ImageList_DrawEx), S(ImageList_GetIconSize), S(ImageList_SetBkColor), S(ImageList_Remove), S(ImageList_GetIcon), S(ImageList_LoadImageW), SA("ImageList_LoadImageA", ImageList_LoadImageW), S(ImageList_BeginDrag), S(ImageList_EndDrag), S(ImageList_SetDragCursorImage), S(ImageList_DragEnter), S(ImageList_DragLeave), S(ImageList_DragMove), S(ImageList_DragShowNolock), \
+  S(CreateCaret), S(DestroyCaret), S(ShowCaret), S(HideCaret), S(SetCaretPos), S(GetCaretPos), S(SetCaretBlinkTime), S(GetCaretBlinkTime), S(InitCommonControls), S(InitCommonControlsEx), \
   S(CreateStatusWindowW), S(CreateToolbarEx), S(SetWindowSubclass), S(RemoveWindowSubclass), S(DefSubclassProc), S(GetWindowSubclass), S(TaskDialogIndirect), S(TaskDialog), S(SetSysColors), \
   S(NebulaButtonProc), S(NebulaStaticProc), S(NebulaLinkProc), S(NebulaEditProc), S(NebulaListBoxProc), S(NebulaComboListProc), S(NebulaComboProc), S(NebulaProgressProc), S(NebulaScrollBarProc), S(NebulaUnsupportedProc), S(NebulaMsgBoxProc), S(NebulaBrowseProc), \
   S(GetDlgCtrlID), S(SendDlgItemMessageW), S(SendDlgItemMessageA), S(SetDlgItemTextW), S(SetDlgItemTextA), S(GetDlgItemTextW), S(GetDlgItemTextA), S(SetDlgItemInt), S(GetDlgItemInt), S(CheckDlgButton), S(IsDlgButtonChecked), S(CheckRadioButton), S(MapDialogRect), S(GetDialogBaseUnits), S(GetNextDlgTabItem), S(GetNextDlgGroupItem), \
