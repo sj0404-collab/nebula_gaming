@@ -63,9 +63,11 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[ai], "--stats")) stats = 1;
     else if (!strcmp(argv[ai], "--key") && ai + 1 < argc) { int vk; double at; int dur = 100; if (sscanf(argv[++ai], "%i@%lf:%d", &vk, &at, &dur) >= 2 && nkeys < 62) { keys[nkeys].vk = vk; keys[nkeys].at = at; keys[nkeys].down = 1; nkeys++; keys[nkeys].vk = vk; keys[nkeys].at = at + dur; keys[nkeys].down = 0; nkeys++; } }
     else if (!strcmp(argv[ai], "--click") && ai + 1 < argc) { int x, y; double at; if (sscanf(argv[++ai], "%d,%d@%lf", &x, &y, &at) == 3 && nclicks < 61) { clicks[nclicks].x = x; clicks[nclicks].y = y; clicks[nclicks].at = at; clicks[nclicks].ev = 0; nclicks++; clicks[nclicks] = clicks[nclicks - 1]; clicks[nclicks].ev = 1; clicks[nclicks].at = at + 1; nclicks++; clicks[nclicks] = clicks[nclicks - 1]; clicks[nclicks].ev = 2; clicks[nclicks].at = at + 60; nclicks++; } }
+    else if (!strcmp(argv[ai], "--rclick") && ai + 1 < argc) { int x, y; double at; if (sscanf(argv[++ai], "%d,%d@%lf", &x, &y, &at) == 3 && nclicks < 61) { clicks[nclicks].x = x; clicks[nclicks].y = y; clicks[nclicks].at = at; clicks[nclicks].ev = 0; nclicks++; clicks[nclicks] = clicks[nclicks - 1]; clicks[nclicks].ev = 3; clicks[nclicks].at = at + 1; nclicks++; clicks[nclicks] = clicks[nclicks - 1]; clicks[nclicks].ev = 4; clicks[nclicks].at = at + 60; nclicks++; } }   /* --rclick: right button */
+    else if (!strcmp(argv[ai], "--move") && ai + 1 < argc) { int x, y; double at; if (sscanf(argv[++ai], "%d,%d@%lf", &x, &y, &at) == 3 && nclicks < 63) { clicks[nclicks].x = x; clicks[nclicks].y = y; clicks[nclicks].at = at; clicks[nclicks].ev = 0; nclicks++; } }   /* --move x,y@ms: mouse move only (hover) */
     else { fprintf(stderr, "unknown option %s\n", argv[ai]); return 2; }
   }
-  if (ai >= argc) { fprintf(stderr, "usage: x64run [--inspect] [--frames N] [--max-ms T] [--key VK@ms[:dur]] [--click x,y@ms] file.exe [args]\n"); return 2; }
+  if (ai >= argc) { fprintf(stderr, "usage: x64run [--inspect] [--frames N] [--max-ms T] [--key VK@ms[:dur]] [--click x,y@ms] [--move x,y@ms] file.exe [args]\n"); return 2; }
   const char *path = argv[ai];
   size_t flen = 0; u8 *bytes = map_file(path, &flen); if (!bytes) { perror(path); return 2; } long len = (long)flen;
   if (inspect) { puts(x64_inspect(bytes, len)); return 0; }

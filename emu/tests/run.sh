@@ -345,8 +345,8 @@ check "7za.exe x86: extract"      "Everything is Ok"                            
 check "7za.exe x86: round-trip identical" "same" "$(cmp -s $W32/src/rand.bin $W32/out/src/rand.bin && cmp -s $W32/src/nums.txt $W32/out/src/nums.txt && echo same || echo different)"
 check "7za.exe x86: error path = MSVC C++ throw/catch (__CxxFrameHandler)" "System ERROR:" "$($X --quiet --max-ms 30000 --mount-rw $W32='C:\w' $Z7/7za.exe x '-oC:\w\o2' 'C:\w\nope.7z' 2>&1 || true)"
 echo "[19] dialog manager (user32 dialogs, standard controls, resources, shell folders, IShellLink) — same test built for x64 and x86"
-check "dlg.exe (x64): 42 checks"    "ALL OK 42/42"   "$($X --quiet --no-stdin --max-ms 30000 tests/dlg.exe 2>&1 || true)"
-check "dlg32.exe (x86): 42 checks"  "ALL OK 42/42"   "$($X --quiet --no-stdin --max-ms 30000 tests/dlg32.exe 2>&1 || true)"
+check "dlg.exe (x64): 61 checks (dialogs, controls, menus)"    "ALL OK 61/61"   "$($X --quiet --no-stdin --max-ms 30000 tests/dlg.exe 2>&1 || true)"
+check "dlg32.exe (x86): 61 checks (dialogs, controls, menus)"  "ALL OK 61/61"   "$($X --quiet --no-stdin --max-ms 30000 tests/dlg32.exe 2>&1 || true)"
 # the same real installer twice: the x86 build (32-bit files) and the x64 build (a 32-bit setup stub that probes
 # IsWow64Process and installs 64-bit files) — both bitnesses end-to-end: setup dialog → installed 7z.exe round trip
 inst_fetch() { [ -f tests/inst/$1 ] && return 0; mkdir -p tests/inst; curl -fsSL -o tests/inst/$1 https://www.7-zip.org/a/$1 2>/dev/null || curl -fsSL -o tests/inst/$1 https://github.com/ip7z/7zip/releases/download/25.01/$1 2>/dev/null || rm -f tests/inst/$1; }
@@ -406,9 +406,10 @@ if [ -f $IS ]; then
     rm -rf $SRC $OUT $RT
     # the Inno Setup Compiler IDE (heavy Delphi VCL app): 253 PNG icons through WIC (IWICImagingFactory), TImageList streams (ImageList_Read),
     # a RichEdit-less startup dialog driven with the mouse -> the main IDE form with the Scintilla editor (isscint.dll) comes up
-    out=$(X64_LOG=1 X64_WNDDUMP=1 $X --no-stdin --max-ms 40000 --click 274,111@12000 --click 674,477@15000 --click 274,111@24000 --click 674,477@27000 --mount "$ID/is=C:\\nebula" $ID/is/Compil32.exe 2>&1 3>&1 | grep -a "^\[wnd\]\|\[wic\]\|\[imagelist\]\|FAULT\|RaiseException" || true)
+    out=$(X64_LOG=1 X64_WNDDUMP=1 $X --no-stdin --max-ms 42000 --click 274,111@12000 --click 674,477@15000 --click 274,111@24000 --click 674,477@27000 --click 270,221@36000 --mount "$ID/is=C:\\nebula" $ID/is/Compil32.exe 2>&1 3>&1 | grep -a "^\[wnd\]\|\[wic\]\|\[imagelist\]\|FAULT\|RaiseException" || true)
     check "Compil32.exe (Inno IDE): PNG icons decoded by the built-in WIC and the TImageList stream read"   "decoded PNG.*ImageList_Read: 4 images\|ImageList_Read: 4 images.*decoded PNG"   "$(echo "$out" | tr '\n' ' ')"
     check "Compil32.exe: Welcome dialog driven with the mouse -> main IDE form with the Scintilla editor is visible, no fault"   '"TMainForm" "Untitled - Inno Setup Compiler.*vis=1.*"TIDEScintFileEdit".*vis=1'   "$(echo "$out" | grep -v FAULT | tr '\n' ' ')"
+    check "Compil32.exe: the VCL TMainMenu bar is drawn in the frame (nc=1,44) and a click on File opens a popup menu window (#32768)"   '"TMainForm" .* nc=1,44 .*"#32768" "" parent=-1 .* vis=1'   "$(echo "$out" | tr '\n' ' ')"
   fi
   rm -rf $ID
   # the GUI wizard (Delphi VCL: superclassed controls, WM_ERASEBKGND through the window procedure, synchronous WM_SIZE, DC origins/clipping)

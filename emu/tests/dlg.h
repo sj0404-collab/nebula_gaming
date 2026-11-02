@@ -11,3 +11,8 @@
 #define IDC_LIST      1006
 #define IDC_PROGRESS  1007
 #define IDC_STATUS    1008
+#define IDM_MAIN      300
+#define IDM_NEW       101
+#define IDM_EXIT      102
+#define IDM_OPEN      103
+#define IDM_COPY      111

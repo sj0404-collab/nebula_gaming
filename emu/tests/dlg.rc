@@ -35,3 +35,17 @@ BEGIN
   LTEXT           "Nested modal dialog", -1, 8, 8, 140, 8
   DEFPUSHBUTTON   "OK", IDOK, 55, 40, 50, 14
 END
+
+IDM_MAIN MENU
+BEGIN
+  POPUP "&File"
+  BEGIN
+    MENUITEM "&New\tCtrl+N", IDM_NEW
+    MENUITEM SEPARATOR
+    MENUITEM "E&xit", IDM_EXIT
+  END
+  POPUP "&Edit"
+  BEGIN
+    MENUITEM "&Copy", IDM_COPY, GRAYED
+  END
+END

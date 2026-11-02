@@ -163,6 +163,58 @@ static INT_PTR CALLBACK modeless_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
   return FALSE;
 }
 
+/* menus: a menu bar on a framed window, Alt+letter / arrow keys / Enter through the popup, WM_INITMENUPOPUP + WM_COMMAND,
+   TrackPopupMenu as a modal loop (TPM_RETURNCMD), the item API, a MENU resource */
+static HMENU g_bar, g_file; static int g_cmd, g_initpopup, g_menu_step, g_track_phase, g_menu_quit;
+static LRESULT CALLBACK menu_wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+  switch (m) {
+    case WM_COMMAND: if (!lp) g_cmd = LOWORD(wp); return 0;
+    case WM_INITMENUPOPUP: g_initpopup++; return 0;
+    case WM_TIMER:
+      if (g_track_phase == 1) { g_track_phase = 2; keybd_event(VK_ESCAPE, 0, 0, 0); keybd_event(VK_ESCAPE, 0, KEYEVENTF_KEYUP, 0); return 0; }
+      if (g_track_phase == 3) { g_track_phase = 4; keybd_event(VK_DOWN, 0, 0, 0); keybd_event(VK_DOWN, 0, KEYEVENTF_KEYUP, 0); keybd_event(VK_DOWN, 0, 0, 0); keybd_event(VK_DOWN, 0, KEYEVENTF_KEYUP, 0); keybd_event(VK_RETURN, 0, 0, 0); keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0); return 0; }
+      if (g_track_phase == 2 || g_track_phase == 4) return 0;
+      switch (g_menu_step++) {
+        case 0: PostMessageW(h, WM_SYSCHAR, 'f', 0x20000000); break;   /* Alt+F */
+        case 1: { HWND p = FindWindowW(L"#32768", NULL); chk(p != NULL && IsWindowVisible(p), "menu: Alt+F opened the File popup (a #32768 window)"); chk(g_initpopup >= 1, "menu: WM_INITMENUPOPUP reached the window before the popup appeared");
+          keybd_event(VK_DOWN, 0, 0, 0); keybd_event(VK_DOWN, 0, KEYEVENTF_KEYUP, 0); keybd_event(VK_RETURN, 0, 0, 0); keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0); break; }
+        case 2: chk(g_cmd == IDM_NEW, "menu: Down + Enter chose the first item -> WM_COMMAND(IDM_NEW)"); chk(FindWindowW(L"#32768", NULL) == NULL, "menu: the popup closed after the choice"); g_cmd = 0;
+          g_track_phase = 1; { int r = (int)TrackPopupMenu(g_file, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, 300, 300, 0, h, NULL); chk(r == 0 && g_track_phase == 2, "menu: TrackPopupMenu(TPM_RETURNCMD) returned 0 after Escape"); }
+          g_track_phase = 3; { int r = (int)TrackPopupMenu(g_file, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, 300, 300, 0, h, NULL); chk(r == IDM_EXIT, "menu: TrackPopupMenu returned the chosen command (Down, Down skips the separator, Enter -> IDM_EXIT)"); chk(g_cmd == 0, "menu: TPM_RETURNCMD did not post WM_COMMAND"); }
+          g_track_phase = 0; break;
+        default: KillTimer(h, 3); DestroyWindow(h); break;
+      }
+      return 0;
+    case WM_DESTROY: g_menu_quit = 1; PostQuitMessage(7); return 0;
+  }
+  return DefWindowProcW(h, m, wp, lp);
+}
+static void menu_tests(void) {
+  g_bar = CreateMenu(); g_file = CreatePopupMenu(); HMENU edit = CreatePopupMenu();
+  AppendMenuW(g_file, MF_STRING, IDM_NEW, L"&New\tCtrl+N"); AppendMenuW(g_file, MF_SEPARATOR, 0, NULL); AppendMenuW(g_file, MF_STRING, IDM_EXIT, L"E&xit");
+  AppendMenuW(edit, MF_STRING | MF_GRAYED, IDM_COPY, L"&Copy"); AppendMenuW(g_bar, MF_POPUP, (UINT_PTR)g_file, L"&File"); AppendMenuW(g_bar, MF_POPUP, (UINT_PTR)edit, L"&Edit");
+  chk(IsMenu(g_bar) && GetMenuItemCount(g_bar) == 2 && GetMenuItemCount(g_file) == 3, "menu: CreateMenu/CreatePopupMenu/AppendMenu, GetMenuItemCount");
+  chk(GetSubMenu(g_bar, 0) == g_file && GetMenuItemID(g_file, 0) == IDM_NEW && GetMenuItemID(g_bar, 0) == (UINT)-1, "menu: GetSubMenu, GetMenuItemID (popup items report -1)");
+  chk((GetMenuState(g_file, 1, MF_BYPOSITION) & MF_SEPARATOR) && (GetMenuState(g_bar, 0, MF_BYPOSITION) & MF_POPUP) && (GetMenuState(edit, IDM_COPY, MF_BYCOMMAND) & MF_GRAYED), "menu: GetMenuState (separator, popup, grayed)");
+  WCHAR buf[64]; int n = GetMenuStringW(g_file, IDM_NEW, buf, 64, MF_BYCOMMAND); chk(n == 11 && wcscmp(buf, L"&New\tCtrl+N") == 0, "menu: GetMenuStringW by command");
+  chk(EnableMenuItem(g_file, IDM_EXIT, MF_BYCOMMAND | MF_GRAYED) == MF_ENABLED && (GetMenuState(g_file, IDM_EXIT, MF_BYCOMMAND) & MF_GRAYED) && EnableMenuItem(g_file, IDM_EXIT, MF_BYCOMMAND | MF_ENABLED) == MF_GRAYED, "menu: EnableMenuItem returns the previous state");
+  chk(CheckMenuItem(g_file, IDM_NEW, MF_BYCOMMAND | MF_CHECKED) == MF_UNCHECKED && (GetMenuState(g_file, IDM_NEW, MF_BYCOMMAND) & MF_CHECKED) && CheckMenuItem(g_file, IDM_NEW, MF_BYCOMMAND | MF_UNCHECKED) == MF_CHECKED, "menu: CheckMenuItem");
+  MENUITEMINFOW mi; memset(&mi, 0, sizeof mi); mi.cbSize = sizeof mi; mi.fMask = MIIM_STRING | MIIM_ID; mi.wID = IDM_OPEN; mi.dwTypeData = (LPWSTR)L"&Open"; chk(InsertMenuItemW(g_file, 1, TRUE, &mi) && GetMenuItemCount(g_file) == 4 && GetMenuItemID(g_file, 1) == IDM_OPEN, "menu: InsertMenuItemW by position");
+  memset(&mi, 0, sizeof mi); mi.cbSize = sizeof mi; mi.fMask = MIIM_STRING | MIIM_ID | MIIM_STATE; mi.dwTypeData = buf; mi.cch = 64; chk(GetMenuItemInfoW(g_file, IDM_OPEN, FALSE, &mi) && wcscmp(buf, L"&Open") == 0 && mi.cch == 5 && mi.wID == IDM_OPEN && mi.fState == MFS_ENABLED, "menu: GetMenuItemInfoW (string, cch, id, state)");
+  chk(RemoveMenu(g_file, IDM_OPEN, MF_BYCOMMAND) && GetMenuItemCount(g_file) == 3, "menu: RemoveMenu by command");
+  HMENU res = LoadMenuW(g_inst, MAKEINTRESOURCEW(IDM_MAIN)); n = res ? GetMenuStringW(GetSubMenu(res, 0), IDM_NEW, buf, 64, MF_BYCOMMAND) : 0;
+  chk(res && GetMenuItemCount(res) == 2 && GetMenuItemCount(GetSubMenu(res, 0)) == 3 && n == 11 && wcscmp(buf, L"&New\tCtrl+N") == 0 && (GetMenuState(GetSubMenu(res, 1), IDM_COPY, MF_BYCOMMAND) & MF_GRAYED), "menu: LoadMenuW from a MENU resource (popups, separator, GRAYED)");
+  DestroyMenu(res);
+  WNDCLASSW wc; memset(&wc, 0, sizeof wc); wc.lpfnWndProc = menu_wnd_proc; wc.hInstance = g_inst; wc.lpszClassName = L"NebulaMenuTest"; wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); RegisterClassW(&wc);
+  HWND h = CreateWindowExW(0, L"NebulaMenuTest", L"Menu test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 100, 100, 320, 200, NULL, g_bar, g_inst, NULL);
+  chk(h != NULL && GetMenu(h) == g_bar, "menu: CreateWindowEx with hMenu, GetMenu");
+  SetTimer(h, 3, 150, NULL);
+  MSG msg; DWORD t0 = GetTickCount();
+  while (GetMessageW(&msg, NULL, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessageW(&msg); if (GetTickCount() - t0 > 15000) { printf("FAIL menu: timeout\n"); g_fail++; break; } }
+  chk(g_menu_quit && msg.message == WM_QUIT && msg.wParam == 7, "menu: the window closed, WM_QUIT reached GetMessage");
+  DestroyMenu(g_bar);
+}
+
 int main(void) {
   g_inst = GetModuleHandleW(NULL);
   InitCommonControls();
@@ -186,6 +238,7 @@ int main(void) {
   }
   if (msg.message == WM_QUIT) quit_code = (int)msg.wParam;
   chk(quit_code == 5, "modeless: PostQuitMessage code reached GetMessage");
+  menu_tests();
   printf("%s %d/%d\n", g_fail ? "FAILED" : "ALL OK", g_ok, g_ok + g_fail);
   return g_fail ? 1 : 0;
 }
