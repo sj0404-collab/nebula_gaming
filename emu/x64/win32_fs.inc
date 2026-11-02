@@ -521,8 +521,10 @@ static void s_ReadProcessMemory(Cpu *c) {
   else if (!proc_read_mem(pid, ARG(1), dst, n)) { W->last_error = 299; if (ARG(4)) wr64(c, ARG(4), 0); RET(0); return; }
   if (ARG(4)) wr64(c, ARG(4), n); RET(1);
 }
-static void s_IsWow64Process(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), 0); RET(1); }
-static void s_IsWow64Process2(Cpu *c) { if (ARG(1)) wr16(c, ARG(1), 0); if (ARG(2)) wr16(c, ARG(2), 0x8664); RET(1); }
+/* the emulated Windows is 64-bit: a 32-bit (PE32) process runs "under WOW64", so 32-bit setup stubs that
+   probe for a 64-bit OS (7-Zip x64 setup, many NSIS/Inno installers) take their 64-bit path instead of refusing */
+static void s_IsWow64Process(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), W->mode32 ? 1 : 0); RET(1); }
+static void s_IsWow64Process2(Cpu *c) { if (ARG(1)) wr16(c, ARG(1), W->mode32 ? 0x14c : 0); if (ARG(2)) wr16(c, ARG(2), 0x8664); RET(1); }
 /* CreateRemoteThread(ExitProcess, code) is how busybox kill delivers signals; anything else is refused */
 static void s_CreateRemoteThread(Cpu *c) {
   int pid = pid_of_handle(c, ARG(0)); u64 start = ARG(3); if (pid < 0) { W->last_error = 6; RET(0); return; }

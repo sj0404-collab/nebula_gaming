@@ -347,20 +347,26 @@ check "7za.exe x86: error path = MSVC C++ throw/catch (__CxxFrameHandler)" "Syst
 echo "[19] dialog manager (user32 dialogs, standard controls, resources, shell folders, IShellLink) — same test built for x64 and x86"
 check "dlg.exe (x64): 42 checks"    "ALL OK 42/42"   "$($X --quiet --no-stdin --max-ms 30000 tests/dlg.exe 2>&1 || true)"
 check "dlg32.exe (x86): 42 checks"  "ALL OK 42/42"   "$($X --quiet --no-stdin --max-ms 30000 tests/dlg32.exe 2>&1 || true)"
-INST=tests/inst/7z2501.exe
-if [ ! -f $INST ]; then mkdir -p tests/inst; curl -fsSL -o $INST https://www.7-zip.org/a/7z2501.exe 2>/dev/null || true; fi
-if [ -f $INST ]; then
-  echo "  real installer: 7-Zip 25.01 x86 (7z2501.exe, the official 32-bit setup program)"
-  ID=$(mktemp -d); rc=0; $X --quiet --no-stdin --max-ms 120000 --mount-rw "$ID=C:\\inst" $INST /S '/D=C:\inst\7z' >/dev/null 2>&1 || rc=$?
-  check "silent install (/S) exit code"   "rc=0"   "rc=$rc"
-  check "silent install wrote 7z.exe + 7z.dll + Lang"   "7z.dll 7z.exe .*Lang"   "$(ls $ID/7z 2>/dev/null | tr '\n' ' ')"
-  echo "round trip" > $ID/in.txt
-  check "installed 7z.exe (x86, loads 7z.dll through COM-style GetProcAddress) compresses"   "Everything is Ok"   "$($X --quiet --no-stdin --max-ms 60000 --mount-rw "$ID=C:\\inst" $ID/7z/7z.exe a 'C:\inst\in.7z' 'C:\inst\in.txt' 2>&1 || true)"
-  rm -rf $ID; ID=$(mktemp -d); rc=0
-  out=$($X --no-stdin --max-ms 120000 --mount-rw "$ID=C:\\inst" --click 130,153@1500 --click 130,153@8000 --click 130,153@16000 --click 130,153@26000 --click 130,153@40000 --click 130,153@60000 --click 130,153@90000 $INST '/D=C:\inst\7z' 2>&1 | grep -v "last blocks" || true)
-  check "GUI install: dialog from the resource template, Install clicked, Close clicked → exit 0"   "exit code 0"   "$out"
-  check "GUI install: frames were presented while installing"   "[1-9][0-9]* frames"   "$out"
-  check "GUI install: files written through the dialog flow"   "7z.exe"   "$(ls $ID/7z 2>/dev/null | tr '\n' ' ')"
-  rm -rf $ID
-else echo "  skip (no 7z2501.exe and no network)"; fi
+# the same real installer twice: the x86 build (32-bit files) and the x64 build (a 32-bit setup stub that probes
+# IsWow64Process and installs 64-bit files) — both bitnesses end-to-end: setup dialog → installed 7z.exe round trip
+inst_fetch() { [ -f tests/inst/$1 ] && return 0; mkdir -p tests/inst; curl -fsSL -o tests/inst/$1 https://www.7-zip.org/a/$1 2>/dev/null || curl -fsSL -o tests/inst/$1 https://github.com/ip7z/7zip/releases/download/25.01/$1 2>/dev/null || rm -f tests/inst/$1; }
+for V in "7z2501.exe x86 32-bit" "7z2501-x64.exe x64 64-bit"; do
+  set -- $V; INST=tests/inst/$1; B=$2; inst_fetch $1
+  if [ -f $INST ]; then
+    echo "  real installer: 7-Zip 25.01 $B ($1, the official setup program; installs $3 7z.exe)"
+    ID=$(mktemp -d); rc=0; $X --quiet --no-stdin --max-ms 120000 --mount-rw "$ID=C:\\inst" $INST /S '/D=C:\inst\7z' >/dev/null 2>&1 || rc=$?
+    check "$B silent install (/S) exit code"   "rc=0"   "rc=$rc"
+    check "$B silent install wrote 7z.exe + 7z.dll + Lang"   "7z.dll 7z.exe .*Lang"   "$(ls $ID/7z 2>/dev/null | tr '\n' ' ')"
+    check "$B installed 7z.exe is a $3 PE"   "$([ $B = x64 ] && echo PE32+ || echo 'PE32 ')"   "$(python3 -c "import struct;d=open('$ID/7z/7z.exe','rb').read();pe=struct.unpack_from('<I',d,0x3c)[0];print('PE32+' if struct.unpack_from('<H',d,pe+24)[0]==0x20b else 'PE32 ')" 2>/dev/null)"
+    echo "round trip" > $ID/in.txt
+    check "$B installed 7z.exe (loads 7z.dll through COM-style GetProcAddress) compresses"   "Everything is Ok"   "$($X --quiet --no-stdin --max-ms 60000 --mount-rw "$ID=C:\\inst" $ID/7z/7z.exe a 'C:\inst\in.7z' 'C:\inst\in.txt' 2>&1 || true)"
+    check "$B installed 7z.exe lists the archive"   "in.txt"   "$($X --quiet --no-stdin --max-ms 60000 --mount-rw "$ID=C:\\inst" $ID/7z/7z.exe l 'C:\inst\in.7z' 2>&1 || true)"
+    rm -rf $ID; ID=$(mktemp -d); rc=0
+    out=$($X --no-stdin --max-ms 120000 --mount-rw "$ID=C:\\inst" --click 130,153@1500 --click 130,153@8000 --click 130,153@16000 --click 130,153@26000 --click 130,153@40000 --click 130,153@60000 --click 130,153@90000 $INST '/D=C:\inst\7z' 2>&1 | grep -v "last blocks" || true)
+    check "$B GUI install: dialog from the resource template, Install clicked, Close clicked → exit 0"   "exit code 0"   "$out"
+    check "$B GUI install: frames were presented while installing"   "[1-9][0-9]* frames"   "$out"
+    check "$B GUI install: files written through the dialog flow"   "7z.exe"   "$(ls $ID/7z 2>/dev/null | tr '\n' ' ')"
+    rm -rf $ID
+  else echo "  skip $B (no $1 and no network)"; fi
+done
 [ $fail = 0 ] && echo "ALL OK" || { echo "FAILURES"; exit 1; }
