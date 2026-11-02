@@ -6,10 +6,10 @@
 #define BC_STATUS_NOT_FOUND 0xC0000225u
 #define BC_STATUS_BUFFER_TOO_SMALL 0xC0000023u
 #define BC_STATUS_INVALID_PARAMETER 0xC000000Du
-enum { BC_MD5 = 1, BC_SHA1, BC_SHA256, BC_SHA384, BC_SHA512, BC_RNG };
+enum { BC_MD5 = 1, BC_SHA1, BC_SHA256, BC_SHA384, BC_SHA512, BC_RNG, BC_ECDSA, BC_RSA, BC_AES };   /* ECDSA/RSA/AES providers open, but every key operation reports STATUS_NOT_SUPPORTED */
 static const int bc_digest_len[] = { 0, 16, 20, 32, 48, 64, 0 };
 static const int bc_block_len[] = { 0, 64, 64, 64, 128, 128, 0 };
-static const char *const bc_alg_name[] = { "", "MD5", "SHA1", "SHA256", "SHA384", "SHA512", "RNG" };
+static const char *const bc_alg_name[] = { "", "MD5", "SHA1", "SHA256", "SHA384", "SHA512", "RNG", "ECDSA_P256", "RSA", "AES" };
 
 /* ---- MD5 ---- */
 typedef struct { u32 h[4]; u64 len; u8 buf[64]; } Md5;
@@ -113,7 +113,8 @@ static void bc_finish(BcHash *h, u8 *out) {
 
 /* ---- handle table: algorithm providers and hash objects ---- */
 #define BC_MAX 256
-typedef struct { int used, kind, alg, hmac; BcHash h; } BcObj;   /* kind 1 algorithm, 2 hash */
+typedef struct { int used, kind, alg, hmac; BcHash h; u8 key[64]; } BcObj;   /* kind 1 algorithm, 2 hash, 3 public key (ECC X||Y) */
+#include "ecdsa.inc"
 static BcObj g_bc[BC_MAX];
 #define BC_HANDLE_BASE 0x6bc00000ull
 static int bc_alloc(int kind, int alg, int hmac) { for (int i = 1; i < BC_MAX; i++) if (!g_bc[i].used) { e_memset(&g_bc[i], 0, sizeof g_bc[i]); g_bc[i].used = 1; g_bc[i].kind = kind; g_bc[i].alg = alg; g_bc[i].hmac = hmac; return i; } return -1; }
@@ -123,12 +124,12 @@ static int bc_alg_of(u64 h, int *hmac) {
   BcObj *o = bc_obj(h, 1); if (o) { *hmac = o->hmac; return o->alg; }
   u32 p = (u32)h; *hmac = 0; if (p >= 0x91 && p <= 0xd1 && (p & 0xf) == 1) { *hmac = 1; p -= 0x70; }
   switch (p) { case 0x21: return BC_MD5; case 0x31: return BC_SHA1; case 0x41: return BC_SHA256; case 0x51: return BC_SHA384; case 0x61: return BC_SHA512; case 0x81: return BC_RNG; } return 0; }
-static int bc_alg_by_name(const char *n) { for (int i = 1; i <= BC_RNG; i++) if (!e_stricmp(n, bc_alg_name[i])) return i; return 0; }
+static int bc_alg_by_name(const char *n) { for (int i = 1; i <= BC_AES; i++) if (!e_stricmp(n, bc_alg_name[i])) return i; return 0; }
 
 /* BCryptOpenAlgorithmProvider(&hAlg, algId, implementation, flags) ; flags 8 = BCRYPT_ALG_HANDLE_HMAC_FLAG */
 static void s_BCryptOpenAlgorithmProvider(Cpu *c) { char name[64]; wstr_to_utf8(c, ARG(1), name, sizeof name, -1); u32 flags = (u32)ARG(3);
   int alg = bc_alg_by_name(name); if (!alg) { e_log("[x64] BCryptOpenAlgorithmProvider(%s): not implemented (hashes + RNG only)\n", name); RET(BC_STATUS_NOT_FOUND); return; }
-  int i = bc_alloc(1, alg, (flags & 8) ? 1 : 0); if (i < 0) { RET(0xC0000017u); return; } wr64(c, ARG(0), BC_HANDLE_BASE + (u64)i); RET(0); }
+  int i = bc_alloc(1, alg, (flags & 8) ? 1 : 0); if (i < 0) { RET(0xC0000017u); return; } wrp(c, ARG(0), BC_HANDLE_BASE + (u64)i); RET(0); }
 static void s_BCryptCloseAlgorithmProvider(Cpu *c) { BcObj *o = bc_obj(ARG(0), 1); if (o) o->used = 0; RET(0); }
 /* BCryptGetProperty(h, propW, out, cbOut, &cbResult, flags) */
 static void s_BCryptGetProperty(Cpu *c) { char prop[64]; wstr_to_utf8(c, ARG(1), prop, sizeof prop, -1); u64 out = ARG(2); u32 cb = (u32)ARG(3), *dummy = 0; (void)dummy; u64 resp = ARG(4);
@@ -141,11 +142,11 @@ static void s_BCryptGetProperty(Cpu *c) { char prop[64]; wstr_to_utf8(c, ARG(1),
   if (resp) wr32(c, resp, 4); if (!out) { RET(0); return; } if (cb < 4) { RET(BC_STATUS_BUFFER_TOO_SMALL); return; } wr32(c, out, v); RET(0); }
 static void s_BCryptSetProperty(Cpu *c) { RET(0); }
 /* BCryptCreateHash(hAlg, &hHash, pbHashObject, cbHashObject, pbSecret, cbSecret, flags) */
-static void s_BCryptCreateHash(Cpu *c) { int hmac = 0, alg = bc_alg_of(ARG(0), &hmac); if (!alg || alg == BC_RNG) { RET(BC_STATUS_INVALID_HANDLE); return; }
+static void s_BCryptCreateHash(Cpu *c) { int hmac = 0, alg = bc_alg_of(ARG(0), &hmac); if (!alg || alg >= BC_RNG) { RET(BC_STATUS_INVALID_HANDLE); return; }
   u64 secret = ARG(4); u32 cbs = (u32)ARG(5); if (secret && cbs) hmac = 1;
   int i = bc_alloc(2, alg, hmac); if (i < 0) { RET(0xC0000017u); return; }
   u8 key[4096]; u32 kl = cbs > sizeof key ? (u32)sizeof key : cbs; if (hmac && secret) { const u8 *p = mem_ptr(c->mem, secret, kl, 0); if (p) e_memcpy(key, p, kl); else kl = 0; } else kl = 0;
-  bc_init(&g_bc[i].h, alg, hmac, key, (int)kl); wr64(c, ARG(1), BC_HANDLE_BASE + (u64)i); RET(0); }
+  bc_init(&g_bc[i].h, alg, hmac, key, (int)kl); wrp(c, ARG(1), BC_HANDLE_BASE + (u64)i); RET(0); }
 static void s_BCryptHashData(Cpu *c) { BcObj *o = bc_obj(ARG(0), 2); if (!o) { RET(BC_STATUS_INVALID_HANDLE); return; } u32 n = (u32)ARG(2); const u8 *p = n ? mem_ptr(c->mem, ARG(1), n, 0) : (const u8 *)""; if (!p) { RET(BC_STATUS_INVALID_PARAMETER); return; } bc_hash_update(&o->h, p, n); RET(0); }
 static void s_BCryptFinishHash(Cpu *c) { BcObj *o = bc_obj(ARG(0), 2); if (!o) { RET(BC_STATUS_INVALID_HANDLE); return; } u32 cb = (u32)ARG(2); int dl = bc_digest_len[o->alg]; if (cb != (u32)dl) { RET(BC_STATUS_INVALID_PARAMETER); return; }
   u8 out[64]; bc_finish(&o->h, out); u8 *d = mem_ptr(c->mem, ARG(1), (u64)dl, 1); if (!d) { RET(BC_STATUS_INVALID_PARAMETER); return; } e_memcpy(d, out, (size_t)dl);
@@ -153,15 +154,36 @@ static void s_BCryptFinishHash(Cpu *c) { BcObj *o = bc_obj(ARG(0), 2); if (!o) {
   RET(0); }
 static void s_BCryptDestroyHash(Cpu *c) { BcObj *o = bc_obj(ARG(0), 2); if (!o) { RET(BC_STATUS_INVALID_HANDLE); return; } o->used = 0; RET(0); }
 /* BCryptDuplicateHash(hHash, &hNew, pbHashObject, cbHashObject, flags) */
-static void s_BCryptDuplicateHash(Cpu *c) { BcObj *o = bc_obj(ARG(0), 2); if (!o) { RET(BC_STATUS_INVALID_HANDLE); return; } int i = bc_alloc(2, o->alg, o->hmac); if (i < 0) { RET(0xC0000017u); return; } g_bc[i].h = o->h; wr64(c, ARG(1), BC_HANDLE_BASE + (u64)i); RET(0); }
+static void s_BCryptDuplicateHash(Cpu *c) { BcObj *o = bc_obj(ARG(0), 2); if (!o) { RET(BC_STATUS_INVALID_HANDLE); return; } int i = bc_alloc(2, o->alg, o->hmac); if (i < 0) { RET(0xC0000017u); return; } g_bc[i].h = o->h; wrp(c, ARG(1), BC_HANDLE_BASE + (u64)i); RET(0); }
 /* BCryptHash(hAlg, pbSecret, cbSecret, pbInput, cbInput, pbOutput, cbOutput): one shot */
-static void s_BCryptHash(Cpu *c) { int hmac = 0, alg = bc_alg_of(ARG(0), &hmac); if (!alg || alg == BC_RNG) { RET(BC_STATUS_INVALID_HANDLE); return; }
+static void s_BCryptHash(Cpu *c) { int hmac = 0, alg = bc_alg_of(ARG(0), &hmac); if (!alg || alg >= BC_RNG) { RET(BC_STATUS_INVALID_HANDLE); return; }
   u32 cbs = (u32)ARG(2), cbi = (u32)ARG(4), cbo = (u32)ARG(6); if (cbs) hmac = 1; if (cbo != (u32)bc_digest_len[alg]) { RET(BC_STATUS_INVALID_PARAMETER); return; }
   u8 key[4096]; u32 kl = cbs > sizeof key ? (u32)sizeof key : cbs; if (kl) { const u8 *p = mem_ptr(c->mem, ARG(1), kl, 0); if (!p) { RET(BC_STATUS_INVALID_PARAMETER); return; } e_memcpy(key, p, kl); }
   const u8 *in = cbi ? mem_ptr(c->mem, ARG(3), cbi, 0) : (const u8 *)""; u8 *out = mem_ptr(c->mem, ARG(5), cbo, 1); if (!in || !out) { RET(BC_STATUS_INVALID_PARAMETER); return; }
   BcHash h; bc_init(&h, alg, hmac, key, (int)kl); bc_hash_update(&h, in, cbi); u8 d[64]; bc_finish(&h, d); e_memcpy(out, d, cbo); RET(0); }
 static void s_BCryptGetFipsAlgorithmMode(Cpu *c) { if (ARG(0)) wr8(c, ARG(0), 0); RET(0); }
+/* Asymmetric / symmetric key operations are not implemented: every call reports STATUS_NOT_SUPPORTED so programs that probe for them
+   (Inno Setup's ISSig verifier, .NET's RSA) take their "unavailable" path instead of calling a missing import. */
+static void s_BCryptDestroyKey(Cpu *c) { BcObj *o = bc_obj(ARG(0), 3); if (o) o->used = 0; RET(0); }
+static void s_BCryptGenerateKeyPair(Cpu *c) { if (ARG(1)) wrp(c, ARG(1), 0); RET(0xC00000BB); }
+static void s_BCryptFinalizeKeyPair(Cpu *c) { RET(0xC00000BB); }
+/* Public keys are accepted (ECCPUBLICBLOB / RSAPUBLICBLOB) so programs can initialise their verifiers; the key handle supports nothing but
+   BCryptDestroyKey — a later BCryptVerifySignature reports STATUS_INVALID_SIGNATURE (no ECDSA/RSA arithmetic here). */
+static void s_BCryptImportKeyPair(Cpu *c) { char type[32]; wstr_to_utf8(c, ARG(2), type, sizeof type, -1); int hm = 0; if (type[0] && (type[0] == 'E' || type[0] == 'R') && type[e_strlen(type) - 1] == 'B') { int alg = bc_alg_of(ARG(0), &hm); if (!alg) { RET(BC_STATUS_INVALID_HANDLE); return; } int i = bc_alloc(3, alg, 0); if (i < 0) { RET(0xC0000017u); return; } u64 blob = ARG(4); u32 blen = (u32)ARG(5); if (alg == BC_ECDSA) { if (blen < 72 || rd32(c, blob) != 0x31534345u /* BCRYPT_ECDSA_PUBLIC_P256_MAGIC */ || rd32(c, blob + 4) != 32) { g_bc[i].used = 0; RET(0xC000000Du); return; } for (int k = 0; k < 64; k++) g_bc[i].key[k] = rd8(c, blob + 8 + k); } if (ARG(3)) wrp(c, ARG(3), BC_HANDLE_BASE + (u64)i); RET(0); return; } if (ARG(3)) wrp(c, ARG(3), 0); RET(0xC00000BB); }
+static void s_BCryptExportKey(Cpu *c) { /* (hKey, hExportKey, blobType, out, cbOut, &cbResult, flags): ECCPUBLICBLOB of an imported key */ BcObj *o = bc_obj(ARG(0), 3); if (!o) { RET(BC_STATUS_INVALID_HANDLE); return; } if (o->alg != BC_ECDSA) { RET(0xC00000BB); return; }
+  if (ARG(5)) wr32(c, ARG(5), 72); if (!ARG(3)) { RET(0); return; } if ((u32)ARG(4) < 72) { RET(0xC0000023u); return; } wr32(c, ARG(3), 0x31534345u); wr32(c, ARG(3) + 4, 32); for (int k = 0; k < 64; k++) wr8(c, ARG(3) + 8 + k, o->key[k]); RET(0); }
+static void s_BCryptImportKey(Cpu *c) { if (ARG(3)) wrp(c, ARG(3), 0); RET(0xC00000BB); }
+static void s_BCryptGenerateSymmetricKey(Cpu *c) { if (ARG(1)) wrp(c, ARG(1), 0); RET(0xC00000BB); }
+static void s_BCryptEncrypt(Cpu *c) { RET(0xC00000BB); }
+static void s_BCryptDecrypt(Cpu *c) { RET(0xC00000BB); }
+static void s_BCryptSignHash(Cpu *c) { RET(0xC00000BB); }
+static void s_BCryptVerifySignature(Cpu *c) { /* (hKey, padding, hash, cbHash, sig, cbSig, flags) — real ECDSA P-256 check */ BcObj *o = bc_obj(ARG(0), 3); if (!o) { RET(BC_STATUS_INVALID_HANDLE); return; } if (o->alg != BC_ECDSA) { RET(0xC00000BB); return; }
+  u32 hl = (u32)ARG(3), sl = (u32)ARG(5); if (sl != 64 || hl == 0 || hl > 64) { RET(0xC000A000); return; } u8 h[64], sig[64]; for (u32 k = 0; k < hl; k++) h[k] = rd8(c, ARG(2) + k); for (int k = 0; k < 64; k++) sig[k] = rd8(c, ARG(4) + k);
+  RET(ecdsa_p256_verify(o->key, o->key + 32, h, hl, sig) ? 0 : 0xC000A000); }   /* STATUS_INVALID_SIGNATURE */
+static void s_BCryptDeriveKeyPBKDF2(Cpu *c) { RET(0xC00000BB); }
+static void s_BCryptDuplicateKey(Cpu *c) { RET(0xC00000BB); }
 #define BCRYPT_SHIMS \
+  S(BCryptDestroyKey), S(BCryptGenerateKeyPair), S(BCryptFinalizeKeyPair), S(BCryptImportKeyPair), S(BCryptExportKey), S(BCryptImportKey), S(BCryptGenerateSymmetricKey), S(BCryptEncrypt), S(BCryptDecrypt), S(BCryptSignHash), S(BCryptVerifySignature), S(BCryptDeriveKeyPBKDF2), S(BCryptDuplicateKey), \
   S(BCryptOpenAlgorithmProvider), S(BCryptCloseAlgorithmProvider), S(BCryptGetProperty), S(BCryptSetProperty), \
   S(BCryptCreateHash), S(BCryptHashData), S(BCryptFinishHash), S(BCryptDestroyHash), S(BCryptDuplicateHash), \
   S(BCryptHash), S(BCryptGetFipsAlgorithmMode),

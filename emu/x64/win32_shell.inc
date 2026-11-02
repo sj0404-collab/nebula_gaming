@@ -272,10 +272,10 @@ static int kf_csidl(u32 d1) { switch (d1) {
   case 0x3EB685DBu: return 0x1a; case 0xF1B32785u: return 0x1c; case 0x352481E8u: return 0x20; case 0x2B0F765Du: return 0x21; case 0xD9DC8A3Bu: return 0x22; case 0x62AB5D82u: return 0x23; case 0xF38BF404u: return 0x24; case 0x1AC14E77u: return 0x25;
   case 0x905E63B6u: return 0x26; case 0x6D809377u: return 0x26; case 0x33E28130u: return 0x27; case 0x5E6C858Fu: return 0x28; case 0xD65231B0u: return 0x29; case 0x7C5A40EFu: return 0x2a; case 0xF7F1ED05u: return 0x2b; case 0xDE974D24u: return 0x2c;
   case 0xB94237E7u: return 0x2d; case 0xED4824AFu: return 0x2e; case 0xD0384E7Du: return 0x2f; case 0x724EF170u: return 0x30; case 0x3214FAB5u: return 0x35; case 0xB6EBFB86u: return 0x36; case 0x2400183Au: return 0x37; case 0x8AD10C31u: return 0x38;
-  case 0x374DE290u: return 0x05; /* Downloads → Documents\..: map to a real folder below */ case 0xA520A1A4u: return 0x1c; /* LocalAppDataLow */ case 0xDFDF76A2u: return 0x19; /* Public */ case 0x0AC0837Cu: return 0x28; /* Computer → profile (never a path) */
+  case 0x5CD7AEE2u: return 0x05; /* UserProgramFiles → mapped below */ case 0xBCBD3057u: return 0x05; /* UserProgramFilesCommon */ case 0x374DE290u: return 0x05; /* Downloads → Documents\..: map to a real folder below */ case 0xA520A1A4u: return 0x1c; /* LocalAppDataLow */ case 0xDFDF76A2u: return 0x19; /* Public */ case 0x0AC0837Cu: return 0x28; /* Computer → profile (never a path) */
   default: return -1; } }
 static void s_SHGetKnownFolderPath(Cpu *c) { u32 d1 = rd32(c, ARG(0)); int csidl = kf_csidl(d1); if (ARG(3)) wrp(c, ARG(3), 0); if (csidl < 0) { RET(0x80070002u); return; }
-  const char *p = d1 == 0x374DE290u ? "C:\\Users\\user\\Downloads" : csidl_path((u32)csidl); if (!p) { RET(0x80070002u); return; } if ((u32)ARG(1) & 0x8000) shell_mkdirs(p);
+  const char *p = d1 == 0x374DE290u ? "C:\\Users\\user\\Downloads" : d1 == 0x5CD7AEE2u ? "C:\\Users\\user\\AppData\\Local\\Programs" : d1 == 0xBCBD3057u ? "C:\\Users\\user\\AppData\\Local\\Programs\\Common" : csidl_path((u32)csidl); if (!p) { RET(0x80070002u); return; } if ((u32)ARG(1) & 0x8000) shell_mkdirs(p);
   u64 mem = w32_heap_alloc(W, (e_strlen(p) + 1) * 2, 1); put_w8(c, mem, p, 0); if (ARG(3)) wrp(c, ARG(3), mem); RET(0); }
 /* PIDLs: an opaque heap block = { u16 cb; char path[]; u16 0 } — enough for SHGetPathFromIDList / ILFree / CoTaskMemFree round trips */
 u64 pidl_make(Win32 *w, const char *path) { size_t l = e_strlen(path); u64 p = w32_heap_alloc(w, l + 6, 1); Cpu *c = w->cpu; wr16(c, p, (u16)(l + 3)); u8 *d = mem_ptr(w->mem, p + 2, l + 1, 1); if (d) { e_memcpy(d, path, l + 1); } wr16(c, p + 2 + l + 1 + 1, 0); return p; }
@@ -340,6 +340,7 @@ static void shell_execute(Cpu *c, u64 verb_a, u64 file_a, u64 params_a, u64 dir_
   else { const char *s; if (verb_a && (s = rd_str(c, verb_a, 63))) e_snprintf(verb, sizeof verb, "%s", s); if (file_a && (s = rd_str(c, file_a, 519))) e_snprintf(file, sizeof file, "%s", s); if (params_a && (s = rd_str(c, params_a, 1023))) e_snprintf(params, sizeof params, "%s", s); }
   (void)dir_a; size_t fl = e_strlen(file); int is_exe = fl > 4 && (!e_stricmp(file + fl - 4, ".exe") || !e_stricmp(file + fl - 4, ".bat") || !e_stricmp(file + fl - 4, ".cmd"));
   if (hproc_out) *hproc_out = 0;
+  if (!is_exe && fl > 0) { /* any PE image counts as a program regardless of its extension (Inno Setup re-launches its own "setup.tmp") */ int fd = vfs_open(file, 1, 3, 0); if (fd >= 0) { u8 mz[2] = { 0, 0 }; if (vfs_read(fd, mz, 2) == 2 && mz[0] == 'M' && mz[1] == 'Z') is_exe = 1; vfs_close(fd); } }
   if (is_exe && (!verb[0] || !e_stricmp(verb, "open") || !e_stricmp(verb, "runas"))) {
     char cmd[1600]; e_snprintf(cmd, sizeof cmd, "\"%s\" %s", file, params); u64 cl = w32_heap_alloc(W, (e_strlen(cmd) + 1) * 2, 1); put_w8(c, cl, cmd, 0);
     u64 si = w32_heap_alloc(W, 0x80, 1), pi = w32_heap_alloc(W, 0x20, 1); wr32(c, si, c->mode32 ? 68 : 104);
@@ -367,10 +368,10 @@ static void s_Wow64EnableWow64FsRedirection(Cpu *c) { RET(1); }
 /* StrFormatByteSizeW / PathAppend & co. come from shlwapi; most are already in win32_compat.inc */
 
 /* ---- IShellLinkW/A + IPersistFile (CLSID_ShellLink {00021401-…}): installers create Start-menu / desktop shortcuts through COM.
-   Object layout (guest heap): [IShellLink vtable][IPersistFile vtable][refs u32][wide u32][path 520][args 520][workdir 520][desc 520][icon 520][iconidx u32][showcmd u32][hotkey u32]
+   Object layout (guest heap): [IShellLink vtable][IPersistFile vtable][IPropertyStore vtable][refs u32][wide u32][path 520][args 520][workdir 520][desc 520][icon 520][iconidx u32][showcmd u32][hotkey u32]
    Save() writes a real MS-SHLLINK file (header + unicode string data) so the .lnk is also readable by Windows. */
 enum { SL_PATH = 0, SL_ARGS = 1, SL_WD = 2, SL_DESC = 3, SL_ICON = 4 };
-static u64 sl_hdr(Cpu *c) { return 2 * PSZ_OF(c); }
+static u64 sl_hdr(Cpu *c) { return 3 * PSZ_OF(c); }   /* IShellLink, IPersistFile, IPropertyStore vtables */
 static u64 sl_str(Cpu *c, u64 obj, int which) { return obj + sl_hdr(c) + 8 + (u64)which * 520; }
 static u64 sl_int(Cpu *c, u64 obj, int which) { return obj + sl_hdr(c) + 8 + 5 * 520 + (u64)which * 4; }
 static int sl_wide(Cpu *c, u64 obj) { return rd32(c, obj + sl_hdr(c) + 4) != 0; }
@@ -381,22 +382,31 @@ static void sl_set_str(Cpu *c, u64 obj, int which, u64 src) { char s[520] = { 0 
   u64 d = sl_str(c, obj, which); for (u32 i = 0; i < 520; i++) wr8(c, d + i, (u8)s[i]); }
 static u64 sl_vt(Cpu *c, const char *iface, const char **names, int n) { u64 P = PSZ_OF(c), vt = w32_heap_alloc(W, (u64)n * P, 1); char full[96];
   for (int i = 0; i < n; i++) { e_snprintf(full, sizeof full, "%s::%s", iface, names[i]); wrp(c, vt + (u64)i * P, w32_shim_slot(W, "shell32", full)); } return vt; }
-static u64 sl_create(Cpu *c, int wide) { u64 P = PSZ_OF(c), obj = w32_heap_alloc(W, 2 * P + 8 + 5 * 520 + 12, 1); if (!obj) return 0;
+static u64 sl_create(Cpu *c, int wide) { u64 P = PSZ_OF(c), obj = w32_heap_alloc(W, 3 * P + 8 + 5 * 520 + 12, 1); if (!obj) return 0;
+  static const char *ps_names[] = { "QueryInterface", "AddRef", "Release", "GetCount", "GetAt", "GetValue", "SetValue", "Commit" };
   static const char *sl_names[] = { "QueryInterface", "AddRef", "Release", "GetPath", "GetIDList", "SetIDList", "GetDescription", "SetDescription", "GetWorkingDirectory", "SetWorkingDirectory", "GetArguments", "SetArguments", "GetHotkey", "SetHotkey", "GetShowCmd", "SetShowCmd", "GetIconLocation", "SetIconLocation", "SetRelativePath", "Resolve", "SetPath" };
   static const char *pf_names[] = { "QueryInterface", "AddRef", "Release", "GetClassID", "IsDirty", "Load", "Save", "SaveCompleted", "GetCurFile" };
-  wrp(c, obj, sl_vt(c, "IShellLink", sl_names, 21)); wrp(c, obj + P, sl_vt(c, "IPersistFile", pf_names, 9)); wr32(c, obj + 2 * P, 1); wr32(c, obj + 2 * P + 4, (u32)wide); wr32(c, sl_int(c, obj, 1), 1); return obj; }
+  wrp(c, obj, sl_vt(c, "IShellLink", sl_names, 21)); wrp(c, obj + P, sl_vt(c, "IPersistFile", pf_names, 9)); wrp(c, obj + 2 * P, sl_vt(c, "IShellLinkProps", ps_names, 8)); wr32(c, obj + 3 * P, 1); wr32(c, obj + 3 * P + 4, (u32)wide); wr32(c, sl_int(c, obj, 1), 1); return obj; }
 /* IIDs (Data1): IUnknown 0, IShellLinkA 000214EE, IShellLinkW 000214F9, IPersist 0000010C, IPersistFile 0000010B */
 static int sl_qi(Cpu *c, u64 obj, u64 riid, u64 ppv) { u32 d1 = rd32(c, riid); u64 P = PSZ_OF(c); if (!ppv) return 0;
-  if (d1 == 0 || d1 == 0x000214F9u || d1 == 0x000214EEu) { if (d1) wr32(c, obj + 2 * P + 4, d1 == 0x000214F9u); wrp(c, ppv, obj); }
-  else if (d1 == 0x0000010Bu || d1 == 0x0000010Cu) wrp(c, ppv, obj + P); else { wrp(c, ppv, 0); return 0; }
-  wr32(c, obj + 2 * P, rd32(c, obj + 2 * P) + 1); return 1; }
-static u64 sl_this(Cpu *c, int pf) { return ARG(0) - (pf ? PSZ_OF(c) : 0); }
+  if (d1 == 0 || d1 == 0x000214F9u || d1 == 0x000214EEu) { if (d1) wr32(c, obj + 3 * P + 4, d1 == 0x000214F9u); wrp(c, ppv, obj); }
+  else if (d1 == 0x0000010Bu || d1 == 0x0000010Cu) wrp(c, ppv, obj + P); else if (d1 == 0x886D8EEBu) wrp(c, ppv, obj + 2 * P); /* IPropertyStore: AppUserModelID & co are accepted and dropped */ else { wrp(c, ppv, 0); return 0; }
+  wr32(c, obj + 3 * P, rd32(c, obj + 3 * P) + 1); return 1; }
+static u64 sl_this(Cpu *c, int pf) { return ARG(0) - (u64)pf * PSZ_OF(c); }
 static void s_IShellLink_QueryInterface(Cpu *c) { RET(sl_qi(c, sl_this(c, 0), ARG(1), ARG(2)) ? 0 : E_NOINTERFACE_); }
 static void s_IPersistFile_QueryInterface(Cpu *c) { RET(sl_qi(c, sl_this(c, 1), ARG(1), ARG(2)) ? 0 : E_NOINTERFACE_); }
-static void sl_addref(Cpu *c, u64 obj) { u64 a = obj + 2 * PSZ_OF(c); wr32(c, a, rd32(c, a) + 1); RET(rd32(c, a)); }
-static void sl_release(Cpu *c, u64 obj) { u64 a = obj + 2 * PSZ_OF(c); u32 n = rd32(c, a); if (n) n--; wr32(c, a, n); if (!n) w32_heap_free(W, obj); RET(n); }
+static void sl_addref(Cpu *c, u64 obj) { u64 a = obj + 3 * PSZ_OF(c); wr32(c, a, rd32(c, a) + 1); RET(rd32(c, a)); }
+static void sl_release(Cpu *c, u64 obj) { u64 a = obj + 3 * PSZ_OF(c); u32 n = rd32(c, a); if (n) n--; wr32(c, a, n); if (!n) w32_heap_free(W, obj); RET(n); }
 static void s_IShellLink_AddRef(Cpu *c) { sl_addref(c, sl_this(c, 0)); }
 static void s_IPersistFile_AddRef(Cpu *c) { sl_addref(c, sl_this(c, 1)); }
+static void s_IPropertyStore_QueryInterface(Cpu *c) { RET(sl_qi(c, sl_this(c, 2), ARG(1), ARG(2)) ? 0 : E_NOINTERFACE_); }
+static void s_IPropertyStore_AddRef(Cpu *c) { sl_addref(c, sl_this(c, 2)); }
+static void s_IPropertyStore_Release(Cpu *c) { sl_release(c, sl_this(c, 2)); }
+static void s_IPropertyStore_GetCount(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), 0); RET(0); }
+static void s_IPropertyStore_GetAt(Cpu *c) { RET(0x80070057u); }
+static void s_IPropertyStore_GetValue(Cpu *c) { if (ARG(2)) { u8 *p = mem_ptr(c->mem, ARG(2), 16, 1); if (p) e_memset(p, 0, 16); } RET(0); }   /* VT_EMPTY */
+static void s_IPropertyStore_SetValue(Cpu *c) { RET(0); }
+static void s_IPropertyStore_Commit(Cpu *c) { RET(0); }
 static void s_IShellLink_Release(Cpu *c) { sl_release(c, sl_this(c, 0)); }
 static void s_IPersistFile_Release(Cpu *c) { sl_release(c, sl_this(c, 1)); }
 static void s_IShellLink_GetPath(Cpu *c) { sl_get_str(c, ARG(0), SL_PATH, ARG(1), (u32)ARG(2)); if (ARG(3)) { for (int i = 0; i < 36; i++) wr8(c, ARG(3) + i, 0); } RET(0); }   /* (buf, cch, WIN32_FIND_DATA*, flags) */
@@ -457,7 +467,7 @@ static int shell_cocreate(Cpu *c, u32 clsid_d1, u64 riid, u64 ppv) {
   SA("IShellLink::GetDescription", IShellLink_GetDescription), SA("IShellLink::SetDescription", IShellLink_SetDescription), SA("IShellLink::GetWorkingDirectory", IShellLink_GetWorkingDirectory), SA("IShellLink::SetWorkingDirectory", IShellLink_SetWorkingDirectory), SA("IShellLink::GetArguments", IShellLink_GetArguments), SA("IShellLink::SetArguments", IShellLink_SetArguments), \
   SA("IShellLink::GetHotkey", IShellLink_GetHotkey), SA("IShellLink::SetHotkey", IShellLink_SetHotkey), SA("IShellLink::GetShowCmd", IShellLink_GetShowCmd), SA("IShellLink::SetShowCmd", IShellLink_SetShowCmd), SA("IShellLink::GetIconLocation", IShellLink_GetIconLocation), SA("IShellLink::SetIconLocation", IShellLink_SetIconLocation), \
   SA("IShellLink::SetRelativePath", IShellLink_SetRelativePath), SA("IShellLink::Resolve", IShellLink_Resolve), SA("IShellLink::SetPath", IShellLink_SetPath), \
-  SA("IPersistFile::QueryInterface", IPersistFile_QueryInterface), SA("IPersistFile::AddRef", IPersistFile_AddRef), SA("IPersistFile::Release", IPersistFile_Release), SA("IPersistFile::GetClassID", IPersistFile_GetClassID), SA("IPersistFile::IsDirty", IPersistFile_IsDirty), SA("IPersistFile::Load", IPersistFile_Load), SA("IPersistFile::Save", IPersistFile_Save), SA("IPersistFile::SaveCompleted", IPersistFile_SaveCompleted), SA("IPersistFile::GetCurFile", IPersistFile_GetCurFile),
+  SA("IShellLinkProps::QueryInterface", IPropertyStore_QueryInterface), SA("IShellLinkProps::AddRef", IPropertyStore_AddRef), SA("IShellLinkProps::Release", IPropertyStore_Release), SA("IShellLinkProps::GetCount", IPropertyStore_GetCount), SA("IShellLinkProps::GetAt", IPropertyStore_GetAt), SA("IShellLinkProps::GetValue", IPropertyStore_GetValue), SA("IShellLinkProps::SetValue", IPropertyStore_SetValue), SA("IShellLinkProps::Commit", IPropertyStore_Commit), SA("IPersistFile::QueryInterface", IPersistFile_QueryInterface), SA("IPersistFile::AddRef", IPersistFile_AddRef), SA("IPersistFile::Release", IPersistFile_Release), SA("IPersistFile::GetClassID", IPersistFile_GetClassID), SA("IPersistFile::IsDirty", IPersistFile_IsDirty), SA("IPersistFile::Load", IPersistFile_Load), SA("IPersistFile::Save", IPersistFile_Save), SA("IPersistFile::SaveCompleted", IPersistFile_SaveCompleted), SA("IPersistFile::GetCurFile", IPersistFile_GetCurFile),
 
 #define SHELL_SHIMS \
   SHELLLINK_SHIMS \

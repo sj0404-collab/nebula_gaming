@@ -107,6 +107,9 @@ static void exec_x87(Ins *i, Cpu *c, u8 op) {
         case 1: x87_st(c, a, 6, fpop(c)); return;                  /* fisttp m16 */
         case 2: x87_st(c, a, 2, ST(0)); return;                    /* fist m16 */
         case 3: x87_st(c, a, 2, fpop(c)); return;                  /* fistp m16 */
+        case 4: { /* fbld m80bcd */ u64 v = 0, m = 1; for (int k = 0; k < 9; k++) { u8 b = rd8(c, a + k); v += (u64)(b & 15) * m; m *= 10; v += (u64)(b >> 4) * m; m *= 10; } double d = (double)v; if (rd8(c, a + 9) & 0x80) d = -d; fpush(c, d); return; }
+        case 6: { /* fbstp m80bcd: round to integer (current rounding mode), 18 packed digits + sign */ double d = fpop(c); double r = x87_round(c, d);
+          int neg = r < 0; if (neg) r = -r; u64 v = r >= 1e18 ? 999999999999999999ull : (u64)r; for (int k = 0; k < 9; k++) { u8 lo = (u8)(v % 10); v /= 10; u8 hi = (u8)(v % 10); v /= 10; wr8(c, a + k, (u8)(lo | hi << 4)); } wr8(c, a + 9, neg ? 0x80 : 0); return; }
         case 5: fpush(c, x87_ld(c, a, 4)); return;                 /* fild m64 */
         case 7: x87_st(c, a, 4, fpop(c)); return;                  /* fistp m64 */
         default: break; } break;

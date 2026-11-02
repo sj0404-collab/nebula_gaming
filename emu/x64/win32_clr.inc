@@ -44,7 +44,7 @@ static int clr_stack_of(Win32 *w, u64 addr, u64 *lo, u64 *hi) {
   return 0;
 }
 static void s_VirtualQuery(Cpu *c) {
-  u64 addr = ARG(0), mbi = ARG(1), lo, hi; u8 *p = mem_ptr(c->mem, mbi, 48, 1); if (!p) { RET(0); return; } e_memset(p, 0, 48);
+  u64 addr = ARG(0), mbi = ARG(1), lo, hi; u32 sz = c->mode32 ? 28 : 48; if (ARG(2) < sz) sz = (u32)ARG(2); u8 *p = mem_ptr(c->mem, mbi, sz, 1); if (!p) { RET(0); return; } e_memset(p, 0, sz);   /* never clear more than the caller's struct: a 32-bit MBI is 28 bytes and sits right under the return address */
   if (c->mode32) {   /* MEMORY_BASIC_INFORMATION32: BaseAddress@0 AllocationBase@4 AllocationProtect@8 RegionSize@12 State@16 Protect@20 Type@24 (28 bytes) */
     u64 page = addr & ~0xfffull; Region *r = mem_region(c->mem, addr);
     if (!r) { wr32(c, mbi, (u32)page); wr32(c, mbi + 12, 0x1000); wr32(c, mbi + 16, 0x10000); wr32(c, mbi + 20, 1); RET(28); return; }

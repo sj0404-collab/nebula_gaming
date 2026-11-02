@@ -313,7 +313,7 @@ struct Win32 {
   int wndclass_registered; u64 wndclass_proc; char wndclass_name[64];
   u64 ubuf;                              /* small scratch buffer in guest memory */
   u64 rt_scratch;                        /* win32_rt.inc: zeroed block for the real msvcp140's locale-name / processing-throw pointers */
-  int quit_posted; int shortcuts;   /* .lnk files written through IShellLink (reported after install) */
+  int quit_posted; int shortcuts; double msgwait_dl; u64 msgwait_rip;   /* MsgWaitForMultipleObjects timeout across retries */   /* .lnk files written through IShellLink (reported after install) */
   /* x87 / misc */
   u32 rand_state;
   /* process */
@@ -329,6 +329,7 @@ int    w32_heap_free(Win32 *w, u64 addr);
 u64    w32_heap_size(Win32 *w, u64 addr);
 u64    w32_guest_strdup(Win32 *w, const char *s);
 void   w32_report(Win32 *w, const char *fmt, ...);
+int    w32_wait_poll(Cpu *c, u32 n, u64 arr, int all, int *which);   /* 1 = one of n handles (array arr) is signaled (consumed), 0 = none, -1 = bad handle */
 void   w32_io_poll(void);                                          /* finish parked overlapped pipe I/O (IOCP); scheduler calls it before every pick */
 void   w32_io_drop(Win32 *w);                                      /* process exit: forget its IOCP associations and parked operations */
 void   w32_tick(Win32 *w);                                         /* called by host once per frame: input + timers */
@@ -352,7 +353,8 @@ double w32_sleep_remaining_ms(Win32 *w);
 void   w32_thread_sync(Win32 *w);                 /* save the live ctx into th[cur_th] */
 int    w32_thread_pick(Win32 *w);                 /* switch to the next runnable thread after cur_th; 1 if one was found */
 void   w32_threads_summary(Win32 *w, int *stdin_wait, int *sleeping, double *best_ms);   /* why nothing runs */
-void   w32_proc_teardown(Win32 *w);               /* process exit: release thread objects */
+void   w32_proc_teardown(Win32 *w);
+void   user_proc_exit(Win32 *w);                 /* USER: destroy the windows and classes of an exited process */               /* process exit: release thread objects */
 int    w32_thread_count(Win32 *w);
 int    w32_thread_alive(Win32 *w);               /* current thread still runnable (not exited / suspended)? */
 

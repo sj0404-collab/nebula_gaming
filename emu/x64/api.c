@@ -84,7 +84,7 @@ int proc_spawn(Win32 *parent, const char *exe_path, const char *cmdline, const i
   p->pid = ++g_next_pid; p->ppid = parent->pid; p->state = 1; p->exit_code = 0; p->handles = 0; p->wake_ms = 0;
   e_snprintf(p->name, sizeof p->name, "%s", basename_of(in.path));
   ProcFs *save = vfs_P;
-  cpu_reset(&p->cpu); w32_init(&p->w32, &p->cpu, &p->mem); p->w32.pid = p->pid; p->w32.ppid = p->ppid;
+  cpu_reset(&p->cpu); w32_init(&p->w32, &p->cpu, &p->mem); p->w32.pid = p->pid; p->w32.ppid = p->ppid; p->w32.api_trace = parent->api_trace;   /* --apitrace follows child processes */
   vfs_init_proc(p->w32.fs, parent->fs);
   for (int k = 0; k < 3; k++) if (std_fd[k] != -2) { ProcFs *f = p->w32.fs; if (f->redir[k] != -1) { vfs_use(f); vfs_close(f->redir[k]); } f->redir[k] = -1; if (std_fd[k] >= 3 && f->fd[std_fd[k] - 3].kind) { vfs_use(f); f->redir[k] = vfs_dup(std_fd[k]); } }
   vfs_use(p->w32.fs);

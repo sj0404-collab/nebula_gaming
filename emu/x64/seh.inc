@@ -294,7 +294,13 @@ static void s_RtlRestoreContext(Cpu *c) { restore_context(c, ARG(0), ARG(1)); }
 static void s_AddVectoredExceptionHandler(Cpu *c) { Win32 *w = W; u64 h = ARG(1); if (!h || w->nveh >= 16) { RET(0); return; } if (ARG(0)) { for (int i = w->nveh; i > 0; i--) w->veh[i] = w->veh[i - 1]; w->veh[0] = h; } else w->veh[w->nveh] = h; w->nveh++; RET(h); }
 static void s_RemoveVectoredExceptionHandler(Cpu *c) { Win32 *w = W; u64 h = ARG(0); for (int i = 0; i < w->nveh; i++) if (w->veh[i] == h) { for (int j = i; j + 1 < w->nveh; j++) w->veh[j] = w->veh[j + 1]; w->nveh--; RET(1); return; } RET(0); }
 static void s_SetUnhandledExceptionFilter(Cpu *c) { Win32 *w = W; u64 prev = w->uef; w->uef = ARG(0); RET(prev); }
-static void s_UnhandledExceptionFilter(Cpu *c) { RET(0); }   /* EXCEPTION_CONTINUE_SEARCH: the CRT's own handler lets the exception reach our report */
+/* UnhandledExceptionFilter(EXCEPTION_POINTERS*): runs the SetUnhandledExceptionFilter callback like Windows does (its result is
+   returned to the caller); with no callback the exception is unhandled — Windows would show the WER dialog and end the process,
+   so the process is terminated with the exception code (and the code is reported) instead of looping on the faulting instruction */
+static void s_UnhandledExceptionFilter(Cpu *c) { Win32 *w = W; u64 ptrs = ARG(0); u64 rec = ptrs ? rdp(c, ptrs) : 0; u32 code = rec ? rd32(c, rec) : 0; u64 addr = rec ? rdp(c, rec + (c->mode32 ? 12 : 16)) : 0;
+  if (w->uef) { int ci = cont_push(c, CONT_RET_RAX); if (ci < 0) return; guest_call(c, w->uef, ptrs, 0, 0, 0); return; }
+  char msg[200]; e_snprintf(msg, sizeof msg, "unhandled exception 0x%08x at 0x%llx (UnhandledExceptionFilter, no top-level filter) — process terminated", code, (unsigned long long)addr); w32_report(w, "%s", msg);
+  seh_log("[x64] %s\n", msg); do_exit(c, (int)code); }
 static void s_RtlLookupFunctionEntry(Cpu *c) { u64 base = 0; u64 fe = seh_lookup(c, ARG(0), &base); if (ARG(1)) wr64(c, ARG(1), base); RET(fe); }
 static void s_RtlPcToFileHeader(Cpu *c) { u64 base = 0; u32 pd, ps; if (!seh_module(W, ARG(0), &base, &pd, &ps)) base = 0; if (ARG(1)) wr64(c, ARG(1), base); RET(base); }
 static void s_RtlCaptureContext(Cpu *c) { ctx_capture(c, ARG(0)); }

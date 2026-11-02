@@ -29,7 +29,7 @@ static GdiObj *gdi_new(Win32 *w, int kind) {
   return 0;
 }
 static GdiObj *gdi_get(Win32 *w, u64 h) { if ((h & ~0xffffull) != GDI_TAG) return 0; u64 i = h & 0xffff; if (i >= MAX_GDI || !w->gdi[i].kind) return 0; return &w->gdi[i]; }
-enum { K_DC = 1, K_BITMAP, K_BRUSH, K_PEN, K_FONT, K_RGN };
+enum { K_DC = 1, K_BITMAP, K_BRUSH, K_PEN, K_FONT, K_RGN, K_PALETTE };
 static u64 stock[20];
 static u64 window_dc;
 
@@ -128,6 +128,21 @@ static void s_DeleteObject(Cpu *c) { GdiObj *o = gdi_get(W, ARG(0)); if (!o) { R
 static void s_SelectObject(Cpu *c) { Win32 *w = W; GdiObj *dc = gdi_get(w, ARG(0)), *o = gdi_get(w, ARG(1)); if (!dc || dc->kind != K_DC || !o) { RET(0); return; } u64 prev = 0;
   switch (o->kind) { case K_BITMAP: prev = dc->bitmap ? dc->bitmap : stock[19]; dc->bitmap = ARG(1); break; case K_BRUSH: prev = dc->brush; dc->brush = ARG(1); break; case K_PEN: prev = dc->pen; dc->pen = ARG(1); break; case K_FONT: prev = dc->font; dc->font = ARG(1); break; case K_RGN: prev = 1; break; default: prev = 0; }
   RET(prev); }
+/* palettes: a 32-bit display never needs them, but Delphi/VCL and old games create and select one; the entries are kept
+   so GetPaletteEntries / GetNearestPaletteIndex answer consistently */
+static void s_CreatePalette(Cpu *c) { u64 lp = ARG(0); u32 n = rd16(c, lp + 2); if (n > 256) n = 256; GdiObj *o = gdi_new(W, K_PALETTE); if (!o) { RET(0); return; } o->font_h = (int)n; o->bits = w32_heap_alloc(W, 1024, 0); for (u32 i = 0; i < n; i++) wr32(c, o->bits + i * 4, rd32(c, lp + 4 + i * 4)); RET(o->handle); }
+static void s_GetPaletteEntries(Cpu *c) { GdiObj *o = gdi_get(W, ARG(0)); if (!o || o->kind != K_PALETTE) { RET(0); return; } u32 st = (u32)ARG(1), n = (u32)ARG(2), tot = (u32)o->font_h; if (!ARG(3)) { RET(tot); return; } u32 k = 0; for (; k < n && st + k < tot; k++) wr32(c, ARG(3) + k * 4, rd32(c, o->bits + (st + k) * 4)); RET(k); }
+static void s_SetPaletteEntries(Cpu *c) { GdiObj *o = gdi_get(W, ARG(0)); if (!o || o->kind != K_PALETTE) { RET(0); return; } u32 st = (u32)ARG(1), n = (u32)ARG(2), tot = (u32)o->font_h; u32 k = 0; for (; k < n && st + k < tot; k++) wr32(c, o->bits + (st + k) * 4, rd32(c, ARG(3) + k * 4)); RET(k); }
+static void s_SelectPalette(Cpu *c) { GdiObj *dc = gdi_get(W, ARG(0)); if (!dc) { RET(0); return; } RET(stock[15]); }   /* DEFAULT_PALETTE comes back as the previous one */
+static void s_RealizePalette(Cpu *c) { RET(0); }
+static void s_GetSystemPaletteEntries(Cpu *c) { u32 st = (u32)ARG(1), n = (u32)ARG(2); if (!ARG(3)) { RET(256); return; } u32 k = 0; for (; k < n && st + k < 256; k++) { u32 i = st + k; u32 r = (i & 7) * 36, g = ((i >> 3) & 7) * 36, b = ((i >> 6) & 3) * 85; wr32(c, ARG(3) + k * 4, r | (g << 8) | (b << 16)); } RET(k); }
+static void s_GetNearestPaletteIndex(Cpu *c) { GdiObj *o = gdi_get(W, ARG(0)); u32 col = (u32)ARG(1); if (!o || o->kind != K_PALETTE) { RET(0); return; } u32 best = 0, bd = 0xffffffffu; for (u32 i = 0; i < (u32)o->font_h; i++) { u32 e = rd32(c, o->bits + i * 4); int dr = (int)(e & 255) - (int)(col & 255), dg = (int)((e >> 8) & 255) - (int)((col >> 8) & 255), db = (int)((e >> 16) & 255) - (int)((col >> 16) & 255); u32 d = (u32)(dr * dr + dg * dg + db * db); if (d < bd) { bd = d; best = i; } } RET(best); }
+static void s_ResizePalette(Cpu *c) { GdiObj *o = gdi_get(W, ARG(0)); if (!o || o->kind != K_PALETTE) { RET(0); return; } u32 n = (u32)ARG(1); if (n > 256) n = 256; o->font_h = (int)n; RET(1); }
+static void s_GetSystemPaletteUse(Cpu *c) { RET(1); }   /* SYSPAL_STATIC */
+static void s_SetSystemPaletteUse(Cpu *c) { RET(1); }
+static void s_UpdateColors(Cpu *c) { RET(1); }
+static void s_AnimatePalette(Cpu *c) { RET(1); }
+static void s_UnrealizeObject(Cpu *c) { RET(1); }
 static void s_GetStockObject(Cpu *c) { u32 i = (u32)ARG(0); RET(i < 20 ? stock[i] : 0); }
 static void s_GetCurrentObject(Cpu *c) { GdiObj *dc = gdi_get(W, ARG(0)); if (!dc) { RET(0); return; } u32 t = (u32)ARG(1); RET(t == 1 ? dc->pen : t == 2 ? dc->brush : t == 6 ? dc->font : t == 7 ? dc->bitmap : 0); }
 static void s_CreateSolidBrush(Cpu *c) { GdiObj *b = gdi_new(W, K_BRUSH); if (!b) { RET(0); return; } b->color = cr2px((u32)ARG(0)); RET(b->handle); }
@@ -204,7 +219,6 @@ static void s_SetDIBitsToDevice(Cpu *c) { /* (hdc, xd, yd, w, h, xs, ys, start, 
   const u32 *bits = (const u32 *)mem_ptr(c->mem, a9, (u64)bw * bh * 4, 0); if (!bits) { RET(0); return; } int dx = (s32)ARG(1), dy = (s32)ARG(2), sx = (s32)ARG(5), sy = (s32)ARG(6);
   for (int y = 0; y < hgt; y++) { int yy = dy + y, syy = sy + y; if (yy < 0 || yy >= d.h || syy < 0 || syy >= bh) continue; const u32 *row = bits + (size_t)(bottom_up ? bh - 1 - syy : syy) * bw; u32 *drow = srow(&d, yy); for (int x = 0; x < wdt; x++) { int xx = dx + x, sxx = sx + x; if (xx < 0 || xx >= d.w || sxx < 0 || sxx >= bw) continue; drow[xx] = row[sxx]; } }
   mark_screen(w, ARG(0)); RET(hgt); }
-static void s_GetDIBits(Cpu *c) { RET(0); }
 static void s_Rectangle(Cpu *c) { Win32 *w = W; Surf s; GdiObj *dc = gdi_get(w, ARG(0)); if (!dc || !dc_surf(c, ARG(0), &s)) { RET(0); return; } int nb, np; u32 b = dc_brush_px(w, dc, &nb), p = dc_pen_px(w, dc, &np); int l = (s32)ARG(1), t = (s32)ARG(2), r = (s32)ARG(3), bt = (s32)ARG(4);
   if (!nb) fill_rect_px(&s, l, t, r, bt, b); if (!np) { hline(&s, l, r - 1, t, p); hline(&s, l, r - 1, bt - 1, p); line_px(&s, l, t, l, bt - 1, p); line_px(&s, r - 1, t, r - 1, bt - 1, p); } mark_screen(w, ARG(0)); RET(1); }
 static void s_RoundRect(Cpu *c) { s_Rectangle(c); }
@@ -252,6 +266,7 @@ static void s_CommandLineToArgvW(Cpu *c) { wr32(c, ARG(1), rd32(c, W->ubuf + 0x2
 
 #define PSZ_OF(cpu) ((cpu)->mode32 ? 4 : 8)
 #include "user.inc"
+#include "win32_vcl.inc"
 static void s_PeekMessageW(Cpu *c) { s_PeekMessageA(c); }
 static void s_GetMessageW(Cpu *c) { s_GetMessageA(c); }
 static void s_DispatchMessageW(Cpu *c) { s_DispatchMessageA(c); }
@@ -266,8 +281,8 @@ static const ShimDef gdi_shims[] = {
   S(RegisterClassA), S(RegisterClassExA), S(RegisterClassW), S(RegisterClassExW), S(UnregisterClassA), S(GetClassInfoExA), S(AdjustWindowRect), S(AdjustWindowRectEx), S(CreateWindowExA), S(CreateWindowExW), S(DefWindowProcA), S(DefWindowProcW), S(DestroyWindow), S(ShowWindow), S(UpdateWindow), S(InvalidateRect), S(InvalidateRgn), S(ValidateRect), S(RedrawWindow), S(GetClientRect), S(GetWindowRect), S(BeginPaint), S(EndPaint), S(GetDC), S(GetWindowDC), S(ReleaseDC),
   S(SetWindowTextA), S(SetWindowTextW), S(GetWindowTextA), S(SetWindowPos), S(MoveWindow), S(SetWindowLongPtrA), S(GetWindowLongPtrA), S(SetWindowLongPtrW), S(GetWindowLongPtrW), S(SetWindowLongA), S(GetWindowLongA), S(SetFocus), S(GetFocus), S(SetForegroundWindow), S(GetForegroundWindow), S(GetActiveWindow), S(SetActiveWindow), S(IsWindow), S(IsWindowVisible), S(IsIconic), S(IsZoomed), S(GetDesktopWindow), S(GetParent), S(FindWindowA), S(EnableWindow), S(BringWindowToTop), S(SetCapture), S(ReleaseCapture), S(ClientToScreen), S(ScreenToClient), S(MapWindowPoints),
   S(GetCursorPos), S(SetCursorPos), S(ShowCursor), S(SetCursor), S(ClipCursor), S(LoadCursorA), S(LoadCursorW), S(LoadIconA), S(LoadIconW), S(LoadImageA), S(DestroyCursor), S(GetAsyncKeyState), S(GetKeyState), S(GetKeyboardState), S(MapVirtualKeyA), S(GetSystemMetrics), S(SystemParametersInfoA), S(MessageBoxA), S(MessageBoxW), S(wsprintfA), S(wsprintfW), S(SetProcessDPIAware), S(SetProcessDpiAwarenessContext), S(GetDpiForWindow), S(GetDpiForSystem), S(EnumDisplaySettingsA), S(ChangeDisplaySettingsA), S(RegisterClipboardFormatA), S(GetDlgItem), S(SetRect), S(PtInRect), S(FillRect), S(DrawTextA), S(DrawTextW), S(GetClassNameA), S(GetUpdateRect), S(GetSysColor), S(GetSysColorBrush),
-  S(CreateCompatibleDC), S(CreateDCA), S(DeleteDC), S(CreateDIBSection), S(CreateCompatibleBitmap), S(CreateBitmap), S(DeleteObject), S(SelectObject), S(GetStockObject), S(GetCurrentObject), S(CreateSolidBrush), S(CreateHatchBrush), S(CreatePatternBrush), S(CreateBrushIndirect), S(CreatePen), S(ExtCreatePen), S(CreateFontA), S(CreateFontW), S(CreateFontIndirectA), S(CreateFontIndirectW), S(SetTextColor), S(SetBkColor), S(SetBkMode), S(GetTextColor), S(GetBkColor), S(SetTextAlign), S(SetROP2), S(SetStretchBltMode), S(SetBrushOrgEx), S(GdiFlush), S(SaveDC), S(RestoreDC), S(SelectClipRgn), S(IntersectClipRect), S(SetMapMode), S(SetViewportOrgEx), S(SetWindowOrgEx), S(GetDeviceCaps), S(GetObjectA), S(GetObjectW),
-  S(GetTextExtentPoint32A), S(GetTextExtentPoint32W), S(GetTextMetricsA), S(GetTextMetricsW), S(TextOutA), S(TextOutW), S(ExtTextOutA), S(ExtTextOutW), S(BitBlt), S(StretchBlt), S(PatBlt), S(StretchDIBits), S(SetDIBitsToDevice), S(GetDIBits), S(Rectangle), S(RoundRect), S(Ellipse), S(MoveToEx), S(LineTo), S(Polyline), S(Polygon), S(SetPixel), S(SetPixelV), S(GetPixel),
+  S(CreateCompatibleDC), S(CreateDCA), S(DeleteDC), S(CreateDIBSection), S(CreateCompatibleBitmap), S(CreateBitmap), S(DeleteObject), S(SelectObject), S(GetStockObject), VCL_SHIMS, THEME_SHIMS, DPI_SHIMS, S(CreatePalette), S(GetPaletteEntries), S(SetPaletteEntries), S(SelectPalette), S(RealizePalette), S(GetSystemPaletteEntries), S(GetNearestPaletteIndex), S(ResizePalette), S(GetSystemPaletteUse), S(SetSystemPaletteUse), S(UpdateColors), S(AnimatePalette), S(UnrealizeObject), S(GetCurrentObject), S(CreateSolidBrush), S(CreateHatchBrush), S(CreatePatternBrush), S(CreateBrushIndirect), S(CreatePen), S(ExtCreatePen), S(CreateFontA), S(CreateFontW), S(CreateFontIndirectA), S(CreateFontIndirectW), S(SetTextColor), S(SetBkColor), S(SetBkMode), S(GetTextColor), S(GetBkColor), S(SetTextAlign), S(SetROP2), S(SetStretchBltMode), S(SetBrushOrgEx), S(GdiFlush), S(SaveDC), S(RestoreDC), S(SelectClipRgn), S(IntersectClipRect), S(SetMapMode), S(SetViewportOrgEx), S(SetWindowOrgEx), S(GetDeviceCaps), S(GetObjectA), S(GetObjectW),
+  S(GetTextExtentPoint32A), S(GetTextExtentPoint32W), S(GetTextMetricsA), S(GetTextMetricsW), S(TextOutA), S(TextOutW), S(ExtTextOutA), S(ExtTextOutW), S(BitBlt), S(StretchBlt), S(PatBlt), S(StretchDIBits), S(SetDIBitsToDevice), S(Rectangle), S(RoundRect), S(Ellipse), S(MoveToEx), S(LineTo), S(Polyline), S(Polygon), S(SetPixel), S(SetPixelV), S(GetPixel),
   S(CreatePolygonRgn), S(CreateRectRgn), S(CreateRectRgnIndirect), S(CreateEllipticRgn), S(CombineRgn), S(FillRgn), S(PaintRgn), S(OffsetRgn), S(PtInRegion), S(GetRgnBox), S(GetNearestColor), S(GetTextFaceA), S(GetCharWidth32A),
   S(timeGetTime), S(timeBeginPeriod), S(timeEndPeriod), S(PlaySoundA), S(waveOutGetNumDevs), S(CoInitialize), S(CoInitializeEx), S(CoUninitialize), S(OleInitialize), S(OleUninitialize), S(CoCreateInstance), S(CommandLineToArgvW),
   USER_SHIMS
@@ -283,6 +298,7 @@ void gdi_init(Win32 *w) {
   { GdiObj *p = gdi_new(w, K_PEN); p->color = 0; p->pen_width = 1; stock[7] = p->handle; }
   { GdiObj *p = gdi_new(w, K_PEN); p->pen_width = -1; stock[8] = p->handle; }
   for (int i = 10; i <= 17; i++) { GdiObj *f = gdi_new(w, K_FONT); f->font_h = 16; stock[i] = f->handle; }
+  { GdiObj *pl = gdi_get(w, stock[15]); pl->kind = K_PALETTE; pl->font_h = 20; pl->bits = w32_heap_alloc(w, 1024, 0); static const u32 sys20[20] = { 0x000000, 0x000080, 0x008000, 0x008080, 0x800000, 0x800080, 0x808000, 0xc0c0c0, 0xc0dcc0, 0xf0caa6, 0xf0fbff, 0xa4a0a0, 0x808080, 0x0000ff, 0x00ff00, 0x00ffff, 0xff0000, 0xff00ff, 0xffff00, 0xffffff }; u8 *p = mem_ptr(w->mem, pl->bits, 80, 1); if (p) for (int i = 0; i < 20; i++) { u32 v = sys20[i]; p[i * 4] = (u8)(v >> 16); p[i * 4 + 1] = (u8)(v >> 8); p[i * 4 + 2] = (u8)v; p[i * 4 + 3] = 0; } }   /* DEFAULT_PALETTE: the 20 system colours */
   { GdiObj *b = gdi_new(w, K_BRUSH); b->color = 0xffffff; stock[18] = b->handle; }
   { GdiObj *b = gdi_new(w, K_BITMAP); b->bw = b->bh = 1; b->bits = 0; stock[19] = b->handle; }   /* default 1x1 bitmap handle */
   { GdiObj *p = gdi_new(w, K_PEN); p->color = 0; p->pen_width = 1; stock[9] = p->handle; }

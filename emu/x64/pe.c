@@ -257,7 +257,7 @@ static void ins_import(void *ctx, const char *dll, const char *name, u32 ordinal
   if (w32_have_shim(dll, name) || (name && w32_data_import_off(name))) x->known++;
   else if (!pe_is_system_dll(dll)) { x->priv++; x->known++; }   /* resolved from the private DLL next to the exe at load time */
   else if (pe_dll_native_only(dll)) { x->pack++; x->known++; }   /* real DLL from the DirectX pack (installed on demand) */
-  else { x->unknown++; if (x->unknown_listed < 60) { ins_put(x, "%s%s!%s", x->unknown_listed ? ", " : "", dll, name); x->unknown_listed++; } else if (x->unknown_listed == 60) { ins_put(x, ", ..."); x->unknown_listed++; } }
+  else { x->unknown++; if (x->unknown_listed < 200) { ins_put(x, "%s%s!%s", x->unknown_listed ? ", " : "", dll, name); x->unknown_listed++; } else if (x->unknown_listed == 200) { ins_put(x, ", ..."); x->unknown_listed++; } }
 }
 int pe_inspect(const u8 *bytes, size_t len, char *out, size_t out_sz) {
   PeHdr h; int rc = pe_parse(&h, bytes, len);

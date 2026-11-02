@@ -213,6 +213,21 @@ static void s_GetCurrentDirectoryW(Cpu *c) { const char *d = vfs_cwd(); size_t l
 static void s_SetCurrentDirectoryA(Cpu *c) { if (vfs_chdir(name_a(c, ARG(0)))) RET(1); else { W->last_error = 2; RET(0); } }
 static void s_SetCurrentDirectoryW(Cpu *c) { if (vfs_chdir(name_w(c, ARG(0)))) RET(1); else { W->last_error = 2; RET(0); } }
 static void full_path(Cpu *c, const char *n, int wide) { char out[1024]; vfs_normalize(n, out, sizeof out); size_t l = e_strlen(out); u32 cap = (u32)ARG(1); if (cap <= l) { RET(l + 1); return; } if (wide) put_w(c, ARG(2), out, 0); else put_a(c, ARG(2), out, 0); if (ARG(3)) { size_t b = l; while (b > 0 && out[b - 1] != '\\') b--; wrp(c, ARG(3), ARG(2) + (wide ? b * 2 : b)); } RET(l); }
+/* SearchPath(path, file, ext, cap, buf, &filepart): path = ';'-separated directories, or NULL → directory of the exe, current directory, System32, Windows */
+static void search_path(Cpu *c, int wide) { char path[2048], file[520], ext[32]; path[0] = file[0] = ext[0] = 0;
+  if (wide) { if (ARG(0)) wstr_to_utf8(c, ARG(0), path, sizeof path, -1); if (ARG(1)) wstr_to_utf8(c, ARG(1), file, sizeof file, -1); if (ARG(2)) wstr_to_utf8(c, ARG(2), ext, sizeof ext, -1); }
+  else { const char *q; if (ARG(0) && (q = rd_str(c, ARG(0), 2047))) e_snprintf(path, sizeof path, "%s", q); if (ARG(1) && (q = rd_str(c, ARG(1), 519))) e_snprintf(file, sizeof file, "%s", q); if (ARG(2) && (q = rd_str(c, ARG(2), 31))) e_snprintf(ext, sizeof ext, "%s", q); }
+  if (!file[0]) { W->last_error = 87; RET(0); return; } size_t fl = e_strlen(file); int has_dot = 0; for (size_t i = 0; i < fl; i++) if (file[i] == '.') has_dot = 1; else if (file[i] == '\\' || file[i] == '/') has_dot = 0;
+  if (ext[0] && !has_dot) e_snprintf(file + fl, sizeof file - fl, "%s", ext);
+  char cand[1100], found[1100]; found[0] = 0; u64 sz;
+  if (file[1] == ':' || file[0] == '\\' || file[0] == '/') { if (vfs_stat(file, &sz)) vfs_normalize(file, found, sizeof found); }
+  else { char dirs[2600]; if (ARG(0)) e_snprintf(dirs, sizeof dirs, "%s", path); else { char ed[600]; e_snprintf(ed, sizeof ed, "%s", W->exe_path); size_t k = e_strlen(ed); while (k && ed[k - 1] != '\\' && ed[k - 1] != '/') k--; ed[k] = 0; e_snprintf(dirs, sizeof dirs, "%s;%s;C:\\Windows\\System32;C:\\Windows", ed, vfs_cwd()); }
+    char *d = dirs; while (*d && !found[0]) { char *e = d; while (*e && *e != ';') e++; char save = *e; *e = 0; if (*d) { size_t dl = e_strlen(d); e_snprintf(cand, sizeof cand, "%s%s%s", d, (d[dl - 1] == '\\' || d[dl - 1] == '/') ? "" : "\\", file); if (vfs_stat(cand, &sz)) vfs_normalize(cand, found, sizeof found); } if (!save) break; d = e + 1; } }
+  if (!found[0]) { W->last_error = 2; RET(0); return; }
+  size_t l = e_strlen(found); u32 cap = (u32)ARG(3); if (cap <= l) { RET(l + 1); return; } if (wide) put_w(c, ARG(4), found, 0); else put_a(c, ARG(4), found, 0);
+  if (ARG(5)) { size_t b = l; while (b && found[b - 1] != '\\') b--; wrp(c, ARG(5), ARG(4) + (wide ? b * 2 : b)); } RET(l); }
+static void s_SearchPathW(Cpu *c) { search_path(c, 1); }
+static void s_SearchPathA(Cpu *c) { search_path(c, 0); }
 /* GetFinalPathNameByHandle(h, buf, cap, flags): the normalised path of the open file; VOLUME_NAME_DOS (0) gets the \\?\ prefix */
 static void final_path(Cpu *c, int wide) {
   int fd = handle_fd(ARG(0)); if (fd < 3) { W->last_error = 6; RET(0); return; }

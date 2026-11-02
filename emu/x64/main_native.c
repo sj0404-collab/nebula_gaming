@@ -87,6 +87,8 @@ int main(int argc, char **argv) {
   if (g_apitrace) { extern void w32_api_trace(int); w32_api_trace(1); }
   if (rc) { fprintf(stderr, "load failed (%d): %s", rc, x64_report()); return 3; }
   g_prof = getenv("X64_PROF") != 0;
+  if (getenv("X64_DWATCH")) { extern u64 g_dwatch; g_dwatch = strtoull(getenv("X64_DWATCH"), 0, 16); }
+  if (getenv("X64_WATCH")) { extern u64 g_watch[8]; extern int g_watch_n; char *ws = strdup(getenv("X64_WATCH")); for (char *t = strtok(ws, ","); t && g_watch_n < 8; t = strtok(0, ",")) g_watch[g_watch_n++] = strtoull(t, 0, 16); }
   u64 trace_after = getenv("X64_TRACE_AFTER") ? strtoull(getenv("X64_TRACE_AFTER"), 0, 10) : 0; int trace_on = 0;
   double t0 = host_now_ms(); int r; int ki = 0, ci = 0; u64 yields = 0; int stdin_eof = 0;
   for (;;) {

@@ -158,7 +158,7 @@ static void thread_finish(Cpu *c, u32 code) {
   if (!alive) { do_exit(c, (int)code); return; }   /* last thread: the process ends with its exit code */
   w->block = BLOCK_NONE; c->status = RUN_YIELD;    /* the scheduler notices the current thread is dead and picks another */
 }
-void w32_proc_teardown(Win32 *w) { for (int i = 0; i < THREAD_MAX; i++) if (w->th[i].used && w->th[i].state == 1) thread_mark_exited(w, i, (u32)w->cpu->exit_code); }
+void w32_proc_teardown(Win32 *w) { for (int i = 0; i < THREAD_MAX; i++) if (w->th[i].used && w->th[i].state == 1) thread_mark_exited(w, i, (u32)w->cpu->exit_code); if (w->ppid) user_proc_exit(w); }   /* child processes: drop their windows/classes (the root process keeps its screen until the emulator stops) */
 int w32_thread_alive(Win32 *w) { Thread *t = cur_thread(w); return t->used && t->state == 1 && t->suspend <= 0; }
 /* ExitThread / _endthreadex: DLL_THREAD_DETACH callbacks first, then finish */
 static void thread_exit(Cpu *c, u32 code) {
@@ -377,6 +377,9 @@ static void do_wait(Cpu *c, u32 n, u64 arr, u64 single, int all, u32 ms) {
   w->nwobj = (int)n; for (u32 i = 0; i < n; i++) { w->wobj_kind[i] = kinds[i]; w->wobj_idx[i] = idxs[i]; } w->wait_all = all;
   park(c, BLOCK_OBJ);
 }
+int w32_wait_poll(Cpu *c, u32 n, u64 arr, int all, int *which) { Win32 *w = W; int kinds[64], idxs[64]; if (n > 64) n = 64; if (!n || !arr) return 0;
+  for (u32 i = 0; i < n; i++) if (!wait_handle(c, rdp(c, arr + i * PSZ_OF(c)), &kinds[i], &idxs[i])) return -1;
+  return wait_check(w->pid, (int)cur_tid(w), kinds, idxs, (int)n, all, 1, which) ? 1 : 0; }
 static void s_WaitForSingleObject(Cpu *c) { do_wait(c, 1, 0, ARG(0), 0, (u32)ARG(1)); }
 static void s_WaitForSingleObjectEx(Cpu *c) { do_wait(c, 1, 0, ARG(0), 0, (u32)ARG(1)); }
 static void s_WaitForMultipleObjects(Cpu *c) { do_wait(c, (u32)ARG(0), ARG(1), 0, (u32)ARG(2) != 0, (u32)ARG(3)); }

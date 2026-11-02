@@ -1,5 +1,8 @@
 /* x86-64 interpreter: integer ISA + SSE/SSE2 subset used by compiler-generated user-mode code. */
 #include "emu.h"
+u64 g_watch[8]; int g_watch_n;
+u64 g_dwatch, g_dwatch_rip; u32 g_dwatch_last;   /* X64_DWATCH=addr: log every change of that dword with the instruction that did it */
+static u32 watch_rd(Cpu *c, u64 a) { const u8 *p = mem_ptr_fast(c->mem, a, 4, 0); u32 v = 0; if (p) __builtin_memcpy(&v, p, 4); return v; }   /* side-effect-free peek for the watch log */   /* X64_WATCH=rip,rip,…: log registers whenever execution reaches one of these addresses (debug aid) */
 #include <stdarg.h>
 
 typedef unsigned __int128 u128; typedef __int128 s128;
@@ -525,7 +528,7 @@ static void exec_body(Ins *i, u8 op) {
     case 0x86: case 0x87: { int sz = op & 1 ? osz : 1; decode_modrm(i); u64 a = rm_get(i, sz), b = get_reg(i, i->reg, sz); rm_set(i, sz, b); set_reg(i, i->reg, sz, a); return; }
     case 0x88: case 0x89: { int sz = op & 1 ? osz : 1; decode_modrm(i); rm_set(i, sz, get_reg(i, i->reg, sz)); return; }
     case 0x8A: case 0x8B: { int sz = op & 1 ? osz : 1; decode_modrm(i); set_reg(i, i->reg, sz, rm_get(i, sz)); return; }
-    case 0x8D: { decode_modrm(i); if (i->mod == 3) UNSUP("lea with register operand"); set_reg(i, i->reg, osz, EA(i)); return; }
+    case 0x8D: { decode_modrm(i); if (i->mod == 3) UNSUP("lea with register operand"); u64 ea = EA(i); if (i->seg == 1) ea -= c->fs_base; else if (i->seg == 2) ea -= c->gs_base; /* LEA ignores segment overrides (Delphi pads with 64 66 8D 80 … NOPs) */ if (i->p67 || c->mode32) ea &= 0xffffffffull; set_reg(i, i->reg, osz, ea); return; }
     case 0x8F: { u64 v = cpu_pop(c); decode_modrm(i); fix_rip_rel(i, 0); rm_set(i, c->mode32 ? 4 : 8, v); return; }   /* pop r/m64: an rsp-based address is computed AFTER the increment (V8 tail calls rely on `pop [rsp+x]`) */
     case 0x90: if (i->rexb) { u64 t = c->r[RAX]; c->r[RAX] = c->r[R8]; c->r[R8] = t; } return;   /* nop / pause / xchg r8,rax */
     case 0x91: case 0x92: case 0x93: case 0x94: case 0x95: case 0x96: case 0x97: { int r = (op & 7) | (i->rexb << 3); u64 a = get_reg(i, RAX, osz), b = get_reg(i, r, osz); set_reg(i, RAX, osz, b); set_reg(i, r, osz, a); return; }
@@ -657,6 +660,12 @@ static void exec_0f(Ins *i, Cpu *c) {
     case 0xB0: case 0xB1: { int sz = op & 1 ? osz : 1; decode_modrm(i); u64 d = rm_get(i, sz), a = get_reg(i, RAX, sz); flags_sub(c, a, d, (a - d) & mask(sz), sz);
       if (a == d) { c->rflags |= F_ZF; rm_set(i, sz, get_reg(i, i->reg, sz)); } else { c->rflags &= ~(u64)F_ZF; set_reg(i, RAX, sz, d); } return; }
     case 0xC0: case 0xC1: { int sz = op & 1 ? osz : 1; decode_modrm(i); u64 d = rm_get(i, sz), s = get_reg(i, i->reg, sz); u64 r = alu(c, 0, d, s, sz); set_reg(i, i->reg, sz, d); rm_set(i, sz, r); return; }
+    case 0xC7: { decode_modrm(i); if (i->reg == 1 && i->mod != 3) { /* CMPXCHG8B m64 / CMPXCHG16B m128 */ u64 a = EA(i);
+        if (i->rexw) { u64 lo = rd64(c, a), hi = rd64(c, a + 8); if (lo == c->r[RAX] && hi == c->r[RDX]) { c->rflags |= F_ZF; wr64(c, a, c->r[RBX]); wr64(c, a + 8, c->r[RCX]); } else { c->rflags &= ~(u64)F_ZF; c->r[RAX] = lo; c->r[RDX] = hi; } return; }
+        u64 m = rd64(c, a), cmp = (u64)(u32)c->r[RAX] | (u64)(u32)c->r[RDX] << 32; if (m == cmp) { c->rflags |= F_ZF; wr64(c, a, (u64)(u32)c->r[RBX] | (u64)(u32)c->r[RCX] << 32); } else { c->rflags &= ~(u64)F_ZF; c->r[RAX] = (u32)m; c->r[RDX] = (u32)(m >> 32); } return; }
+      if (i->reg == 6 && i->mod == 3) { /* RDRAND r */ u64 v = (u64)host_now_ms() * 2654435761u ^ (c->r[RSP] << 7) ^ 0x9E3779B97F4A7C15ull; set_reg(i, i->rm, osz, v); c->rflags = (c->rflags & ~(u64)(F_OF | F_SF | F_ZF | F_AF | F_PF)) | F_CF; return; }
+      if (i->reg == 7 && i->mod == 3) { /* RDSEED r */ u64 v = (u64)host_now_ms() * 0x9E3779B97F4A7C15ull ^ (c->r[RSP] << 3); set_reg(i, i->rm, osz, v); c->rflags = (c->rflags & ~(u64)(F_OF | F_SF | F_ZF | F_AF | F_PF)) | F_CF; return; }
+      break; }
     case 0xB6: case 0xB7: { decode_modrm(i); set_reg(i, i->reg, osz, rm_get(i, op == 0xB6 ? 1 : 2)); return; }
     case 0xBE: case 0xBF: { decode_modrm(i); int ssz = op == 0xBE ? 1 : 2; set_reg(i, i->reg, osz, sext(rm_get(i, ssz), ssz) & mask(osz)); return; }
     case 0xBC: case 0xBD: { decode_modrm(i); u64 v = rm_get(i, osz); int bits = osz * 8;
@@ -827,6 +836,8 @@ int cpu_run(Cpu *c, u64 max_insns) {
     if (c->rip == X64_WATCH || c->rip == X64_WATCH2) { e_log("[watch] rip=%llx tid=%d rax=%llx rbx=%llx rsp=%llx rbp=%llx rsi=%llx rdi=%llx r12=%llx r13=%llx r14=%llx r15=%llx\n", (unsigned long long)c->rip, c->w->th[c->w->cur_th].tid, (unsigned long long)c->r[0], (unsigned long long)c->r[3], (unsigned long long)c->r[4], (unsigned long long)c->r[5], (unsigned long long)c->r[6], (unsigned long long)c->r[7], (unsigned long long)c->r[12], (unsigned long long)c->r[13], (unsigned long long)c->r[14], (unsigned long long)c->r[15]);
       u8 *sp = mem_ptr(c->mem, c->r[4], 64, 0); if (sp) { e_log("        stack:"); for (int k = 0; k < 8; k++) { u64 v; e_memcpy(&v, sp + 8 * k, 8); e_log(" %llx", (unsigned long long)v); } e_log("\n"); } }
 #endif
+    if (__builtin_expect(g_dwatch != 0, 0)) { u32 v = watch_rd(c, g_dwatch); if (v != g_dwatch_last) { e_log("[dwatch] [%llx] %x -> %x after rip=%llx (next %llx)\n", (unsigned long long)g_dwatch, g_dwatch_last, v, (unsigned long long)g_dwatch_rip, (unsigned long long)c->rip); g_dwatch_last = v; } g_dwatch_rip = c->rip; }
+    if (__builtin_expect(g_watch_n, 0)) { for (int wi = 0; wi < g_watch_n; wi++) if (g_watch[wi] == c->rip) { e_log("[watch] rip=%llx eax=%llx ecx=%llx edx=%llx ebx=%llx esp=%llx ebp=%llx esi=%llx edi=%llx [esi]=%x [edx]=%x [eax]=%x\n", (unsigned long long)c->rip, (unsigned long long)c->r[RAX], (unsigned long long)c->r[RCX], (unsigned long long)c->r[RDX], (unsigned long long)c->r[RBX], (unsigned long long)c->r[RSP], (unsigned long long)c->r[RBP], (unsigned long long)c->r[RSI], (unsigned long long)c->r[RDI], watch_rd(c, c->r[RSI]), watch_rd(c, c->r[RDX]), watch_rd(c, c->r[RAX])); break; } }
     Dc *e = DC_SLOT(c->rip); u64 w0 = 0, w1 = 0;
     const u8 *code = (e->rip == c->rip && e->mem == c->mem && e->gen == c->mem->gen) ? e->code : mem_ptr_fast(c->mem, c->rip, 16, 0);
     if (code) { __builtin_memcpy(&w0, code, 8); __builtin_memcpy(&w1, code + 8, 8); }

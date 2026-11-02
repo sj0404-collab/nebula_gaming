@@ -385,6 +385,28 @@ if [ -f tests/inst/npp32.exe ] && [ -f tests/inst/npp64.exe ]; then
   check "NSIS x86 setup: 32-bit notepad++.exe written through the wizard"   "PE32 "   "$(python3 -c "import struct;d=open('$ID/npp/notepad++.exe','rb').read();pe=struct.unpack_from('<I',d,0x3c)[0];print('PE32+' if struct.unpack_from('<H',d,pe+24)[0]==0x20b else 'PE32 ')" 2>/dev/null)"
   rm -rf $ID
 else echo "  skip Notepad++ (no network)"; fi
+# a real Delphi/VCL installer (Inno Setup 6.5.4 installing itself: SetupLdr → Setup child → Compil32 /ASSOC third process,
+# ISSig ECDSA P-256 verification of its own DLLs through BCrypt), then the installed ISCC.exe compiles a script (ISPP, LZMA2
+# threads in islzma.dll) and the setup it produced installs — the file survives the compress/decompress round trip unchanged
+IS=tests/inst/inno.exe; [ -f $IS ] || curl -fsSL -m 120 -o $IS https://github.com/jrsoftware/issrc/releases/download/is-6_5_4/innosetup-6.5.4.exe 2>/dev/null || rm -f $IS
+if [ -f $IS ]; then
+  echo "  real installer: Inno Setup 6.5.4 (Delphi), then ISCC compiles and the result installs"
+  ID=$(mktemp -d); rc=0; $X --quiet --no-stdin --max-ms 200000 --mount-rw "$ID=C:\\inst" $IS /VERYSILENT /SUPPRESSMSGBOXES /NORESTART '/DIR=C:\inst\is' >/dev/null 2>&1 || rc=$?
+  check "Inno Setup: silent self-install exit code"   "rc=0"   "rc=$rc"
+  check "Inno Setup: compiler, IDE, DLLs (ISSig-verified) and languages written"   "Compil32.exe.*ISCC.exe.*ISCmplr.dll.*Languages.*islzma.dll"   "$(ls $ID/is 2>/dev/null | tr '\n' ' ')"
+  if [ -f $ID/is/ISCC.exe ]; then
+    SRC=$(mktemp -d); OUT=$(mktemp -d); cp $ID/is/Examples/MyProg.exe $ID/is/Examples/Readme.txt $SRC/ 2>/dev/null
+    printf '[Setup]\nAppName=Nebula Test App\nAppVersion=1.0\nDefaultDirName={autopf}\\NebulaTest\nOutputDir=C:\\out\nOutputBaseFilename=nebula-setup\nCompression=lzma2/fast\nSolidCompression=yes\nPrivilegesRequired=lowest\n[Files]\nSource: "C:\\src\\MyProg.exe"; DestDir: "{app}"\nSource: "C:\\src\\Readme.txt"; DestDir: "{app}"\n' > $SRC/nebula.iss
+    out=$($X --no-stdin --max-ms 200000 --mount "$ID/is=C:\\nebula" --mount "$SRC=C:\\src" --mount-rw "$OUT=C:\\out" $ID/is/ISCC.exe 'C:\src\nebula.iss' 2>&1 | grep -v "last blocks" || true)
+    check "ISCC.exe (installed compiler): compiles the script with LZMA2 (multi-threaded islzma.dll)"   "Successful compile"   "$out"
+    check "ISCC.exe: exit code 0"   "exit code 0"   "$out"
+    RT=$(mktemp -d); rc=0; [ -f $OUT/nebula-setup.exe ] && { $X --quiet --no-stdin --max-ms 120000 --mount-rw "$RT=C:\\inst" $OUT/nebula-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART '/DIR=C:\inst\nt' >/dev/null 2>&1 || rc=$?; } || rc=99
+    check "compiled setup: silent install exit code"   "rc=0"   "rc=$rc"
+    check "compiled setup: MyProg.exe identical after the LZMA2 round trip, uninstaller written"   "same.*unins000.exe"   "$(cmp -s $RT/nt/MyProg.exe $SRC/MyProg.exe && echo same) $(ls $RT/nt 2>/dev/null | tr '\n' ' ')"
+    rm -rf $SRC $OUT $RT
+  fi
+  rm -rf $ID
+else echo "  skip Inno Setup (no network)"; fi
 # a real MSVC x64 GUI program with dialog templates + common controls: PuTTY reaches its configuration dialog
 # (About box opens through the dialog manager); SysTreeView32 is still reported as not implemented
 PT=tests/inst/putty.exe; [ -f $PT ] || curl -fsSL -m 60 -o $PT https://the.earth.li/~sgtatham/putty/latest/w64/putty.exe 2>/dev/null || rm -f $PT

@@ -19,7 +19,7 @@ enum { BI_NONE = 0, BI_BUTTON, BI_STATIC, BI_EDIT, BI_COMBO, BI_LISTBOX, BI_SCRO
 enum { CONT_WNDCREATE = 6 /* = CONT_CREATEWND in win32.c */, CONT_WNDDESTROY = 400, CONT_CTLPAINT = 401, CONT_DLGINIT = 402, CONT_MODAL = 403, CONT_DLGMSG = 404, CONT_SENDCMD = 405, CONT_DLGPROC = 406, CONT_RET_VAL_ = 5 };
 #define MAX_ITEMS 512
 typedef struct {
-  int used, destroyed; int parent, owner; int builtin; char clsname[40]; u64 wndproc; u64 cls_brush; u32 cls_style; int cls_extra;
+  int used, destroyed; int parent, owner; int builtin; int pid;   /* owning process: messages from other processes are posted to its queue */ char clsname[40]; u64 wndproc; u64 cls_brush; u32 cls_style; int cls_extra;
   u32 style, exstyle; u64 id, inst;
   int x, y, w, h;            /* relative to the parent's client origin (top-level: framebuffer coordinates) */
   int ncx, ncy;              /* client offset inside the window (caption/border of secondary top-level windows) */
@@ -36,7 +36,7 @@ static int g_mouse_x, g_mouse_y, g_mouse_btn;
 static u64 g_slot_button, g_slot_static, g_slot_edit, g_slot_combo, g_slot_listbox, g_slot_dialog, g_slot_progress, g_slot_unsupported, g_slot_scrollbar, g_slot_msgbox, g_slot_combolist, g_slot_link;
 static u64 g_dlg_font; static int g_msgbox_auto = 1;
 /* registered window classes */
-typedef struct { int used; char name[64]; u64 proc, brush, cursor, icon; u32 style; int extra; u64 inst; } WndClass;
+typedef struct { int used; int pid; char name[64]; u64 proc, brush, cursor, icon; u32 style; int extra; u64 inst; } WndClass;   /* pid: classes are per process (the procedure address only means something in its own address space) */
 static WndClass g_cls[64];
 static int g_timers_n; static struct { u64 id; int wnd; u32 ms; double next; u64 proc; } g_timers[32];
 /* clipboard (text only, internal to the emulator) */
@@ -180,6 +180,8 @@ static void dispatch_to_wndproc(Cpu *c, u64 hwnd, u32 msg, u64 wp, u64 lp) {
   Win32 *w = W;
   if (msg == 0x113 && lp && lp > 0x10000) { w32_push_cont(c, CONT_RET_RAX, 0); w32_guest_call(c, lp, hwnd, msg, wp, (u64)(u32)(host_now_ms() - w->start_ms)); return; }
   int i = wnd_of(hwnd); if (i < 0 || g_wnd[i].destroyed || !g_wnd[i].wndproc) { RET(0); return; }
+  if (g_wnd[i].pid != w->pid) { /* another process's window: its procedure lives in a different address space — queue the message there (SendMessage degrades to PostMessage; the reply is 1) */
+    for (int k = 0; ; k++) { Win32 *o = proc_w32_at(k); if (!o) break; if (o == (Win32 *)1) continue; if (o->pid == g_wnd[i].pid) { post_msg_to(o, hwnd, msg, wp, lp); break; } } RET(1); return; }
   send_to(c, i, msg, wp, lp, CONT_RET_RAX, 0);
 }
 static void s_DispatchMessageA(Cpu *c) { u64 a = ARG(0); dispatch_to_wndproc(c, rdp(c, a), rd32(c, MSG_MSG(a)), rdp(c, MSG_WP(a)), rdp(c, MSG_LP(a))); }
@@ -194,8 +196,16 @@ static void s_SetTimer(Cpu *c) { int wi = wnd_of(ARG(0)); u64 id = ARG(1) ? ARG(
   if (g_timers_n < 32) { g_timers[g_timers_n].id = id; g_timers[g_timers_n].wnd = wi; g_timers[g_timers_n].ms = ms; g_timers[g_timers_n].next = host_now_ms() + ms; g_timers[g_timers_n].proc = ARG(3); g_timers_n++; } RET(id); }
 static void s_KillTimer(Cpu *c) { int wi = wnd_of(ARG(0)); for (int i = 0; i < g_timers_n; i++) if (g_timers[i].id == ARG(1) && (g_timers[i].wnd == wi || wi < 0)) { g_timers[i] = g_timers[--g_timers_n]; RET(1); return; } RET(0); }
 static void kill_timers_of(int wi) { for (int i = 0; i < g_timers_n;) { if (g_timers[i].wnd == wi) g_timers[i] = g_timers[--g_timers_n]; else i++; } }
-static void s_MsgWaitForMultipleObjects(Cpu *c) { Win32 *w = W; GuestMsg m; if (next_message(c, &m, 0, 0) || w->quit_posted) { RET(ARG(0)); return; } w->blits_since_yield = 0; w32_retry_yield(c); }
-static void s_MsgWaitForMultipleObjectsEx(Cpu *c) { s_MsgWaitForMultipleObjects(c); }
+/* MsgWaitForMultipleObjects(n, handles, all, ms, mask): handles are polled like WaitForMultipleObjects (a child process
+   ending, an event, a thread), a pending message returns n, the timeout returns WAIT_TIMEOUT; otherwise the shim is retried */
+static void msgwait_common(Cpu *c, u32 n, u64 arr, int all, u32 ms) { Win32 *w = W; GuestMsg m; int which = 0;
+  int r = w32_wait_poll(c, n, arr, all, &which); if (r < 0) { w->last_error = 6; w->msgwait_rip = 0; RET(0xffffffffu); return; }
+  if (r > 0) { w->msgwait_rip = 0; RET((u32)which); return; }
+  if (next_message(c, &m, 0, 0) || w->quit_posted) { w->msgwait_rip = 0; RET(n); return; }
+  if (ms != 0xffffffffu) { double now = host_now_ms(); if (w->msgwait_rip != c->rip) { w->msgwait_rip = c->rip; w->msgwait_dl = now + ms; } if (now >= w->msgwait_dl) { w->msgwait_rip = 0; RET(258); return; } }
+  w->blits_since_yield = 0; w32_retry_yield(c); }
+static void s_MsgWaitForMultipleObjects(Cpu *c) { msgwait_common(c, (u32)ARG(0), ARG(1), (u32)ARG(2) != 0, (u32)ARG(3)); }
+static void s_MsgWaitForMultipleObjectsEx(Cpu *c) { msgwait_common(c, (u32)ARG(0), ARG(1), (ARG(4) & 1) != 0, (u32)ARG(3)); }
 static void s_WaitMessage(Cpu *c) { s_MsgWaitForMultipleObjects(c); }
 static void s_GetQueueStatus(Cpu *c) { Win32 *w = W; RET(w->msg_head != w->msg_tail ? 0x00FF00FFull : 0); }
 static void s_GetInputState(Cpu *c) { Win32 *w = W; RET(w->msg_head != w->msg_tail); }
@@ -206,46 +216,47 @@ static void s_GetMessageTime(Cpu *c) { RET((u32)(host_now_ms() - W->start_ms)); 
 static void s_GetMessageExtraInfo(Cpu *c) { RET(0); }
 
 /* ---------- window classes ---------- */
-static int cls_find(const char *name) { for (int i = 0; i < 64; i++) if (g_cls[i].used && !e_stricmp(g_cls[i].name, name)) return i; return -1; }
+static int cls_find(Win32 *w, const char *name) { for (int i = 0; i < 64; i++) if (g_cls[i].used && g_cls[i].pid == w->pid && !e_stricmp(g_cls[i].name, name)) return i; return -1; }
 /* WNDCLASS(EX): x64 proc@8(16) extra@20(28) inst@24(32) icon@32(40) cursor@40(48) brush@48(56) menu@56(64) name@64(72); x86 proc@4(8) extra@12(16) inst@16(20) icon@20(24) cursor@24(28) brush@28(32) name@36(40) */
 static void register_class(Cpu *c, u64 a, int ex, int wide) { Win32 *w = W; int m = c->mode32; u64 off = ex ? (m ? 4 : 8) : 0; char name[64]; u64 np = rdp(c, a + off + (m ? 36 : 64));
   if (np < 0x10000) e_snprintf(name, sizeof name, "#%u", (u32)np); else text_in(c, np, wide, name, sizeof name);
-  int i = cls_find(name); if (i >= 0 && g_cls[i].inst == rdp(c, a + off + (m ? 16 : 24))) { W->last_error = 1410; RET(0); return; }   /* ERROR_CLASS_ALREADY_EXISTS */
+  int i = cls_find(W, name); if (i >= 0 && g_cls[i].inst == rdp(c, a + off + (m ? 16 : 24))) { W->last_error = 1410; RET(0); return; }   /* ERROR_CLASS_ALREADY_EXISTS */
   if (i < 0) for (int k = 0; k < 64; k++) if (!g_cls[k].used) { i = k; break; } if (i < 0) { RET(0); return; }
-  WndClass *k = &g_cls[i]; k->used = 1; e_snprintf(k->name, sizeof k->name, "%s", name); k->style = rd32(c, a + off); k->proc = rdp(c, a + off + (m ? 4 : 8)); k->extra = (int)rd32(c, a + off + (m ? 12 : 20)); k->inst = rdp(c, a + off + (m ? 16 : 24)); k->icon = rdp(c, a + off + (m ? 20 : 32)); k->cursor = rdp(c, a + off + (m ? 24 : 40)); k->brush = rdp(c, a + off + (m ? 28 : 48));
+  WndClass *k = &g_cls[i]; k->used = 1; k->pid = w->pid; e_snprintf(k->name, sizeof k->name, "%s", name); k->style = rd32(c, a + off); k->proc = rdp(c, a + off + (m ? 4 : 8)); k->extra = (int)rd32(c, a + off + (m ? 12 : 20)); k->inst = rdp(c, a + off + (m ? 16 : 24)); k->icon = rdp(c, a + off + (m ? 20 : 32)); k->cursor = rdp(c, a + off + (m ? 24 : 40)); k->brush = rdp(c, a + off + (m ? 28 : 48));
   w->wndclass_proc = k->proc; w->wndclass_registered = 1; e_snprintf(w->wndclass_name, sizeof w->wndclass_name, "%s", name); RET(0xC001 + i); }
 static void s_RegisterClassA(Cpu *c) { register_class(c, ARG(0), 0, 0); }
 static void s_RegisterClassExA(Cpu *c) { register_class(c, ARG(0), 1, 0); }
 static void s_RegisterClassW(Cpu *c) { register_class(c, ARG(0), 0, 1); }
 static void s_RegisterClassExW(Cpu *c) { register_class(c, ARG(0), 1, 1); }
-static void s_UnregisterClassA(Cpu *c) { char name[64]; if (ARG(0) < 0x10000) { RET(1); return; } text_in(c, ARG(0), 0, name, sizeof name); int i = cls_find(name); if (i >= 0) g_cls[i].used = 0; RET(1); }
-static void s_UnregisterClassW(Cpu *c) { char name[64]; if (ARG(0) < 0x10000) { RET(1); return; } text_in(c, ARG(0), 1, name, sizeof name); int i = cls_find(name); if (i >= 0) g_cls[i].used = 0; RET(1); }
+static void s_UnregisterClassA(Cpu *c) { char name[64]; if (ARG(0) < 0x10000) { RET(1); return; } text_in(c, ARG(0), 0, name, sizeof name); int i = cls_find(W, name); if (i >= 0) g_cls[i].used = 0; RET(1); }
+static void s_UnregisterClassW(Cpu *c) { char name[64]; if (ARG(0) < 0x10000) { RET(1); return; } text_in(c, ARG(0), 1, name, sizeof name); int i = cls_find(W, name); if (i >= 0) g_cls[i].used = 0; RET(1); }
 static int builtin_of_class(const char *n) {
   if (!e_stricmp(n, "Button")) return BI_BUTTON; if (!e_stricmp(n, "Static")) return BI_STATIC; if (!e_stricmp(n, "Edit")) return BI_EDIT; if (!e_stricmp(n, "ComboBox")) return BI_COMBO; if (!e_stricmp(n, "ListBox")) return BI_LISTBOX;
   if (!e_stricmp(n, "ScrollBar")) return BI_SCROLLBAR; if (!e_stricmp(n, "#32770")) return BI_DIALOG; if (!e_stricmp(n, "msctls_progress32")) return BI_PROGRESS; if (!e_stricmp(n, "SysLink")) return BI_LINK; if (!e_stricmp(n, "ComboLBox")) return BI_COMBOLIST;
   if (!e_stricmp(n, "SysListView32") || !e_stricmp(n, "SysTreeView32") || !e_stricmp(n, "ToolbarWindow32") || !e_stricmp(n, "msctls_statusbar32") || !e_stricmp(n, "SysTabControl32") || !e_stricmp(n, "ReBarWindow32") || !e_stricmp(n, "tooltips_class32") || !e_stricmp(n, "msctls_trackbar32") || !e_stricmp(n, "msctls_updown32") || !e_stricmp(n, "SysHeader32") || !e_stricmp(n, "SysAnimate32") || !e_stricmp(n, "SysDateTimePick32") || !e_stricmp(n, "SysMonthCal32") || !e_stricmp(n, "ComboBoxEx32") || !e_stricmp(n, "SysIPAddress32") || !e_strnicmp(n, "RichEdit", 8) || !e_stricmp(n, "RICHEDIT50W") || !e_stricmp(n, "SysPager") || !e_stricmp(n, "MDIClient")) return BI_UNSUPPORTED;
   return BI_NONE; }
 static u64 builtin_slot(int bi) { switch (bi) { case BI_BUTTON: return g_slot_button; case BI_STATIC: return g_slot_static; case BI_EDIT: return g_slot_edit; case BI_COMBO: return g_slot_combo; case BI_LISTBOX: return g_slot_listbox; case BI_SCROLLBAR: return g_slot_scrollbar; case BI_DIALOG: return g_slot_dialog; case BI_PROGRESS: return g_slot_progress; case BI_LINK: return g_slot_link; case BI_COMBOLIST: return g_slot_combolist; case BI_MSGBOX: return g_slot_dialog; default: return g_slot_unsupported; } }
-static void builtin_init_slots(Win32 *w) { if (g_slot_button) return;
+static Win32 *g_slot_w;   /* slot addresses are per process (each process resolves shims in its own order) — recompute when another process asks */
+static void builtin_init_slots(Win32 *w) { if (g_slot_button && g_slot_w == w) return; g_slot_w = w;
   g_slot_button = w32_shim_slot(w, "user32", "NebulaButtonProc"); g_slot_static = w32_shim_slot(w, "user32", "NebulaStaticProc"); g_slot_edit = w32_shim_slot(w, "user32", "NebulaEditProc"); g_slot_combo = w32_shim_slot(w, "user32", "NebulaComboProc");
   g_slot_listbox = w32_shim_slot(w, "user32", "NebulaListBoxProc"); g_slot_dialog = w32_shim_slot(w, "user32", "DefDlgProcW"); g_slot_progress = w32_shim_slot(w, "user32", "NebulaProgressProc"); g_slot_unsupported = w32_shim_slot(w, "user32", "NebulaUnsupportedProc");
   g_slot_scrollbar = w32_shim_slot(w, "user32", "NebulaScrollBarProc"); g_slot_msgbox = w32_shim_slot(w, "user32", "NebulaMsgBoxProc"); g_slot_combolist = w32_shim_slot(w, "user32", "NebulaComboListProc"); g_slot_link = w32_shim_slot(w, "user32", "NebulaLinkProc");
   { GdiObj *f = gdi_new(w, K_FONT); f->font_h = 13; f->font_em = 11; g_dlg_font = f->handle; } }
 static void s_GetClassInfoExA(Cpu *c) { RET(0); }
-static void s_GetClassInfoExW(Cpu *c) { char name[64]; if (ARG(1) < 0x10000) { RET(0); return; } text_in(c, ARG(1), 1, name, sizeof name); int i = cls_find(name); int bi = builtin_of_class(name); u64 a = ARG(2); int m = c->mode32; u64 off = m ? 4 : 8;
+static void s_GetClassInfoExW(Cpu *c) { char name[64]; if (ARG(1) < 0x10000) { RET(0); return; } text_in(c, ARG(1), 1, name, sizeof name); int i = cls_find(W, name); int bi = builtin_of_class(name); u64 a = ARG(2); int m = c->mode32; u64 off = m ? 4 : 8;
   if (i < 0 && !bi) { W->last_error = 1411; RET(0); return; } u8 *p = mem_ptr(c->mem, a, m ? 48 : 80, 1); if (p) e_memset(p, 0, m ? 48 : 80); wr32(c, a, m ? 48 : 80);
   if (i >= 0) { wr32(c, a + off, g_cls[i].style); wrp(c, a + off + (m ? 4 : 8), g_cls[i].proc); wr32(c, a + off + (m ? 12 : 20), (u32)g_cls[i].extra); wrp(c, a + off + (m ? 16 : 24), g_cls[i].inst); wrp(c, a + off + (m ? 28 : 48), g_cls[i].brush); }
-  else { wrp(c, a + off + (m ? 4 : 8), builtin_slot(bi)); wr32(c, a + off, 0x0008 | 0x0003); }
+  else { builtin_init_slots(W); wrp(c, a + off + (m ? 4 : 8), builtin_slot(bi)); wr32(c, a + off, 0x0008 | 0x0003); }
   wrp(c, a + off + (m ? 36 : 64), ARG(1)); RET(1); }
-static void s_GetClassInfoW(Cpu *c) { char name[64]; if (ARG(1) < 0x10000) { RET(0); return; } text_in(c, ARG(1), 1, name, sizeof name); int i = cls_find(name); int bi = builtin_of_class(name); u64 a = ARG(2); int m = c->mode32; if (i < 0 && !bi) { RET(0); return; } u8 *p = mem_ptr(c->mem, a, m ? 40 : 72, 1); if (p) e_memset(p, 0, m ? 40 : 72);
-  if (i >= 0) { wr32(c, a, g_cls[i].style); wrp(c, a + (m ? 4 : 8), g_cls[i].proc); wrp(c, a + (m ? 28 : 48), g_cls[i].brush); } else wrp(c, a + (m ? 4 : 8), builtin_slot(bi)); wrp(c, a + (m ? 36 : 64), ARG(1)); RET(1); }
+static void s_GetClassInfoW(Cpu *c) { char name[64]; if (ARG(1) < 0x10000) { RET(0); return; } text_in(c, ARG(1), 1, name, sizeof name); int i = cls_find(W, name); int bi = builtin_of_class(name); u64 a = ARG(2); int m = c->mode32; if (i < 0 && !bi) { RET(0); return; } u8 *p = mem_ptr(c->mem, a, m ? 40 : 72, 1); if (p) e_memset(p, 0, m ? 40 : 72);
+  builtin_init_slots(W); if (i >= 0) { wr32(c, a, g_cls[i].style); wrp(c, a + (m ? 4 : 8), g_cls[i].proc); wrp(c, a + (m ? 28 : 48), g_cls[i].brush); } else wrp(c, a + (m ? 4 : 8), builtin_slot(bi)); wrp(c, a + (m ? 36 : 64), ARG(1)); RET(1); }
 static void s_GetClassInfoA(Cpu *c) { s_GetClassInfoW(c); }
 static void s_GetClassNameA(Cpu *c) { int i = wnd_of(ARG(0)); const char *n = i >= 0 ? g_wnd[i].clsname : ""; RET(text_out_cap(c, ARG(1), n, (u32)ARG(2), 0)); }
 static void s_GetClassNameW(Cpu *c) { int i = wnd_of(ARG(0)); const char *n = i >= 0 ? g_wnd[i].clsname : ""; RET(text_out_cap(c, ARG(1), n, (u32)ARG(2), 1)); }
 static void s_RealGetWindowClassW(Cpu *c) { s_GetClassNameW(c); }
-static void s_GetClassLongPtrW(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } int idx = (int)(s32)ARG(1); int k = cls_find(g_wnd[i].clsname); switch (idx) { case -26: RET(g_wnd[i].cls_style); return; case -24: RET(g_wnd[i].wndproc); return; case -10: RET(g_wnd[i].cls_brush); return; case -14: RET(g_wnd[i].icon); return; case -12: RET(k >= 0 ? g_cls[k].cursor : 0x7A001); return; case -16: RET(g_wnd[i].inst); return; case -20: RET(g_wnd[i].cls_extra); return; case -18: RET(0); return; default: RET(0); return; } }
+static void s_GetClassLongPtrW(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } int idx = (int)(s32)ARG(1); int k = cls_find(W, g_wnd[i].clsname); switch (idx) { case -26: RET(g_wnd[i].cls_style); return; case -24: RET(g_wnd[i].wndproc); return; case -10: RET(g_wnd[i].cls_brush); return; case -14: RET(g_wnd[i].icon); return; case -12: RET(k >= 0 ? g_cls[k].cursor : 0x7A001); return; case -16: RET(g_wnd[i].inst); return; case -20: RET(g_wnd[i].cls_extra); return; case -18: RET(0); return; default: RET(0); return; } }
 static void s_GetClassLongA(Cpu *c) { s_GetClassLongPtrW(c); }
-static void s_SetClassLongPtrW(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } int idx = (int)(s32)ARG(1); if (idx == -10) { u64 old = g_wnd[i].cls_brush; g_wnd[i].cls_brush = ARG(2); RET(old); return; } if (idx == -24) { int k = cls_find(g_wnd[i].clsname); u64 old = k >= 0 ? g_cls[k].proc : 0; if (k >= 0) g_cls[k].proc = ARG(2); RET(old); return; } RET(0); }
+static void s_SetClassLongPtrW(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } int idx = (int)(s32)ARG(1); if (idx == -10) { u64 old = g_wnd[i].cls_brush; g_wnd[i].cls_brush = ARG(2); RET(old); return; } if (idx == -24) { int k = cls_find(W, g_wnd[i].clsname); u64 old = k >= 0 ? g_cls[k].proc : 0; if (k >= 0) g_cls[k].proc = ARG(2); RET(old); return; } RET(0); }
 
 /* ---------- window creation / destruction ---------- */
 static void s_AdjustWindowRectEx(Cpu *c) { u64 r = ARG(0); u32 style = (u32)ARG(1); if (style & 0x00C00000u) { wr32(c, r, rd32(c, r) - 8); wr32(c, r + 4, rd32(c, r + 4) - 31); wr32(c, r + 8, rd32(c, r + 8) + 8); wr32(c, r + 12, rd32(c, r + 12) + 8); } RET(1); }
@@ -257,10 +268,10 @@ static void items_free(Wnd *n) { if (n->items) { emu_free(n->items); n->items = 
 static int wnd_create_obj(Cpu *c, const char *cls, const char *title, u32 style, u32 exstyle, int x, int y, int cx, int cy, u64 parent_h, u64 id, u64 inst, u64 param, int wide, u64 title_a) {
   Win32 *w = W; builtin_init_slots(w); int parent = wnd_of(parent_h); int bi = BI_NONE; int ci = -1;
   if (cls[0] == '#' && cls[1] >= '0') { u32 ord = 0; for (const char *p = cls + 1; *p >= '0' && *p <= '9'; p++) ord = ord * 10 + (u32)(*p - '0'); if (ord == 32770) cls = "#32770"; else if (ord >= 0x80 && ord <= 0x85) { static const char *names[] = { "Button", "Edit", "Static", "ListBox", "ScrollBar", "ComboBox" }; cls = names[ord - 0x80]; } }
-  ci = cls_find(cls); if (ci < 0) bi = builtin_of_class(cls); else bi = BI_NONE;
+  ci = cls_find(W, cls); if (ci < 0) bi = builtin_of_class(cls); else bi = BI_NONE;
   if (ci < 0 && !bi) { w32_report(w, "CreateWindow: class \"%s\" is not registered", cls); W->last_error = 1407; return -1; }
-  int i; if (!g_wnd[0].used && !(style & 0x40000000u)) i = 0; else i = wnd_alloc(); if (i < 0) { W->last_error = 8; return -1; }
-  if (i == 0) { e_memset(&g_wnd[0], 0, sizeof g_wnd[0]); g_wnd[0].used = 1; g_wnd[0].parent = g_wnd[0].owner = -1; g_wnd[0].enabled = 1; g_wnd[0].cursel = -1; g_wnd[0].drop_wnd = -1; g_wnd[0].zseq = ++g_zseq; }
+  int i; if (!g_wnd[0].used && !(style & 0x40000000u)) i = 0; else i = wnd_alloc(); if (i >= 0) g_wnd[i].pid = W->pid; if (i < 0) { W->last_error = 8; return -1; }
+  if (i == 0) { e_memset(&g_wnd[0], 0, sizeof g_wnd[0]); g_wnd[0].used = 1; g_wnd[0].pid = W->pid; g_wnd[0].parent = g_wnd[0].owner = -1; g_wnd[0].enabled = 1; g_wnd[0].cursel = -1; g_wnd[0].drop_wnd = -1; g_wnd[0].zseq = ++g_zseq; }
   Wnd *n = &g_wnd[i]; n->builtin = bi; e_snprintf(n->clsname, sizeof n->clsname, "%s", cls); n->style = style; n->exstyle = exstyle; n->inst = inst; n->id = id; n->userdata = 0;
   if (ci >= 0) { n->wndproc = g_cls[ci].proc; n->cls_brush = g_cls[ci].brush; n->cls_style = g_cls[ci].style; n->cls_extra = g_cls[ci].extra; n->icon = g_cls[ci].icon; } else { n->wndproc = builtin_slot(bi); n->cls_brush = bi == BI_DIALOG ? 0 : 0; n->cls_style = 0x0B; }
   if (bi == BI_DIALOG) n->is_dlg = 1;
@@ -318,6 +329,9 @@ static void wndcreate_resume(Cpu *c, u64 rax) {
 static struct { int list[64]; int n, pos, phase; int root; } g_destroy[6]; static int g_ndestroy;
 static void destroy_collect(int i, int *list, int *n) { if (*n >= 64) return; list[(*n)++] = i; for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].parent == i) destroy_collect(k, list, n); }
 static void wnd_free(int i) { Wnd *n = &g_wnd[i]; items_free(n); kill_timers_of(i); if (g_focus == i) g_focus = -1; if (g_capture == i) g_capture = -1; if (g_active == i) g_active = -1; n->used = 0; n->destroyed = 1; }
+/* process exit: its windows vanish without WM_DESTROY (no code left to run them) and its window classes are released */
+void user_proc_exit(Win32 *w) { for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].pid == w->pid && w->pid != 0) { g_wnd[k].destroyed = 1; g_wnd[k].visible = 0; wnd_free(k); if (k == 0) sync_main(w); }
+  for (int i = 0; i < 64; i++) if (g_cls[i].used && g_cls[i].pid == w->pid && w->pid != 0) g_cls[i].used = 0; wnd_invalidate_all(); }
 static void destroy_step(Cpu *c) {
   Win32 *w = W; int d = g_ndestroy - 1; for (;;) {
     if (g_destroy[d].pos >= g_destroy[d].n) { if (g_destroy[d].phase == 0) { g_destroy[d].phase = 1; g_destroy[d].pos = 0; continue; }

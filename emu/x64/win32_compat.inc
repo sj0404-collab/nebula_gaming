@@ -80,18 +80,22 @@ static void s_FindFirstStreamW(Cpu *c) { W->last_error = 38; RET(~0ull); }      
 static void s_FindNextStreamW(Cpu *c) { W->last_error = 38; RET(0); }
 static void s_DeviceIoControl(Cpu *c) { W->last_error = 1; RET(0); }
 static void s_GetLogicalProcessorInformation(Cpu *c) {
-  /* one core, one NUMA node, L1d/L1i/L2/L3 caches, one package: 7 records x 32 bytes */
-  u64 buf = ARG(0), plen = ARG(1); u32 need = 7 * 32; u32 have = plen ? rd32(c, plen) : 0;
+  /* one core, one NUMA node, L1d/L1i/L2/L3 caches, one package: 7 records; SYSTEM_LOGICAL_PROCESSOR_INFORMATION is
+     32 bytes on x64 (ProcessorMask 8 + Relationship 4 + pad 4 + union 16) and 24 bytes on x86 (4 + 4 + 16) */
+  int m32 = c->mode32; u32 rs = m32 ? 24 : 32, uo = m32 ? 8 : 16;   /* record size, offset of the union */
+  u64 buf = ARG(0), plen = ARG(1); u32 need = 7 * rs; u32 have = plen ? rd32(c, plen) : 0;
   if (plen) wr32(c, plen, need);
   if (!buf || have < need) { W->last_error = 122; RET(0); return; }
   u8 *p = mem_ptr(c->mem, buf, need, 1); if (!p) { RET(0); return; } e_memset(p, 0, need);
   struct { u32 rel; u8 level, assoc; u16 line; u32 size; u32 type; } caches[4] = { { 2, 1, 8, 64, 32768, 1 }, { 2, 1, 8, 64, 32768, 2 }, { 2, 2, 8, 64, 1048576, 0 }, { 2, 3, 16, 64, 16777216, 0 } };
-  int rec = 0; u64 a = buf;
-  wr64(c, a, 1); wr32(c, a + 8, 0); wr8(c, a + 16, 0); a += 32; rec++;                          /* RelationProcessorCore */
-  wr64(c, a, 1); wr32(c, a + 8, 1); wr32(c, a + 16, 0); a += 32; rec++;                         /* RelationNumaNode */
-  for (int i = 0; i < 4; i++) { wr64(c, a, 1); wr32(c, a + 8, 2); wr8(c, a + 16, caches[i].level); wr8(c, a + 17, caches[i].assoc); wr16(c, a + 18, caches[i].line); wr32(c, a + 20, caches[i].size); wr32(c, a + 24, caches[i].type); a += 32; rec++; }
-  wr64(c, a, 1); wr32(c, a + 8, 3); a += 32; rec++;                                              /* RelationProcessorPackage */
-  (void)rec; RET(1);
+  u64 a = buf;
+#define LPI_HDR(rel) do { wrp(c, a, 1); wr32(c, a + PSZ, (rel)); } while (0)
+  LPI_HDR(0); wr8(c, a + uo, 0); a += rs;                                                                       /* RelationProcessorCore */
+  LPI_HDR(1); wr32(c, a + uo, 0); a += rs;                                                                      /* RelationNumaNode */
+  for (int i = 0; i < 4; i++) { LPI_HDR(2); wr8(c, a + uo, caches[i].level); wr8(c, a + uo + 1, caches[i].assoc); wr16(c, a + uo + 2, caches[i].line); wr32(c, a + uo + 4, caches[i].size); wr32(c, a + uo + 8, caches[i].type); a += rs; }
+  LPI_HDR(3); a += rs;                                                                                          /* RelationProcessorPackage */
+#undef LPI_HDR
+  RET(1);
 }
 static void s_GetLogicalProcessorInformationEx(Cpu *c) { W->last_error = 122; if (ARG(2)) wr32(c, ARG(2), 0); RET(0); }
 
