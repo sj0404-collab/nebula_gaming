@@ -114,6 +114,7 @@ echo "  frames presented: ${frames:-0}"
 echo "[7] threads & synchronisation (real Win32 threads scheduled by the emulator)"
 check "threads.exe"   "39 checks, 0 failed"          "$($X --quiet --max-ms 30000 tests/threads.exe 2>&1 | tail -1 || true)"
 check "pthreads.exe"  "9 checks, 0 failed"           "$($X --quiet --max-ms 30000 tests/pthreads.exe 2>&1 | tail -1 || true)"
+check "rtlwait.exe"   "timeout -> 0x102 after ~100ms; woken -> 0x0 flag=1 after ~150ms" "$($X --quiet --max-ms 30000 tests/rtlwait.exe 2>&1 | tail -1 || true)"   # ntdll RtlWaitOnAddress re-executed after a park (v1.20.1 regression)
 check "threads in child + pipe" "39 checks, 0 failed" "$($X --quiet --no-stdin --max-ms 30000 --mount "$PWD/tests" $S/busybox64.exe sh -c './threads.exe | tail -1' 2>&1 || true)"
 echo "[7b] Winsock loopback: blocking send/recv of 12 MB between threads, overlapped WSASend + WSAGetOverlappedResult, shutdown/EOF, select, FIONREAD"
 check "netloop.exe"   "netloop: 23 checks, 0 failed"  "$($X --quiet --no-stdin --max-ms 60000 tests/netloop.exe 2>&1 | tail -1 || true)"

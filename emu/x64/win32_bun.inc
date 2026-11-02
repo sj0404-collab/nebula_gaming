@@ -71,7 +71,8 @@ static void s_RtlExitUserProcess(Cpu *c) { do_exit(c, (int)ARG(0)); }
 static void s_RtlFillMemory(Cpu *c) { u8 *p = mem_ptr(c->mem, ARG(0), ARG(1), 1); if (p) e_memset(p, (int)(ARG(2) & 0xff), (size_t)ARG(1)); RET(0); }
 /* RtlWaitOnAddress(addr, cmp, size, timeout*) — like WaitOnAddress but the timeout is a LARGE_INTEGER* (negative = relative 100 ns) and the result is NTSTATUS */
 static void s_RtlWaitOnAddress(Cpu *c) { int retry = W->wait_active && W->wait_rip == c->rip;
-  u64 tp = ARG(3); u32 ms = 0xffffffffu; if (tp) { s64 t = (s64)rd64(c, tp); ms = t >= 0 ? 0 : (u32)((-t) / 10000); }
+  u32 ms = 0xffffffffu;
+  if (c->mode32 || !retry) { u64 tp = ARG(3); if (tp) { s64 t = (s64)rd64(c, tp); ms = t >= 0 ? 0 : (u32)((-t) / 10000); } }   /* x64 retry: R9 was already replaced by the ms — ARG(3) is no longer a pointer */
   if (c->mode32) call_shim(c, s_WaitOnAddress, ARG(0), ARG(1), ARG(2), ms);
   else { if (!retry) c->r[R9] = ms; s_WaitOnAddress(c); }   /* re-executed after a park: R9 already holds the ms */
    if (W->block != BLOCK_NONE) return; c->r[RAX] = c->r[RAX] ? 0 : 0x102; }   /* 0x102 = STATUS_TIMEOUT */
