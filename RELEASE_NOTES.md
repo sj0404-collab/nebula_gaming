@@ -1,3 +1,34 @@
+# v1.23.0 — Nebula x64: game input (Raw Input + DirectInput 8), real menus, common controls (status bar / toolbar / tab control), image lists, WIC, RichEdit — x86 and x64 together
+
+**Why.** A user's GOG (Inno Setup, Delphi) installer reported `Imports: 120 total · 119 implemented · 1 missing — user32.dll!GetKeyboardType`;
+games and their installers also expect Raw Input and DirectInput 8, which the emulator did not have at all. Every change below was
+built and tested for **x86 and x64 together** (native suite both bitnesses + browser e2e) before it was committed.
+
+**Measured** (`emu/tests/run.sh` **197 native checks ALL OK**, x86 + x64; e2e 22/23 in headless Chromium — the 23rd scenario needs the
+CI‑built .NET pack; `tests/dlg.exe`/`dlg32.exe` 88/88; `tests/input.exe`/`input32.exe` 30/30):
+
+* **Raw Input (user32)** — `RegisterRawInputDevices`, `GetRegisteredRawInputDevices`, `GetRawInputData`, `GetRawInputBuffer`,
+  `GetRawInputDeviceList`, `GetRawInputDeviceInfoA/W`, `DefRawInputProc`: real keyboard/mouse events arrive as `WM_INPUT` with
+  `RAWKEYBOARD` (make/break, VKey, scan code) and `RAWMOUSE` (relative deltas, buttons, wheel); `RIDEV_NOLEGACY` suppresses the
+  ordinary `WM_KEY*`/`WM_MOUSE*` messages as on Windows.
+* **DirectInput 8 (dinput8.dll)** — `DirectInput8Create`, full `IDirectInput8` (11 methods) and `IDirectInputDevice8` (32 methods)
+  COM objects for the system keyboard and mouse: `EnumDevices` through the guest callback, `CreateDevice(GUID_SysKeyboard/SysMouse)`,
+  `SetDataFormat`/`SetCooperativeLevel`/`Acquire`/`Unacquire`/`Poll`, immediate `GetDeviceState` (DIK scan‑code table, `DIMOUSESTATE/2`
+  relative axes), buffered `GetDeviceData` with `DIPROP_BUFFERSIZE`, `GetCapabilities`/`GetDeviceInfo`/`GetObjectInfo`, correct error
+  codes (`DIERR_NOTACQUIRED`, `DIERR_DEVICENOTREG`, `S_FALSE` on re‑acquire). No game controllers yet (enumerated as none).
+* `GetKeyboardType`, `OemKeyScan`, `GetMouseMovePointsEx`, `EnableMouseInPointer` — the GOG installer's import table is now complete.
+* **Menus** (user32): menu bar in the non‑client area, popup menus as `#32768` windows with cascades, keyboard + mouse navigation,
+  `WM_INITMENUPOPUP`/`WM_MENUSELECT`/`WM_COMMAND`, owner‑drawn items, `TrackPopupMenu(Ex)` modal loop, `WM_CONTEXTMENU`.
+* **Common controls** (comctl32): real **StatusBar**, **Toolbar**, **TabControl**, subclass chains (`SetWindowSubclass`), real
+  **image lists** (`ImageList_*`, VCL `TImageList` streams), built‑in **WIC** (PNG/BMP/ICO decoders, converter, scaler),
+  **RichEdit** + multi‑line EDIT (word wrap, scrollbars, `EM_STREAMIN` RTF→text), native 1/4/8/16/24‑bpp DIB sections.
+* Notepad++ 8.8.9 **x64** now starts to its main window (Scintilla) after a silent install inside the emulator; Inno Setup's
+  **Compil32 IDE** opens with menus, toolbar, status bar and context menu; the Inno GUI wizard is driven end‑to‑end by mouse in the suite.
+
+**Honest limits.** DirectInput covers keyboard + mouse only (no joysticks/gamepads, no XInput, no force feedback); TreeView/ListView
+are still pending (PuTTY config, Compil32 file lists); Notepad++ toolbar icons / menu bar / status bar are not yet drawn; no HTTPS,
+no WinForms/WPF, D3D11 partial, no D3D9/DDraw; runtime packs are x64‑only; US keyboard layout.
+
 # v1.22.0 — Nebula x64: NSIS and Inno Setup installers run (x86 and x64), ISCC compiles installers inside the emulator, real ECDSA, a CPU bug that broke every Delphi binary
 
 **Why.** After 7‑Zip (v1.21) the two installer engines almost every Windows program ships with are **NSIS** (Notepad++,
