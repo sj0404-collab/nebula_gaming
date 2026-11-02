@@ -91,6 +91,13 @@ static void draw_text(Surf *s, GdiObj *dc, Win32 *w, int x, int y, const char *s
       for (int px = 0; px < cw; px++) { int gx = px * 8 / cw; int on = (g[gy] >> gx) & 1; if (!on && bold && gx > 0) on = (g[gy] >> (gx - 1)) & 1; if (on) { int xx = gx0 + px; if (xx >= 0 && xx < s->w) row[xx] = fg; } } } }
 }
 
+/* UTF-8 → UTF-16 into guest memory (returns the number of UTF-16 units written, excluding the terminator) */
+static int put_w_utf8(Cpu *c, u64 dst, const char *s, int cap) { int i = 0, o = 0, n = (int)e_strlen(s);
+  while (i < n && o + 2 < cap) { u32 b = (u8)s[i++], cp = b; int extra = b >= 0xF0 ? 3 : b >= 0xE0 ? 2 : b >= 0xC0 ? 1 : 0; if (extra) cp = b & (0x3f >> extra);
+    for (int k = 0; k < extra && i < n && ((u8)s[i] & 0xC0) == 0x80; k++) cp = (cp << 6) | ((u8)s[i++] & 0x3f);
+    if (cp >= 0x10000) { cp -= 0x10000; wr16(c, dst + o++ * 2, (u16)(0xD800 | (cp >> 10))); wr16(c, dst + o++ * 2, (u16)(0xDC00 | (cp & 0x3ff))); } else wr16(c, dst + o++ * 2, (u16)cp); }
+  wr16(c, dst + o * 2, 0); return o; }
+static void s_wsprintfW(Cpu *c) { char out[1024]; w32_format_args(c, out, sizeof out, ARG(1), 1, 2); if (c->status) return; RET(put_w_utf8(c, ARG(0), out, 1024)); }
 static void s_wsprintfA(Cpu *c) { char out[1024]; int n = w32_format_args(c, out, sizeof out, ARG(1), 0, 2); if (c->status) return; u8 *p = mem_ptr(c->mem, ARG(0), n + 1, 1); if (p) e_memcpy(p, out, n + 1); RET(n); }
 static void s_SetProcessDPIAware(Cpu *c) { RET(1); }
 static void s_SetProcessDpiAwarenessContext(Cpu *c) { RET(1); }
@@ -238,6 +245,8 @@ static void s_waveOutGetNumDevs(Cpu *c) { RET(0); }
 static void s_CoInitialize(Cpu *c) { RET(0); }
 static void s_CoInitializeEx(Cpu *c) { RET(0); }
 static void s_CoUninitialize(Cpu *c) { }
+static void s_OleInitialize(Cpu *c) { RET(0); }
+static void s_OleUninitialize(Cpu *c) { }
 static void s_CoCreateInstance(Cpu *c) { w32_report(W, "CoCreateInstance: COM objects are not available"); RET(0x80040154u); }
 static void s_CommandLineToArgvW(Cpu *c) { wr32(c, ARG(1), rd32(c, W->ubuf + 0x200)); RET(rd64(c, W->ubuf + 0x218)); }
 
@@ -256,11 +265,11 @@ static const ShimDef gdi_shims[] = {
   S(PeekMessageA), S(PeekMessageW), S(GetMessageA), S(GetMessageW), S(TranslateMessage), S(DispatchMessageA), S(DispatchMessageW), S(SendMessageA), S(SendMessageW), S(PostMessageA), S(PostMessageW), S(PostQuitMessage), S(SetTimer), S(KillTimer), S(MsgWaitForMultipleObjects), S(WaitMessage),
   S(RegisterClassA), S(RegisterClassExA), S(RegisterClassW), S(RegisterClassExW), S(UnregisterClassA), S(GetClassInfoExA), S(AdjustWindowRect), S(AdjustWindowRectEx), S(CreateWindowExA), S(CreateWindowExW), S(DefWindowProcA), S(DefWindowProcW), S(DestroyWindow), S(ShowWindow), S(UpdateWindow), S(InvalidateRect), S(InvalidateRgn), S(ValidateRect), S(RedrawWindow), S(GetClientRect), S(GetWindowRect), S(BeginPaint), S(EndPaint), S(GetDC), S(GetWindowDC), S(ReleaseDC),
   S(SetWindowTextA), S(SetWindowTextW), S(GetWindowTextA), S(SetWindowPos), S(MoveWindow), S(SetWindowLongPtrA), S(GetWindowLongPtrA), S(SetWindowLongPtrW), S(GetWindowLongPtrW), S(SetWindowLongA), S(GetWindowLongA), S(SetFocus), S(GetFocus), S(SetForegroundWindow), S(GetForegroundWindow), S(GetActiveWindow), S(SetActiveWindow), S(IsWindow), S(IsWindowVisible), S(IsIconic), S(IsZoomed), S(GetDesktopWindow), S(GetParent), S(FindWindowA), S(EnableWindow), S(BringWindowToTop), S(SetCapture), S(ReleaseCapture), S(ClientToScreen), S(ScreenToClient), S(MapWindowPoints),
-  S(GetCursorPos), S(SetCursorPos), S(ShowCursor), S(SetCursor), S(ClipCursor), S(LoadCursorA), S(LoadCursorW), S(LoadIconA), S(LoadIconW), S(LoadImageA), S(DestroyCursor), S(GetAsyncKeyState), S(GetKeyState), S(GetKeyboardState), S(MapVirtualKeyA), S(GetSystemMetrics), S(SystemParametersInfoA), S(MessageBoxA), S(MessageBoxW), S(wsprintfA), S(SetProcessDPIAware), S(SetProcessDpiAwarenessContext), S(GetDpiForWindow), S(GetDpiForSystem), S(EnumDisplaySettingsA), S(ChangeDisplaySettingsA), S(RegisterClipboardFormatA), S(GetDlgItem), S(SetRect), S(PtInRect), S(FillRect), S(DrawTextA), S(DrawTextW), S(GetClassNameA), S(GetUpdateRect), S(GetSysColor), S(GetSysColorBrush),
+  S(GetCursorPos), S(SetCursorPos), S(ShowCursor), S(SetCursor), S(ClipCursor), S(LoadCursorA), S(LoadCursorW), S(LoadIconA), S(LoadIconW), S(LoadImageA), S(DestroyCursor), S(GetAsyncKeyState), S(GetKeyState), S(GetKeyboardState), S(MapVirtualKeyA), S(GetSystemMetrics), S(SystemParametersInfoA), S(MessageBoxA), S(MessageBoxW), S(wsprintfA), S(wsprintfW), S(SetProcessDPIAware), S(SetProcessDpiAwarenessContext), S(GetDpiForWindow), S(GetDpiForSystem), S(EnumDisplaySettingsA), S(ChangeDisplaySettingsA), S(RegisterClipboardFormatA), S(GetDlgItem), S(SetRect), S(PtInRect), S(FillRect), S(DrawTextA), S(DrawTextW), S(GetClassNameA), S(GetUpdateRect), S(GetSysColor), S(GetSysColorBrush),
   S(CreateCompatibleDC), S(CreateDCA), S(DeleteDC), S(CreateDIBSection), S(CreateCompatibleBitmap), S(CreateBitmap), S(DeleteObject), S(SelectObject), S(GetStockObject), S(GetCurrentObject), S(CreateSolidBrush), S(CreateHatchBrush), S(CreatePatternBrush), S(CreateBrushIndirect), S(CreatePen), S(ExtCreatePen), S(CreateFontA), S(CreateFontW), S(CreateFontIndirectA), S(CreateFontIndirectW), S(SetTextColor), S(SetBkColor), S(SetBkMode), S(GetTextColor), S(GetBkColor), S(SetTextAlign), S(SetROP2), S(SetStretchBltMode), S(SetBrushOrgEx), S(GdiFlush), S(SaveDC), S(RestoreDC), S(SelectClipRgn), S(IntersectClipRect), S(SetMapMode), S(SetViewportOrgEx), S(SetWindowOrgEx), S(GetDeviceCaps), S(GetObjectA), S(GetObjectW),
   S(GetTextExtentPoint32A), S(GetTextExtentPoint32W), S(GetTextMetricsA), S(GetTextMetricsW), S(TextOutA), S(TextOutW), S(ExtTextOutA), S(ExtTextOutW), S(BitBlt), S(StretchBlt), S(PatBlt), S(StretchDIBits), S(SetDIBitsToDevice), S(GetDIBits), S(Rectangle), S(RoundRect), S(Ellipse), S(MoveToEx), S(LineTo), S(Polyline), S(Polygon), S(SetPixel), S(SetPixelV), S(GetPixel),
   S(CreatePolygonRgn), S(CreateRectRgn), S(CreateRectRgnIndirect), S(CreateEllipticRgn), S(CombineRgn), S(FillRgn), S(PaintRgn), S(OffsetRgn), S(PtInRegion), S(GetRgnBox), S(GetNearestColor), S(GetTextFaceA), S(GetCharWidth32A),
-  S(timeGetTime), S(timeBeginPeriod), S(timeEndPeriod), S(PlaySoundA), S(waveOutGetNumDevs), S(CoInitialize), S(CoInitializeEx), S(CoUninitialize), S(CoCreateInstance), S(CommandLineToArgvW),
+  S(timeGetTime), S(timeBeginPeriod), S(timeEndPeriod), S(PlaySoundA), S(waveOutGetNumDevs), S(CoInitialize), S(CoInitializeEx), S(CoUninitialize), S(OleInitialize), S(OleUninitialize), S(CoCreateInstance), S(CommandLineToArgvW),
   USER_SHIMS
 };
 ShimFn gdi_find_shim(const char *name) { for (size_t i = 0; i < sizeof gdi_shims / sizeof gdi_shims[0]; i++) if (!e_strcmp(gdi_shims[i].name, name)) return gdi_shims[i].fn; return 0; }

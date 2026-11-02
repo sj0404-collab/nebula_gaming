@@ -369,6 +369,22 @@ for V in "7z2501.exe x86 32-bit" "7z2501-x64.exe x64 64-bit"; do
     rm -rf $ID
   else echo "  skip $B (no $1 and no network)"; fi
 done
+# NSIS (the installer framework of Notepad++, VLC, Audacity, ...): the official Notepad++ 8.8.9 setups — x86 and x64 —
+# are 32-bit NSIS stubs (ordinal import COMCTL32!#17, wsprintfW, CharNextW, GetPrivateProfileString, plugins extracted to %TEMP%)
+nsis_fetch() { [ -f tests/inst/$1 ] && return 0; mkdir -p tests/inst; curl -fsSL -m 120 -o tests/inst/$1 https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/v8.8.9/$2 2>/dev/null || rm -f tests/inst/$1; }
+nsis_fetch npp32.exe npp.8.8.9.Installer.exe; nsis_fetch npp64.exe npp.8.8.9.Installer.x64.exe
+if [ -f tests/inst/npp32.exe ] && [ -f tests/inst/npp64.exe ]; then
+  echo "  real installer: Notepad++ 8.8.9 (NSIS), x86 and x64 setups"
+  ID=$(mktemp -d); rc=0; $X --quiet --no-stdin --max-ms 150000 --mount-rw "$ID=C:\\inst" tests/inst/npp64.exe /S '/D=C:\inst\npp' >/dev/null 2>&1 || rc=$?
+  check "NSIS x64 setup: silent install exit code"   "rc=0"   "rc=$rc"
+  check "NSIS x64 setup: notepad++.exe is a 64-bit PE, plugins/themes/localization written"   "PE32+ .*localization.*plugins.*themes"   "$(python3 -c "import struct;d=open('$ID/npp/notepad++.exe','rb').read();pe=struct.unpack_from('<I',d,0x3c)[0];print('PE32+' if struct.unpack_from('<H',d,pe+24)[0]==0x20b else 'PE32 ')" 2>/dev/null) $(ls $ID/npp 2>/dev/null | tr '\n' ' ')"
+  rm -rf $ID; ID=$(mktemp -d)
+  out=$($X --no-stdin --max-ms 150000 --mount-rw "$ID=C:\\inst" --click 357,337@3000 --click 357,337@6000 --click 357,337@9000 --click 357,337@12000 --click 357,337@70000 --click 357,337@80000 --click 357,337@90000 --click 357,337@110000 tests/inst/npp32.exe '/D=C:\inst\npp' 2>&1 | grep -v "last blocks" || true)
+  check "NSIS x86 setup: GUI wizard (license → components → directory → install → finish) exit 0"   "exit code 0"   "$out"
+  check "NSIS x86 setup: frames presented"   "[1-9][0-9]* frames"   "$out"
+  check "NSIS x86 setup: 32-bit notepad++.exe written through the wizard"   "PE32 "   "$(python3 -c "import struct;d=open('$ID/npp/notepad++.exe','rb').read();pe=struct.unpack_from('<I',d,0x3c)[0];print('PE32+' if struct.unpack_from('<H',d,pe+24)[0]==0x20b else 'PE32 ')" 2>/dev/null)"
+  rm -rf $ID
+else echo "  skip Notepad++ (no network)"; fi
 # a real MSVC x64 GUI program with dialog templates + common controls: PuTTY reaches its configuration dialog
 # (About box opens through the dialog manager); SysTreeView32 is still reported as not implemented
 PT=tests/inst/putty.exe; [ -f $PT ] || curl -fsSL -m 60 -o $PT https://the.earth.li/~sgtatham/putty/latest/w64/putty.exe 2>/dev/null || rm -f $PT

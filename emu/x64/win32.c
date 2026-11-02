@@ -402,6 +402,7 @@ static void s_RtlNtStatusToDosError(Cpu *c) { RET(nt_to_dos((u32)ARG(0))); }
 static int iocp_rw(Cpu *c, int fd, int write, u64 buf, u32 len, u64 bytes_out, u64 ov);   /* win32_iocp.inc */
 static void iocp_handle_closed(int pid, int fd); static void iocp_kobj_closed(int kobj); static int iocp_has_packets(int kobj);
 #include "win32_fs.inc"
+#include "win32_ini.inc"
 #include "win32_nt.inc"
 #include "win32_threads.inc"
 #include "win32_iocp.inc"
@@ -569,8 +570,10 @@ static u64 mod_export(Win32 *w, int mi, const char *name, u32 ordinal, int depth
 /* exports of the main executable itself: GetProcAddress(GetModuleHandle(NULL), "napi_...") — Node-API addons delay-load their host's exports */
 static u64 exe_export(Win32 *w, const char *name, u32 ordinal) { if (!w->exe_exp_rva) return 0; GuestModule m; e_memset(&m, 0, sizeof m); m.base = w->image_base; m.exp_rva = w->exe_exp_rva; m.exp_size = w->exe_exp_size; return mod_export_m(w, &m, name, ordinal, 0); 
 }
+static const char *ordinal_name(const char *dll, u32 ord);
 u64 w32_resolve_import(Win32 *w, const char *dll, const char *name, u32 ordinal) {
   if (!pe_is_system_dll(dll) || pe_dll_native_ok(dll)) { int m = mod_load(w, dll); if (m >= 0) { u64 a = mod_export(w, m, name[0] == '#' ? 0 : name, name[0] == '#' ? ordinal : 0, 0); if (a) return a; } }
+  if (name[0] == '#') { const char *n = ordinal_name(dll, ordinal); if (n) return w32_shim_slot(w, dll, n); }
   return w32_shim_slot(w, dll, name);
 }
 /* DllMain(base, DLL_PROCESS_ATTACH, 0) for every module not yet attached (one per continuation round trip) */
@@ -588,14 +591,21 @@ static u64 fake_module(const char *n) { char k[40]; fake_key(n && n[0] ? n : "?"
   return base + (1ull << 12); }
 static const char *fake_module_name(u64 h) { if (((h >> 32) != 0x7ff && (h >> 20) != 0x7f0) || (h & 0xfff)) return 0; u64 i = (h >> 12) & 0xff; return i >= 1 && i <= (u64)g_nfake ? g_fake_names[i - 1] : 0; }
 /* export ordinals of the DLLs that are still imported by number (delay-loaded WSOCK32 in Bun, OLEAUT32 everywhere) */
+#include "ordinals.inc"
+/* numbered export of a system DLL (generated table from the Wine .spec files); dll may carry a path/extension */
+static const char *ordinal_table_name(const char *dll, u32 ord) {
+  if (!dll) return 0; const char *b = dll; for (const char *p = dll; *p; p++) if (*p == '\\' || *p == '/') b = p + 1;
+  size_t bl = e_strlen(b); if (bl > 4 && !e_stricmp(b + bl - 4, ".dll")) bl -= 4;
+  for (size_t i = 0; i < sizeof g_ordinals / sizeof g_ordinals[0]; i++) if (g_ordinals[i].ord == ord && !e_strnicmp_(g_ordinals[i].dll, b, bl) && !g_ordinals[i].dll[bl]) return g_ordinals[i].name;
+  return 0; }
 static const char *ordinal_name(const char *dll, u32 ord) {
   if (dll && !e_strnicmp_(dll, "xinput", 6)) { switch (ord) { case 100: return "XInputGetStateEx"; case 101: return "XInputWaitForGuideButton"; case 102: return "XInputCancelGuideButtonWait"; case 103: return "XInputPowerOffController"; default: return 0; } }   /* hidden exports used by Steam Input / SDL */
   if (!dll) return 0;
   if (!e_stricmp(dll, "ws2_32") || !e_stricmp(dll, "wsock32")) { static const char *const t[] = { 0, "accept", "bind", "closesocket", "connect", "getpeername", "getsockname", "getsockopt", "htonl", "htons", "ioctlsocket", "inet_addr", "inet_ntoa", "listen", "ntohl", "ntohs", "recv", "recvfrom", "select", "send", "sendto", "setsockopt", "shutdown", "socket" };
     if (ord < 24) return t[ord]; switch (ord) { case 51: return "gethostbyaddr"; case 52: return "gethostbyname"; case 53: return "getprotobyname"; case 54: return "getprotobynumber"; case 55: return "getservbyname"; case 56: return "getservbyport"; case 57: return "gethostname";
-      case 111: return "WSAGetLastError"; case 112: return "WSASetLastError"; case 115: return "WSAStartup"; case 116: return "WSACleanup"; case 151: return "__WSAFDIsSet"; default: return 0; } }
+      case 111: return "WSAGetLastError"; case 112: return "WSASetLastError"; case 115: return "WSAStartup"; case 116: return "WSACleanup"; case 151: return "__WSAFDIsSet"; default: return ordinal_table_name(dll, ord); } }
   if (!e_stricmp(dll, "oleaut32")) { switch (ord) { case 2: return "SysAllocString"; case 3: return "SysReAllocString"; case 4: return "SysAllocStringLen"; case 5: return "SysReAllocStringLen"; case 6: return "SysFreeString"; case 7: return "SysStringLen"; case 8: return "VariantInit"; case 9: return "VariantClear"; case 149: return "SysStringByteLen"; case 150: return "SysAllocStringByteLen"; default: return 0; } }
-  return 0; }
+  return ordinal_table_name(dll, ord); }
 static void load_library(Cpu *c, const char *n) {
   if (!n || !n[0]) { W->last_error = 87; RET(0); return; }
   if (!pe_is_system_dll(n) || pe_dll_native_ok(n)) {
@@ -1262,6 +1272,7 @@ static void s_dsign(Cpu *c) { RET(c->x[0].f64[0] < 0 ? 1 : 0); }
 #define S(n) { "", #n, s_##n }
 #define SA(api, fn) { "", api, s_##fn }
 static const ShimDef shims[] = {
+  INI_SHIMS, INI_SHIMS2,
   SHELL_SHIMS
   COMPAT_SHIMS
   X86_SHIMS
