@@ -1,11 +1,15 @@
 // x64 Runner — runs real Windows x86-64 executables inside Nebula OS through the wasm64 emulator (emu/x64) and presents them with WebGL.
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Cpu, FolderOpen, FolderInput, Play, Square, Terminal as TerminalIcon, Monitor, FileSearch, AlertTriangle, CheckCircle2, HelpCircle, XCircle, Gamepad2, HardDrive, Download, Trash2, SendHorizontal, Keyboard } from 'lucide-react';
+import { Cpu, FolderOpen, FolderInput, Play, Square, Terminal as TerminalIcon, Monitor, FileSearch, AlertTriangle, CheckCircle2, HelpCircle, XCircle, Gamepad2, HardDrive, Download, Trash2, SendHorizontal, Keyboard, LayoutGrid, Maximize2, Minimize2, Image as ImageIcon, FlaskConical, Loader2, PackagePlus, X } from 'lucide-react';
+import { scanLibrary, classifyExe, loadPrefs, savePrefs, makeLnk, type LibraryItem, type LibraryPrefs } from '../../lib/x64/library';
+import { peIconDataUrl } from '../../lib/x64/peicon';
+import { zipEntries, zipRead } from '../../lib/x64/zip';
+import { useOS } from '../../lib/os';
 import { X64Runtime, vkFromEvent, wasm64Supported, type PeInfo, type RunStats, type VfsEntry } from '../../lib/x64/runtime';
 import { FramePresenter } from '../../lib/x64/present';
 import { takeX64Launch, onX64Launch, type X64Launch } from '../../lib/x64/launch';
 
-interface ExeEntry { id: number; name: string; bytes: Uint8Array; info: PeInfo; source: 'sample' | 'file'; pending?: string[]; path?: string }   // path: guest path when not C:\nebula\<name>   // pending: companion files fetched on first Run (big runtimes)
+interface ExeEntry { id: number; name: string; bytes: Uint8Array; info: PeInfo; source: 'sample' | 'file' | 'disk'; pending?: string[]; path?: string; kind?: 'installer' | 'program'; cwd?: string }   // path: guest path when not C:\nebula\<name>   // pending: companion files fetched on first Run (big runtimes)
 
 const SAMPLE_DATA = ['demo.sql', 'demo.json', 'demo.lua', 'demo.txt', 'demo.py', 'demo.bat'];   // small inputs for the real apps, placed in C:\nebula
 const PY_FILES = ['python312.dll', 'python312.zip', 'python312._pth', '_sqlite3.pyd', 'sqlite3.dll', '_decimal.pyd', '_ctypes.pyd', 'libffi-8.dll', '_bz2.pyd', '_lzma.pyd', 'pyexpat.pyd', '_elementtree.pyd', 'unicodedata.pyd', '_queue.pyd', '_socket.pyd', 'select.pyd', '_asyncio.pyd', '_zoneinfo.pyd', '_uuid.pyd', '_multiprocessing.pyd'];
@@ -108,7 +112,21 @@ export default function X64App() {
   const [initError, setInitError] = useState('');
   const [exes, setExes] = useState<ExeEntry[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
-  const [tab, setTab] = useState<'screen' | 'console' | 'files' | 'report'>('screen');
+  const [tab, setTab] = useState<'library' | 'screen' | 'console' | 'files' | 'report'>('library');
+  const { pushToast } = useOS();
+  const [showTests, setShowTests] = useState(false);          // the emulator's self-test / sample programs (hidden by default; loaded on demand)
+  const samplesLoaded = useRef<Promise<ExeEntry[]> | null>(null);
+  const [library, setLibrary] = useState<LibraryItem[]>([]);  // what is installed on the persistent C:\ (Start Menu shortcuts + Uninstall registry keys)
+  const libIds = useRef<Set<string>>(new Set());
+  const [icons, setIcons] = useState<Record<string, string>>({});
+  const iconCache = useRef(new Map<string, string | null>());
+  const [prefs, setPrefs] = useState<Record<string, LibraryPrefs>>(() => loadPrefs());
+  const [fs, setFs] = useState(false);                        // fullscreen program view (game mode)
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const [disk, setDisk] = useState({ files: 0, writes: 0, bytes: 0, queued: 0 });
+  const [menuFor, setMenuFor] = useState<string | null>(null);
+  const [diskReady, setDiskReady] = useState(false);
+  const rescanRef = useRef<(announce: boolean) => void>(() => {});
   const [files, setFiles] = useState<VfsEntry[]>([]);
   const [stdinLine, setStdinLine] = useState('');
   const [waitingStdin, setWaitingStdin] = useState(false);
@@ -126,54 +144,98 @@ export default function X64App() {
   const nextId = useRef(1);
   const consoleBuf = useRef('');
 
-  const launchByName = useCallback((rt: X64Runtime, list: ExeEntry[], want: X64Launch) => {
-    const e = list.find(x => x.name.toLowerCase() === want.exe.toLowerCase()); if (!e || e.pending) return;
+  /** download one bundled sample (or test program) onto the virtual disk; cached per name */
+  const loadSample = useCallback(async (rt: X64Runtime, sName: string): Promise<ExeEntry | null> => {
+    const sm = SAMPLES.find(x => x.name === sName); if (!sm) return null;
+    try {
+      const r = await fetch(sm.href); if (!r.ok) return null; const bytes = new Uint8Array(await r.arrayBuffer());
+      const d = sm.href.slice(0, sm.href.lastIndexOf('/') + 1); const gd = 'C:\\nebula\\' + (sm.dir ? sm.dir + '\\' : '');
+      rt.vfsAdd(gd + sm.name, bytes);
+      if (!sm.lazy) for (const f of sm.files ?? []) { const rf = await fetch(d + f); if (rf.ok) rt.vfsAdd(gd + f, new Uint8Array(await rf.arrayBuffer())); }
+      return { id: nextId.current++, name: sm.name, bytes, info: rt.inspect(bytes), source: 'sample', pending: sm.lazy && sm.files ? sm.files.map(f => d + f) : undefined, path: sm.dir ? gd + sm.name : undefined };
+    } catch { return null; }
+  }, []);
+  const loadSamples = useCallback((rt: X64Runtime): Promise<ExeEntry[]> => {
+    if (samplesLoaded.current) return samplesLoaded.current;
+    samplesLoaded.current = (async () => {
+      const loaded: ExeEntry[] = [];
+      for (const sm of SAMPLES) { const e = await loadSample(rt, sm.name); if (e) { loaded.push(e); setExes(l => l.some(x => x.name === e.name && x.source === 'sample') ? l : [...l, e]); } }
+      for (const f of SAMPLE_DATA) { try { const r = await fetch('/x64/apps/' + f); if (r.ok) rt.vfsAdd('C:\\nebula\\' + f, new Uint8Array(await r.arrayBuffer())); } catch { /* optional */ } }
+      rt.vfsAdd('C:\\nebula\\readme.txt', new TextEncoder().encode('Nebula x64 virtual disk\nThis file lives in C:\\nebula\\readme.txt inside the emulator.\nTry: busybox64.exe cat readme.txt | wc -l | sort | sha256sum readme.txt\n'));
+      setFiles(rt.vfsList()); return loaded;
+    })();
+    return samplesLoaded.current;
+  }, [loadSample]);
+  const launchByName = useCallback(async (rt: X64Runtime, list: ExeEntry[], want: X64Launch) => {
+    let e = list.find(x => x.name.toLowerCase() === want.exe.toLowerCase());
+    if (!e) { const got = await loadSample(rt, want.exe); if (!got) return; e = got; setExes(l => [...l, got]); }
+    if (!e || e.pending) return;
     if (rt.status === 'running' || rt.status === 'waiting-stdin') rt.stop();
     setSelected(e.id); setArgs(want.args); consoleBuf.current = ''; setConsoleText(''); setLog([]);
     const err = rt.start(e.bytes, e.name, want.args.trim() ? `${e.name} ${want.args.trim()}` : e.name);
     if (err) setLog(l => [...l, 'LOADER: ' + err]);
     setStats(rt.stats()); setFiles(rt.vfsList()); setTab('console');
-  }, []);
+  }, [loadSample]);
 
   // init runtime once
   useEffect(() => {
     let alive = true;
     if (!wasm64Supported()) return;
     const rt = new X64Runtime(); rtRef.current = rt;
+    (window as unknown as { __x64?: X64Runtime }).__x64 = rt;   // debugging aid (e2e / devtools): the live runtime of the last opened Programs window
     rt.onConsole = (_fd, text) => { consoleBuf.current = (consoleBuf.current + text).slice(-60000); setConsoleText(consoleBuf.current); };
     rt.onLog = (text) => setLog(l => [...l.slice(-199), text.trimEnd()]);
     rt.onStdinWait = (w) => { setWaitingStdin(w); if (w) { setTab('console'); setTimeout(() => stdinRef.current?.focus(), 30); } };
     rt.onPresent = (px, w, h) => { presenterRef.current?.present(px, w, h); setFrames(f => { if (f === 0 && autoTabRef.current) setTab('screen'); return f + 1; }); };
-    rt.onStop = (s) => { setStats(s); setApiStats(rt.apiStats()); setFiles(rt.vfsList()); if (s.status !== 'exited' || !s.hasWindow) setTab(t => (s.hasWindow && s.status === 'exited') ? t : (s.status === 'fault' ? 'report' : t === 'screen' && !s.hasWindow ? 'console' : t)); };
+    rt.onStop = (s) => { setStats(s); setApiStats(rt.apiStats()); setFiles(rt.vfsList()); rescanRef.current(true); if (s.status !== 'exited' || !s.hasWindow) setTab(t => (s.hasWindow && s.status === 'exited') ? t : (s.status === 'fault' ? 'report' : t === 'screen' && !s.hasWindow ? 'console' : t)); };
+    rt.onDisk = () => setDisk({ files: rt.diskFiles, writes: rt.disk.writes, bytes: rt.disk.bytes, queued: rt.disk.queued() });
     rt.init().then(async () => {
       if (!alive) return;
-      // preload samples (best effort)
-      const loaded: ExeEntry[] = [];
-      for (const s of SAMPLES) {
-        try {
-          const r = await fetch(s.href); if (!r.ok) continue; const bytes = new Uint8Array(await r.arrayBuffer());
-          const d = s.href.slice(0, s.href.lastIndexOf('/') + 1);
-          const gd = 'C:\\nebula\\' + (s.dir ? s.dir + '\\' : '');
-          loaded.push({ id: nextId.current++, name: s.name, bytes, info: rt.inspect(bytes), source: 'sample', pending: s.lazy && s.files ? s.files.map(f => d + f) : undefined, path: s.dir ? gd + s.name : undefined });
-          rt.vfsAdd(gd + s.name, bytes);   // on the virtual disk too, so busybox sh can chain them and DLLs find their exe
-          if (!s.lazy) for (const f of s.files ?? []) { const rf = await fetch(d + f); if (rf.ok) rt.vfsAdd(gd + f, new Uint8Array(await rf.arrayBuffer())); }
-        } catch { /* sample missing */ }
-      }
-      for (const f of SAMPLE_DATA) { try { const r = await fetch('/x64/apps/' + f); if (r.ok) rt.vfsAdd('C:\\nebula\\' + f, new Uint8Array(await r.arrayBuffer())); } catch { /* optional */ } }
-      if (!alive) return;
-      rt.vfsAdd('C:\\nebula\\readme.txt', new TextEncoder().encode('Nebula x64 virtual disk\nThis file lives in C:\\nebula\\readme.txt inside the emulator.\nTry: busybox64.exe cat readme.txt | wc -l | sort | sha256sum readme.txt\n'));
-      setFiles(rt.vfsList());
-      setModuleKB(rt.moduleBytes / 1024);
-      setExes(loaded); if (loaded.length) setSelected(loaded[0].id);
+      setFiles(rt.vfsList()); setModuleKB(rt.moduleBytes / 1024);
+      setDisk({ files: rt.diskFiles, writes: 0, bytes: 0, queued: 0 }); setDiskReady(rt.disk.available);
       setReady('ready');
+      rescanRef.current(false);
       const want = takeX64Launch();   // another app (the Command Prompt's `real` command) asked us to start a program right away
-      if (want) launchByName(rt, loaded, want);
+      if (want) void launchByName(rt, [], want);
     }).catch(e => { if (alive) { setInitError(String(e)); setReady('error'); } });
     return () => { alive = false; rt.stop(); };
   }, [launchByName]);
 
   // launch requests from other apps while we are open (Command Prompt → `real`)
-  useEffect(() => onX64Launch(want => { const rt = rtRef.current; if (rt && ready === 'ready') launchByName(rt, exes, want); }), [ready, exes, launchByName]);
+  useEffect(() => onX64Launch(want => { const rt = rtRef.current; if (rt && ready === 'ready') void launchByName(rt, exes, want); }), [ready, exes, launchByName]);
+  // the test programs panel: download the bundled samples the first time it is opened
+  useEffect(() => { const rt = rtRef.current; if (showTests && rt && ready === 'ready') void loadSamples(rt).then(l => { if (l.length) setSelected(sel => sel ?? l[0].id); }); }, [showTests, ready, loadSamples]);
+  // exit fullscreen when the browser/WebView leaves it (back gesture)
+  useEffect(() => { const h = () => { if (!document.fullscreenElement) setFs(false); }; document.addEventListener('fullscreenchange', h); return () => document.removeEventListener('fullscreenchange', h); }, []);
+
+  /* ---- the library: installed programs & games on the persistent disk ---- */
+  const loadIcons = useCallback(async (items: LibraryItem[]) => {
+    const rt = rtRef.current; if (!rt) return;
+    for (const it of items) {
+      const key = it.iconPath.toLowerCase() + '#' + it.iconIndex; if (iconCache.current.has(key)) continue;
+      iconCache.current.set(key, null);
+      const src = /\.(exe|dll)$/i.test(it.iconPath) ? rt.vfsRead(it.iconPath) ?? rt.vfsRead(it.exe) : rt.vfsRead(it.exe); if (!src) continue;
+      const url = await peIconDataUrl(src, 96, it.iconIndex); iconCache.current.set(key, url);
+      if (url) setIcons(m => ({ ...m, [it.id]: url }));
+    }
+  }, []);
+  const rescan = useCallback((announce: boolean) => {
+    const rt = rtRef.current; if (!rt) return;
+    const items = scanLibrary(rt.vfsList(), p => rt.vfsRead(p));
+    if (announce) { const fresh = items.filter(i => !libIds.current.has(i.id)); if (fresh.length) pushToast('Programs', `Installed: ${fresh.map(f => f.name).join(', ')}`, 'x64'); }
+    libIds.current = new Set(items.map(i => i.id)); setLibrary(items); void loadIcons(items);
+  }, [pushToast, loadIcons]);
+  useEffect(() => { rescanRef.current = rescan; }, [rescan]);
+  const updatePrefs = useCallback((id: string, patch: LibraryPrefs) => setPrefs(p => { const n = { ...p, [id]: { ...p[id], ...patch } }; savePrefs(n); return n; }), []);
+  const toggleFullscreen = useCallback(() => {
+    setFs(v => {
+      const n = !v; const el = rootRef.current;
+      if (n && el && document.fullscreenEnabled && !document.fullscreenElement) el.requestFullscreen().catch(() => { /* kiosk layout alone */ });
+      if (!n && document.fullscreenElement) document.exitFullscreen().catch(() => { /* ignore */ });
+      return n;
+    });
+    setTimeout(() => screenRef.current?.focus(), 50);
+  }, []);
 
   // presenter bound to the canvas
   useEffect(() => {
@@ -185,7 +247,7 @@ export default function X64App() {
 
   // stats ticker while running
   useEffect(() => {
-    const t = setInterval(() => { const rt = rtRef.current; if (rt && (rt.status === 'running' || rt.status === 'waiting-stdin')) setStats(rt.stats()); }, 500);
+    const t = setInterval(() => { const rt = rtRef.current; if (rt && (rt.status === 'running' || rt.status === 'waiting-stdin')) { setStats(rt.stats()); setDisk({ files: rt.diskFiles, writes: rt.disk.writes, bytes: rt.disk.bytes, queued: rt.disk.queued() }); } }, 500);
     return () => clearInterval(t);
   }, []);
 
@@ -199,19 +261,51 @@ export default function X64App() {
   }, []);
 
   // a whole folder (webkitdirectory) → virtual disk under C:\nebula\ (top-level folder name stripped); .exe files also join the list
-  const addFolder = useCallback(async (list: FileList | File[]) => {
-    const rt = rtRef.current; if (!rt) return;
+  /** files with their relative paths → C:\nebula (mount for a test run) or C:\Program Files\<top> on the persistent disk (+ Start Menu shortcut) */
+  const installFiles = useCallback(async (items: { rel: string[]; bytes: () => Promise<Uint8Array>; size: number }[], top: string, install: boolean) => {
+    const rt = rtRef.current; if (!rt || !items.length) return;
     const added: ExeEntry[] = []; let n = 0;
-    for (const f of Array.from(list)) {
-      const rel = ((f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name).split('/').filter(Boolean);
-      const parts = rel.length > 1 ? rel.slice(1) : rel; const path = 'C:\\nebula\\' + parts.join('\\');
-      const bytes = new Uint8Array(await f.arrayBuffer());
-      if (rt.vfsAdd(path, bytes)) n++;
-      if (/\.exe$/i.test(f.name)) added.push({ id: nextId.current++, name: parts.join('\\'), bytes, info: rt.inspect(bytes), source: 'file' });
+    const root = install ? 'C:\\Program Files\\' + top.replace(/[<>:"|?*]/g, '_') : 'C:\\nebula';
+    if (install) { rt.vfsMkdir(root); rt.disk.mkdir(root); }
+    let total = 0; for (const f of items) total += f.size; rt.reserve(total + (1 << 20));
+    let done = 0;
+    for (const f of items) {
+      const parts = f.rel; if (!parts.length) continue; const path = root + '\\' + parts.join('\\');
+      const bytes = await f.bytes(); done++;
+      if (rt.vfsAdd(path, bytes)) { n++; if (install) rt.disk.put(path, bytes); }
+      if (install && (done % 20 === 0 || done === items.length)) setFetching(`installing ${top}: ${done}/${items.length} files`);
+      if (/\.exe$/i.test(parts[parts.length - 1])) added.push({ id: nextId.current++, name: parts.join('\\'), bytes, info: rt.inspect(bytes), source: install ? 'disk' : 'file', path, cwd: path.slice(0, path.lastIndexOf('\\')) });
+    }
+    if (install) {   // a real Start Menu shortcut to the main program (the biggest top-level exe that is not a helper), like an installer would leave
+      const mains = added.filter(e => !e.name.includes('\\') && !/unins|setup|install|crash|update|redist/i.test(e.name)).sort((a, b) => b.bytes.length - a.bytes.length);
+      const main = mains[0] ?? added.sort((a, b) => b.bytes.length - a.bytes.length)[0];
+      if (main?.path) { const lnk = 'C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\' + top + '.lnk'; const b = makeLnk(main.path, main.cwd ?? root, top); rt.vfsAdd(lnk, b); rt.disk.put(lnk, b); }
+      setFetching(null); await rt.disk.flush(); rescan(true); setTab('library'); setFiles(rt.vfsList());
+      setLog(l => [...l, `installed ${n} file(s) under ${root}\\`]); if (!main) pushToast('Programs', `${top}: no .exe inside — files were copied to ${root}`, 'x64'); return;
     }
     setExes(l => [...l, ...added]); if (added.length) setSelected(added[0].id);
     setFiles(rt.vfsList()); setLog(l => [...l, `mounted ${n} file(s) under C:\\nebula\\`]); setTab('files');
-  }, []);
+  }, [rescan, pushToast]);
+  const addFolder = useCallback(async (list: FileList | File[], install = false) => {
+    const arr = Array.from(list); if (!arr.length) return;
+    const first = ((arr[0] as File & { webkitRelativePath?: string }).webkitRelativePath || '').split('/').filter(Boolean); const top = first.length > 1 ? first[0] : (arr.length === 1 ? arr[0].name.replace(/\.[^.]+$/, '') : 'Program');
+    const items = arr.map(f => { const rel = ((f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name).split('/').filter(Boolean); return { rel: rel.length > 1 ? rel.slice(1) : rel, size: f.size, bytes: async () => new Uint8Array(await f.arrayBuffer()) }; });
+    await installFiles(items, top, install);
+  }, [installFiles]);
+  /** a .zip of a portable program / game folder (the practical unit on Android, which has no folder picker) */
+  const installZip = useCallback(async (f: File) => {
+    const rt = rtRef.current; if (!rt) return;
+    try {
+      const zip = new Uint8Array(await f.arrayBuffer()); const entries = zipEntries(zip).filter(e => !e.dir && !/(^|\/)__MACOSX\//.test(e.name));
+      if (!entries.length) throw new Error('empty archive');
+      // strip one common top-level folder (game/ game/bin/x.exe → bin/x.exe) and name the install after it
+      const firsts = new Set(entries.map(e => e.name.split('/')[0])); const common = firsts.size === 1 && entries.every(e => e.name.includes('/')) ? [...firsts][0] : '';
+      const top = common || f.name.replace(/\.zip$/i, '');
+      const items = entries.map(e => { const parts = e.name.split('/').filter(Boolean); return { rel: common ? parts.slice(1) : parts, size: e.size, bytes: () => zipRead(zip, e) }; }).filter(i => i.rel.length);
+      setFetching(`unpacking ${f.name}: ${items.length} files…`);
+      await installFiles(items, top, true);
+    } catch (e) { setFetching(null); pushToast('Programs', `${f.name}: ${String((e as Error).message ?? e)}`, 'x64'); }
+  }, [installFiles, pushToast]);
   const addDataFiles = useCallback(async (list: FileList | File[]) => {
     const rt = rtRef.current; if (!rt) return; let n = 0;
     for (const f of Array.from(list)) { if (rt.vfsAdd('C:\\nebula\\' + f.name, new Uint8Array(await f.arrayBuffer()))) n++; }
@@ -289,8 +383,9 @@ export default function X64App() {
   }, []);
   const installDotnet = useCallback((rt: X64Runtime) => installGz(rt, GZ_PACKS.dotnet, dotnet, setDotnet), [installGz, dotnet]);
   const installDx = useCallback((rt: X64Runtime) => installGz(rt, GZ_PACKS.dx, dx, setDx), [installGz, dx]);
-  const run = useCallback(async () => {
-    const rt = rtRef.current; if (!rt || !current) return;
+  const run = useCallback(async (entry?: ExeEntry, argv?: string) => {
+    const rt = rtRef.current; const current = entry ?? curRef.current; if (!rt || !current) return;
+    const args = argv ?? argsRef.current;
     consoleBuf.current = ''; setConsoleText(''); setLog([]); setFrames(0); setWaitingStdin(false);
     if (current.pending && current.pending.length) {   // heavy runtime: fetch its companion files on first Run
       const urls = current.pending; let done = 0, bytes = 0;
@@ -314,12 +409,65 @@ export default function X64App() {
       setLog(l => [...l, `${current.name} is a .NET program (${current.info.dotnet}): the .NET runtime pack could not be installed, so it cannot run here`]); setStats(rt.stats()); setTab('report'); return;
     }
     const base = current.name.split('\\').pop() || current.name;
-    const err = rt.start(current.bytes, current.path ?? base, args.trim() ? `${base} ${args.trim()}` : base);
+    const argv0 = current.path && current.path.includes(' ') ? `"${current.path}"` : current.path ?? base;
+    const err = rt.start(current.bytes, current.path ?? base, args.trim() ? `${argv0} ${args.trim()}` : argv0, current.cwd);
     if (err) { setLog(l => [...l, 'LOADER: ' + err]); setStats(rt.stats()); setTab('report'); return; }
-    setStats(rt.stats()); setFiles(rt.vfsList());
+    setStats(rt.stats()); setFiles(rt.vfsList()); setFrames(0);
     setTab(current.info.subsystem === 'GUI' ? 'screen' : 'console'); autoTabRef.current = true;
     setTimeout(() => screenRef.current?.focus(), 50);
-  }, [current, args, pack, installPack, dotnet, installDotnet, dx, installDx]);
+  }, [pack, installPack, dotnet, installDotnet, dx, installDx]);
+  const curRef = useRef<ExeEntry | null>(null); curRef.current = current;
+  const argsRef = useRef(''); argsRef.current = args;
+
+  /** the library's Play button: the installed exe from the persistent disk, started in its own folder with the shortcut's arguments */
+  const launchItem = useCallback((it: LibraryItem) => {
+    const rt = rtRef.current; if (!rt) return; const bytes = rt.vfsRead(it.exe); if (!bytes) { pushToast('Programs', `${it.exe} is missing from the disk`, 'x64'); rescan(false); return; }
+    const entry: ExeEntry = { id: nextId.current++, name: it.exe.slice(it.exe.lastIndexOf('\\') + 1), bytes, info: rt.inspect(bytes), source: 'disk', path: it.exe, cwd: it.workDir || undefined, kind: 'program' };
+    setExes(l => [...l.filter(e => !(e.source === 'disk' && e.path?.toLowerCase() === it.exe.toLowerCase())), entry]); setSelected(entry.id); setArgs(it.args);
+    updatePrefs(it.id, { lastRun: Date.now(), runs: (prefs[it.id]?.runs ?? 0) + 1 });
+    void run(entry, it.args);
+  }, [run, pushToast, rescan, updatePrefs, prefs]);
+  /** Open / Install…: a setup program runs at once and shows its own wizard; a plain program runs at once too (“Add to library” keeps it) */
+  const openProgram = useCallback(async (list: FileList | File[]) => {
+    const rt = rtRef.current; if (!rt) return; const f = Array.from(list)[0]; if (!f) return;
+    if (/\.zip$/i.test(f.name)) { await installZip(f); return; }
+    const bytes = new Uint8Array(await f.arrayBuffer()); const info = rt.inspect(bytes);
+    if (!info.ok) { pushToast('Programs', `${f.name}: not a Windows program (${info.error ?? 'not a PE file'})`, 'x64'); return; }
+    const kind = classifyExe(f.name, bytes);
+    const entry: ExeEntry = { id: nextId.current++, name: f.name, bytes, info, source: 'file', kind };
+    setExes(l => [...l, entry]); setSelected(entry.id); setArgs('');
+    void run(entry, '');
+  }, [run, pushToast, installZip]);
+  /** keep a program the user opened: copy it to C:\Program Files\<name>\ on the persistent disk and create its Start Menu shortcut */
+  const addToLibrary = useCallback(async (e: ExeEntry) => {
+    const rt = rtRef.current; if (!rt) return;
+    const base = e.name.split('\\').pop() || e.name; const title = base.replace(/\.exe$/i, '');
+    const dir = 'C:\\Program Files\\' + title.replace(/[<>:"|?*]/g, '_'); const exe = dir + '\\' + base;
+    rt.vfsMkdir(dir); rt.disk.mkdir(dir); rt.vfsAdd(exe, e.bytes); rt.disk.put(exe, e.bytes);
+    const lnk = 'C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\' + title + '.lnk'; const b = makeLnk(exe, dir, title); rt.vfsAdd(lnk, b); rt.disk.put(lnk, b);
+    await rt.disk.flush(); rescan(true); setTab('library');
+  }, [rescan]);
+  /** Uninstall: the program's own uninstaller when the registry names one, otherwise its folder and shortcut are deleted from the disk */
+  const uninstallItem = useCallback((it: LibraryItem) => {
+    const rt = rtRef.current; if (!rt) return; setMenuFor(null);
+    if (it.uninstall) {
+      const m = /^"([^"]+)"\s*(.*)$/.exec(it.uninstall.trim()); const exe = m ? m[1] : it.uninstall.trim().split(' ')[0]; const a = m ? m[2] : it.uninstall.trim().slice(exe.length).trim();
+      const bytes = rt.vfsRead(exe); if (bytes) { const entry: ExeEntry = { id: nextId.current++, name: exe.slice(exe.lastIndexOf('\\') + 1), bytes, info: rt.inspect(bytes), source: 'disk', path: exe, cwd: exe.slice(0, exe.lastIndexOf('\\')) }; setExes(l => [...l, entry]); setSelected(entry.id); void run(entry, a); return; }
+    }
+    const dir = it.exe.slice(0, it.exe.lastIndexOf('\\')).toLowerCase();
+    if (/^c:\\program files( \(x86\))?\\[^\\]+$/.test(dir) || /^c:\\users\\user\\appdata\\local\\programs\\[^\\]+$/.test(dir)) {
+      const all = rt.vfsList().filter(f => f.path.toLowerCase().startsWith(dir + '\\') || f.path.toLowerCase() === dir).sort((a, b) => b.path.length - a.path.length);
+      for (const f of all) rt.vfsRemove(f.path);
+    } else rt.vfsRemove(it.exe);
+    if (it.shortcut) rt.vfsRemove(it.shortcut);
+    setPrefs(p => { const n = { ...p }; delete n[it.id]; savePrefs(n); return n; });
+    void rt.disk.flush().then(() => { rescan(false); setFiles(rt.vfsList()); pushToast('Programs', `${it.name} removed`, 'x64'); });
+  }, [run, rescan, pushToast]);
+  const setCover = useCallback(async (id: string, file: File | null) => {
+    setMenuFor(null); if (!file) { updatePrefs(id, { cover: undefined }); return; }
+    const url = await new Promise<string>((res, rej) => { const im = new Image(); const u = URL.createObjectURL(file); im.onload = () => { const c = document.createElement('canvas'); const s = Math.min(1, 512 / Math.max(im.width, im.height)); c.width = Math.round(im.width * s); c.height = Math.round(im.height * s); c.getContext('2d')!.drawImage(im, 0, 0, c.width, c.height); URL.revokeObjectURL(u); res(c.toDataURL('image/jpeg', 0.85)); }; im.onerror = () => { URL.revokeObjectURL(u); rej(new Error('bad image')); }; im.src = u; }).catch(() => '');
+    if (url) updatePrefs(id, { cover: url });
+  }, [updatePrefs]);
   const stop = useCallback(() => { const rt = rtRef.current; if (!rt) return; rt.stop(); setStats(rt.stats()); setFiles(rt.vfsList()); }, []);
 
   // keyboard → guest
@@ -414,22 +562,32 @@ export default function X64App() {
   const V = (v?: string) => VERDICT[v ?? 'invalid'] ?? VERDICT.invalid;
 
   return (
-    <div className="flex h-full flex-col bg-[#f3f3f3] text-[12px] text-[#1b1b1b]" data-x64-status={stats?.status ?? 'idle'}>
-      {/* toolbar */}
-      <div className="flex h-11 shrink-0 items-center gap-2 overflow-x-auto whitespace-nowrap border-b border-slate-200 bg-white px-3 [scrollbar-width:none]">   {/* phones: one scrollable row instead of wrapped, overlapping buttons */}
+    <div ref={rootRef} className={`flex h-full flex-col bg-[#f3f3f3] text-[12px] text-[#1b1b1b] ${fs ? 'fixed inset-0 z-[500]' : ''}`} data-x64-status={stats?.status ?? 'idle'} data-x64-fullscreen={fs ? '1' : undefined}>
+      {/* toolbar (hidden in fullscreen / game mode) */}
+      {!fs && <div className="flex h-11 shrink-0 items-center gap-2 overflow-x-auto whitespace-nowrap border-b border-slate-200 bg-white px-3 [scrollbar-width:none]">   {/* phones: one scrollable row instead of wrapped, overlapping buttons */}
         <Cpu size={16} className="shrink-0 text-indigo-600" />
-        <span className="shrink-0 font-semibold">x64 Runner</span>
-        <span className="hidden text-[10px] text-slate-400 sm:inline">x86-64 + x86 · PE32+/PE32 · wasm64 + WebGL</span>
-        <label className="ml-3 flex cursor-pointer items-center gap-1 rounded border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50">
-          <FolderOpen size={13} /> Open .exe…
-          <input type="file" accept=".exe,application/x-msdownload,application/octet-stream" multiple className="hidden" data-x64-file onChange={e => { if (e.target.files) void addFiles(e.target.files); e.target.value = ''; }} />
+        <span className="shrink-0 font-semibold">Programs</span>
+        <span className="hidden text-[10px] text-slate-400 sm:inline">Windows x86-64 + x86 · wasm64 + WebGL</span>
+        <label className="ml-3 flex cursor-pointer items-center gap-1 rounded bg-indigo-600 px-2 py-1 font-semibold text-white hover:bg-indigo-700" title="Open a Windows program or installer from this device: it starts right away, with its own windows">
+          <FolderOpen size={13} /> Open / Install…
+          <input type="file" accept=".exe,.zip,application/x-msdownload,application/zip,application/octet-stream" className="hidden" data-x64-open onChange={e => { if (e.target.files) void openProgram(e.target.files); e.target.value = ''; }} />
         </label>
-        <label className="flex cursor-pointer items-center gap-1 rounded border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50" title="Mount a whole folder as the program's disk (C:\\nebula\\)">
-          <FolderInput size={13} /> Open folder…
-          <input type="file" multiple className="hidden" data-x64-folder {...({ webkitdirectory: '', directory: '' } as Record<string, string>)} onChange={e => { if (e.target.files) void addFolder(e.target.files); e.target.value = ''; }} />
+        <label className="flex cursor-pointer items-center gap-1 rounded border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50" title="Install a portable program or game folder: copied to C:\\Program Files\\<folder> on the persistent disk, with a Start Menu shortcut">
+          <FolderInput size={13} /> Install folder…
+          <input type="file" multiple className="hidden" data-x64-install-folder {...({ webkitdirectory: '', directory: '' } as Record<string, string>)} onChange={e => { if (e.target.files) void addFolder(e.target.files, true); e.target.value = ''; }} />
         </label>
-        <input value={args} onChange={e => setArgs(e.target.value)} placeholder="arguments" className="w-32 rounded border border-slate-300 px-2 py-1 text-[11px] outline-none focus:border-indigo-400" />
-        <button data-x64-run disabled={!current || ready !== 'ready' || !!running || !!fetching} onClick={() => { void run(); }} className="flex items-center gap-1 rounded bg-indigo-600 px-3 py-1 font-semibold text-white disabled:opacity-40 hover:bg-indigo-700"><Play size={12} /> Run</button>
+        {showTests && <>
+          <label className="flex cursor-pointer items-center gap-1 rounded border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50">
+            <FolderOpen size={13} /> Open .exe…
+            <input type="file" accept=".exe,application/x-msdownload,application/octet-stream" multiple className="hidden" data-x64-file onChange={e => { if (e.target.files) void addFiles(e.target.files); e.target.value = ''; }} />
+          </label>
+          <label className="flex cursor-pointer items-center gap-1 rounded border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50" title="Mount a whole folder as the program's disk (C:\\nebula\\)">
+            <FolderInput size={13} /> Open folder…
+            <input type="file" multiple className="hidden" data-x64-folder {...({ webkitdirectory: '', directory: '' } as Record<string, string>)} onChange={e => { if (e.target.files) void addFolder(e.target.files); e.target.value = ''; }} />
+          </label>
+          <input value={args} onChange={e => setArgs(e.target.value)} placeholder="arguments" className="w-32 rounded border border-slate-300 px-2 py-1 text-[11px] outline-none focus:border-indigo-400" />
+          <button data-x64-run disabled={!current || ready !== 'ready' || !!running || !!fetching} onClick={() => { void run(); }} className="flex items-center gap-1 rounded bg-indigo-600 px-3 py-1 font-semibold text-white disabled:opacity-40 hover:bg-indigo-700"><Play size={12} /> Run</button>
+        </>}
         <button data-x64-stop disabled={!running} onClick={stop} className="flex items-center gap-1 rounded border border-slate-300 bg-white px-2 py-1 disabled:opacity-40 hover:bg-slate-50"><Square size={11} /> Stop</button>
         <button data-x64-pack={pack.status} disabled={pack.status !== 'available' || !!running || !!fetching} onClick={() => { const rt = rtRef.current; if (rt) void installPack(rt); }}
           title={pack.status === 'installed' ? `Runtime pack installed in C:\\Windows\\System32 (${pack.done} DLLs)` : pack.status === 'available' ? `Install the VC++ 2015–2022 runtime DLLs (${pack.manifest?.files.length} files, ${((pack.manifest?.files.reduce((a, f) => a + f.size, 0) ?? 0) / 1048576).toFixed(1)} MB) into C:\\Windows\\System32 — also happens automatically when a program needs them` : pack.status === 'unavailable' ? 'Runtime pack not available: ' + pack.note : 'Runtime pack…'}
@@ -447,22 +605,24 @@ export default function X64App() {
           <Download size={11} /> {dx.status === 'installed' ? 'DirectX ✓' : dx.status === 'installing' ? `DirectX ${dx.done}/${dx.manifest?.files.length}` : dx.status === 'unavailable' ? 'DirectX n/a' : 'DirectX'}
         </button>
         <div className="ml-auto flex items-center gap-1 rounded bg-slate-100 p-0.5">
-          {(['screen', 'console', 'files', 'report'] as const).map(t => (
+          {(['library', 'screen', 'console', 'files', 'report'] as const).map(t => (
             <button key={t} data-x64-tab={t} onClick={() => { autoTabRef.current = false; setTab(t); }} className={`flex items-center gap-1 rounded px-2 py-1 capitalize ${tab === t ? 'bg-white shadow-sm font-semibold' : 'text-slate-500 hover:text-slate-800'}`}>
-              {t === 'screen' ? <Monitor size={12} /> : t === 'console' ? <TerminalIcon size={12} /> : t === 'files' ? <HardDrive size={12} /> : <FileSearch size={12} />}{t}
+              {t === 'library' ? <LayoutGrid size={12} /> : t === 'screen' ? <Monitor size={12} /> : t === 'console' ? <TerminalIcon size={12} /> : t === 'files' ? <HardDrive size={12} /> : <FileSearch size={12} />}{t}
             </button>
           ))}
+          <button data-x64-tests aria-pressed={showTests} onClick={() => setShowTests(v => !v)} title="Emulator test programs (self-tests and bundled real console tools)" className={`flex items-center gap-1 rounded px-2 py-1 ${showTests ? 'bg-white shadow-sm font-semibold' : 'text-slate-500 hover:text-slate-800'}`}><FlaskConical size={12} />tests</button>
         </div>
-      </div>
+      </div>}
 
       <div className="flex min-h-0 flex-1">
-        {/* file list */}
-        <div className="flex w-56 shrink-0 flex-col border-r border-slate-200 bg-white" onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); void addFiles(e.dataTransfer.files); }}>
+        {/* test programs list (self-tests + bundled console tools); hidden unless “tests” is on */}
+        {showTests && !fs && <div className="flex w-56 shrink-0 flex-col border-r border-slate-200 bg-white" onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); void addFiles(e.dataTransfer.files); }}>
           <div className="border-b border-slate-100 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Executables ({exes.length})</div>
           <div className="min-h-0 flex-1 overflow-y-auto">
             {ready === 'loading' && <div className="p-3 text-slate-400">Loading wasm64 emulator…</div>}
             {ready === 'unsupported' && <div className="p-3 text-rose-700">This browser has no WebAssembly memory64 (wasm64). Chrome/Edge ≥ 133, Firefox ≥ 134 or Android WebView ≥ 133 is required.</div>}
             {ready === 'error' && <div className="p-3 text-rose-700">Emulator failed to load: {initError}</div>}
+            {ready === 'ready' && exes.length === 0 && <div className="p-3 text-slate-400"><Loader2 size={14} className="mr-1 inline animate-spin" />Downloading the test programs…</div>}
             {exes.map(e => { const v = V(e.info.ok ? e.info.verdict : 'invalid'); return (
               <button key={e.id} data-x64-exe={e.name} onClick={() => { setSelected(e.id); const d = SAMPLES.find(x => x.name === e.name)?.args; if (e.source === 'sample' && d !== undefined) setArgs(d); }} className={`flex w-full items-start gap-2 border-b border-slate-100 px-3 py-2 text-left hover:bg-indigo-50 ${selected === e.id ? 'bg-indigo-50' : ''}`}>
                 <v.Icon size={14} className={`mt-0.5 shrink-0 ${v.cls.split(' ')[1]}`} />
@@ -474,10 +634,76 @@ export default function X64App() {
               </button>); })}
             {ready === 'ready' && <div className="p-3 text-[10px] text-slate-400">Drop .exe files here or use “Open .exe…”. Files never leave this device — everything runs in the page.</div>}
           </div>
-        </div>
+        </div>}
 
         {/* main */}
         <div className="flex min-w-0 flex-1 flex-col">
+          {tab === 'library' && !fs && (
+            <div className="min-h-0 flex-1 overflow-auto" data-x64-library onClick={() => setMenuFor(null)}>
+              {ready === 'loading' && <div className="p-4 text-slate-400"><Loader2 size={14} className="mr-1 inline animate-spin" />Loading the emulator and the persistent disk…</div>}
+              {ready === 'unsupported' && <div className="p-4 text-rose-700">This WebView has no WebAssembly memory64 (wasm64). Android System WebView ≥ 133 is required.</div>}
+              {ready === 'error' && <div className="p-4 text-rose-700">Emulator failed to load: {initError}</div>}
+              {/* what is running / just ran */}
+              {current && (stats || fetching) && (
+                <div className="m-3 rounded-lg border border-slate-200 bg-white p-3" data-x64-activity={running ? 'running' : stats?.status ?? 'idle'}>
+                  <div className="flex items-center gap-2">
+                    {running ? <Loader2 size={16} className="shrink-0 animate-spin text-indigo-600" /> : stats?.status === 'fault' ? <XCircle size={16} className="shrink-0 text-rose-600" /> : <CheckCircle2 size={16} className="shrink-0 text-emerald-600" />}
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-[13px] font-semibold">{current.kind === 'installer' ? 'Installing: ' : ''}{current.path ?? current.name}{stats?.title && stats.title !== current.name ? <span className="font-normal text-slate-500"> — {stats.title}</span> : null}</div>
+                      <div className="text-[10px] text-slate-500">
+                        {fetching ? fetching : running ? (stats?.status === 'waiting-stdin' ? 'waiting for console input' : stats?.hasWindow ? `running · ${stats.frames} frames · ${stats.procs} process${stats.procs === 1 ? '' : 'es'}` : 'starting…') : stats?.status === 'exited' ? `finished (exit code ${stats.exitCode}) in ${((stats.elapsedMs) / 1000).toFixed(1)} s` : stats?.status === 'fault' ? `stopped with an error: ${stats.error}` : stats?.status}
+                        {stats ? ` · ${stats.mips.toFixed(0)} MIPS` : ''}{disk.writes ? ` · ${disk.writes} files written (${(disk.bytes / 1048576).toFixed(1)} MB)${disk.queued ? ' · saving…' : ' · saved'}` : ''}
+                      </div>
+                    </div>
+                    {running && stats?.hasWindow && <button data-x64-show-screen onClick={() => { autoTabRef.current = false; setTab('screen'); }} className="flex items-center gap-1 rounded bg-indigo-600 px-2 py-1 font-semibold text-white hover:bg-indigo-700"><Monitor size={12} /> Show</button>}
+                    {running && <button onClick={stop} className="flex items-center gap-1 rounded border border-slate-300 px-2 py-1 hover:bg-slate-50"><Square size={11} /> Stop</button>}
+                    {!running && current.source === 'file' && current.kind === 'program' && current.info.ok && <button data-x64-add-library onClick={() => { void addToLibrary(current); }} className="flex items-center gap-1 rounded border border-indigo-300 bg-indigo-50 px-2 py-1 font-semibold text-indigo-800 hover:bg-indigo-100"><PackagePlus size={12} /> Add to library</button>}
+                    {!running && stats?.status === 'fault' && <button onClick={() => setTab('report')} className="rounded border border-rose-300 bg-rose-50 px-2 py-1 text-rose-800">Details</button>}
+                  </div>
+                  {running && current.kind === 'installer' && <div className="mt-2 rounded bg-indigo-50 px-2 py-1 text-[11px] text-indigo-900">The setup program is running with its own wizard — it appears on the Screen tab as soon as it draws its first window. Finish it there; the installed program is added here when setup exits.</div>}
+                </div>
+              )}
+              {ready === 'ready' && (
+                <div className="flex items-center gap-2 px-4 pt-3 text-[10px] text-slate-500">
+                  <HardDrive size={12} /> <span data-x64-disk={diskReady ? 'persistent' : 'volatile'}>{diskReady ? `Persistent disk C:\\ — ${disk.files} files restored${disk.writes ? `, ${disk.writes} written this session` : ''}` : 'IndexedDB unavailable: installs last until the app is closed'}</span>
+                  <span className="ml-auto">{library.length} installed</span>
+                </div>
+              )}
+              {ready === 'ready' && library.length === 0 && (
+                <div className="m-4 rounded-lg border border-dashed border-slate-300 bg-white p-6 text-center text-slate-500">
+                  <LayoutGrid size={36} strokeWidth={1} className="mx-auto text-slate-400" />
+                  <div className="mt-2 text-[13px] font-semibold text-slate-700">Nothing installed yet</div>
+                  <div className="mt-1 text-[11px]">Use <b>Open / Install…</b> to run a Windows program or its setup (.exe) from this device — or pick a <b>.zip</b> of a portable program / game folder to install it. Setup programs install onto the persistent disk C:\\ and their Start Menu shortcuts become tiles here.</div>
+                </div>
+              )}
+              <div className="grid grid-cols-2 gap-3 p-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+                {library.filter(it => !prefs[it.id]?.hidden).map(it => { const cover = prefs[it.id]?.cover; const icon = icons[it.id]; return (
+                  <div key={it.id} data-x64-item={it.name} className="group relative flex flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm" onClick={e => e.stopPropagation()}>
+                    <button onClick={() => launchItem(it)} disabled={!!running || !!fetching} className="relative block aspect-[4/3] w-full overflow-hidden bg-gradient-to-br from-slate-700 to-slate-900 text-left disabled:cursor-default" title={`Start ${it.exe}`}>
+                      {cover ? <img src={cover} alt="" className="h-full w-full object-cover" /> : icon ? <img src={icon} alt="" data-x64-icon className="absolute left-1/2 top-1/2 h-14 w-14 -translate-x-1/2 -translate-y-1/2 drop-shadow-[0_2px_6px_rgba(0,0,0,0.6)]" style={{ imageRendering: 'auto' }} /> : <Cpu size={32} strokeWidth={1} className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-white/60" />}
+                      <span className="absolute inset-0 flex items-center justify-center bg-black/0 opacity-0 transition group-hover:bg-black/30 group-hover:opacity-100"><span className="flex items-center gap-1 rounded-full bg-white px-3 py-1 text-[11px] font-semibold text-slate-900"><Play size={12} /> Play</span></span>
+                      {cover && icon && <img src={icon} alt="" className="absolute bottom-1 left-1 h-6 w-6 drop-shadow" />}
+                    </button>
+                    <div className="flex items-start gap-1 px-2 py-1.5">
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-[12px] font-semibold" title={it.name}>{it.name}</div>
+                        <div className="truncate text-[10px] text-slate-500">{[it.publisher, it.version, it.group].filter(Boolean).join(' · ') || it.exe.replace(/^c:\\program files( \(x86\))?\\/i, '')}</div>
+                      </div>
+                      <button data-x64-item-menu onClick={() => setMenuFor(m => m === it.id ? null : it.id)} className="rounded p-1 text-slate-500 hover:bg-slate-100" title="More">⋯</button>
+                    </div>
+                    {menuFor === it.id && (
+                      <div className="absolute right-1 top-1 z-10 w-44 rounded-md border border-slate-200 bg-white py-1 text-[11px] shadow-lg">
+                        <button onClick={() => { setMenuFor(null); launchItem(it); }} className="flex w-full items-center gap-2 px-3 py-1.5 hover:bg-slate-100"><Play size={12} /> Play</button>
+                        <label className="flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 hover:bg-slate-100"><ImageIcon size={12} /> Set cover image…<input type="file" accept="image/*" className="hidden" data-x64-cover onChange={e => { void setCover(it.id, e.target.files?.[0] ?? null); e.target.value = ''; }} /></label>
+                        {cover && <button onClick={() => { void setCover(it.id, null); }} className="flex w-full items-center gap-2 px-3 py-1.5 hover:bg-slate-100"><X size={12} /> Remove cover</button>}
+                        <button onClick={() => { setMenuFor(null); setTab('files'); }} className="flex w-full items-center gap-2 px-3 py-1.5 hover:bg-slate-100"><HardDrive size={12} /> Open files</button>
+                        <button data-x64-uninstall onClick={() => uninstallItem(it)} className="flex w-full items-center gap-2 px-3 py-1.5 text-rose-700 hover:bg-rose-50"><Trash2 size={12} /> {it.uninstall ? 'Uninstall' : 'Remove'}</button>
+                      </div>
+                    )}
+                  </div>); })}
+              </div>
+            </div>
+          )}
           {tab === 'screen' && (
             <div ref={screenRef} tabIndex={0} onKeyDown={e => guestKey(e, true)} onKeyUp={e => guestKey(e, false)} className="relative flex min-h-0 flex-1 items-center justify-center bg-black outline-none" onClick={focusGuest}>
               <canvas ref={canvasRef} data-x64-screen data-frames={frames} className="h-full w-full" style={{ imageRendering: 'pixelated', touchAction: 'none' }}
@@ -486,10 +712,11 @@ export default function X64App() {
               <textarea ref={imeRef} aria-label="Type into the Windows program" data-x64-ime autoCapitalize="off" autoCorrect="off" autoComplete="off" spellCheck={false} rows={1} defaultValue={IME_SENTINEL}
                 className="absolute bottom-0 left-0 h-px w-px resize-none opacity-0" style={{ fontSize: 16, pointerEvents: imeOpen ? 'auto' : 'none' }} tabIndex={imeOpen ? 0 : -1}
                 onInput={imeInput} onCompositionEnd={imeInput} onKeyDown={e => imeKey(e, true)} onKeyUp={e => imeKey(e, false)} onBlur={() => { if (imeOpen && running) setTimeout(() => { const a = document.activeElement; if (imeOpen && a && a !== imeRef.current && !a.closest?.('[data-x64-touchbar]')) setImeOpen(false); }, 0); }} />
+              <button data-x64-fs onClick={e => { e.stopPropagation(); toggleFullscreen(); }} title={fs ? 'Exit fullscreen' : 'Fullscreen (game mode)'} className={`absolute right-2 top-2 rounded-full bg-black/50 p-2 text-white ${touch || fs ? '' : 'opacity-0 hover:opacity-100'}`} onPointerDown={e => e.stopPropagation()}>{fs ? <Minimize2 size={14} /> : <Maximize2 size={14} />}</button>
               {!running && frames === 0 && (
                 <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center text-slate-400">
                   <Monitor size={40} strokeWidth={1} />
-                  <div className="mt-2 text-[12px]">{current ? `Press Run to start ${current.name}` : 'Select or open an executable'}</div>
+                  <div className="mt-2 text-[12px]">{current ? `${current.name} is starting…` : 'Start a program from the Library'}</div>
                   <div className="mt-1 text-[10px] text-slate-500">GUI windows render here through WebGL; console programs write to the Console tab.</div>
                 </div>
               )}
@@ -523,7 +750,7 @@ export default function X64App() {
           {tab === 'files' && (
             <div className="flex min-h-0 flex-1 flex-col" data-x64-files onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); void addDataFiles(e.dataTransfer.files); }}>
               <div className="flex shrink-0 items-center gap-2 border-b border-slate-200 bg-white px-3 py-1.5 text-[11px]">
-                <HardDrive size={13} className="text-indigo-600" /> <b>Virtual disk</b> <span className="text-slate-500">— in-memory C:\ seen by the program (cwd C:\nebula). Files written by programs appear here and can be downloaded.</span>
+                <HardDrive size={13} className="text-indigo-600" /> <b>Disk C:\</b> <span className="text-slate-500">— {diskReady ? 'persistent (IndexedDB): everything programs write is kept across restarts, except C:\\tmp, Temp folders and the C:\\nebula scratch folder' : 'in memory for this session'}. Files can be downloaded to the device.</span>
                 <label className="ml-auto flex cursor-pointer items-center gap-1 rounded border border-slate-300 bg-white px-2 py-0.5 hover:bg-slate-50"><FolderOpen size={12} /> Add files…<input type="file" multiple className="hidden" data-x64-addfiles onChange={e => { if (e.target.files) void addDataFiles(e.target.files); e.target.value = ''; }} /></label>
                 <button onClick={() => setFiles(rtRef.current?.vfsList() ?? [])} className="rounded border border-slate-300 bg-white px-2 py-0.5 hover:bg-slate-50">Refresh</button>
               </div>
@@ -552,12 +779,12 @@ export default function X64App() {
             </div>
           )}
           {/* status bar */}
-          <div className="flex h-7 shrink-0 items-center gap-3 border-t border-slate-200 bg-white px-3 text-[10px] text-slate-600">
+          {!fs && <div className="flex h-7 shrink-0 items-center gap-3 border-t border-slate-200 bg-white px-3 text-[10px] text-slate-600">
             <span className={`font-semibold ${stats?.status === 'fault' ? 'text-rose-700' : stats?.status === 'running' ? 'text-emerald-700' : stats?.status === 'waiting-stdin' ? 'text-amber-700' : ''}`}>{(stats?.status ?? 'idle').toUpperCase()}{stats?.status === 'exited' ? ` (code ${stats.exitCode})` : ''}</span>
             {stats && <span>{(stats.icount / 1e6).toFixed(1)} M insns · {stats.mips.toFixed(1)} MIPS · {stats.frames} frames · {stats.memMB.toFixed(0)} MB guest{stats.procs > 1 ? <span data-x64-procs={stats.procs}> · {stats.procs} processes</span> : null}{stats.threads > 1 ? <span data-x64-threads={stats.threads}> · {stats.threads} threads</span> : null}{stats.audioFrames > 0 ? <span data-x64-audio={stats.audioFrames} title={stats.audio === 'suspended' ? 'the browser keeps audio suspended until you tap/click once' : 'sound is playing through the device output'}> · 🔊 {(stats.audioFrames / 48000).toFixed(1)} s{stats.audio === 'suspended' ? ' (tap to unmute)' : ''}</span> : null}</span>}
             <span className="ml-auto truncate">{glInfo}</span>
             <span className="shrink-0">wasm64 {moduleKB ? moduleKB.toFixed(0) + ' KB' : ''}</span>
-          </div>
+          </div>}
         </div>
       </div>
     </div>

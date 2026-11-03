@@ -83,7 +83,7 @@ export default function TerminalApp() {
           '  python -c "<code>"      run Python 3 code (real CPython)',
           '  python <file.py>        run a .py file',
           '  opencode                launch Big Pickle TUI (real opencode TUI)',
-          '  start <app>             open an app (start steam | start nebula | start edge)',
+          '  start <app>             open an app (start programs | start nebula | start edge)',
           '  wasm64                  show Memory64 module report',
           '  ipconfig                network configuration',
           '  tasklist                running processes',
@@ -103,8 +103,6 @@ export default function TerminalApp() {
           'dwm.exe                        1180 Console                     1    142,208 K',
           'explorer.exe                   5212 Console                     1    198,540 K',
           'msedge.exe                     6104 Console                     1    402,116 K',
-          'steam.exe                      7331 Console                     1    356,704 K',
-          'EpicGamesLauncher.exe          8112 Console                     1    412,976 K',
           'NebulaStrike.exe               9120 Console                     1     48,392 K',
           'opencode.exe                  10048 Console                     1     88,104 K',
           'cmd.exe                       11202 Console                     1      4,980 K',
@@ -128,9 +126,9 @@ export default function TerminalApp() {
       }
       case 'start': {
         const app = args[0]?.toLowerCase();
-        const map: Record<string, 'steam' | 'nebula' | 'epic' | 'edge' | 'terminal' | 'opencode' | 'explorer' | 'notepad' | 'settings' | 'downloads'> = { steam: 'steam', nebula: 'nebula', strike: 'nebula', epic: 'epic', edge: 'edge', browser: 'edge', terminal: 'terminal', cmd: 'terminal', opencode: 'opencode', explorer: 'explorer', notepad: 'notepad', settings: 'settings', downloads: 'downloads' };
+        const map: Record<string, 'x64' | 'nebula' | 'edge' | 'terminal' | 'opencode' | 'explorer' | 'notepad' | 'settings' | 'downloads'> = { programs: 'x64', x64: 'x64', nebula: 'nebula', strike: 'nebula', edge: 'edge', browser: 'edge', terminal: 'terminal', cmd: 'terminal', opencode: 'opencode', explorer: 'explorer', notepad: 'notepad', settings: 'settings', downloads: 'downloads' };
         const a = app ? map[app] : undefined;
-        if (a) { openApp(a); out(`Starting ${app}…`, 'ok'); } else out(`'${app ?? ''}' is not recognized. Try: start steam | start nebula | start edge | start opencode`, 'err');
+        if (a) { openApp(a); out(`Starting ${app}…`, 'ok'); } else out(`'${app ?? ''}' is not recognized. Try: start programs | start nebula | start edge | start opencode`, 'err');
         return;
       }
       case 'wasm64':

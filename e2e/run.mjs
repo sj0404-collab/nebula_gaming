@@ -10,7 +10,7 @@
  */
 import { chromium } from 'playwright';
 import { spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const PORT = 4199;
@@ -64,7 +64,7 @@ page.on('console', m => { if (m.type() === 'error' && !/favicon|net::ERR|designa
 
 const win = (title) => page.locator(`[aria-label="${title}"]`);
 const windowsCount = () => page.locator('[data-window]').count();
-const ICON = { 'This PC': 'pc', 'Recycle Bin': 'recycle', 'Nebula Strike': 'game', 'Steam': 'steam', 'Epic Games': 'epic', 'Command Prompt': 'terminal', 'opencode': 'opencode', 'Microsoft Edge': 'edge', 'x64 Runner': 'x64' };
+const ICON = { 'This PC': 'pc', 'Recycle Bin': 'recycle', 'Nebula Strike': 'game', 'Command Prompt': 'terminal', 'opencode': 'opencode', 'Microsoft Edge': 'edge', 'Programs': 'x64' };
 const iconOf = (p, label) => p.locator(`[data-desktop-icon="${ICON[label]}"]`);
 const openFromDesktop = async (label) => { await iconOf(page, label).dblclick(); await sleep(300); };
 // close the TOPMOST window first through a DOM click: a forced pointer click on the first window's Close button lands on
@@ -88,27 +88,27 @@ await test('desktop loads with 9 icons, taskbar, no page errors', async () => {
 });
 
 await test('double-click opens exactly ONE window (no click+dblclick duplicate)', async () => {
-  await openFromDesktop('Steam');
+  await openFromDesktop('Microsoft Edge');
   expect((await windowsCount()) === 1, `expected 1 window, got ${await windowsCount()}`);
   await closeAll();
   expect((await windowsCount()) === 0, 'window did not close');
 });
 
 await test('single click selects icon but does not open', async () => {
-  await iconOf(page, 'Steam').click();
+  await iconOf(page, 'Microsoft Edge').click();
   await sleep(300);
   expect((await windowsCount()) === 0, 'single click should not open a window');
 });
 
 await test('single-instance apps focus the existing window instead of duplicating', async () => {
-  await openFromDesktop('Steam'); await openFromDesktop('Steam');
-  expect((await windowsCount()) === 1, `Steam duplicated: ${await windowsCount()}`);
+  await openFromDesktop('Microsoft Edge'); await openFromDesktop('Microsoft Edge');
+  expect((await windowsCount()) === 1, `Edge duplicated: ${await windowsCount()}`);
   await closeAll();
 });
 
 await test('every app opens, renders and closes', async () => {
-  const apps = [['This PC', 'File Explorer'], ['Nebula Strike', 'NEBULA STRIKE'], ['Steam', 'Steam'], ['Epic Games', 'Epic Games Launcher'],
-    ['Command Prompt', 'Command Prompt'], ['opencode', 'opencode'], ['Microsoft Edge', 'Microsoft Edge'], ['x64 Runner', 'x64 Runner']];
+  const apps = [['This PC', 'File Explorer'], ['Nebula Strike', 'NEBULA STRIKE'],
+    ['Command Prompt', 'Command Prompt'], ['opencode', 'opencode'], ['Microsoft Edge', 'Microsoft Edge'], ['Programs', 'Programs']];
   for (const [label, title] of apps) {
     await openFromDesktop(label);
     const w = page.locator(`[data-window][aria-label*="${title}"]`);
@@ -122,21 +122,21 @@ await test('every app opens, renders and closes', async () => {
 });
 
 await test('window controls: minimize → taskbar restore, maximize fills screen', async () => {
-  await openFromDesktop('Steam');
-  const w = page.locator('[data-window="steam"]');
+  await openFromDesktop('Microsoft Edge');
+  const w = page.locator('[data-window="edge"]');
   await w.locator('[aria-label="Maximize"]').click(); await sleep(250);
   const b = await w.boundingBox();
   expect(b.width >= 1390 && b.height >= 800, `maximized size ${b.width}x${b.height}`);
   await w.locator('[aria-label="Minimize"]').click(); await sleep(250);
   expect(!(await w.isVisible()), 'window still visible after minimize');
-  await page.locator('[data-taskbar] button[title="steam" i]').first().click(); await sleep(250);
+  await page.locator('[data-taskbar] button[title="edge" i]').first().click(); await sleep(250);
   expect(await w.isVisible(), 'window not restored from taskbar');
   await closeAll();
 });
 
 await test('window drag moves it', async () => {
-  await openFromDesktop('Steam');
-  const w = page.locator('[data-window="steam"]');
+  await openFromDesktop('Microsoft Edge');
+  const w = page.locator('[data-window="edge"]');
   const before = await w.boundingBox();
   const bar = w.locator('[data-titlebar]').first();
   const bb = await bar.boundingBox();
@@ -229,9 +229,10 @@ await test('Nebula Strike: real WebGL renderer (WebGL2) draws the wasm64 scene',
 
 // ───────────── Nebula x64: real Windows x86-64 executables through the wasm64 emulator ─────────────
 const x64Open = async () => {
-  await openFromDesktop('x64 Runner');
-  const w = page.locator('[data-window][aria-label*="x64 Runner"]');
-  await w.locator('[data-x64-exe="NebulaStrike.exe"]').waitFor({ timeout: 30_000 });
+  await openFromDesktop('Programs');
+  const w = page.locator('[data-window][aria-label*="Programs"]');
+  await w.locator('[data-x64-tests]').click();   // the self-test / sample programs panel (downloaded on demand)
+  await w.locator('[data-x64-exe="NebulaStrike.exe"]').waitFor({ timeout: 60_000 });
   return w;
 };
 await test('x64: emulator loads (wasm64), scans the bundled samples and reports verdicts', async () => {
@@ -461,6 +462,63 @@ await test('x64: NebulaStrike32.exe (the GDI game as a 32-bit PE32 process) rend
   await w.locator('[data-x64-stop]').click();
   await closeAll();
 });
+// ───────────── Programs library: a real installer → persistent disk → tile with the PE icon → Play → survives a reload ─────────────
+const installerBytes = async () => {
+  const local = resolve('emu/tests/inst/7z2501-x64.exe'); if (existsSync(local)) return readFileSync(local);
+  try { const r = await fetch('https://github.com/ip7z/7zip/releases/download/25.01/7z2501-x64.exe', { redirect: 'follow' }); if (r.ok) return Buffer.from(await r.arrayBuffer()); } catch { /* offline */ }
+  return null;
+};
+await test('programs: the official 7-Zip 25.01 x64 setup installs onto the persistent C:\\ (Program Files, Start Menu shortcut, Uninstall key); the library shows “7-Zip File Manager” with its real icon; Play starts 7zFM.exe; the install survives a page reload', async () => {
+  const bytes = await installerBytes(); if (!bytes) { const e = new Error('7z2501-x64.exe not available (no network)'); e.name = 'Inconclusive'; throw e; }
+  await page.evaluate(() => new Promise(res => { const r = indexedDB.deleteDatabase('nebula-x64-disk'); r.onsuccess = r.onerror = r.onblocked = () => res(); }));
+  await page.reload({ waitUntil: 'load' }); await page.waitForSelector('[aria-label="Start"]');
+  const w = await x64Open();
+  // the library starts empty on a fresh disk
+  await w.locator('[data-x64-tab="library"]').click();
+  expect(await w.locator('[data-x64-item]').count() === 0, 'library not empty on a fresh disk');
+  expect(await w.locator('[data-x64-disk]').getAttribute('data-x64-disk') === 'persistent', 'persistent disk not available');
+  // silent install through the test panel (the GUI flow is the same program; /S only skips its wizard)
+  await w.locator('[data-x64-file]').setInputFiles({ name: '7z2501-x64.exe', mimeType: 'application/octet-stream', buffer: bytes });
+  await w.locator('[data-x64-exe="7z2501-x64.exe"]').click();
+  await w.locator('input[placeholder="arguments"]').fill('/S');
+  await w.locator('[data-x64-run]').click();
+  await page.waitForFunction(() => /^(exited|fault)$/.test(document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') ?? ''), null, { timeout: 240_000 });
+  expect(await w.getAttribute('data-x64-status') === 'exited' || await page.locator('[data-x64-status="exited"]').count() === 1, 'setup did not exit cleanly');
+  await w.locator('[data-x64-tab="library"]').click();
+  const tile = w.locator('[data-x64-item="7-Zip File Manager"]');
+  await tile.waitFor({ timeout: 15_000 });
+  await tile.locator('[data-x64-icon]').waitFor({ timeout: 15_000 });   // the icon extracted from 7zFM.exe's resources
+  const iconSrc = await tile.locator('[data-x64-icon]').getAttribute('src');
+  expect(iconSrc && iconSrc.startsWith('data:image/png') && iconSrc.length > 400, 'tile icon is not a real PNG from the exe');
+  expect(/Igor Pavlov/.test(await tile.innerText()), 'publisher from the Uninstall registry key missing: ' + await tile.innerText());
+  await page.screenshot({ path: resolve(SHOTS, 'programs-library.png') });
+  await w.locator('[data-x64-tab="files"]').click();
+  const files = await w.innerText();
+  expect(/Program Files\\7-Zip\\7zFM\.exe/.test(files) && /Start Menu\\Programs\\7-Zip\\7-Zip File Manager\.lnk/.test(files), 'installed files / shortcut missing from the disk listing');
+  await page.screenshot({ path: resolve(SHOTS, 'programs-installed.png') });
+  // Play → 7zFM.exe starts in its own folder and draws its window
+  await w.locator('[data-x64-tab="library"]').click();
+  await tile.locator('button').first().click();
+  await page.waitForFunction(() => (Number(document.querySelector('[data-x64-screen]')?.getAttribute('data-frames')) || 0) > 0, null, { timeout: 90_000 });
+  await sleep(1500);
+  expect(await page.locator('[data-x64-status="running"]').count() === 1, '7zFM.exe not running after Play');
+  await page.screenshot({ path: resolve(SHOTS, 'programs-7zfm.png') });
+  await w.locator('[data-x64-stop]').click(); await sleep(800);
+  await closeAll();
+  // a reload = app restart: the disk comes back from IndexedDB and the tile is still there
+  await page.reload({ waitUntil: 'load' }); await page.waitForSelector('[aria-label="Start"]');
+  await openFromDesktop('Programs');
+  const w2 = page.locator('[data-window][aria-label*="Programs"]');
+  await w2.locator('[data-x64-item="7-Zip File Manager"]').waitFor({ timeout: 60_000 });
+  expect(/\d+ files restored/.test(await w2.locator('[data-x64-disk]').innerText()), 'disk restore count missing');
+  await w2.locator('[data-x64-item="7-Zip File Manager"] button').first().click();
+  await page.waitForFunction(() => (Number(document.querySelector('[data-x64-screen]')?.getAttribute('data-frames')) || 0) > 0, null, { timeout: 90_000 });
+  await page.screenshot({ path: resolve(SHOTS, 'programs-after-reload.png') });
+  await w2.locator('[data-x64-stop]').click(); await sleep(500);
+  await closeAll();
+  await page.evaluate(() => new Promise(res => { const r = indexedDB.deleteDatabase('nebula-x64-disk'); r.onsuccess = r.onerror = r.onblocked = () => res(); }));
+});
+
 await test('x64: NebulaStrike.exe (real Win32 GDI PE32+) renders frames through WebGL and reacts to keys', async () => {
   const w = await x64Open();
   await w.locator('[data-x64-exe="NebulaStrike.exe"]').click();
@@ -705,7 +763,7 @@ await test('x64: cmd.exe — batch file (demo.bat: for, if, pipes, redirection, 
   const term = page.locator('[data-window="terminal"]');
   const input = term.locator('input').first();
   await input.fill('real'); await input.press('Enter');
-  const w2 = page.locator('[data-window][aria-label*="x64 Runner"]');
+  const w2 = page.locator('[data-window][aria-label*="Programs"]');
   await w2.locator('[data-x64-status="waiting-stdin"]').waitFor({ timeout: 60_000 });
   await w2.locator('[data-x64-stdin]').fill('echo real-shell-ok'); await w2.locator('[data-x64-stdin-send]').click();
   await page.waitForFunction(() => /real-shell-ok/.test(document.querySelector('[data-x64-console]')?.textContent || ''), null, { timeout: 30_000 });
@@ -873,7 +931,7 @@ await test('responsive: 390×844 phone viewport still shows taskbar + icons and 
   const p3 = await c3.newPage();
   await p3.goto(url, { waitUntil: 'load' });
   await p3.waitForSelector('[aria-label="Start"]');
-  await iconOf(p3, 'Steam').tap();
+  await iconOf(p3, 'Microsoft Edge').tap();
   await sleep(400);
   const w = p3.locator('[data-window]').first();
   expect(await w.count() === 1, 'tap did not open the app on touch device');
@@ -883,13 +941,14 @@ await test('responsive: 390×844 phone viewport still shows taskbar + icons and 
   await c3.close();
 });
 
-await test('phone (Android-like 1000×560, touch): x64 Runner — the soft-keyboard field types into a Windows EDIT control (Latin, Cyrillic, punctuation) and a tap on the screen is a click', async () => {
+await test('phone (Android-like 1000×560, touch): Programs — the soft-keyboard field types into a Windows EDIT control (Latin, Cyrillic, punctuation) and a tap on the screen is a click', async () => {
   const c5 = await browser.newContext({ viewport: { width: 1000, height: 560 }, hasTouch: true, isMobile: true });
   const p5 = await c5.newPage();
   await p5.goto(url, { waitUntil: 'load' });
-  await iconOf(p5, 'x64 Runner').tap();
-  const w = p5.locator('[data-window][aria-label*="x64 Runner"]');
-  await w.locator('[data-x64-exe="typing.exe"]').waitFor({ timeout: 30_000 });
+  await iconOf(p5, 'Programs').tap();
+  const w = p5.locator('[data-window][aria-label*="Programs"]');
+  await w.locator('[data-x64-tests]').tap();
+  await w.locator('[data-x64-exe="typing.exe"]').waitFor({ timeout: 60_000 });
   await w.locator('[data-x64-exe="typing.exe"]').tap();
   await w.locator('[data-x64-run]').tap(); await sleep(800);
   await w.getByRole('button', { name: /^screen$/i }).tap();   // a console-subsystem exe opens on the Console tab; the program's window is on the Screen tab

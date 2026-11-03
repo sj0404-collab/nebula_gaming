@@ -84,7 +84,7 @@ export default function SettingsApp() {
             <h1 className="text-xl font-light">Network & Internet</h1>
             <div className="mt-3 max-w-md space-y-3">
               <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 flex items-center gap-3"><Wifi className="text-emerald-600" size={26} /><div><div className="font-semibold text-emerald-800">Connected — BigPickle-5G</div><div className="text-[11px] text-emerald-700">IPv4 10.0.2.15 · DNS over HTTPS · 1 Gbps</div></div></div>
-              <div className="rounded-lg border border-slate-200 p-3 text-[11px] text-slate-600">Edge, Steam and Epic Games Launcher have network access. opencode Big Pickle model runs 100% locally — no cloud calls.</div>
+              <div className="rounded-lg border border-slate-200 p-3 text-[11px] text-slate-600">Windows programs run in the x86-64 emulator (Programs app) without network access: no raw TCP from a WebView page. Edge browses through the device's connection.</div>
             </div>
           </>
         )}

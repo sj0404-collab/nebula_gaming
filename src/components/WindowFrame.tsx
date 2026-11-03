@@ -4,8 +4,6 @@ import { useOS, type WinState } from '../lib/os';
 import { AppIcon } from './icons';
 import EdgeApp from './apps/EdgeApp';
 import NebulaApp from './apps/NebulaApp';
-import SteamApp from './apps/SteamApp';
-import EpicApp from './apps/EpicApp';
 import TerminalApp from './apps/TerminalApp';
 import OpencodeApp from './apps/OpencodeApp';
 import ExplorerApp from './apps/ExplorerApp';
@@ -17,8 +15,6 @@ import X64App from './apps/X64App';
 const appContent: Record<string, React.ComponentType<{ win: WinState }>> = {
   edge: EdgeApp,
   nebula: NebulaApp,
-  steam: SteamApp,
-  epic: EpicApp,
   terminal: TerminalApp,
   opencode: OpencodeApp,
   explorer: ExplorerApp,

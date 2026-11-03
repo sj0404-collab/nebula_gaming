@@ -13,7 +13,20 @@ int host_key(int vk) { (void)vk; return 0; }
 void host_exit(int code) { (void)code; }
 void host_mem_discard(void *p, size_t n) { e_memset(p, 0, n); }   /* linear memory cannot shrink; keep the zero-on-recommit semantics */
 double host_math(int op, double a, double b) { return js_math(op, a, b); }
-int host_fs_op(int op, const char *a, const char *b, u8 **data, u64 *size) { (void)op; (void)a; (void)b; (void)data; (void)size; return 0; }   /* browser: no write-back mounts (yet) */
+/* persistent virtual disk: the page keeps C:\ in IndexedDB (src/lib/x64/disk.ts). op 1 = a written file was closed → hand the bytes to JS,
+   3 = mkdir, 4 = delete (size = is_dir), 5 = rename. op 2 (exists / load back) returns 0: the bytes stay in wasm memory, nothing is evicted. */
+__attribute__((import_module("env"), import_name("host_fs_write"))) int js_fs_write(const char *path, const u8 *data, u64 n);
+__attribute__((import_module("env"), import_name("host_fs_mkdir"))) int js_fs_mkdir(const char *path);
+__attribute__((import_module("env"), import_name("host_fs_remove"))) int js_fs_remove(const char *path, int is_dir);
+__attribute__((import_module("env"), import_name("host_fs_rename"))) int js_fs_rename(const char *from, const char *to);
+int host_fs_op(int op, const char *a, const char *b, u8 **data, u64 *size) {
+  if (op == 1) return a && data && size ? js_fs_write(a, *data, *size) : 0;
+  if (op == 3) return a ? js_fs_mkdir(a) : 0;
+  if (op == 4) return a ? js_fs_remove(a, size && *size ? 1 : 0) : 0;
+  if (op == 5) return a && b ? js_fs_rename(a, b) : 0;
+  if (op == 6) return 1;
+  return 0;
+}
 /* networking: no raw TCP from a browser page — every call fails cleanly (WSAENETDOWN); a WebSocket relay can plug in here later */
 int host_net_resolve(const char *name, u8 *ip4s, int max) { (void)name; (void)ip4s; (void)max; return -1; }
 int host_net_connect(const u8 *ip4, int port, int *wsa_err) { (void)ip4; (void)port; if (wsa_err) *wsa_err = 10050; return -1; }

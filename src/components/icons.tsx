@@ -209,7 +209,7 @@ export function WindowsLogo({ size = 22, className = '' }: { size?: number; clas
 
 // eslint-disable-next-line react-refresh/only-export-components
 export const AppIdToName: Record<string, string> = {
-  edge: 'Microsoft Edge', nebula: 'Nebula Strike', steam: 'Steam', epic: 'Epic Games',
+  edge: 'Microsoft Edge', nebula: 'Nebula Strike',
   terminal: 'Command Prompt', opencode: 'opencode', explorer: 'File Explorer', notepad: 'Notepad',
-  settings: 'Settings', downloads: 'Downloads', snipping: 'Snipping Tool', x64: 'x64 Runner',
+  settings: 'Settings', downloads: 'Downloads', snipping: 'Snipping Tool', x64: 'Programs',
 };

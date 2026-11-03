@@ -185,6 +185,8 @@ EXPORT(x64_run) int x64_run(u64 budget) {
 }
 /* ---- virtual file system / stdin (host side) ---- */
 EXPORT(x64_vfs_add) int x64_vfs_add(const char *path, const u8 *data, size_t n) { return vfs_add_ref(path, (u8 *)data, n) >= 0; }   /* host-owned buffer, referenced not copied */
+EXPORT(x64_chdir) int x64_chdir(const char *path) { return vfs_chdir(path); }   /* working directory of the loaded process (a shortcut's "Start in"); call after x64_load */
+EXPORT(x64_vfs_sync) void x64_vfs_sync(void) { vfs_sync_all(); }   /* flush written files (open or never closed) to the persistent disk */
 EXPORT(x64_vfs_mkdir) int x64_vfs_mkdir(const char *path) { return vfs_mkdir(path); }
 EXPORT(x64_vfs_remove) int x64_vfs_remove(const char *path) { return vfs_remove(path); }
 EXPORT(x64_vfs_size) s64 x64_vfs_size(const char *path) { u64 sz; int k = vfs_stat(path, &sz); return k == 1 ? (s64)sz : -1; }

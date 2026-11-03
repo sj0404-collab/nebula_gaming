@@ -1,5 +1,6 @@
 import { WebGLGfx } from './gfx';
 import { HostAudio } from './audio';
+import { Disk } from './disk';
 // Nebula x64 — JS host for the wasm64 x86-64 emulator (emu/x64).  Pointers/sizes cross the boundary as BigInt (memory64).
 export type RunStatus = 'idle' | 'running' | 'waiting-stdin' | 'exited' | 'fault' | 'break' | 'stopped';
 export interface VfsEntry { path: string; size: number; dir: boolean; written: boolean }
@@ -35,6 +36,7 @@ type Exports = {
   x64_vfs_add(path: bigint, data: bigint, n: bigint): number; x64_vfs_mkdir(path: bigint): number; x64_vfs_remove(path: bigint): number;
   x64_vfs_size(path: bigint): bigint; x64_vfs_data(path: bigint): bigint; x64_vfs_list(): bigint;
   x64_stdin_write(data: bigint, n: bigint): void; x64_stdin_eof(): void; x64_wants_stdin(): number;
+  x64_vfs_sync(): void; x64_chdir(path: bigint): number;
 };
 
 export const RUN_OK = 0, RUN_EXIT = 1, RUN_FAULT = 2, RUN_YIELD = 3, RUN_BREAK = 4;
@@ -63,6 +65,10 @@ export class X64Runtime {
   onStdinWait: ((waiting: boolean) => void) | null = null;
   private waitingStdin = false;
   readonly gfx = new WebGLGfx();
+  /** persistent C:\ (IndexedDB): installed programs, saved documents, the registry hive and Start Menu shortcuts survive restarts */
+  readonly disk = new Disk();
+  diskFiles = 0;   // entries restored from the persistent disk at init
+  onDisk: (() => void) | null = null;
   private lastFrame: { p: bigint; w: number; h: number } | null = null;
   /** the most recently presented window contents (still valid after the program exits) — lets a re-mounted canvas show the final frame */
   lastPresented(): { px: Uint8Array; w: number; h: number } | null { const f = this.lastFrame; return f && this.ex ? { px: this.bytesAt(f.p, f.w * f.h * 4), w: f.w, h: f.h } : null; }
@@ -97,11 +103,33 @@ export class X64Runtime {
         host_audio_open: (rate: number) => { this.audio.log = (t) => this.onLog?.(t); return this.audio.open(rate); },
         host_audio_write: (lr: bigint, frames: number) => this.audio.write(new Float32Array(this.ex!.memory.buffer, Number(lr), frames * 2)),
         host_audio_queued: () => this.audio.queued(),
+        // persistent disk (src/lib/x64/disk.ts): the emulator reports closed-after-write files, mkdir, delete and rename
+        host_fs_write: (path: bigint, data: bigint, n: bigint) => { this.disk.put(this.cstr(path), this.bytesAt(data, Number(n))); return 1; },
+        host_fs_mkdir: (path: bigint) => { this.disk.mkdir(this.cstr(path)); return 1; },
+        host_fs_remove: (path: bigint) => { this.disk.remove(this.cstr(path)); return 1; },
+        host_fs_rename: (from: bigint, to: bigint) => { void this.disk.rename(this.cstr(from), this.cstr(to)); return 1; },
       },
     };
     const { instance } = await WebAssembly.instantiate(bytes, imports);
     this.ex = instance.exports as unknown as Exports;
+    this.disk.onActivity = () => this.onDisk?.();
+    await this.restoreDisk();
   }
+
+  /** put every persisted file back on the virtual disk (called once from init, before any program runs) */
+  private async restoreDisk() {
+    const ex = this.ex!; let files: Awaited<ReturnType<Disk['loadAll']>> = [];
+    try { files = await this.disk.loadAll(); } catch { return; }
+    let total = 0; for (const f of files) total += f.data?.length ?? 0;
+    if (total) this.reserve(total + (4 << 20));
+    for (const f of files) {
+      if (f.data === null) ex.x64_vfs_mkdir(this.putStr(f.path));
+      else ex.x64_vfs_add(this.putStr(f.path), this.put(f.data), BigInt(f.data.length));   // x64_vfs_add references the buffer: the bytes live once, in wasm memory
+    }
+    this.diskFiles = files.length;
+  }
+  /** flush files a program still has open (or never closed) to the persistent disk and wait until they are durable */
+  async syncDisk() { if (this.ex?.x64_vfs_sync) this.ex.x64_vfs_sync(); await this.disk.flush(); }
 
   private bytesAt(p: bigint, n: number): Uint8Array { return new Uint8Array(this.ex!.memory.buffer, Number(p), n); }
   private cstr(p: bigint): string {
@@ -124,11 +152,12 @@ export class X64Runtime {
   }
 
   /** Load an exe and start the frame loop.  Returns the loader error text, or null on success. */
-  start(bytes: Uint8Array, name: string, cmdline?: string): string | null {
+  start(bytes: Uint8Array, name: string, cmdline?: string, cwd?: string): string | null {
     const ex = this.ex!; this.stop();
     const p = this.putCached(bytes);
     const rc = ex.x64_load(p, BigInt(bytes.length), this.putStr(name), this.putStr(cmdline ?? name));
     if (rc !== 0) { this.status = 'fault'; return this.cstr(ex.x64_report()) || `loader error ${rc}`; }
+    if (cwd && ex.x64_chdir) ex.x64_chdir(this.putStr(cwd));
     this.status = 'running'; this.running = true; this.t0 = performance.now(); this.frames = 0; this.lastFrame = null;
     this.schedule();
     return null;
@@ -153,13 +182,14 @@ export class X64Runtime {
     }
     if (r === RUN_EXIT || r === RUN_FAULT || r === RUN_BREAK) {
       this.running = false; this.status = r === RUN_EXIT ? 'exited' : r === RUN_FAULT ? 'fault' : 'break';
+      void this.syncDisk();
       this.onStop?.(this.stats());
       return;
     }
     this.schedule();
   }
 
-  stop() { if (this.running) { this.running = false; this.status = 'stopped'; cancelAnimationFrame(this.raf); clearTimeout(this.timer); this.audio.flush(); if (this.waitingStdin) { this.waitingStdin = false; this.onStdinWait?.(false); } } }
+  stop() { if (this.running) { this.running = false; this.status = 'stopped'; cancelAnimationFrame(this.raf); clearTimeout(this.timer); this.audio.flush(); void this.syncDisk(); if (this.waitingStdin) { this.waitingStdin = false; this.onStdinWait?.(false); } } }
 
   private resumeFromStdin() { if (this.waitingStdin && this.running) { this.waitingStdin = false; this.status = 'running'; this.onStdinWait?.(false); this.schedule(); } }
   /** feed text to the guest's stdin (a trailing newline is what line-oriented programs expect) */

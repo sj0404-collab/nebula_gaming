@@ -6,15 +6,13 @@ import { motion, AnimatePresence } from 'framer-motion';
 const PINNED: { app: Parameters<ReturnType<typeof useOS>['openApp']>[0]; label: string; icon: string }[] = [
   { app: 'edge', label: 'Microsoft Edge', icon: 'edge' },
   { app: 'nebula', label: 'Nebula Strike', icon: 'game' },
-  { app: 'steam', label: 'Steam', icon: 'steam' },
-  { app: 'epic', label: 'Epic Games', icon: 'epic' },
   { app: 'terminal', label: 'Command Prompt', icon: 'terminal' },
   { app: 'opencode', label: 'opencode', icon: 'opencode' },
   { app: 'explorer', label: 'File Explorer', icon: 'explorer' },
   { app: 'notepad', label: 'Notepad', icon: 'notepad' },
   { app: 'settings', label: 'Settings', icon: 'settings' },
   { app: 'downloads', label: 'Downloads', icon: 'downloads' },
-  { app: 'x64', label: 'x64 Runner', icon: 'x64' },
+  { app: 'x64', label: 'Programs', icon: 'x64' },
 ];
 
 export default function StartMenu() {
@@ -73,8 +71,8 @@ export default function StartMenu() {
               </button>
               <div className="grid grid-cols-2 gap-1.5">
                 <button onClick={() => openApp('edge')} className="flex h-20 flex-col items-center justify-center gap-1 rounded bg-[#0078d7] hover:brightness-110"><AppIcon id="edge" size={26} /><span className="text-[9px] text-white">Edge</span></button>
-                <button onClick={() => openApp('steam')} className="flex h-20 flex-col items-center justify-center gap-1 rounded bg-[#1b2838] hover:brightness-110"><AppIcon id="steam" size={26} /><span className="text-[9px] text-white">Steam</span></button>
-                <button onClick={() => openApp('epic')} className="flex h-20 flex-col items-center justify-center gap-1 rounded bg-[#2f2d2e] hover:brightness-110"><AppIcon id="epic" size={26} /><span className="text-[9px] text-white">Epic</span></button>
+                <button onClick={() => openApp('x64')} className="flex h-20 flex-col items-center justify-center gap-1 rounded bg-[#312e81] hover:brightness-110"><AppIcon id="x64" size={26} /><span className="text-[9px] text-white">Programs</span></button>
+                <button onClick={() => openApp('explorer')} className="flex h-20 flex-col items-center justify-center gap-1 rounded bg-[#2f2d2e] hover:brightness-110"><AppIcon id="explorer" size={26} /><span className="text-[9px] text-white">Explorer</span></button>
                 <button onClick={() => openApp('terminal')} className="flex h-20 flex-col items-center justify-center gap-1 rounded bg-[#0c0c0c] hover:brightness-125"><AppIcon id="terminal" size={26} /><span className="text-[9px] text-white">cmd.exe</span></button>
               </div>
               <button onClick={() => openApp('opencode')} className="flex flex-1 min-h-[70px] flex-col items-start justify-end gap-1 rounded bg-[#111318] border border-[#3dd68c]/40 p-2 hover:border-[#3dd68c]">

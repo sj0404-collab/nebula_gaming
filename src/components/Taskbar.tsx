@@ -47,7 +47,7 @@ export default function Taskbar() {
       </button>
       {/* Pinned + running apps */}
       <div className="flex h-12 flex-1 items-stretch overflow-x-auto">
-        {(['edge', 'nebula', 'steam', 'epic', 'terminal', 'opencode'] as const).map(app => {
+        {(['edge', 'nebula', 'x64', 'terminal', 'opencode'] as const).map(app => {
           const running = windows.filter(w => w.app === app);
           const isOpen = running.length > 0;
           return (
@@ -66,7 +66,7 @@ export default function Taskbar() {
             </button>
           );
         })}
-        {windows.filter(w => !['edge', 'nebula', 'steam', 'epic', 'terminal', 'opencode'].includes(w.app)).map(w => (
+        {windows.filter(w => !['edge', 'nebula', 'x64', 'terminal', 'opencode'].includes(w.app)).map(w => (
           <button key={w.id} className="relative flex h-12 w-12 shrink-0 items-center justify-center hover:bg-white/10" title={w.title} onClick={() => (w.minimized ? focusWindow(w.id) : toggleMinimize(w.id))}>
             <AppIcon id={w.icon} size={22} />
             {!w.minimized && <span className="absolute bottom-[3px] h-[3px] w-5 rounded-full bg-[#76b9ed]" />}

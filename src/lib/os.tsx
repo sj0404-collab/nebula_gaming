@@ -3,7 +3,7 @@ import { createContext, useCallback, useContext, useRef, useState, type ReactNod
 import { W as VW, H as VH } from './nebula';
 
 export type AppId =
-  | 'edge' | 'nebula' | 'steam' | 'epic' | 'terminal' | 'opencode'
+  | 'edge' | 'nebula' | 'terminal' | 'opencode'
   | 'explorer' | 'notepad' | 'settings' | 'downloads' | 'snipping' | 'x64';
 
 export interface WinState {
@@ -125,15 +125,13 @@ export function OSProvider({ children }: { children: ReactNode }) {
     const meta: Record<AppId, { title: string; icon: string; size: { w: number; h: number } }> = {
       edge:      { title: 'Microsoft Edge',            icon: 'edge',      size: { w: 980, h: 640 } },
       nebula:    { title: 'NEBULA STRIKE — NebulaStrike.exe', icon: 'game', size: { w: 856, h: 560 } },
-      steam:     { title: 'Steam',                     icon: 'steam',     size: { w: 980, h: 640 } },
-      epic:      { title: 'Epic Games Launcher',       icon: 'epic',      size: { w: 980, h: 640 } },
       terminal:  { title: 'Command Prompt — C:\\Windows\\system32\\cmd.exe', icon: 'terminal', size: { w: 900, h: 560 } },
       opencode:  { title: 'opencode — TUI (C:\\dev\\game)',    icon: 'opencode',  size: { w: 920, h: 600 } },
       explorer:  { title: 'File Explorer',              icon: 'explorer',  size: { w: 900, h: 560 } },
       notepad:   { title: 'Notepad',                    icon: 'notepad',   size: { w: 640, h: 500 } },
       settings:  { title: 'Settings',                   icon: 'settings',  size: { w: 900, h: 580 } },
       downloads: { title: 'Downloads',                  icon: 'downloads', size: { w: 760, h: 480 } },
-      x64:       { title: 'x64 Runner — Nebula x64 (wasm64 + WebGL)', icon: 'x64', size: { w: 1040, h: 660 } },
+      x64:       { title: 'Programs — Windows programs & games (x86-64 emulator, wasm64 + WebGL)', icon: 'x64', size: { w: 1040, h: 660 } },
       snipping:  { title: 'Snipping Tool',              icon: 'snipping',  size: { w: 560, h: 420 } },
     };
     const m = meta[app];

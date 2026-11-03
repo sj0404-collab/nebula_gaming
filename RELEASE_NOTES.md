@@ -1,3 +1,49 @@
+# v1.28.0 — Programs & Games library (Android): real installers run from the device, a persistent C:\ drive, tiles with the programs' own icons, Play / fullscreen — the fake Steam / Epic demos are gone
+
+**Why.** The “x64 Runner” was a developer tool (a list of sample exes and a Run button) and Steam / Epic Games were stand‑in windows with a
+`setInterval` progress bar. The user flow on Android must be the Windows one: open a setup program from the phone → it runs with its own
+wizard → the installed program appears with its icon → Play → its screen, full‑screen for games — and it is still there after the app restarts.
+
+**What is real now** (measured: `emu/tests/run.sh` native suite x86 + x64 **ALL OK**; e2e headless Chromium incl. the new end‑to‑end install
+test — the official `7z2501-x64.exe` setup → `7-Zip File Manager` tile with the icon from `7zFM.exe` → Play draws the 7‑Zip window → page reload →
+the tile is restored from IndexedDB and Play works again):
+
+* **Persistent disk C:\** (`src/lib/x64/disk.ts`, `host_fs_*` imports in `emu/x64/host_wasm.c`): every file a program writes and closes is
+  handed to the page and stored in IndexedDB (`nebula-x64-disk`) — installed programs, the registry hive `C:\Windows\nebula.reg`, Start Menu
+  `.lnk` shortcuts, saved documents, configs. Deletes and renames follow. On start everything is put back before any program runs
+  (`x64_vfs_sync` flushes files a program left open; `x64_chdir` sets the shortcut's working directory). Scratch paths are not persisted:
+  `C:\tmp`, `*\Temp\*`, the `C:\nebula` session folder. Limit: the disk lives in memory while the app runs (fine for programs of tens or a few
+  hundred MB; a lazy‑loading OPFS disk is the next step for multi‑GB games).
+* **Programs app** (renamed from x64 Runner; desktop, Start menu, taskbar): **Library** tab — tiles of what is installed, found exactly the way
+  Windows finds it: Start Menu / Desktop `.lnk` files (parsed MS‑SHLLINK: target, arguments, working dir, icon) and the registry
+  `HKLM\…\CurrentVersion\Uninstall` keys (`DisplayName`, `DisplayIcon`, `InstallLocation`, `UninstallString`, `Publisher`, `DisplayVersion`).
+  Nothing is invented: no shortcut / Uninstall key pointing at an exe that exists → no tile. Helper links (Uninstall, Help, readme, website…) are
+  filtered out. **Open / Install…** opens the device file picker: a setup `.exe` runs at once with its real wizard (the Screen tab opens on its
+  first frame, the library card shows *Installing…*, frames, processes, MIPS, files written / saving / saved); when it exits the library rescans
+  and a toast names what was installed. A plain `.exe` runs at once too; **Add to library** copies it to `C:\Program Files\<name>\` with a real
+  Start Menu shortcut. A **.zip** of a portable program / game folder is unpacked (browser `DecompressionStream`, ZIP64 aware) to
+  `C:\Program Files\<folder>` with a shortcut to the main exe — on Android there is no folder picker, the archive is the unit. **Install folder…**
+  does the same from a directory picker where the WebView offers one.
+* **Icons** straight from the PE resources (`src/lib/x64/peicon.ts`): `RT_GROUP_ICON` → best `RT_ICON` (PNG entries passed through, DIB
+  32/24/16/8/4/1 bpp with AND mask decoded by hand), PE32 and PE32+; honours the shortcut's icon path / index. **Set cover image…** per tile
+  (device photo, stored locally) — the game's artwork over its icon, like a launcher.
+* **Play** starts the installed exe from its own folder (`x64_chdir`) with the shortcut's arguments; **fullscreen / game mode** button on the
+  Screen tab: the whole app becomes the program's screen (WebView `requestFullscreen` where available + kiosk layout), touch bar and soft keyboard
+  stay; back gesture / button leaves it. **Uninstall** runs the program's own uninstaller from `UninstallString` (its real dialog); programs
+  without one are removed from `C:\Program Files\<name>` with their shortcut.
+* **Emulator fix found by this flow:** `cpu_reset` now clears `mode32` — a Proc slot reused after a 32‑bit process (the 7‑Zip x64 setup is a 32‑bit
+  stub) made the next 64‑bit exe run in IA‑32 mode (`call [rip+disp]` decoded as `[disp32]` → access violation at its first import). Affects a
+  64‑bit program started after a 32‑bit one in the same session and 32‑bit launchers spawning 64‑bit children.
+* **Fake apps removed:** Steam and Epic Games Launcher windows (scripted “installs” of Nebula Strike). A real Steam client cannot run here
+  (no raw TCP from a WebView page); saying so is better than a demo.
+* The self‑test / sample programs (hello.exe, threads.exe, sqlite3, jq, lua, python, NebulaStrike…) moved behind a **tests** toggle and download on
+  demand — the app no longer pulls ~40 MB of samples at start.
+
+**Honest limits.** One Windows program (process tree) at a time per Programs window. MSI packages do not run (no `msiexec`). The library relies on
+the installer leaving a Start Menu shortcut or an Uninstall key (NSIS, Inno Setup, 7‑Zip's SFX setup and MSI‑less installers do); a bare copy of
+files shows up through *Add to library* / zip install. Android `Install folder…` depends on the WebView's directory picker (often absent) — use a
+.zip. Network inside programs is still absent.
+
 # v1.27.0 — Nebula x64 (Android): real Windows hooks (WH_KEYBOARD / WH_CALLWNDPROC / CallNextHookEx), IFileDialogEvents, IOleWindow; Notepad++ Save As appends the extension itself (x86 + x64)
 
 **Why.** In v1.26.0 Notepad++ saved `hello` instead of `hello.txt`. On Windows the extension is not added by the dialog — Notepad++ does it

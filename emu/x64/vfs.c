@@ -103,7 +103,7 @@ static int node_load(int i) {
 static void node_sync(int i) {
   VNode *v = &g_nodes[i]; if (!v->used || v->is_dir || v->evicted) return;
   if (v->written) { u8 *d = v->data; u64 n = v->size; if (!host_fs_op(1, v->path, 0, &d, &n)) return; v->written = 0; }
-  else if (!host_fs_op(2, v->path, 0, 0, 0)) return;   /* only files that exist on a write-back mount may be evicted */
+  if (!host_fs_op(2, v->path, 0, 0, 0)) return;   /* only files the host can load back (op 2) may be evicted — the browser's IndexedDB disk persists but never reloads, so its nodes stay in memory */
   if (v->opens <= 0 && !v->pinned) { node_drop_data(v); v->evicted = 1; }
 }
 void vfs_sync_all(void) { for (int i = 0; i < g_ncap; i++) if (g_nodes[i].used && g_nodes[i].written && !g_nodes[i].is_dir) { u8 *d = g_nodes[i].data; u64 n = g_nodes[i].size; if (host_fs_op(1, g_nodes[i].path, 0, &d, &n)) g_nodes[i].written = 0; } }
