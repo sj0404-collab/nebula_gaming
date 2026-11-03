@@ -193,9 +193,10 @@ static void check_timers(Win32 *w) {
 static void write_msg(Cpu *c, u64 a, GuestMsg *m) {
   if (c->mode32) { wr32(c, a, (u32)m->hwnd); wr32(c, a + 4, m->msg); wr32(c, a + 8, (u32)m->wparam); wr32(c, a + 12, (u32)m->lparam); wr32(c, a + 16, m->time); wr32(c, a + 20, (u32)(g_mouse_x + SCREEN_X0)); wr32(c, a + 24, (u32)(g_mouse_y + SCREEN_Y0)); return; }
   wr64(c, a, m->hwnd); wr32(c, a + 8, m->msg); wr32(c, a + 12, 0); wr64(c, a + 16, m->wparam); wr64(c, a + 24, m->lparam); wr32(c, a + 32, m->time); wr32(c, a + 36, (u32)(g_mouse_x + SCREEN_X0)); wr32(c, a + 40, (u32)(g_mouse_y + SCREEN_Y0)); wr32(c, a + 44, 0); }
-/* paint order: top-level windows bottom-up, each followed by its children in z order; returns the first invalid visible window */
-static int next_invalid_in(int i) { if (!g_wnd[i].visible) return -1; if (g_wnd[i].invalid) return i; int order[MAX_WND]; int n = 0; for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].parent == i) order[n++] = k;
-  for (int a = 1; a < n; a++) { int v = order[a], b = a - 1; while (b >= 0 && g_wnd[order[b]].zseq > g_wnd[v].zseq) { order[b + 1] = order[b]; b--; } order[b + 1] = v; }
+static int wnd_siblings_topdown(int parent, int skip, int *order);
+/* paint order: top-level windows bottom-up; the children of a window top-down like Windows dispatches WM_PAINT (a lower sibling without WS_CLIPSIBLINGS overwrites a higher one — dialog
+   controls; with WS_CLIPSIBLINGS the DcSnap clip keeps the higher siblings intact — Notepad++'s Scintilla over its tab bar); returns the first invalid visible window */
+static int next_invalid_in(int i) { if (!g_wnd[i].visible) return -1; if (g_wnd[i].invalid) return i; int order[MAX_WND]; int n = wnd_siblings_topdown(i, -1, order);
   for (int a = 0; a < n; a++) { int r = next_invalid_in(order[a]); if (r >= 0) return r; } return -1; }
 static int next_invalid(void) { int order[MAX_WND]; int n = 0; for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].parent < 0) order[n++] = k;
   for (int a = 1; a < n; a++) { int v = order[a], b = a - 1; while (b >= 0 && g_wnd[order[b]].zseq > g_wnd[v].zseq) { order[b + 1] = order[b]; b--; } order[b + 1] = v; }
@@ -356,6 +357,13 @@ static void s_AdjustWindowRectExForDpi(Cpu *c) { s_AdjustWindowRectEx(c); }
 static int wnd_alloc(void) { for (int i = 1; i < MAX_WND; i++) if (!g_wnd[i].used) { e_memset(&g_wnd[i], 0, sizeof g_wnd[i]); g_wnd[i].text = g_wnd[i].tbuf; g_wnd[i].textcap = sizeof g_wnd[i].tbuf; g_wnd[i].used = 1; g_wnd[i].parent = g_wnd[i].owner = -1; g_wnd[i].enabled = 1; g_wnd[i].cursel = -1; g_wnd[i].drop_wnd = -1; g_wnd[i].zseq = ++g_zseq; return i; } return -1; }
 static void items_free(Wnd *n) { if (n->items) { emu_free(n->items); n->items = 0; } if (n->itemdata) { emu_free(n->itemdata); n->itemdata = 0; } if (n->itemimg) { emu_free(n->itemimg); n->itemimg = 0; } n->nitems = 0; }
 /* create the window object; sends WM_CREATE to builtin classes directly and leaves guest classes to the CONT_WNDCREATE chain */
+/* z-order model: higher zseq = nearer the top. Windows links a NEW CHILD at the BOTTOM of its siblings (first-created control = top of the z-order = first in tab order; Notepad++'s
+   Scintilla stays above the tab bar created after it) and a new top-level window at the top. wnd_reorder(i, 1 = bottom / ref sibling = directly behind it) renumbers the siblings keeping their relative order. */
+static int wnd_siblings_topdown(int parent, int skip, int *order) { int n = 0; for (int k = 0; k < MAX_WND; k++) if (k != skip && g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].parent == parent) order[n++] = k;
+  for (int a = 1; a < n; a++) { int v = order[a], b = a - 1; while (b >= 0 && g_wnd[order[b]].zseq < g_wnd[v].zseq) { order[b + 1] = order[b]; b--; } order[b + 1] = v; } return n; }
+static void wnd_reorder(int i, int ref) { int order[MAX_WND], out[MAX_WND], n = wnd_siblings_topdown(g_wnd[i].parent, i, order), m = 0; int placed = 0;
+  for (int a = 0; a < n; a++) { out[m++] = order[a]; if (order[a] == ref) { out[m++] = i; placed = 1; } } if (!placed) out[m++] = i;   /* top-down list; i goes right after ref (= behind it) or last (= bottom) */
+  for (int a = m - 1; a >= 0; a--) g_wnd[out[a]].zseq = ++g_zseq; }
 static int wnd_create_obj(Cpu *c, const char *cls, const char *title, u32 style, u32 exstyle, int x, int y, int cx, int cy, u64 parent_h, u64 id, u64 inst, u64 param, int wide, u64 title_a) {
   Win32 *w = W; builtin_init_slots(w); int parent = wnd_of(parent_h); int bi = BI_NONE; int ci = -1;
   if (cls[0] == '#' && cls[1] >= '0') { u32 ord = 0; for (const char *p = cls + 1; *p >= '0' && *p <= '9'; p++) ord = ord * 10 + (u32)(*p - '0'); if (ord == 32770) cls = "#32770"; else if (ord >= 0x80 && ord <= 0x85) { static const char *names[] = { "Button", "Edit", "Static", "ListBox", "ScrollBar", "ComboBox" }; cls = names[ord - 0x80]; } }
@@ -367,6 +375,7 @@ static int wnd_create_obj(Cpu *c, const char *cls, const char *title, u32 style,
   if (ci >= 0) { n->wndproc = g_cls[ci].proc; n->cls_brush = g_cls[ci].brush; n->cls_style = g_cls[ci].style; n->cls_extra = g_cls[ci].extra; n->icon = g_cls[ci].icon; } else { n->wndproc = builtin_slot(bi); n->cls_brush = bi == BI_DIALOG ? 0 : 0; n->cls_style = 0x0B; }
   if (bi == BI_DIALOG) n->is_dlg = 1;
   if (style & 0x40000000u) { n->parent = parent >= 0 ? parent : 0; if (parent < 0 && !g_wnd[0].used) n->parent = -1; } else { n->parent = -1; n->owner = parent; }
+  if (n->parent >= 0) wnd_reorder(i, -1);
   wnd_set_text(n, title); n->visible = 0; n->enabled = !(style & 0x08000000u); n->font = 0; n->limit = 30000;
   int cwdef = (u32)cx == 0x80000000u || cx < 0 ? 0 : cx, chdef = (u32)cy == 0x80000000u || cy < 0 ? 0 : cy;
   if (n->parent < 0) {   /* top-level */
@@ -421,6 +430,12 @@ static void wndcreate_resume(Cpu *c, u64 rax) {
 /* DestroyWindow: WM_DESTROY to the window, then to its descendants, then WM_NCDESTROY (guest classes only), then free */
 static struct { int list[64]; int n, pos, phase; int root; } g_destroy[6]; static int g_ndestroy;
 static void destroy_collect(int i, int *list, int *n) { if (*n >= 64) return; list[(*n)++] = i; for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].parent == i) destroy_collect(k, list, n); }
+/* a top-level window goes away (destroyed / hidden): activation moves to its owner, else to the topmost visible top-level window of the process, with WM_ACTIVATE so the app can restore its focus (Notepad++ puts the caret back into the editor) */
+static void wnd_deactivated(Win32 *w, int i) { if (g_active != i && !(wnd_alive(g_active) && wnd_root(g_active) == i) && !(g_focus >= 0 && wnd_alive(g_focus) && wnd_root(g_focus) == i)) return;
+  int ow = g_wnd[i].owner; if (!(ow >= 0 && wnd_alive(ow) && g_wnd[ow].visible)) { ow = -1; for (int k = 0; k < MAX_WND; k++) if (k != i && wnd_alive(k) && g_wnd[k].visible && g_wnd[k].parent < 0 && g_wnd[k].pid == g_wnd[i].pid && g_wnd[k].builtin != BI_MENU && g_wnd[k].builtin != BI_COMBOLIST && (ow < 0 || g_wnd[k].zseq > g_wnd[ow].zseq)) ow = k; }
+  if (ow < 0) { if (g_active == i) g_active = -1; if (g_focus >= 0 && wnd_alive(g_focus) && wnd_root(g_focus) == i) g_focus = -1; return; }
+  g_active = ow; if (!wnd_alive(g_focus) || wnd_root(g_focus) == i) g_focus = ow;
+  if (!g_wnd[ow].builtin || g_wnd[ow].superclassed) { post_msg_to(w, HWND_OF(ow), 0x06, 1, HWND_OF(i)); post_msg_to(w, HWND_OF(ow), 0x07, HWND_OF(i), 0); } }
 static void wnd_free(int i) { Wnd *n = &g_wnd[i]; items_free(n); if (n->text && n->text != n->tbuf) emu_free(n->text); if (n->stream) { emu_free(n->stream); n->stream = 0; } if (n->cc) { emu_free(n->cc); n->cc = 0; } n->nsub = 0; n->subcur = 0; n->sub_orig = 0; n->edit_wnd = 0; n->combo_wnd = 0; n->himl = 0; n->cbex_exstyle = 0; n->text = n->tbuf; n->textcap = sizeof n->tbuf; n->tbuf[0] = 0; kill_timers_of(i); if (g_focus == i) g_focus = -1; if (g_capture == i) g_capture = -1; if (g_active == i) g_active = -1; n->used = 0; n->destroyed = 1; }
 /* process exit: its windows vanish without WM_DESTROY (no code left to run them) and its window classes are released */
 void user_proc_exit(Win32 *w) { for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].pid == w->pid && w->pid != 0) { g_wnd[k].destroyed = 1; g_wnd[k].visible = 0; wnd_free(k); if (k == 0) sync_main(w); }
@@ -438,7 +453,7 @@ static void destroy_step(Cpu *c) {
 static void destroy_window(Cpu *c, int i) { Win32 *w = W; if (g_ndestroy >= 6) { cpu_fault(c, "DestroyWindow nesting too deep"); return; }
   int d = g_ndestroy++; g_destroy[d].n = 0; g_destroy[d].pos = 0; g_destroy[d].phase = 0; g_destroy[d].root = i; destroy_collect(i, g_destroy[d].list, &g_destroy[d].n);
   for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].parent < 0 && g_wnd[k].owner == i && g_destroy[d].n < 64) destroy_collect(k, g_destroy[d].list, &g_destroy[d].n);
-  if (g_wnd[i].parent < 0) { int ow = g_wnd[i].owner; if (ow >= 0 && wnd_alive(ow)) { g_active = ow; if (!wnd_alive(g_focus) || wnd_root(g_focus) == i) g_focus = ow; } }
+  if (g_wnd[i].parent < 0) wnd_deactivated(W, i);
   w32_push_cont(c, CONT_WNDDESTROY, (u64)i); (void)w; destroy_step(c); }
 static void s_DestroyWindow(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0 || g_wnd[i].destroyed) { W->last_error = 1400; RET(0); return; } destroy_window(c, i); }
 
@@ -517,7 +532,7 @@ static void s_CallWindowProcA(Cpu *c) { s_CallWindowProcW(c); }
 
 /* ---------- show / move / size / enable ---------- */
 static void s_ShowWindow(Cpu *c) { Win32 *w = W; int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } int cmd = (int)ARG(1); int prev = g_wnd[i].visible;
-  if (cmd == 0 /* SW_HIDE */) { g_wnd[i].style &= ~0x10000000u; if (prev) { g_wnd[i].visible = 0; desktop_clear(w, i); wnd_invalidate_all(); w->dirty = 1; if (g_focus == i || (g_focus >= 0 && wnd_is_child_of(g_focus, i))) g_focus = -1; } }
+  if (cmd == 0 /* SW_HIDE */) { g_wnd[i].style &= ~0x10000000u; if (prev) { g_wnd[i].visible = 0; desktop_clear(w, i); wnd_invalidate_all(); w->dirty = 1; if (g_focus == i || (g_focus >= 0 && wnd_is_child_of(g_focus, i))) g_focus = -1; if (g_wnd[i].parent < 0) wnd_deactivated(w, i); } }
   else { g_wnd[i].style |= 0x10000000u; if (!prev) { wnd_show_now(c, i); if (!g_wnd[i].builtin || g_wnd[i].superclassed) post_msg_to(w, HWND_OF(i), 0x18, 1, 0); } if (g_wnd[i].parent < 0 && cmd != 4 && cmd != 7 && cmd != 8) g_active = i; }
   if (i == 0) sync_main(w); RET(prev); }
 static void s_ShowWindowAsync(Cpu *c) { s_ShowWindow(c); }
@@ -536,7 +551,7 @@ static int wnd_set_pos(Cpu *c, int i, int x, int y, int cx, int cy, u32 flags, u
   if (!(flags & 2 /* SWP_NOMOVE */)) { int nx = x, ny = y; if (n->parent < 0) { nx -= SCREEN_X0; ny -= SCREEN_Y0; } if (i == 0) { nx = 0; ny = 0; } else if (n->parent < 0) { /* the framebuffer is the whole visible screen: a top-level window that centres itself on the 1280x720 "desktop" (PuTTY, many setup wizards) is kept inside the presented area */ int sw = w->screen_w, sh = w->screen_h; if (nx + n->w > sw) nx = sw - n->w; if (ny + n->h > sh) ny = sh - n->h; if (nx < 0) nx = 0; if (ny < 0) ny = 0; } if (nx != n->x || ny != n->y) { n->x = nx; n->y = ny; moved = 1; } }
   if (!(flags & 1 /* SWP_NOSIZE */)) { int nw = cx, nh = cy; if (i == 0) { int cw = nw, ch = nh; if (n->style & 0x00C00000u) { cw -= 16; ch -= 39; } if (cw < 16) cw = 16; if (ch < 16) ch = 16; if (cw != n->w || ch != n->h - n->ncy) { n->w = cw; n->h = ch + n->ncy; screen_ensure(w, cw, n->h); sized = 1; } }
     else if (nw != n->w || nh != n->h) { n->w = nw < 0 ? 0 : nw; n->h = nh < 0 ? 0 : nh; sized = 1; if (n->parent < 0) screen_ensure(w, w->screen_w > n->x + n->w ? w->screen_w : n->x + n->w, w->screen_h > n->y + n->h ? w->screen_h : n->y + n->h); } }
-  if (flags & 0x40 /* SWP_SHOWWINDOW */) { n->style |= 0x10000000u; wnd_show_now(c, i); } if (flags & 0x80 /* SWP_HIDEWINDOW */) { n->style &= ~0x10000000u; if (n->visible) desktop_clear(w, i); n->visible = 0; wnd_invalidate_all(); }
+  if (flags & 0x40 /* SWP_SHOWWINDOW */) { n->style |= 0x10000000u; wnd_show_now(c, i); } if (flags & 0x80 /* SWP_HIDEWINDOW */) { n->style &= ~0x10000000u; if (n->visible) desktop_clear(w, i); n->visible = 0; wnd_invalidate_all(); if (n->parent < 0) wnd_deactivated(w, i); }
   if ((moved || sized) && n->visible && n->parent < 0 && i != 0) { int nx = n->x, ny = n->y, nw = n->w, nh = n->h; n->x = ox; n->y = oy; n->w = ow; n->h = oh; desktop_clear(w, i); n->x = nx; n->y = ny; n->w = nw; n->h = nh; }
   if (i == 0) sync_main(w);
   if (sized && (n->builtin == BI_REBAR || n->builtin == BI_COMBO || n->builtin == BI_COMBOEX) && !n->superclassed) builtin_proc_direct(c, i, 0x05, 0, ((u64)(wnd_client_h(i) & 0xffff) << 16) | (wnd_client_w(i) & 0xffff));   /* a rebar re-lays out its bands and takes its own height (comctl32 does the same) */
@@ -548,10 +563,15 @@ static int wnd_set_pos(Cpu *c, int i, int x, int y, int cx, int cy, u32 flags, u
   return 0;
 }
 static void setpos_resume(Cpu *c, u64 rax) { Win32 *w = W; int ci = w->ncont - 1; int i = (int)w->cont[ci].data[0]; (void)rax; if (w->cont[ci].data[2] && wnd_alive(i)) { w->cont[ci].data[2] = 0; w32_guest_call(c, g_wnd[i].wndproc, HWND_OF(i), 0x03, 0, w->cont[ci].data[3]); return; } w32_cont_finish(c, w->cont[ci].data[1]); }
-static void s_SetWindowPos(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } u64 after = ARG(1); if (!(ARG(6) & 4) && (after == 0 || after == (u64)-1 || after == 0xffffffffull)) g_wnd[i].zseq = ++g_zseq; if (wnd_set_pos(c, i, (int)(s32)ARG(2), (int)(s32)ARG(3), (int)(s32)ARG(4), (int)(s32)ARG(5), (u32)ARG(6), 1)) return; RET(1); }
+/* z-order part of SetWindowPos/DeferWindowPos: HWND_TOP/TOPMOST/NOTOPMOST -> top of the siblings, HWND_BOTTOM -> bottom, a sibling handle -> directly behind it (siblings are renumbered keeping their relative order) */
+static void wnd_zorder(int i, u64 after, u32 flags) { if (flags & 4 /* SWP_NOZORDER */) return; u32 a32 = (u32)after;
+  if (after == 0 || a32 == 0xffffffffu || a32 == 0xfffffffeu) { g_wnd[i].zseq = ++g_zseq; return; }
+  int ref = -1; if (a32 != 1) { ref = wnd_of(after); if (ref < 0 || ref == i || g_wnd[ref].parent != g_wnd[i].parent) return; }
+  wnd_reorder(i, ref); wnd_invalidate_all(); }
+static void s_SetWindowPos(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } wnd_zorder(i, ARG(1), (u32)ARG(6)); if (wnd_set_pos(c, i, (int)(s32)ARG(2), (int)(s32)ARG(3), (int)(s32)ARG(4), (int)(s32)ARG(5), (u32)ARG(6), 1)) return; RET(1); }
 static void s_MoveWindow(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } if (ARG(5)) wnd_invalidate(i, 1); if (wnd_set_pos(c, i, (int)(s32)ARG(1), (int)(s32)ARG(2), (int)(s32)ARG(3), (int)(s32)ARG(4), 0, 1)) return; RET(1); }
 static void s_BeginDeferWindowPos(Cpu *c) { RET(0x5D001); }
-static void s_DeferWindowPos(Cpu *c) { int i = wnd_of(ARG(1)); if (i >= 0 && wnd_set_pos(c, i, (int)(s32)ARG(3), (int)(s32)ARG(4), (int)(s32)ARG(5), (int)(s32)ARG(6), (u32)ARG(7), ARG(0))) return; RET(ARG(0)); }
+static void s_DeferWindowPos(Cpu *c) { int i = wnd_of(ARG(1)); if (i >= 0) wnd_zorder(i, ARG(2), (u32)ARG(7)); if (i >= 0 && wnd_set_pos(c, i, (int)(s32)ARG(3), (int)(s32)ARG(4), (int)(s32)ARG(5), (int)(s32)ARG(6), (u32)ARG(7), ARG(0))) return; RET(ARG(0)); }
 static void s_EndDeferWindowPos(Cpu *c) { RET(1); }
 static void s_GetWindowPlacement(Cpu *c) { int i = wnd_of(ARG(0)); u64 p = ARG(1); if (i < 0) { RET(0); return; } int sx, sy; /* rcNormalPosition: workspace coordinates for top-level windows, PARENT CLIENT coordinates for children (7-Zip adds .top to the toolbar height) */ if (g_wnd[i].parent >= 0) { sx = g_wnd[i].x; sy = g_wnd[i].y; } else { wnd_window_origin(i, &sx, &sy); sx += SCREEN_X0; sy += SCREEN_Y0; } wr32(c, p, 44); wr32(c, p + 4, 0); wr32(c, p + 8, g_wnd[i].visible ? 1 : 0); wr32(c, p + 28, (u32)sx); wr32(c, p + 32, (u32)sy); wr32(c, p + 36, (u32)(sx + g_wnd[i].w)); wr32(c, p + 40, (u32)(sy + g_wnd[i].h)); RET(1); }
 static void s_SetWindowPlacement(Cpu *c) { int i = wnd_of(ARG(0)); u64 p = ARG(1); if (i < 0) { RET(0); return; } u32 show = rd32(c, p + 8); int l = (s32)rd32(c, p + 28), t = (s32)rd32(c, p + 32), r = (s32)rd32(c, p + 36), b = (s32)rd32(c, p + 40); if (show && show != 0) wnd_show_now(c, i); if (wnd_set_pos(c, i, l, t, r - l, b - t, 0, 1)) return; RET(1); }
@@ -570,13 +590,13 @@ static void s_SetParent(Cpu *c) { int i = wnd_of(ARG(0)), p = wnd_of(ARG(1)); if
 /* GetWindow(hwnd, cmd): 0 first sibling 1 last 2 next 3 prev 4 owner 5 child (first) 6 enabled popup */
 static void s_GetWindow(Cpu *c) { int i = wnd_of(ARG(0)); u32 cmd = (u32)ARG(1); if (i < 0) { RET(0); return; } int parent = g_wnd[i].parent;
   if (cmd == 4) { RET(g_wnd[i].owner >= 0 && wnd_alive(g_wnd[i].owner) ? HWND_OF(g_wnd[i].owner) : 0); return; }
-  if (cmd == 5) { int best = -1; for (int k = 0; k < MAX_WND; k++) if (wnd_alive(k) && g_wnd[k].parent == i && (best < 0 || g_wnd[k].zseq < g_wnd[best].zseq)) best = k; RET(best >= 0 ? HWND_OF(best) : 0); return; }
+  if (cmd == 5) { int best = -1; for (int k = 0; k < MAX_WND; k++) if (wnd_alive(k) && g_wnd[k].parent == i && (best < 0 || g_wnd[k].zseq > g_wnd[best].zseq)) best = k; RET(best >= 0 ? HWND_OF(best) : 0); return; }
   if (cmd == 6) { RET(ARG(0)); return; }
   int best = -1; for (int k = 0; k < MAX_WND; k++) { if (!wnd_alive(k) || g_wnd[k].parent != parent) continue;
-    if (cmd == 0) { if (best < 0 || g_wnd[k].zseq < g_wnd[best].zseq) best = k; } else if (cmd == 1) { if (best < 0 || g_wnd[k].zseq > g_wnd[best].zseq) best = k; }
-    else if (cmd == 2) { if (g_wnd[k].zseq > g_wnd[i].zseq && (best < 0 || g_wnd[k].zseq < g_wnd[best].zseq)) best = k; } else if (cmd == 3) { if (g_wnd[k].zseq < g_wnd[i].zseq && (best < 0 || g_wnd[k].zseq > g_wnd[best].zseq)) best = k; } }
+    if (cmd == 0) { if (best < 0 || g_wnd[k].zseq > g_wnd[best].zseq) best = k; } else if (cmd == 1) { if (best < 0 || g_wnd[k].zseq < g_wnd[best].zseq) best = k; }
+    else if (cmd == 2) { if (g_wnd[k].zseq < g_wnd[i].zseq && (best < 0 || g_wnd[k].zseq > g_wnd[best].zseq)) best = k; } else if (cmd == 3) { if (g_wnd[k].zseq > g_wnd[i].zseq && (best < 0 || g_wnd[k].zseq < g_wnd[best].zseq)) best = k; } }
   RET(best >= 0 ? HWND_OF(best) : 0); }
-static void s_GetTopWindow(Cpu *c) { int i = wnd_of(ARG(0)); int best = -1; for (int k = 0; k < MAX_WND; k++) if (wnd_alive(k) && g_wnd[k].parent == i && (best < 0 || g_wnd[k].zseq < g_wnd[best].zseq)) best = k; RET(best >= 0 ? HWND_OF(best) : 0); }
+static void s_GetTopWindow(Cpu *c) { int i = wnd_of(ARG(0)); int best = -1; for (int k = 0; k < MAX_WND; k++) if (wnd_alive(k) && g_wnd[k].parent == i && (best < 0 || g_wnd[k].zseq > g_wnd[best].zseq)) best = k; RET(best >= 0 ? HWND_OF(best) : 0); }
 static void s_GetNextWindow(Cpu *c) { s_GetWindow(c); }
 static void s_GetLastActivePopup(Cpu *c) { RET(ARG(0)); }
 /* EnumChildWindows / EnumWindows / EnumThreadWindows: callback(hwnd, lparam) per window via continuations */
@@ -589,7 +609,7 @@ static void s_EnumWindows(Cpu *c) { Win32 *w = W; w32_push_cont(c, CONT_ENUMWND,
 static void s_EnumThreadWindows(Cpu *c) { Win32 *w = W; w32_push_cont(c, CONT_ENUMWND, 0); u64 *d = w->cont[w->ncont - 1].data; d[0] = (u64)-1; d[1] = 0; d[2] = ARG(1); d[3] = 1; d[4] = ARG(2); enum_wnd_step(c); }
 static void s_FindWindowA(Cpu *c) { char cls[64], title[256]; text_in(c, ARG(0), 0, cls, sizeof cls); text_in(c, ARG(1), 0, title, sizeof title); for (int k = 0; k < MAX_WND; k++) if (wnd_alive(k) && g_wnd[k].parent < 0 && (!cls[0] || !e_stricmp(g_wnd[k].clsname, cls)) && (!title[0] || !e_strcmp(g_wnd[k].text, title))) { RET(HWND_OF(k)); return; } RET(0); }
 static void s_FindWindowW(Cpu *c) { char cls[64], title[256]; text_in(c, ARG(0), 1, cls, sizeof cls); text_in(c, ARG(1), 1, title, sizeof title); for (int k = 0; k < MAX_WND; k++) if (wnd_alive(k) && g_wnd[k].parent < 0 && (!cls[0] || !e_stricmp(g_wnd[k].clsname, cls)) && (!title[0] || !e_strcmp(g_wnd[k].text, title))) { RET(HWND_OF(k)); return; } RET(0); }
-static void s_FindWindowExW(Cpu *c) { int p = wnd_of(ARG(0)); char cls[64], title[256]; text_in(c, ARG(2), 1, cls, sizeof cls); text_in(c, ARG(3), 1, title, sizeof title); int after = wnd_of(ARG(1)); for (int k = 0; k < MAX_WND; k++) if (wnd_alive(k) && g_wnd[k].parent == p && (after < 0 || g_wnd[k].zseq > g_wnd[after].zseq) && (!cls[0] || !e_stricmp(g_wnd[k].clsname, cls)) && (!title[0] || !e_strcmp(g_wnd[k].text, title))) { RET(HWND_OF(k)); return; } RET(0); }
+static void s_FindWindowExW(Cpu *c) { int p = wnd_of(ARG(0)); char cls[64], title[256]; text_in(c, ARG(2), 1, cls, sizeof cls); text_in(c, ARG(3), 1, title, sizeof title); int after = wnd_of(ARG(1)); int order[MAX_WND], n = wnd_siblings_topdown(p, -1, order); for (int a = 0; a < n; a++) { int k = order[a]; if (wnd_alive(k) && (after < 0 || g_wnd[k].zseq < g_wnd[after].zseq) && (!cls[0] || !e_stricmp(g_wnd[k].clsname, cls)) && (!title[0] || !e_strcmp(g_wnd[k].text, title))) { RET(HWND_OF(k)); return; } } RET(0); }
 static void s_FindWindowExA(Cpu *c) { int p = wnd_of(ARG(0)); char cls[64], title[256]; text_in(c, ARG(2), 0, cls, sizeof cls); text_in(c, ARG(3), 0, title, sizeof title); for (int k = 0; k < MAX_WND; k++) if (wnd_alive(k) && g_wnd[k].parent == p && (!cls[0] || !e_stricmp(g_wnd[k].clsname, cls)) && (!title[0] || !e_strcmp(g_wnd[k].text, title))) { RET(HWND_OF(k)); return; } RET(0); }
 static void s_WindowFromPoint(Cpu *c) { s32 x = (s32)(u32)ARG(0), y = (s32)(u32)(ARG(0) >> 32); if (c->mode32) { x = (s32)(u32)ARG(0); y = (s32)(u32)ARG(1); } int t = hit_test(x - SCREEN_X0, y - SCREEN_Y0); RET(t >= 0 ? HWND_OF(t) : 0); }
 static void s_ChildWindowFromPoint(Cpu *c) { int p = wnd_of(ARG(0)); if (p < 0) { RET(0); return; } s32 x, y; if (c->mode32) { x = (s32)(u32)ARG(1); y = (s32)(u32)ARG(2); } else { x = (s32)(u32)ARG(1); y = (s32)(u32)(ARG(1) >> 32); } int cx, cy; wnd_client_origin(p, &cx, &cy); for (int k = 0; k < MAX_WND; k++) if (wnd_alive(k) && g_wnd[k].parent == p && x >= g_wnd[k].x && y >= g_wnd[k].y && x < g_wnd[k].x + g_wnd[k].w && y < g_wnd[k].y + g_wnd[k].h) { RET(HWND_OF(k)); return; } RET(ARG(0)); }
@@ -907,8 +927,17 @@ static void combo_paint(Cpu *c, int i, u64 hdc, u64 hbr);
 static void listbox_paint(Cpu *c, int i, u64 hdc, u64 hbr);
 static void progress_paint(Cpu *c, int i, u64 hdc);
 static void ctl_paint_with(Cpu *c, int i, u64 hdc, u64 hbr) { switch (g_wnd[i].builtin) { case BI_BUTTON: button_paint(c, i, hdc, hbr); break; case BI_STATIC: case BI_LINK: static_paint(c, i, hdc, hbr); break; case BI_EDIT: edit_paint(c, i, hdc, hbr); break; case BI_COMBO: combo_paint(c, i, hdc, hbr); break; case BI_LISTBOX: case BI_COMBOLIST: listbox_paint(c, i, hdc, hbr); break; case BI_PROGRESS: progress_paint(c, i, hdc); break; default: break; } }
-static void ctlpaint_resume(Cpu *c, u64 rax) { Win32 *w = W; int ci = w->ncont - 1; int i = (int)w->cont[ci].data[0]; u64 hdc = w->cont[ci].data[1]; if (wnd_alive(i)) ctl_paint_with(c, i, hdc, rax); if (wnd_alive(i)) ctl_paint_end(c, i, hdc); else wnd_dc_free(w, hdc); w32_cont_finish(c, 0); }
+static void ctlpaint_resume(Cpu *c, u64 rax) { Win32 *w = W; int ci = w->ncont - 1; int i = (int)w->cont[ci].data[0]; u64 hdc = w->cont[ci].data[1];
+  if (w->cont[ci].data[2] == 0x2B) { /* owner-draw: the parent painted it in WM_DRAWITEM */ w32_heap_free(w, w->cont[ci].data[3]); if (wnd_alive(i)) ctl_paint_end(c, i, hdc); else wnd_dc_free(w, hdc); w32_cont_finish(c, 0); return; }
+  if (wnd_alive(i)) ctl_paint_with(c, i, hdc, rax); if (wnd_alive(i)) ctl_paint_end(c, i, hdc); else wnd_dc_free(w, hdc); w32_cont_finish(c, 0); }
 static void ctl_do_paint(Cpu *c, int i) { Wnd *n = &g_wnd[i]; u64 hdc = ctl_paint_begin(c, i); if (!hdc) { RET(0); return; }
+  if ((n->builtin == BI_BUTTON && (n->style & 0xF) == 0xB) || (n->builtin == BI_STATIC && (n->style & 0x1F) == 0xD)) { /* BS_OWNERDRAW / SS_OWNERDRAW: WM_DRAWITEM(DRAWITEMSTRUCT) to the parent, which paints the control itself (Notepad++ About logo, image buttons) */
+    int p = n->parent; Win32 *w = W; if (p >= 0 && wnd_alive(p) && (!g_wnd[p].builtin || g_wnd[p].superclassed)) { u64 ds = w32_heap_alloc(w, 64, 1); if (ds) { int cw = wnd_client_w(i), ch = wnd_client_h(i); u32 st = (n->pushed ? 1 : 0) | (!wnd_enabled_chain(i) ? 4 : 0) | (n->focus_draw ? 0x10 : 0) | (n->checked ? 8 : 0);
+        wr32(c, ds, n->builtin == BI_BUTTON ? 4 : 5); wr32(c, ds + 4, (u32)n->id); wr32(c, ds + 8, 0); wr32(c, ds + 12, 1 /* ODA_DRAWENTIRE */); wr32(c, ds + 16, st);
+        if (c->mode32) { wr32(c, ds + 20, (u32)HWND_OF(i)); wr32(c, ds + 24, (u32)hdc); wr32(c, ds + 28, 0); wr32(c, ds + 32, 0); wr32(c, ds + 36, (u32)cw); wr32(c, ds + 40, (u32)ch); wr32(c, ds + 44, 0); }
+        else { wr64(c, ds + 24, HWND_OF(i)); wr64(c, ds + 32, hdc); wr32(c, ds + 40, 0); wr32(c, ds + 44, 0); wr32(c, ds + 48, (u32)cw); wr32(c, ds + 52, (u32)ch); wr64(c, ds + 56, 0); }
+        w32_push_cont(c, CONT_CTLPAINT, (u64)i); w->cont[w->ncont - 1].data[1] = hdc; w->cont[w->ncont - 1].data[2] = 0x2B; w->cont[w->ncont - 1].data[3] = ds; w32_guest_call(c, g_wnd[p].wndproc, HWND_OF(p), 0x2B, n->id, ds); return; } }
+    if (n->builtin == BI_STATIC) { ctl_paint_end(c, i, hdc); RET(0); return; } }
   u32 q = 0; switch (n->builtin) { case BI_STATIC: case BI_LINK: q = 0x138; break; case BI_EDIT: q = (n->style & 0x800) || !n->enabled ? 0x138 : 0x133; break; case BI_BUTTON: { u32 bs = n->style & 0xF; if (bs >= 2 && bs <= 9 && bs != 8) q = 0x135; break; } case BI_LISTBOX: q = 0x134; break; default: break; }
   if (q && ctl_color_query(c, i, q, hdc)) return; ctl_paint_with(c, i, hdc, 0); ctl_paint_end(c, i, hdc); RET(0); }
 
@@ -1271,7 +1300,7 @@ static void s_CheckRadioButton(Cpu *c) { int d = wnd_of(ARG(0)); if (d < 0) { RE
 static void s_MapDialogRect(Cpu *c) { int d = wnd_of(ARG(0)); u64 r = ARG(1); int bx = d >= 0 && g_wnd[d].base_x ? g_wnd[d].base_x : 7, by = d >= 0 && g_wnd[d].base_y ? g_wnd[d].base_y : 13; wr32(c, r, (u32)((s32)rd32(c, r) * bx / 4)); wr32(c, r + 4, (u32)((s32)rd32(c, r + 4) * by / 8)); wr32(c, r + 8, (u32)((s32)rd32(c, r + 8) * bx / 4)); wr32(c, r + 12, (u32)((s32)rd32(c, r + 12) * by / 8)); RET(1); }
 static void s_GetDialogBaseUnits(Cpu *c) { RET(7 | (13 << 16)); }
 /* tab order: children of the dialog in creation order with WS_TABSTOP, visible and enabled */
-static int dlg_next_tab(int d, int from, int back) { int order[MAX_WND]; int n = 0; for (int k = 0; k < MAX_WND; k++) if (wnd_alive(k) && g_wnd[k].parent == d) order[n++] = k; for (int a = 1; a < n; a++) { int v = order[a], b = a - 1; while (b >= 0 && g_wnd[order[b]].zseq > g_wnd[v].zseq) { order[b + 1] = order[b]; b--; } order[b + 1] = v; }
+static int dlg_next_tab(int d, int from, int back) { int order[MAX_WND]; int n = wnd_siblings_topdown(d, -1, order);
   int cur = -1; for (int a = 0; a < n; a++) if (order[a] == from) cur = a; for (int step = 1; step <= n; step++) { int a = cur < 0 ? (back ? n - step : step - 1) : ((cur + (back ? n - step : step)) % n); int k = order[a]; if ((g_wnd[k].style & 0x10000) && g_wnd[k].visible && g_wnd[k].enabled && g_wnd[k].builtin != BI_STATIC) return k; } return -1; }
 static void s_GetNextDlgTabItem(Cpu *c) { int d = wnd_of(ARG(0)); if (d < 0) { RET(0); return; } int k = dlg_next_tab(d, wnd_of(ARG(1)), ARG(2) != 0); RET(k >= 0 ? HWND_OF(k) : 0); }
 static void s_GetNextDlgGroupItem(Cpu *c) { int d = wnd_of(ARG(0)); if (d < 0) { RET(0); return; } int from = wnd_of(ARG(1)); int k = dlg_next_tab(d, from, ARG(2) != 0); RET(k >= 0 ? HWND_OF(k) : (from >= 0 ? ARG(1) : 0)); }
