@@ -18,13 +18,15 @@
 #define MENU_H 20
 #define SUPER_ADOPT(i, k) do { if (!g_wnd[i].builtin) { g_wnd[i].builtin = (k); g_wnd[i].superclassed = 1; } } while (0)
 enum { BI_NONE = 0, BI_BUTTON, BI_STATIC, BI_EDIT, BI_COMBO, BI_LISTBOX, BI_SCROLLBAR, BI_DIALOG, BI_PROGRESS, BI_LINK, BI_COMBOLIST, BI_UNSUPPORTED, BI_MSGBOX, BI_MENU, BI_STATUS, BI_TOOLBAR, BI_TAB, BI_TREE, BI_LIST, BI_REBAR, BI_COMBOEX };
-enum { CONT_WNDCREATE = 6 /* = CONT_CREATEWND in win32.c */, CONT_WNDDESTROY = 400, CONT_CTLPAINT = 401, CONT_DLGINIT = 402, CONT_MODAL = 403, CONT_DLGMSG = 404, CONT_SENDCMD = 405, CONT_DLGPROC = 406, CONT_ERASEBG = 407, CONT_SETPOS = 408, CONT_STREAMIN = 409, CONT_ILREAD = 410, CONT_WICREAD = 411, CONT_MENUOPEN = 412, CONT_MENUDRAW = 413, CONT_TABSEL = 414, CONT_SUBCLASS = 415, CONT_DIENUM = 416, CONT_TVSEL = 417, CONT_TVEXP = 418, CONT_TVDISP = 419, CONT_ANSIOUT = 420, CONT_LVCHG = 421, CONT_LVDISP = 422, CONT_LVSORT = 423, CONT_LVCLICK = 424, CONT_RET_VAL_ = 5 };
+enum { CONT_WNDCREATE = 6 /* = CONT_CREATEWND in win32.c */, CONT_WNDDESTROY = 400, CONT_CTLPAINT = 401, CONT_DLGINIT = 402, CONT_MODAL = 403, CONT_DLGMSG = 404, CONT_SENDCMD = 405, CONT_DLGPROC = 406, CONT_ERASEBG = 407, CONT_SETPOS = 408, CONT_STREAMIN = 409, CONT_ILREAD = 410, CONT_WICREAD = 411, CONT_MENUOPEN = 412, CONT_MENUDRAW = 413, CONT_TABSEL = 414, CONT_SUBCLASS = 415, CONT_DIENUM = 416, CONT_TVSEL = 417, CONT_TVEXP = 418, CONT_TVDISP = 419, CONT_ANSIOUT = 420, CONT_LVCHG = 421, CONT_LVDISP = 422, CONT_LVSORT = 423, CONT_LVCLICK = 424, CONT_CWPHOOK = 425, CONT_KBDHOOK = 426, CONT_HOOKNEXT = 427, CONT_FDINIT = 428, CONT_FDEVT = 429, CONT_FDOK = 430, CONT_RET_VAL_ = 5 };
 #define MAX_ITEMS 512
 static int combo_icon_cx(u64 himl);   /* comctl.inc: width reserved for an image-list icon (0 without image list) */
 static void combo_icon_draw(Cpu *c, u64 himl, u32 img1, u64 hdc, int x, int y, int h);   /* comctl.inc: draws item image (img1 = image + 1) centred in a row of height h */
 static void combo_layout_edit(Cpu *c, int i);
 static void combo_sync_edit(Cpu *c, int i);
 static void combo_sync_list(Cpu *c, int i);
+static int kbd_hook_needed(Cpu *c, GuestMsg *m); static void kbd_hook_start(Cpu *c, GuestMsg *m, int mode, u64 lpmsg);
+static u64 si_create(Cpu *c, const char *path);
 typedef struct {
   int used, destroyed; int parent, owner; int builtin; int superclassed; /* app-registered class whose wndproc delegates to a built-in proc (VCL TNewButton …): behaves like the built-in for painting but all messages flow through the guest wndproc */ int pid;   /* owning process: messages from other processes are posted to its queue */ char clsname[40]; u64 wndproc; u64 cls_brush; u32 cls_style; int cls_extra;
   u32 style, exstyle; u64 id, inst; int dc_gen;
@@ -212,12 +214,12 @@ static int next_message(Cpu *c, GuestMsg *out, int remove, u64 filter_hwnd) {
 }
 static void s_PeekMessageA(Cpu *c) {
   Win32 *w = W; GuestMsg m; u32 flags = (u32)ARG(4);
-  if (next_message(c, &m, flags & 1, ARG(1))) { write_msg(c, ARG(0), &m); RET(1); return; }
+  if (next_message(c, &m, flags & 1, ARG(1))) { if ((flags & 1) && kbd_hook_needed(c, &m)) { kbd_hook_start(c, &m, 2, ARG(0)); return; } write_msg(c, ARG(0), &m); RET(1); return; }
   if (w->blits_since_yield || w->yield_frames++ > 20000) { w->blits_since_yield = 0; w->yield_frames = 0; w32_retry_yield(c); return; }
   RET(0);
 }
 static void s_GetMessageA(Cpu *c) {
-  GuestMsg m; if (next_message(c, &m, 1, ARG(1))) { write_msg(c, ARG(0), &m); RET(m.msg == 0x12 ? 0 : 1); return; }
+  GuestMsg m; if (next_message(c, &m, 1, ARG(1))) { if (kbd_hook_needed(c, &m)) { kbd_hook_start(c, &m, 1, ARG(0)); return; } write_msg(c, ARG(0), &m); RET(m.msg == 0x12 ? 0 : 1); return; }
   W->blits_since_yield = 0; w32_retry_yield(c);
 }
 /* text typed on the host (Android soft keyboard / IME, hardware keyboards of other layouts, --type in the native runner):
@@ -253,7 +255,38 @@ static u32 vk_to_char(Win32 *w, u64 vk) { int shift = w->key_state[0x10], ctrl =
 static void translate_msg(Cpu *c, u64 hwnd, u32 msg, u64 vk, u64 lp) { if (msg == 0x100 || msg == 0x104) { u32 ch; if (g_prechar_r != g_prechar_w && g_prechar[g_prechar_r].vk == (u32)vk) { ch = g_prechar[g_prechar_r].ch; g_prechar_r = (g_prechar_r + 1) % PRECHAR_MAX; } else ch = vk_to_char(W, vk); if (ch) post_msg_to(W, hwnd, msg == 0x104 ? 0x106 : 0x102, ch, lp); } }
 static void s_TranslateMessage(Cpu *c) { u64 a = ARG(0); u32 msg = rd32(c, MSG_MSG(a)); translate_msg(c, rdp(c, a), msg, rdp(c, MSG_WP(a)), rdp(c, MSG_LP(a))); RET(msg == 0x100 || msg == 0x101 || msg == 0x104 || msg == 0x105); }
 /* deliver a message to a window procedure (guest call; builtin classes are shim slots too) with a continuation that returns its result */
-static void send_to(Cpu *c, int i, u32 msg, u64 wp, u64 lp, int cont_kind, u64 cont_val) { w32_push_cont(c, cont_kind, cont_val); w32_guest_call(c, g_wnd[i].wndproc, HWND_OF(i), msg, wp, lp); }
+/* Windows hooks (SetWindowsHookEx). Real ones: WH_KEYBOARD (2) — called when a key message is retrieved (GetMessage / PeekMessage(PM_REMOVE) / the
+   modal dialog loop), a non-zero result discards the message; WH_CALLWNDPROC (4) — called with a CWPSTRUCT before every message sent to a window of
+   the process (SendMessage, control notifications); CallNextHookEx walks to the next hook of the same type. Other types are accepted and kept but never called. */
+typedef struct { int used, type, pid; u64 proc; u32 tid; } Hook; static Hook g_hooks[16]; static int g_hook_depth[16]; static int g_hook_cur[16], g_nhook_cur;
+static int hook_find(Cpu *c, int type, int after) { for (int k = after + 1; k < 16; k++) if (g_hooks[k].used && g_hooks[k].type == type && g_hooks[k].pid == W->pid) return k; return -1; }
+static void hook_cur_push(int h) { if (g_nhook_cur < 16) g_hook_cur[g_nhook_cur++] = h; }
+static void hook_cur_pop(void) { if (g_nhook_cur) g_nhook_cur--; }
+static void s_SetWindowsHookExW(Cpu *c) { int type = (int)(s32)(u32)ARG(0); u64 proc = ARG(1); if (!proc) { RET(0); return; } for (int k = 0; k < 16; k++) if (!g_hooks[k].used) { g_hooks[k].used = 1; g_hooks[k].type = type; g_hooks[k].proc = proc; g_hooks[k].tid = (u32)ARG(3); g_hooks[k].pid = W->pid; RET(0x48000 + k + 1); return; } RET(0); }
+static void s_SetWindowsHookExA(Cpu *c) { s_SetWindowsHookExW(c); }
+static void s_UnhookWindowsHookEx(Cpu *c) { u64 h = ARG(0); if (h > 0x48000 && h <= 0x48010) { g_hooks[h - 0x48001].used = 0; RET(1); return; } RET(0); }
+static void hooknext_resume(Cpu *c, u64 rax) { hook_cur_pop(); w32_cont_finish(c, rax); }
+static void s_CallNextHookEx(Cpu *c) { int cur = g_nhook_cur ? g_hook_cur[g_nhook_cur - 1] : -1; if (cur < 0) { RET(0); return; } int nx = hook_find(c, g_hooks[cur].type, cur); if (nx < 0) { RET(0); return; }
+  w32_push_cont(c, CONT_HOOKNEXT, 0); hook_cur_push(nx); w32_guest_call(c, g_hooks[nx].proc, ARG(1), ARG(2), ARG(3), 0); }
+static void send_to(Cpu *c, int i, u32 msg, u64 wp, u64 lp, int cont_kind, u64 cont_val) { Win32 *w = W;
+  int h = g_hook_depth[4] ? -1 : hook_find(c, 4, -1);
+  if (h >= 0 && g_wnd[i].pid == w->pid) { u64 cwp = w32_heap_alloc(w, 32, 1); if (cwp) { /* CWPSTRUCT: lParam, wParam, message, hwnd */
+      if (c->mode32) { wr32(c, cwp, (u32)lp); wr32(c, cwp + 4, (u32)wp); wr32(c, cwp + 8, msg); wr32(c, cwp + 12, (u32)HWND_OF(i)); } else { wr64(c, cwp, lp); wr64(c, cwp + 8, wp); wr32(c, cwp + 16, msg); wr32(c, cwp + 20, 0); wr64(c, cwp + 24, HWND_OF(i)); }
+      w32_push_cont(c, CONT_CWPHOOK, (u64)i); u64 *d = w->cont[w->ncont - 1].data; d[1] = msg; d[2] = wp; d[3] = lp; d[4] = (u64)cont_kind; d[5] = cont_val; d[6] = cwp; g_hook_depth[4]++; hook_cur_push(h);
+      w32_guest_call(c, g_hooks[h].proc, 0 /* HC_ACTION */, 0 /* sent by this thread */, cwp, 0); return; } }
+  w32_push_cont(c, cont_kind, cont_val); w32_guest_call(c, g_wnd[i].wndproc, HWND_OF(i), msg, wp, lp); }
+static void cwphook_resume(Cpu *c, u64 rax) { (void)rax; Win32 *w = W; int ci = w->ncont - 1; u64 *d = w->cont[ci].data; g_hook_depth[4]--; hook_cur_pop(); w32_heap_free(w, d[6]);
+  int i = (int)d[0]; u32 msg = (u32)d[1]; u64 wp = d[2], lp = d[3]; int kind = (int)d[4]; u64 val = d[5]; if (!wnd_alive(i) || !g_wnd[i].wndproc) { w32_cont_finish(c, 0); return; }
+  w->cont[ci].kind = kind; d[0] = val; d[1] = d[2] = d[3] = 0; w32_guest_call(c, g_wnd[i].wndproc, HWND_OF(i), msg, wp, lp); }   /* the continuation becomes the one the plain send would have pushed */
+static GuestMsg g_modal_pending; static int g_modal_pending_valid;
+static int kbd_hook_needed(Cpu *c, GuestMsg *m) { return m->msg >= 0x100 && m->msg <= 0x105 && !g_hook_depth[2] && hook_find(c, 2, -1) >= 0; }
+static void kbd_hook_start(Cpu *c, GuestMsg *m, int mode, u64 lpmsg) { Win32 *w = W; int h = hook_find(c, 2, -1); w32_push_cont(c, CONT_KBDHOOK, (u64)mode); u64 *d = w->cont[w->ncont - 1].data; d[1] = m->hwnd; d[2] = m->msg; d[3] = m->wparam; d[4] = m->lparam; d[5] = m->time; d[6] = lpmsg;
+  g_hook_depth[2]++; hook_cur_push(h); w32_guest_call(c, g_hooks[h].proc, 0 /* HC_ACTION */, m->wparam, m->lparam, 0); }
+static void modal_resume(Cpu *c, u64 rax);
+static void kbdhook_resume(Cpu *c, u64 rax) { Win32 *w = W; int ci = w->ncont - 1; u64 *d = w->cont[ci].data; g_hook_depth[2]--; hook_cur_pop(); int mode = (int)d[0]; GuestMsg m; m.hwnd = d[1]; m.msg = (u32)d[2]; m.wparam = d[3]; m.lparam = d[4]; m.time = (u32)d[5];
+  if (mode == 0) { if (!rax) { g_modal_pending = m; g_modal_pending_valid = 1; } modal_resume(c, 0); return; }   /* modal loop: the message is processed (or dropped) on the next pass */
+  if (rax) { m.msg = 0; m.wparam = m.lparam = 0; }   /* eaten by the hook: the program receives WM_NULL in its place */
+  write_msg(c, d[6], &m); w32_cont_finish(c, 1); }
 static void dispatch_to_wndproc(Cpu *c, u64 hwnd, u32 msg, u64 wp, u64 lp) {
   Win32 *w = W;
   if (msg == 0x113 && lp && lp > 0x10000) { w32_push_cont(c, CONT_RET_RAX, 0); w32_guest_call(c, lp, hwnd, msg, wp, (u64)(u32)(host_now_ms() - w->start_ms)); return; }
@@ -609,7 +642,7 @@ static void s_EnumWindows(Cpu *c) { Win32 *w = W; w32_push_cont(c, CONT_ENUMWND,
 static void s_EnumThreadWindows(Cpu *c) { Win32 *w = W; w32_push_cont(c, CONT_ENUMWND, 0); u64 *d = w->cont[w->ncont - 1].data; d[0] = (u64)-1; d[1] = 0; d[2] = ARG(1); d[3] = 1; d[4] = ARG(2); enum_wnd_step(c); }
 static void s_FindWindowA(Cpu *c) { char cls[64], title[256]; text_in(c, ARG(0), 0, cls, sizeof cls); text_in(c, ARG(1), 0, title, sizeof title); for (int k = 0; k < MAX_WND; k++) if (wnd_alive(k) && g_wnd[k].parent < 0 && (!cls[0] || !e_stricmp(g_wnd[k].clsname, cls)) && (!title[0] || !e_strcmp(g_wnd[k].text, title))) { RET(HWND_OF(k)); return; } RET(0); }
 static void s_FindWindowW(Cpu *c) { char cls[64], title[256]; text_in(c, ARG(0), 1, cls, sizeof cls); text_in(c, ARG(1), 1, title, sizeof title); for (int k = 0; k < MAX_WND; k++) if (wnd_alive(k) && g_wnd[k].parent < 0 && (!cls[0] || !e_stricmp(g_wnd[k].clsname, cls)) && (!title[0] || !e_strcmp(g_wnd[k].text, title))) { RET(HWND_OF(k)); return; } RET(0); }
-static void s_FindWindowExW(Cpu *c) { int p = wnd_of(ARG(0)); char cls[64], title[256]; text_in(c, ARG(2), 1, cls, sizeof cls); text_in(c, ARG(3), 1, title, sizeof title); int after = wnd_of(ARG(1)); int order[MAX_WND], n = wnd_siblings_topdown(p, -1, order); for (int a = 0; a < n; a++) { int k = order[a]; if (wnd_alive(k) && (after < 0 || g_wnd[k].zseq < g_wnd[after].zseq) && (!cls[0] || !e_stricmp(g_wnd[k].clsname, cls)) && (!title[0] || !e_strcmp(g_wnd[k].text, title))) { RET(HWND_OF(k)); return; } } RET(0); }
+static void s_FindWindowExW(Cpu *c) { int p = wnd_of(ARG(0)); char cls[64], title[256]; text_in(c, ARG(2), 1, cls, sizeof cls); text_in(c, ARG(3), 1, title, sizeof title); int any_title = !ARG(3); int after = wnd_of(ARG(1)); int order[MAX_WND], n = wnd_siblings_topdown(p, -1, order); for (int a = 0; a < n; a++) { int k = order[a]; if (wnd_alive(k) && (after < 0 || g_wnd[k].zseq < g_wnd[after].zseq) && (!cls[0] || !e_stricmp(g_wnd[k].clsname, cls)) && (any_title || !e_strcmp(g_wnd[k].text, title))) { RET(HWND_OF(k)); return; } } RET(0); }
 static void s_FindWindowExA(Cpu *c) { int p = wnd_of(ARG(0)); char cls[64], title[256]; text_in(c, ARG(2), 0, cls, sizeof cls); text_in(c, ARG(3), 0, title, sizeof title); for (int k = 0; k < MAX_WND; k++) if (wnd_alive(k) && g_wnd[k].parent == p && (!cls[0] || !e_stricmp(g_wnd[k].clsname, cls)) && (!title[0] || !e_strcmp(g_wnd[k].text, title))) { RET(HWND_OF(k)); return; } RET(0); }
 static void s_WindowFromPoint(Cpu *c) { s32 x = (s32)(u32)ARG(0), y = (s32)(u32)(ARG(0) >> 32); if (c->mode32) { x = (s32)(u32)ARG(0); y = (s32)(u32)ARG(1); } int t = hit_test(x - SCREEN_X0, y - SCREEN_Y0); RET(t >= 0 ? HWND_OF(t) : 0); }
 static void s_ChildWindowFromPoint(Cpu *c) { int p = wnd_of(ARG(0)); if (p < 0) { RET(0); return; } s32 x, y; if (c->mode32) { x = (s32)(u32)ARG(1); y = (s32)(u32)ARG(2); } else { x = (s32)(u32)ARG(1); y = (s32)(u32)(ARG(1) >> 32); } int cx, cy; wnd_client_origin(p, &cx, &cy); for (int k = 0; k < MAX_WND; k++) if (wnd_alive(k) && g_wnd[k].parent == p && x >= g_wnd[k].x && y >= g_wnd[k].y && x < g_wnd[k].x + g_wnd[k].w && y < g_wnd[k].y + g_wnd[k].h) { RET(HWND_OF(k)); return; } RET(ARG(0)); }
@@ -1401,7 +1434,7 @@ static void modal_loop(Cpu *c, int i) {
     int ow = n->owner; if (ow >= 0 && wnd_alive(ow)) { g_wnd[ow].enabled = 1; wnd_invalidate(ow, 1); g_active = ow; if (!wnd_alive(g_focus) || wnd_root(g_focus) == i) g_focus = ow; }
     g_modal[m].phase = 2; n->visible = 0; wnd_invalidate_all(); w->dirty = 1;
     w32_push_cont(c, CONT_MODAL, (u64)i); destroy_window(c, i); return; }   /* destroy finishes → chained CONT_MODAL (phase 2) returns the result */
-  GuestMsg msg; if (!next_message(c, &msg, 1, 0)) { w->blits_since_yield = 0; w32_retry_yield(c); return; }
+  GuestMsg msg; if (g_modal_pending_valid) { msg = g_modal_pending; g_modal_pending_valid = 0; } else { if (!next_message(c, &msg, 1, 0)) { w->blits_since_yield = 0; w32_retry_yield(c); return; } if (kbd_hook_needed(c, &msg)) { kbd_hook_start(c, &msg, 0, 0); return; } }
   if (msg.msg == 0x12) { w->quit_posted = 1; n->ended = 1; n->result = 0; modal_loop(c, i); return; }
   if (dlg_key_message(c, i, &msg)) return;
   translate_msg(c, msg.hwnd, msg.msg, msg.wparam, msg.lparam);
@@ -1498,14 +1531,33 @@ static void s_SHBrowseForFolderA(Cpu *c) { s_SHBrowseForFolderW(c); }
    (lpstrFile, nFileOffset, nFileExtension, lpstrFileTitle, nFilterIndex; lpstrDefExt appended when the name has no extension).
    The same dialog serves IFileOpenDialog / IFileSaveDialog (filedlg_com.inc). Hooks / custom templates / multi-select are not run. */
 #define FD_MAX_FILTERS 24
-typedef struct { u64 ofn; int wide, save; u32 flags; int nflt; char fname[FD_MAX_FILTERS][64], fpat[FD_MAX_FILTERS][128]; char defext[16]; int wnd; int used; int spec; int pickfolders; char dir[1024]; } FileDlg;
+typedef struct { u64 ofn; int wide, save; u32 flags; int nflt; char fname[FD_MAX_FILTERS][64], fpat[FD_MAX_FILTERS][128]; char defext[16]; int wnd; int used; int spec; int pickfolders; char dir[1024];  char accept_full[1024]; } FileDlg;
 /* IFileDialog (COM) state, host side; the guest object only carries the index */
-typedef struct { int used, save; u32 options; int nflt; char fname[FD_MAX_FILTERS][64], fpat[FD_MAX_FILTERS][128]; int ftype; char filename[520], title[256], defext[16], folder[1024], result[1024]; int chk_id[8], chk_val[8], nchk; u64 sink; } FdSpec;
+typedef struct { int used, save; u32 options; int nflt; char fname[FD_MAX_FILTERS][64], fpat[FD_MAX_FILTERS][128]; int ftype; char filename[520], title[256], defext[16], folder[1024], result[1024]; int chk_id[8], chk_val[8], nchk; u64 sink;  u64 obj; } FdSpec;
 static FdSpec g_fdspec[8];
 static FileDlg g_fdlg[8];
 static int fdlg_is_com(int wnd) { for (int k = 0; k < 8; k++) if (g_fdlg[k].used && g_fdlg[k].wnd == wnd) return g_fdlg[k].spec >= 0; return 0; }
 static void fdlg_release(int wnd) { for (int k = 0; k < 8; k++) if (g_fdlg[k].used && g_fdlg[k].wnd == wnd) g_fdlg[k].used = 0; }
 static FileDlg *fdlg_of_wnd(int i) { for (int k = 0; k < 8; k++) if (g_fdlg[k].used && g_fdlg[k].wnd == i) return &g_fdlg[k]; return 0; }
+static void fd_name_set(Cpu *c, int i, const char *t) { int cb = dlg_find_id(i, 101); if (cb < 0) return; Wnd *k = &g_wnd[cb]; wnd_set_text(k, t); if (k->edit_wnd > 0 && wnd_alive(k->edit_wnd)) { Wnd *e = &g_wnd[k->edit_wnd]; wnd_set_text(e, t); e->sel0 = 0; e->sel1 = (int)e_strlen(t); wnd_invalidate(k->edit_wnd, 1); } else combo_sync_edit(c, cb); wnd_invalidate(cb, 1); }
+static const char *fd_name_get(int i) { int cb = dlg_find_id(i, 101); if (cb < 0) return ""; Wnd *k = &g_wnd[cb]; if (k->edit_wnd > 0 && wnd_alive(k->edit_wnd)) return g_wnd[k->edit_wnd].text; return k->text; }
+static FileDlg *fdlg_of_spec(int spec) { for (int k = 0; k < 8; k++) if (g_fdlg[k].used && g_fdlg[k].spec == spec && wnd_alive(g_fdlg[k].wnd)) return &g_fdlg[k]; return 0; }
+/* IFileDialogEvents (Advise): OnFileOk 3, OnFolderChanging 4, OnFolderChange 5, OnSelectionChange 6, OnShareViolation 7, OnTypeChange 8, OnOverwrite 9 — returns 1 when the sink was called (a guest call is in flight) */
+static int fd_fire(Cpu *c, int i, int method, u64 a2, u64 a3, int cont_kind, u64 step) { FileDlg *fd = fdlg_of_wnd(i); if (!fd || fd->spec < 0) return 0; FdSpec *sp = &g_fdspec[fd->spec]; if (!sp->sink || !sp->obj) return 0; u64 vt = rdp(c, sp->sink); if (!vt) return 0; u64 fn = rdp(c, vt + (u64)method * PSZ_OF(c)); if (!fn) return 0;
+  Win32 *w = W; w32_push_cont(c, cont_kind, (u64)i); w->cont[w->ncont - 1].data[1] = step; hook_cur_push(-1); w32_guest_call(c, fn, sp->sink, sp->obj, a2, a3); return 1; }
+static void fd_preset_name(Cpu *c, int i) { FileDlg *fd = fdlg_of_wnd(i); if (!fd) return; char pre[520] = ""; if (fd->spec >= 0) e_snprintf(pre, sizeof pre, "%s", g_fdspec[fd->spec].filename); else { u64 lf = rdp(c, fd->ofn + (c->mode32 ? 28 : 48)); if (lf) text_in(c, lf, fd->wide, pre, sizeof pre); }
+  const char *b = pre; for (const char *p = pre; *p; p++) if (*p == '\\') b = p + 1; fd_name_set(c, i, b); }
+/* dialog start-up in the order the real dialog fires its events: OnTypeChange → OnFolderChanging → OnFolderChange → (file name shown) → OnSelectionChange; returns 1 while a sink call is in flight */
+static int fd_init_step(Cpu *c, int i, int step) { FileDlg *fd = fdlg_of_wnd(i);
+  for (;;) { if (!fd || !wnd_alive(i)) return 0;
+    if (step == 0) { if (fd_fire(c, i, 8, 0, 0, CONT_FDINIT, 1)) return 1; step = 1; }
+    if (step == 1) { u64 si = si_create(c, fd->dir); if (fd_fire(c, i, 4, si, 0, CONT_FDINIT, 2)) return 1; step = 2; }
+    if (step == 2) { if (fd_fire(c, i, 5, 0, 0, CONT_FDINIT, 3)) return 1; step = 3; }
+    if (step == 3) { fd_preset_name(c, i); if (fd_fire(c, i, 6, 0, 0, CONT_FDINIT, 4)) return 1; step = 4; }
+    return 0; } }
+static void fdinit_resume(Cpu *c, u64 rax) { (void)rax; Win32 *w = W; int ci = w->ncont - 1; int i = (int)w->cont[ci].data[0]; int step = (int)w->cont[ci].data[1]; hook_cur_pop(); w->ncont--; /* the next step pushes its own continuation on the same frame */ if (fd_init_step(c, i, step)) return; w->ncont++; w32_cont_finish(c, 1); }
+static void fd_accept_finish(Cpu *c, int i);
+static void fdok_resume(Cpu *c, u64 rax) { Win32 *w = W; int ci = w->ncont - 1; int i = (int)w->cont[ci].data[0]; hook_cur_pop(); if (rax == 0 && wnd_alive(i)) fd_accept_finish(c, i); w32_cont_finish(c, 1); }
 static void fd_refresh(Cpu *c, int i) { FileDlg *fd = fdlg_of_wnd(i); int lb = dlg_find_id(i, 100), lab = dlg_find_id(i, 103), cb = dlg_find_id(i, 104); if (!fd || lb < 0) return;
   if (lab >= 0) { wnd_set_text(&g_wnd[lab], fd->dir); wnd_invalidate(lab, 1); }
   Wnd *l = &g_wnd[lb]; items_free(l); items_add(l, "[..]", -1);
@@ -1522,12 +1574,14 @@ static void fd_refresh(Cpu *c, int i) { FileDlg *fd = fdlg_of_wnd(i); int lb = d
 static void fd_join(const char *dir, const char *name, char *out, size_t cap) { if ((name[0] && name[1] == ':') || name[0] == '\\') e_snprintf(out, cap, "%s", name); else e_snprintf(out, cap, "%s%s%s", dir, dir[e_strlen(dir) - 1] == '\\' ? "" : "\\", name); }
 static void fd_up(char *path) { size_t l = e_strlen(path); while (l > 3 && path[l - 1] != '\\') l--; if (l > 3) path[l - 1] = 0; else path[3] = 0; }
 /* OK: resolve the name; a folder navigates, a file ends the dialog and fills the OPENFILENAME (or the COM spec) */
-static void fd_accept(Cpu *c, int i, const char *name) { Wnd *n = &g_wnd[i]; FileDlg *fd = fdlg_of_wnd(i); if (!fd || !name[0]) return; Win32 *w = W;
+static void fd_accept_finish(Cpu *c, int i) { Wnd *n = &g_wnd[i]; FileDlg *fd = fdlg_of_wnd(i); if (!fd || fd->spec < 0) return; FdSpec *sp = &g_fdspec[fd->spec]; const char *full = fd->accept_full; e_snprintf(sp->result, sizeof sp->result, "%s", full); e_snprintf(sp->folder, sizeof sp->folder, "%s", fd->dir); const char *bb = full; for (const char *p = full; *p; p++) if (*p == '\\') bb = p + 1; e_snprintf(sp->filename, sizeof sp->filename, "%s", bb); int cb = dlg_find_id(i, 104); sp->ftype = (cb >= 0 && g_wnd[cb].cursel >= 0 ? g_wnd[cb].cursel : 0) + 1; wnd_set_text(n, full); n->ended = 1; n->result = 1; (void)c; }
+/* the user accepted a name (Enter, Open/Save button, double click): returns 1 when a sink call is in flight (the caller must not RET) */
+static int fd_accept(Cpu *c, int i, const char *name) { Wnd *n = &g_wnd[i]; FileDlg *fd = fdlg_of_wnd(i); if (!fd || !name[0]) return 0; Win32 *w = W;
   char full[1024]; fd_join(fd->dir, name, full, sizeof full); u64 sz; int st = vfs_stat(full, &sz);
-  if (st == 2) { e_snprintf(fd->dir, sizeof fd->dir, "%s", full); fd_refresh(c, i); return; }
+  if (st == 2) { e_snprintf(fd->dir, sizeof fd->dir, "%s", full); fd_refresh(c, i); return 0; }
   if (!e_strchr(name, '.') && fd->defext[0]) { size_t l = e_strlen(full); e_snprintf(full + l, sizeof full - l, ".%s", fd->defext); st = vfs_stat(full, &sz); }
-  if (!fd->save && (fd->flags & 0x1000 /* OFN_FILEMUSTEXIST */) && st != 1) { w32_report(w, "GetOpenFileName: '%s' does not exist", full); return; }
-  if (fd->spec >= 0) { FdSpec *sp = &g_fdspec[fd->spec]; e_snprintf(sp->result, sizeof sp->result, "%s", full); e_snprintf(sp->folder, sizeof sp->folder, "%s", fd->dir); const char *bb = full; for (const char *p = full; *p; p++) if (*p == '\\') bb = p + 1; e_snprintf(sp->filename, sizeof sp->filename, "%s", bb); int cb = dlg_find_id(i, 104); sp->ftype = (cb >= 0 && g_wnd[cb].cursel >= 0 ? g_wnd[cb].cursel : 0) + 1; wnd_set_text(n, full); n->ended = 1; n->result = 1; return; }
+  if (!fd->save && (fd->flags & 0x1000 /* OFN_FILEMUSTEXIST */) && st != 1) { w32_report(w, "GetOpenFileName: '%s' does not exist", full); return 0; }
+  if (fd->spec >= 0) { e_snprintf(fd->accept_full, sizeof fd->accept_full, "%s", full); if (fd_fire(c, i, 3 /* OnFileOk: S_FALSE keeps the dialog open */, 0, 0, CONT_FDOK, 0)) return 1; fd_accept_finish(c, i); return 0; }
   u64 o = fd->ofn; int x86 = c->mode32;
   u64 lpstrFile = rdp(c, o + (x86 ? 28 : 48)); u32 nMaxFile = rd32(c, o + (x86 ? 32 : 56)); u64 lpstrTitle = rdp(c, o + (x86 ? 36 : 64)); u32 nMaxTitle = rd32(c, o + (x86 ? 40 : 72));
   if (lpstrFile && nMaxFile) text_out_cap(c, lpstrFile, full, nMaxFile, fd->wide);
@@ -1537,19 +1591,19 @@ static void fd_accept(Cpu *c, int i, const char *name) { Wnd *n = &g_wnd[i]; Fil
   wr16(c, o + (x86 ? 56 : 100), (u16)off_name); wr16(c, o + (x86 ? 58 : 102), (u16)(ext ? off_ext : 0));
   if (lpstrTitle && nMaxTitle) text_out_cap(c, lpstrTitle, base, nMaxTitle, fd->wide);
   int cb = dlg_find_id(i, 104); wr32(c, o + (x86 ? 24 : 44), (u32)((cb >= 0 && g_wnd[cb].cursel >= 0 ? g_wnd[cb].cursel : 0) + 1));
-  wnd_set_text(n, full); n->ended = 1; n->result = 1; }
+  wnd_set_text(n, full); n->ended = 1; n->result = 1; return 0; }
 static void s_NebulaFileDlgProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } u32 msg = (u32)ARG(1); u64 wp = ARG(2); Wnd *n = &g_wnd[i]; FileDlg *fd = fdlg_of_wnd(i);
   if (msg == 0x110) { int cb = dlg_find_id(i, 104); if (cb >= 0 && fd) { Wnd *k = &g_wnd[cb]; items_free(k); for (int f = 0; f < fd->nflt; f++) items_add(k, fd->fname[f], -1); if (!fd->nflt) items_add(k, "All Files (*.*)", -1); u32 sel = fd->spec >= 0 ? (u32)g_fdspec[fd->spec].ftype : (u32)rd32(c, fd->ofn + (c->mode32 ? 24 : 44)); k->cursel = (sel >= 1 && (int)sel <= k->nitems) ? (int)sel - 1 : 0; wnd_set_text(k, k->items[k->cursel]); wnd_invalidate(cb, 1); }
-    int ed = dlg_find_id(i, 101); if (ed >= 0 && fd) { /* a preset file name in lpstrFile / IFileDialog::SetFileName */ char pre[520] = ""; if (fd->spec >= 0) e_snprintf(pre, sizeof pre, "%s", g_fdspec[fd->spec].filename); else { u64 lf = rdp(c, fd->ofn + (c->mode32 ? 28 : 48)); if (lf) text_in(c, lf, fd->wide, pre, sizeof pre); } const char *b = pre; for (const char *p = pre; *p; p++) if (*p == '\\') b = p + 1; wnd_set_text(&g_wnd[ed], b); g_wnd[ed].sel0 = 0; g_wnd[ed].sel1 = (int)e_strlen(b); /* preset name selected, typing replaces it */ }
+    if (fd_init_step(c, i, 0)) return;   /* IFileDialogEvents start-up sequence, then the preset name (lpstrFile / SetFileName) */
     fd_refresh(c, i); RET(1); return; }
   if (msg == 0x111) { u32 id = (u32)(wp & 0xffff), code = (u32)(wp >> 16);
     if (id == 100 && (code == 2 /* LBN_DBLCLK */ || code == 1 /* LBN_SELCHANGE */)) { int lb = dlg_find_id(i, 100), ed = dlg_find_id(i, 101); if (lb >= 0 && g_wnd[lb].cursel >= 0) { const char *it = g_wnd[lb].items[g_wnd[lb].cursel]; int isdir = it[0] == '[';
-        if (code == 1) { if (!isdir && ed >= 0) { wnd_set_text(&g_wnd[ed], it); wnd_invalidate(ed, 1); } RET(1); return; }
+        if (code == 1) { if (!isdir && ed >= 0) { fd_name_set(c, i, it); } RET(1); return; }
         if (!e_strcmp(it, "[..]")) { if (fd) { fd_up(fd->dir); fd_refresh(c, i); } }
         else if (isdir) { char nm[140]; e_snprintf(nm, sizeof nm, "%s", it + 1); size_t l = e_strlen(nm); if (l) nm[l - 1] = 0; if (fd) { char p[1024]; fd_join(fd->dir, nm, p, sizeof p); e_snprintf(fd->dir, sizeof fd->dir, "%s", p); fd_refresh(c, i); } }
-        else fd_accept(c, i, it); } RET(1); return; }
-    if (id == 104 && code == 1 /* CBN_SELCHANGE */) { fd_refresh(c, i); RET(1); return; }
-    if (id == 1) { int ed = dlg_find_id(i, 101); if (ed >= 0) { char nm[520]; e_snprintf(nm, sizeof nm, "%s", g_wnd[ed].text); size_t l = e_strlen(nm); while (l && nm[l - 1] == ' ') nm[--l] = 0; if (l) fd_accept(c, i, nm); else if (fd && fd->pickfolders && fd->spec >= 0) { FdSpec *sp = &g_fdspec[fd->spec]; e_snprintf(sp->result, sizeof sp->result, "%s", fd->dir); e_snprintf(sp->folder, sizeof sp->folder, "%s", fd->dir); n->ended = 1; n->result = 1; } } RET(1); return; }
+        else if (fd_accept(c, i, it)) return; } RET(1); return; }
+    if (id == 104 && code == 1 /* CBN_SELCHANGE */) { fd_refresh(c, i); if (fd_fire(c, i, 8 /* OnTypeChange */, 0, 0, CONT_FDEVT, 0)) return; RET(1); return; }
+    if (id == 1) { int ed = dlg_find_id(i, 101); if (ed >= 0) { char nm[520]; e_snprintf(nm, sizeof nm, "%s", fd_name_get(i)); size_t l = e_strlen(nm); while (l && nm[l - 1] == ' ') nm[--l] = 0; if (l) { if (fd_accept(c, i, nm)) return; } else if (fd && fd->pickfolders && fd->spec >= 0) { FdSpec *sp = &g_fdspec[fd->spec]; e_snprintf(sp->result, sizeof sp->result, "%s", fd->dir); e_snprintf(sp->folder, sizeof sp->folder, "%s", fd->dir); n->ended = 1; n->result = 1; } } RET(1); return; }
     if (id == 2) { n->ended = 1; n->result = 0; RET(1); return; } RET(0); return; }
   RET(0); }
 static FileDlg *fd_alloc(void) { if (g_nmodal >= 8) return 0; for (int k = 0; k < 8; k++) if (!g_fdlg[k].used) { FileDlg *fd = &g_fdlg[k]; e_memset(fd, 0, sizeof *fd); fd->used = 1; fd->spec = -1; return fd; } return 0; }
@@ -1558,7 +1612,7 @@ static void fd_show(Cpu *c, FileDlg *fd, u64 owner_h, const char *title, const c
   size_t n = 0; mb_put32(&n, 0x80C800C0u | 0x40 | 0x04); mb_put32(&n, 0); mb_put16(&n, 9); mb_put16(&n, 0); mb_put16(&n, 0); mb_put16(&n, 300); mb_put16(&n, 194); mb_put16(&n, 0); mb_put16(&n, 0); mb_puts(&n, title); mb_put16(&n, 8); mb_puts(&n, "MS Shell Dlg");
   mb_item(&n, 0, 8, 7, 34, 10, 0xFFFF, 0x82, "Look in:"); mb_item(&n, 0, 44, 7, 248, 10, 103, 0x82, "");
   mb_item(&n, 0x1 | 0x800000 /* WS_BORDER */ | 0x200000, 8, 20, 284, 108, 100, 0x83, "");   /* no tab stop: focus starts in the file-name edit like comdlg32 */
-  mb_item(&n, 0, 8, 136, 56, 10, 0xFFFF, 0x82, "File name:"); mb_item(&n, 0x80 | 0x10000 | 0x800000, 66, 134, 226, 13, 101, 0x81, "");
+  mb_item(&n, 0, 8, 136, 56, 10, 0xFFFF, 0x82, "File name:"); mb_item(&n, 0x2 | 0x40 | 0x10000 | 0x200000, 66, 134, 226, 80, 101, 0x85, "");   /* ComboBox + Edit child, as comdlg32 (Notepad++ finds the Edit by FindWindowEx(combo, "Edit", "")) */
   mb_item(&n, 0, 8, 154, 58, 10, 0xFFFF, 0x82, "Files of type:"); mb_item(&n, 0x3 | 0x10000 | 0x200000, 66, 152, 226, 80, 104, 0x85, "");
   mb_item(&n, 1 | 0x10000, 184, 174, 50, 14, 1, 0x80, save ? "Save" : "Open"); mb_item(&n, 0x10000, 242, 174, 50, 14, 2, 0x80, "Cancel");
   u64 tmpl = w32_heap_alloc(w, n * 2 + 16, 1); u8 *p = mem_ptr(w->mem, tmpl, n * 2, 1); if (!p) { fd->used = 0; RET(0); return; } e_memcpy(p, g_mb_tmpl, n * 2);
@@ -1589,6 +1643,8 @@ void gdi_cont_resume(Cpu *c, int kind, u64 rax) {
     case CONT_WNDCREATE: wndcreate_resume(c, rax); return;
     case CONT_WNDDESTROY: destroy_step(c); return;
     case CONT_CTLPAINT: ctlpaint_resume(c, rax); return;
+    case CONT_CWPHOOK: cwphook_resume(c, rax); return; case CONT_KBDHOOK: kbdhook_resume(c, rax); return; case CONT_HOOKNEXT: hooknext_resume(c, rax); return;
+    case CONT_FDINIT: fdinit_resume(c, rax); return; case CONT_FDEVT: hook_cur_pop(); w32_cont_finish(c, 1); return; case CONT_FDOK: fdok_resume(c, rax); return;
     case CONT_ERASEBG: erasebg_resume(c, rax); return;
     case CONT_SETPOS: setpos_resume(c, rax); return;
     case CONT_STREAMIN: streamin_resume(c, rax); return;

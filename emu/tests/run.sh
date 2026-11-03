@@ -354,8 +354,8 @@ check "typing32.exe (x86): the same host text input as a 32-bit process"  "TYPIN
 # file dialogs: GetOpenFileNameW / GetSaveFileNameA (comdlg32) and the COM IFileOpenDialog / IFileSaveDialog (+IFileDialogCustomize,
 # IShellItem, SHCreateItemFromParsingName) — the dialog is driven by typing the name + Enter, results/offsets/default extension checked by the exe
 FDT=$(mktemp -d)
-check "fdlg.exe (x64): GetOpenFileName / GetSaveFileName / IFileOpenDialog / IFileSaveDialog return the chosen files"  "FDLG OK"  "$(X64_MODAL=1 $X --quiet --no-stdin --max-ms 20000 --mount-rw "$FDT=C:\\nebula" --type 'fd_test.txt@800' --key 13@1500 --type 'report@2500' --key 13@3200 --type 'fd_test.txt@4200' --key 13@4900 --key 13@6000 tests/fdlg.exe 2>&1 || true)"
-check "fdlg32.exe (x86): the same file dialogs from a 32-bit process"  "FDLG OK"  "$(X64_MODAL=1 $X --quiet --no-stdin --max-ms 20000 --mount-rw "$FDT=C:\\nebula" --type 'fd_test.txt@800' --key 13@1500 --type 'report@2500' --key 13@3200 --type 'fd_test.txt@4200' --key 13@4900 --key 13@6000 tests/fdlg32.exe 2>&1 || true)"
+check "fdlg.exe (x64): GetOpenFileName / GetSaveFileName / IFileOpenDialog / IFileSaveDialog return the chosen files; IFileDialogEvents (OnTypeChange/OnFolderChanging/OnFolderChange/OnSelectionChange/OnFileOk), IOleWindow::GetWindow, ComboBox→Edit name field, WH_KEYBOARD (eats a key, rewrites the name on Enter) + WH_CALLWNDPROC + CallNextHookEx chain"  "FDLG OK"  "$(X64_MODAL=1 $X --quiet --no-stdin --max-ms 20000 --mount-rw "$FDT=C:\\nebula" --type 'fd_test.txt@800' --key 13@1500 --type 'report@2500' --key 13@3200 --type 'fd_test.txt@4200' --key 13@4900 --key 13@6000 --type 'draftz@7200' --key 13@8200 tests/fdlg.exe 2>&1 || true)"
+check "fdlg32.exe (x86): the same file dialogs from a 32-bit process"  "FDLG OK"  "$(X64_MODAL=1 $X --quiet --no-stdin --max-ms 20000 --mount-rw "$FDT=C:\\nebula" --type 'fd_test.txt@800' --key 13@1500 --type 'report@2500' --key 13@3200 --type 'fd_test.txt@4200' --key 13@4900 --key 13@6000 --type 'draftz@7200' --key 13@8200 tests/fdlg32.exe 2>&1 || true)"
 check "fdlg: GetSaveFileName / IFileSaveDialog results are plain paths (no file created by the dialog itself)"  "files=1"  "files=$(ls $FDT | wc -l) $(ls $FDT | tr '\n' ' ')"
 rm -rf $FDT
 # the same real installer twice: the x86 build (32-bit files) and the x64 build (a 32-bit setup stub that probes
@@ -409,13 +409,16 @@ if [ -f tests/inst/npp32.exe ] && [ -f tests/inst/npp64.exe ]; then
   # dialogs on top of the editor: F1 (About, owner-drawn logo static + WM_DRAWITEM) → Esc hides it and activation returns to the main
   # window → Ctrl+O accelerator → the Open dialog (IFileOpenDialog) → type change.log + Enter → the file is loaded into the Scintilla view,
   # which stays above the tab bar (Windows z-order: the tab created later sits below the editor; WS_CLIPSIBLINGS keeps the editor intact)
-  out=$(X64_LOG=1 X64_WNDDUMP=1 X64_MODAL=1 $X --no-stdin --max-ms 40000 --key 112@20000 --key 27@27000 --key 17@29000:1500 --key 79@29500:100 --type 'change.log@34000' --key 13@36000 --mount-rw "$ID/npp=C:\\nebula" $ID/npp/notepad++.exe 2>&1 3>&1 | grep -a "^\[wnd\] #0 \|^\[wnd\].*Scintilla\|^\[wnd\].*SysTabControl32\|FAULT\|MessageBox" || true)
+  out=$(X64_LOG=1 X64_WNDDUMP=1 X64_MODAL=1 $X --no-stdin --max-ms 46000 --key 112@21000 --key 27@29000 --key 17@31000:1500 --key 79@31500:100 --type 'change.log@38000' --key 13@41000 --mount-rw "$ID/npp=C:\\nebula" $ID/npp/notepad++.exe 2>&1 3>&1 | grep -a "^\[wnd\] #0 \|^\[wnd\].*Scintilla\|^\[wnd\].*SysTabControl32\|FAULT\|MessageBox" || true)
   check "Notepad++ x64: About (F1) → Esc → Ctrl+O → change.log opened (title 'change.log - Notepad++')"   'change.log - Notepad++'   "$(printf '%s\n' "$out" | grep -a "#0 " | tr '\n' ' ')"
   check "Notepad++ x64: the editor stays above the tab bar after the dialogs (Scintilla z > tab z)"   "above"   "$(printf '%s\n' "$out" | python3 -c "
 import re,sys
 t=sys.stdin.read(); sc=[int(m) for m in re.findall(r'\[wnd\] #1 hwnd=10052 .* z=(\d+)', t)]; tb=[int(m) for m in re.findall(r'\[wnd\] #4 hwnd=10082 .* z=(\d+)', t)]
 print('above' if sc and tb and sc[-1] > tb[-1] else 'below %r %r' % (sc, tb))")"
-  check "Notepad++ x64: no fault through About / Open dialogs"   "errors=0"   "errors=$(echo "$out" | grep -a -c "FAULT\|MessageBox")"
+  check "Notepad++ x64: no fault through About / Open dialogs"   "errors=0"   "errors=$(echo "$out" | grep -a -c "FAULT\|MessageBox") $(echo "$out" | grep -a "FAULT\|MessageBox" | head -2 | tr '\n' ' ')"
+  # Save As: Notepad++ appends the extension itself (IFileDialogEvents + IOleWindow + WH_KEYBOARD/WH_CALLWNDPROC hooks + FindWindowEx(ComboBox, "Edit")) — typed "hello" must become hello.txt
+  rm -f "$ID/npp/hello" "$ID/npp/hello.txt"; X64_MODAL=1 $X --quiet --no-stdin --max-ms 42000 --mount-rw "$ID/npp=C:\\nebula" --type 'abc@20000' --key 17@24000:2000 --key 18@24100:1900 --key 83@24500:100 --type 'hello@31000' --key 13@34000 $ID/npp/notepad++.exe >/dev/null 2>&1 || true
+  check "Notepad++ x64: Save As (Ctrl+Alt+S) 'hello' → hello.txt with the typed text (extension added by Notepad++ through hooks + dialog events, as on Windows)"   "hello.txt:abc"   "$(ls "$ID/npp" | grep -a '^hello' | tr '\n' ' ' | sed 's/ $//'):$(cat "$ID/npp/hello.txt" 2>/dev/null)"
   rm -rf $ID; ID=$(mktemp -d)
   out=$($X --no-stdin --max-ms 150000 --mount-rw "$ID=C:\\inst" --click 357,337@3000 --click 357,337@6000 --click 357,337@9000 --click 357,337@12000 --click 357,337@70000 --click 357,337@80000 --click 357,337@90000 --click 357,337@110000 tests/inst/npp32.exe '/D=C:\inst\npp' 2>&1 | grep -v "last blocks" || true)
   check "NSIS x86 setup: GUI wizard (license → components → directory → install → finish) exit 0"   "exit code 0"   "$out"
@@ -427,6 +430,8 @@ print('above' if sc and tb and sc[-1] > tb[-1] else 'below %r %r' % (sc, tb))")"
   check "Notepad++ x86 (installed): main window with Scintilla, tab bar, rebar + toolbar, status bar"   '"Scintilla" "Notepad++".*"SysTabControl32" "Tab".* builtin=16 .*"msctls_statusbar32" "" parent=0 .* vis=1 .* builtin=14.*"ReBarWindow32"'   "$(echo "$out" | grep -v "FAULT\|MessageBox\|not registered" | tr '\n' ' ')"
   check "Notepad++ x86: typing in the editor marks the document modified (title '*new 1')"   '"\*new 1 - Notepad++'   "$(echo "$out" | grep -a "#0 " | tr '\n' ' ')"
   check "Notepad++ x86: no fault, no 'Exception On WM_CREATE' box, no autosave fault"   "errors=0"   "errors=$(echo "$out" | grep -a -c "FAULT\|MessageBox\|not registered") $(echo "$out" | grep -a "FAULT\|MessageBox\|not registered" | head -1)"
+  rm -f "$ID/npp/hello" "$ID/npp/hello.txt"; X64_MODAL=1 $X --quiet --no-stdin --max-ms 42000 --mount-rw "$ID/npp=C:\\nebula" --type 'abc@20000' --key 17@24000:2000 --key 18@24100:1900 --key 83@24500:100 --type 'hello@31000' --key 13@34000 $ID/npp/notepad++.exe >/dev/null 2>&1 || true
+  check "Notepad++ x86: Save As 'hello' → hello.txt with the typed text (32-bit hooks, CWPSTRUCT, COM events)"   "hello.txt:abc"   "$(ls "$ID/npp" | grep -a '^hello' | tr '\n' ' ' | sed 's/ $//'):$(cat "$ID/npp/hello.txt" 2>/dev/null)"
   rm -rf $ID
 else echo "  skip Notepad++ (no network)"; fi
 # a real Delphi/VCL installer (Inno Setup 6.5.4 installing itself: SetupLdr → Setup child → Compil32 /ASSOC third process,

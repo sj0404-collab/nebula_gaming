@@ -38,17 +38,24 @@ static void s_SHCreateItemFromParsingName(Cpu *c) { if (!ARG(0) || !ARG(3)) { RE
 static void s_SHCreateItemFromIDList(Cpu *c) { if (!ARG(0) || !ARG(2)) { RET(0x80070057u); return; } u64 o = si_create(c, pidl_path(c, ARG(0))); wrp(c, ARG(2), o); RET(o ? 0 : 0x8007000Eu); }
 static void s_SHGetIDListFromObject(Cpu *c) { if (!ARG(0) || !ARG(1)) { RET(0x80070057u); return; } wrp(c, ARG(1), pidl_make(W, si_path(c, ARG(0)))); RET(0); }
 /* IFileDialog */
-static FdSpec *fd_spec_of(Cpu *c, u64 this_) { u32 k = rd32(c, this_ + 2 * PSZ_OF(c) + 4); return k < 8 && g_fdspec[k].used ? &g_fdspec[k] : 0; }
+static FdSpec *fd_spec_of(Cpu *c, u64 this_) { u32 k = rd32(c, this_ + 3 * PSZ_OF(c) + 4); return k < 8 && g_fdspec[k].used ? &g_fdspec[k] : 0; }
 static u64 fd_this(Cpu *c, int sub) { return ARG(0) - (u64)sub * PSZ_OF(c); }
 static int fd_qi(Cpu *c, u64 obj, u64 riid, u64 ppv) { u32 d1 = rd32(c, riid); u64 P = PSZ_OF(c); if (!ppv) return 0; FdSpec *sp = fd_spec_of(c, obj);
   if (d1 == 0 || d1 == 0xb4db1657u /* IModalWindow */ || d1 == 0x42f85136u /* IFileDialog */ || (d1 == 0xd57c7288u /* IFileOpenDialog */ && sp && !sp->save) || (d1 == 0x84bccd23u /* IFileSaveDialog */ && sp && sp->save)) wrp(c, ppv, obj);
-  else if (d1 == 0xe6fdd21au /* IFileDialogCustomize */) wrp(c, ppv, obj + P); else { wrp(c, ppv, 0); return 0; }
-  wr32(c, obj + 2 * P, rd32(c, obj + 2 * P) + 1); return 1; }
-static void fd_release(Cpu *c, u64 obj) { u64 a = obj + 2 * PSZ_OF(c); u32 n = rd32(c, a); if (n) n--; wr32(c, a, n); if (!n) { FdSpec *sp = fd_spec_of(c, obj); if (sp) sp->used = 0; w32_heap_free(W, obj); } RET(n); }
+  else if (d1 == 0xe6fdd21au /* IFileDialogCustomize */) wrp(c, ppv, obj + P); else if (d1 == 0x114u /* IOleWindow */) wrp(c, ppv, obj + 2 * P); else { wrp(c, ppv, 0); return 0; }
+  wr32(c, obj + 3 * P, rd32(c, obj + 3 * P) + 1); return 1; }
+static void fd_release(Cpu *c, u64 obj) { u64 a = obj + 3 * PSZ_OF(c); u32 n = rd32(c, a); if (n) n--; wr32(c, a, n); if (!n) { FdSpec *sp = fd_spec_of(c, obj); if (sp) sp->used = 0; w32_heap_free(W, obj); } RET(n); }
 static void s_IFileDialog_QueryInterface(Cpu *c) { RET(fd_qi(c, fd_this(c, 0), ARG(1), ARG(2)) ? 0 : 0x80004002u); }
 static void s_IFileDialogCustomize_QueryInterface(Cpu *c) { RET(fd_qi(c, fd_this(c, 1), ARG(1), ARG(2)) ? 0 : 0x80004002u); }
-static void s_IFileDialog_AddRef(Cpu *c) { com_addref_at(c, fd_this(c, 0) + 2 * PSZ_OF(c)); }
-static void s_IFileDialogCustomize_AddRef(Cpu *c) { com_addref_at(c, fd_this(c, 1) + 2 * PSZ_OF(c)); }
+static void s_IFileDialog_AddRef(Cpu *c) { com_addref_at(c, fd_this(c, 0) + 3 * PSZ_OF(c)); }
+static void s_IFileDialogCustomize_AddRef(Cpu *c) { com_addref_at(c, fd_this(c, 1) + 3 * PSZ_OF(c)); }
+/* IOleWindow on the dialog object (Notepad++ asks for it to find the dialog's HWND and walk its controls) */
+static void s_IOleWindow_QueryInterface(Cpu *c) { RET(fd_qi(c, fd_this(c, 2), ARG(1), ARG(2)) ? 0 : 0x80004002u); }
+static void s_IOleWindow_AddRef(Cpu *c) { com_addref_at(c, fd_this(c, 2) + 3 * PSZ_OF(c)); }
+static void s_IOleWindow_Release(Cpu *c) { fd_release(c, fd_this(c, 2)); }
+static void s_IOleWindow_GetWindow(Cpu *c) { FdSpec *sp = fd_spec_of(c, fd_this(c, 2)); if (!ARG(1)) { RET(0x80070057u); return; } FileDlg *fd = sp ? fdlg_of_spec((int)(sp - g_fdspec)) : 0; wrp(c, ARG(1), fd ? HWND_OF(fd->wnd) : 0); RET(fd ? 0 : 0x80004005u); }
+static void s_IOleWindow_ContextSensitiveHelp(Cpu *c) { RET(0); }
+static const char *g_ole_names[] = { "QueryInterface", "AddRef", "Release", "GetWindow", "ContextSensitiveHelp" };
 static void s_IFileDialog_Release(Cpu *c) { fd_release(c, fd_this(c, 0)); }
 static void s_IFileDialogCustomize_Release(Cpu *c) { fd_release(c, fd_this(c, 1)); }
 static void s_IFileDialog_Show(Cpu *c) { Win32 *w = W; if (modal_reentry(c)) { modal_loop(c, g_modal[g_nmodal - 1].wnd); return; }
@@ -58,19 +65,19 @@ static void s_IFileDialog_Show(Cpu *c) { Win32 *w = W; if (modal_reentry(c)) { m
   fd->nflt = sp->nflt; e_memcpy(fd->fname, sp->fname, sizeof fd->fname); e_memcpy(fd->fpat, sp->fpat, sizeof fd->fpat); e_snprintf(fd->defext, sizeof fd->defext, "%s", sp->defext); sp->result[0] = 0;
   char start[1024]; u64 szd; e_snprintf(start, sizeof start, "%s", sp->folder); if (!start[0] || vfs_stat(start, &szd) != 2) e_snprintf(start, sizeof start, "%s", vfs_cwd()[0] ? vfs_cwd() : "C:\\");
   fd_show(c, fd, ARG(1), sp->title[0] ? sp->title : (fd->pickfolders ? "Select Folder" : sp->save ? "Save As" : "Open"), start); }
-static void s_IFileDialog_SetFileTypes(Cpu *c) { FdSpec *sp = fd_spec_of(c, ARG(0)); if (!sp) { RET(0x80004005u); return; } u32 n = (u32)ARG(1); u64 a = ARG(2), P = PSZ_OF(c); sp->nflt = 0; for (u32 k = 0; k < n && k < FD_MAX_FILTERS && a; k++) { u64 nm = rdp(c, a + (u64)k * 2 * P), pt = rdp(c, a + (u64)k * 2 * P + P); if (nm) text_in(c, nm, 1, sp->fname[k], 64); else sp->fname[k][0] = 0; if (pt) text_in(c, pt, 1, sp->fpat[k], 128); else e_snprintf(sp->fpat[k], 128, "*"); sp->nflt = (int)k + 1; } RET(0); }
+static void s_IFileDialog_SetFileTypes(Cpu *c) { FdSpec *sp = fd_spec_of(c, ARG(0)); if (!sp) { RET(0x80004005u); return; } u32 n = (u32)ARG(1); u64 a = ARG(2), P = PSZ_OF(c); sp->nflt = 0; for (u32 k = 0; k < n && k < FD_MAX_FILTERS && a; k++) { u64 nm = rdp(c, a + (u64)k * 2 * P), pt = rdp(c, a + (u64)k * 2 * P + P); if (nm) text_in(c, nm, 1, sp->fname[k], 64); else sp->fname[k][0] = 0; if (pt) text_in(c, pt, 1, sp->fpat[k], 128); else e_snprintf(sp->fpat[k], 128, "*"); sp->nflt = (int)k + 1; } if (W->api_trace) for (int k = 0; k < sp->nflt && k < 3; k++) e_log("[fdlg] type %d: \"%s\" = \"%s\"\n", k + 1, sp->fname[k], sp->fpat[k]); RET(0); }
 static void s_IFileDialog_SetFileTypeIndex(Cpu *c) { FdSpec *sp = fd_spec_of(c, ARG(0)); if (sp) sp->ftype = (int)(u32)ARG(1); RET(0); }
 static void s_IFileDialog_GetFileTypeIndex(Cpu *c) { FdSpec *sp = fd_spec_of(c, ARG(0)); if (ARG(1)) wr32(c, ARG(1), sp ? (u32)(sp->ftype ? sp->ftype : 1) : 1); RET(0); }
-static void s_IFileDialog_Advise(Cpu *c) { FdSpec *sp = fd_spec_of(c, ARG(0)); if (sp) sp->sink = ARG(1); if (ARG(2)) wr32(c, ARG(2), 1); RET(0); }   /* the sink is accepted; the dialog does not call back into it */
+static void s_IFileDialog_Advise(Cpu *c) { FdSpec *sp = fd_spec_of(c, ARG(0)); if (sp) sp->sink = ARG(1); if (ARG(2)) wr32(c, ARG(2), 1); RET(0); }   /* the sink receives OnTypeChange/OnFolderChanging/OnFolderChange/OnSelectionChange/OnFileOk from the dialog (user.inc fd_fire) */
 static void s_IFileDialog_Unadvise(Cpu *c) { FdSpec *sp = fd_spec_of(c, ARG(0)); if (sp) sp->sink = 0; RET(0); }
 static void s_IFileDialog_SetOptions(Cpu *c) { FdSpec *sp = fd_spec_of(c, ARG(0)); if (sp) sp->options = (u32)ARG(1); RET(0); }
 static void s_IFileDialog_GetOptions(Cpu *c) { FdSpec *sp = fd_spec_of(c, ARG(0)); if (ARG(1)) wr32(c, ARG(1), sp ? sp->options : 0); RET(0); }
 static void s_IFileDialog_SetDefaultFolder(Cpu *c) { FdSpec *sp = fd_spec_of(c, ARG(0)); if (sp && ARG(1) && !sp->folder[0]) e_snprintf(sp->folder, sizeof sp->folder, "%s", si_path(c, ARG(1))); RET(0); }
 static void s_IFileDialog_SetFolder(Cpu *c) { FdSpec *sp = fd_spec_of(c, ARG(0)); if (sp && ARG(1)) e_snprintf(sp->folder, sizeof sp->folder, "%s", si_path(c, ARG(1))); RET(0); }
-static void s_IFileDialog_GetFolder(Cpu *c) { FdSpec *sp = fd_spec_of(c, ARG(0)); if (!ARG(1)) { RET(0x80070057u); return; } const char *f = sp && sp->folder[0] ? sp->folder : vfs_cwd(); u64 o = si_create(c, f); wrp(c, ARG(1), o); RET(o ? 0 : 0x8007000Eu); }
+static void s_IFileDialog_GetFolder(Cpu *c) { FdSpec *sp = fd_spec_of(c, ARG(0)); if (!ARG(1)) { RET(0x80070057u); return; } FileDlg *fd = sp ? fdlg_of_spec((int)(sp - g_fdspec)) : 0; const char *f = fd && fd->dir[0] ? fd->dir : sp && sp->folder[0] ? sp->folder : vfs_cwd(); u64 o = si_create(c, f); wrp(c, ARG(1), o); RET(o ? 0 : 0x8007000Eu); }
 static void s_IFileDialog_GetCurrentSelection(Cpu *c) { FdSpec *sp = fd_spec_of(c, ARG(0)); if (!ARG(1)) { RET(0x80070057u); return; } if (!sp || !sp->result[0]) { wrp(c, ARG(1), 0); RET(0x80004005u); return; } u64 o = si_create(c, sp->result); wrp(c, ARG(1), o); RET(o ? 0 : 0x8007000Eu); }
-static void s_IFileDialog_SetFileName(Cpu *c) { FdSpec *sp = fd_spec_of(c, ARG(0)); if (sp) { if (ARG(1)) text_in(c, ARG(1), 1, sp->filename, sizeof sp->filename); else sp->filename[0] = 0; } RET(0); }
-static void s_IFileDialog_GetFileName(Cpu *c) { FdSpec *sp = fd_spec_of(c, ARG(0)); if (!ARG(1)) { RET(0x80070057u); return; } u64 a = com_alloc_wstr(c, sp ? sp->filename : ""); wrp(c, ARG(1), a); RET(a ? 0 : 0x8007000Eu); }
+static void s_IFileDialog_SetFileName(Cpu *c) { FdSpec *sp = fd_spec_of(c, ARG(0)); if (sp) { if (ARG(1)) text_in(c, ARG(1), 1, sp->filename, sizeof sp->filename); else sp->filename[0] = 0; FileDlg *fd = fdlg_of_spec((int)(sp - g_fdspec)); if (fd && dlg_find_id(fd->wnd, 101) >= 0) fd_name_set(c, fd->wnd, sp->filename); } RET(0); }
+static void s_IFileDialog_GetFileName(Cpu *c) { FdSpec *sp = fd_spec_of(c, ARG(0)); if (!ARG(1)) { RET(0x80070057u); return; } FileDlg *fd = sp ? fdlg_of_spec((int)(sp - g_fdspec)) : 0; u64 a = com_alloc_wstr(c, fd && dlg_find_id(fd->wnd, 101) >= 0 ? fd_name_get(fd->wnd) : sp ? sp->filename : ""); if (W->api_trace) e_log("[fdlg] GetFileName -> \"%s\"\n", fd && dlg_find_id(fd->wnd, 101) >= 0 ? fd_name_get(fd->wnd) : sp ? sp->filename : ""); wrp(c, ARG(1), a); RET(a ? 0 : 0x8007000Eu); }
 static void s_IFileDialog_SetTitle(Cpu *c) { FdSpec *sp = fd_spec_of(c, ARG(0)); if (sp && ARG(1)) text_in(c, ARG(1), 1, sp->title, sizeof sp->title); RET(0); }
 static void s_IFileDialog_SetOkButtonLabel(Cpu *c) { RET(0); }
 static void s_IFileDialog_SetFileNameLabel(Cpu *c) { RET(0); }
@@ -120,11 +127,12 @@ static void s_IFileDialogCustomize_SetControlItemText(Cpu *c) { RET(0); }
 /* CoCreateInstance hook (called from win32.c): CLSID_FileOpenDialog {DC1C5A9C-…} / CLSID_FileSaveDialog {C0B4E2F3-…} */
 int gdi_filedlg_cocreate(Cpu *c, u32 clsid_d1, u64 riid, u64 ppv) {
   if (clsid_d1 != 0xDC1C5A9Cu && clsid_d1 != 0xC0B4E2F3u) return 0; int k = -1; for (int q = 0; q < 8; q++) if (!g_fdspec[q].used) { k = q; break; }
-  if (k < 0) { RET(0x8007000Eu); return 1; } u64 P = PSZ_OF(c), obj = w32_heap_alloc(W, 2 * P + 8, 1); if (!obj) { RET(0x8007000Eu); return 1; }
+  if (k < 0) { RET(0x8007000Eu); return 1; } u64 P = PSZ_OF(c), obj = w32_heap_alloc(W, 3 * P + 8, 1); if (!obj) { RET(0x8007000Eu); return 1; }
   FdSpec *sp = &g_fdspec[k]; e_memset(sp, 0, sizeof *sp); sp->used = 1; sp->save = clsid_d1 == 0xC0B4E2F3u; sp->options = 0x40 /* FOS_FORCEFILESYSTEM */ | 0x8 /* NOCHANGEDIR */ | (sp->save ? 0x2 /* OVERWRITEPROMPT */ : 0x1000 /* FILEMUSTEXIST */) | 0x800 /* PATHMUSTEXIST */; sp->ftype = 1;
-  wrp(c, obj, com_vt(c, "IFileDialog", g_fd_names, 32)); wrp(c, obj + P, com_vt(c, "IFileDialogCustomize", g_fdc_names, 30)); wr32(c, obj + 2 * P, 0); wr32(c, obj + 2 * P + 4, (u32)k);
+  wrp(c, obj, com_vt(c, "IFileDialog", g_fd_names, 32)); wrp(c, obj + P, com_vt(c, "IFileDialogCustomize", g_fdc_names, 30)); wrp(c, obj + 2 * P, com_vt(c, "IOleWindow", g_ole_names, 5)); wr32(c, obj + 3 * P, 0); wr32(c, obj + 3 * P + 4, (u32)k); sp->obj = obj;
   if (!fd_qi(c, obj, riid, ppv)) { sp->used = 0; w32_heap_free(W, obj); RET(0x80004002u); return 1; } RET(0); return 1; }
 #define FILEDLG_COM_SHIMS \
+  SA("IOleWindow::QueryInterface", IOleWindow_QueryInterface), SA("IOleWindow::AddRef", IOleWindow_AddRef), SA("IOleWindow::Release", IOleWindow_Release), SA("IOleWindow::GetWindow", IOleWindow_GetWindow), SA("IOleWindow::ContextSensitiveHelp", IOleWindow_ContextSensitiveHelp), \
   SA("IShellItem::QueryInterface", IShellItem_QueryInterface), SA("IShellItem::AddRef", IShellItem_AddRef), SA("IShellItem::Release", IShellItem_Release), SA("IShellItem::BindToHandler", IShellItem_BindToHandler), SA("IShellItem::GetParent", IShellItem_GetParent), SA("IShellItem::GetDisplayName", IShellItem_GetDisplayName), SA("IShellItem::GetAttributes", IShellItem_GetAttributes), SA("IShellItem::Compare", IShellItem_Compare), \
   SA("IShellItemArray::QueryInterface", IShellItemArray_QueryInterface), SA("IShellItemArray::AddRef", IShellItemArray_AddRef), SA("IShellItemArray::Release", IShellItemArray_Release), SA("IShellItemArray::BindToHandler", IShellItemArray_BindToHandler), SA("IShellItemArray::GetPropertyStore", IShellItemArray_GetPropertyStore), SA("IShellItemArray::GetPropertyDescriptionList", IShellItemArray_GetPropertyDescriptionList), SA("IShellItemArray::GetAttributes", IShellItemArray_GetAttributes), SA("IShellItemArray::GetCount", IShellItemArray_GetCount), SA("IShellItemArray::GetItemAt", IShellItemArray_GetItemAt), SA("IShellItemArray::EnumItems", IShellItemArray_EnumItems), \
   S(SHCreateItemFromParsingName), S(SHCreateItemFromIDList), S(SHGetIDListFromObject), \

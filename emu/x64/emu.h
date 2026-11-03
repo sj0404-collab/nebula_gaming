@@ -167,7 +167,7 @@ typedef struct { const char *dll; const char *name; ShimFn fn; } ShimDef;
 
 #define SHIM_SLOT_SIZE 16
 #define MAX_SHIMS 2048
-typedef struct { const char *dll; const char *name; ShimFn fn; int calls; u16 clean32; const char *sig32; } ShimSlot;   /* clean32: stack bytes removed by the callee in 32-bit mode (stdcall); sig32: "ret:args" for shims needing argument marshaling (win32_x86.inc) */
+typedef struct { const char *dll; const char *name; ShimFn fn; int calls; u16 clean32, warned32; const char *sig32; } ShimSlot;   /* clean32: stack bytes removed by the callee in 32-bit mode (stdcall); sig32: "ret:args" for shims needing argument marshaling (win32_x86.inc) */
 
 /* guest layout */
 #define G_SHIM_BASE   0x0000000000200000ull    /* import trampolines, TEB/PEB, strings  (2 MB) */

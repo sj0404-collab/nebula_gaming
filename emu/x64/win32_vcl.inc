@@ -35,11 +35,6 @@ static void s_DeleteAtom(Cpu *c) { s_GlobalDeleteAtom(c); }
 static void s_GetAtomNameW(Cpu *c) { atom_name(c, 1); }
 static void s_GetAtomNameA(Cpu *c) { atom_name(c, 0); }
 /* ---- Windows hooks: accepted and never called (the VCL installs a GetMessage/CBT hook for its own bookkeeping) ---- */
-static int g_nhooks;
-static void s_SetWindowsHookExW(Cpu *c) { RET(0x48000 + (++g_nhooks)); }
-static void s_SetWindowsHookExA(Cpu *c) { RET(0x48000 + (++g_nhooks)); }
-static void s_UnhookWindowsHookEx(Cpu *c) { RET(1); }
-static void s_CallNextHookEx(Cpu *c) { RET(0); }
 /* ---- keyboard layout / OEM / MDI / menus ---- */
 static void s_GetKeyboardLayoutNameW(Cpu *c) { const char *s = "00000409"; for (int i = 0; i <= 8; i++) wr16(c, ARG(0) + i * 2, (u8)s[i]); RET(1); }
 static void s_GetKeyboardLayoutNameA(Cpu *c) { const char *s = "00000409"; for (int i = 0; i <= 8; i++) wr8(c, ARG(0) + i, (u8)s[i]); RET(1); }

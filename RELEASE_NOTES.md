@@ -1,3 +1,45 @@
+# v1.27.0 — Nebula x64 (Android): real Windows hooks (WH_KEYBOARD / WH_CALLWNDPROC / CallNextHookEx), IFileDialogEvents, IOleWindow; Notepad++ Save As appends the extension itself (x86 + x64)
+
+**Why.** In v1.26.0 Notepad++ saved `hello` instead of `hello.txt`. On Windows the extension is not added by the dialog — Notepad++ does it
+itself through a chain of real APIs: `IFileDialog::Advise` events (`OnTypeChange` → `OnFolderChanging` → `OnFolderChange` → `OnSelectionChange`,
+`OnFileOk`), `IOleWindow::GetWindow` to get the dialog HWND, `EnumChildWindows` + `FindWindowEx(ComboBox, "Edit", "")` to find the file‑name
+edit and the OK button, a `WH_KEYBOARD` hook that catches Enter in that edit and rewrites the name with `GetFileName`/`SetFileName`, and a
+`WH_CALLWNDPROC` hook that sees the OK button's `WM_COMMAND`. All of these were stubs (hooks returned a handle and were never called; `Advise`
+accepted the sink and never called it; there was no `IOleWindow`; the name field was a plain Edit). They are real now — no `SetDefaultExtension`
+hack, the program does exactly what it does on Windows.
+
+**Measured** (`emu/tests/run.sh` native suite x86 + x64 **ALL OK** (219 checks incl. the two new Notepad++ Save As checks); `tests/fdlg.exe` /
+`fdlg32.exe` **FDLG OK** with the new stage 5; Notepad++ **x64 and x86**: `Ctrl+Alt+S` → type `hello` → Enter → `hello.txt` created with the
+typed text; e2e in headless Chromium 23/24, the only failure is the .NET pack test that needs the GitHub‑built pack):
+
+* **Windows hooks** (`user.inc`): `SetWindowsHookExA/W`, `UnhookWindowsHookEx`, `CallNextHookEx` keep a real per‑process hook table.
+  `WH_KEYBOARD` is called when a key message is retrieved — from `GetMessage`, `PeekMessage(PM_REMOVE)` **and from the modal dialog loop**
+  (modal dialogs pump their own messages); a non‑zero result discards the key (the program receives `WM_NULL` in its place, the modal loop simply
+  drops it). `WH_CALLWNDPROC` is called with a heap `CWPSTRUCT` (x64 32 B / x86 16 B layouts) before every message sent to a window of the
+  process — `SendMessage`, control notifications, dialog‑manager `WM_COMMAND` — with a re‑entry guard (hook procs may `SendMessage` themselves).
+  `CallNextHookEx` walks to the next hook of the same type (verified with two keyboard hooks chained). Other hook types are accepted and kept but
+  never called (`WH_MOUSE`, `WH_CBT`, `WH_GETMESSAGE`, low‑level hooks).
+* **IFileDialogEvents** fired from the dialog in the order of the real dialog: `OnTypeChange` → `OnFolderChanging(IShellItem)` → `OnFolderChange`
+  before the name is shown, then `OnSelectionChange`; `OnTypeChange` again on every change of the “Files of type” combo; `OnFileOk` when the user
+  accepts (`S_FALSE` keeps the dialog open). `GetFileName` / `GetFolder` read the **live** dialog (the edit text, the current folder) while it is
+  shown; `SetFileName` while shown updates the edit (that is how Notepad++ rewrites `hello` → `hello.txt`).
+* **IOleWindow** on the dialog object (`QueryInterface(IID_IOleWindow)`, `GetWindow` → dialog HWND).
+* **File‑name field is a ComboBox (CBS_DROPDOWN) with a real Edit child**, like comdlg32 — found by `FindWindowEx(hCombo, NULL, "Edit", "")`;
+  `GetFocus()` returns that Edit while typing, Enter → `IDOK`. `FindWindowEx` now distinguishes `NULL` (any title) from `""` (empty title).
+* **shlwapi**: `PathCombineA/W`, `PathAppendA/W`, `PathCanonicalizeA/W` (join + `.`/`..` normalisation) — Notepad++ calls `PathCombineW` in the
+  Save As path.
+* **32‑bit robustness**: a 32‑bit call to a Win32 shim whose stdcall cleanup size is unknown is now reported (`emu/tools/stdcall32.py` must be
+  re‑run after adding shims). This is exactly what broke x86 Save As during development: `PathCombineW` without a cleanup entry left 12 bytes on
+  the caller's stack, `edi` was restored from the wrong slot and Notepad++'s `_currentType` read garbage.
+* **Tests**: `tests/fdlg.c` stage 5 (what Notepad++'s `CustomFileDialog` does: events sink in C, `IOleWindow`, `EnumChildWindows` →
+  ComboBox/Edit + leftmost push button, two `WH_KEYBOARD` hooks + `WH_CALLWNDPROC`, a key eaten by the hook, name rewritten on Enter →
+  `C:\nebula\draft.md`); `run.sh`: Notepad++ x64 **and** x86 `Save As hello → hello.txt` with content check; the About/Open chain check now
+  prints the offending line and has more timing margin for the slower GitHub runner.
+
+**Honest limits.** No overwrite prompt (`OnOverwrite` is never fired); only the two hook types above are called; `WH_KEYBOARD` is not called for
+`PeekMessage(PM_NOREMOVE)`; hooks are per process (no thread filter); still single selection, no places bar, no custom controls drawn, bitmap
+font clipping in dialogs. Android only — no other platform is built or tested.
+
 # v1.26.0 — Nebula x64 (Android): real file dialogs (Open / Save As, Win32 + COM), Windows z‑order, owner‑draw controls; Notepad++ opens and saves files
 
 **Why.** A Windows program that cannot open or save a file is a toy. Notepad++ (x86 and x64) showed its editor, accepted typing — and

@@ -287,6 +287,7 @@ static void w32_call32(Cpu *c, ShimSlot *s, u64 ret) {
   Win32 *w = W; while (w->ncont && w->cont[w->ncont - 1].rsp < c->r[RSP]) w->ncont--;   /* drop continuations abandoned by a non-local exit (C++ throw / longjmp over them) BEFORE counting: otherwise a stale frame hides the one this shim pushes and its stdcall cleanup is lost */
   int nc0 = w->ncont; u64 sp0 = c->r[RSP]; g_a32_n = 0;   /* a call from guest code: arguments are on the stack (no override left over from a shim that started a guest call) */
   if (s->sig32) w32_marshal32_in(c, s);
+  if (!s->clean32 && !s->sig32 && !s->warned32 && s->name[0] >= 'A' && s->name[0] <= 'Z' && !w->api_trace) { s->warned32 = 1; w32_report(w, "32-bit call to %s!%s: stdcall cleanup size unknown (name missing from stdcall32.inc — regenerate it with emu/tools/stdcall32.py)", s->dll, s->name); }
   s->fn(c); g_a32_n = 0;
   if (c->status == RUN_OK && c->rip == ret && w->ncont == nc0 && c->r[RSP] == sp0) c->r[RSP] = (u32)(c->r[RSP] + s->clean32);
   else if (w->ncont > nc0 && c->rip != ret) w->cont[nc0].clean32 = s->clean32;
