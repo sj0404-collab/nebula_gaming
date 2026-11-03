@@ -1,5 +1,6 @@
 import { WebGLGfx } from './gfx';
 import { HostAudio } from './audio';
+import { registerLiveVfs } from './diskbus';
 import { Disk } from './disk';
 // Nebula x64 — JS host for the wasm64 x86-64 emulator (emu/x64).  Pointers/sizes cross the boundary as BigInt (memory64).
 export type RunStatus = 'idle' | 'running' | 'waiting-stdin' | 'exited' | 'fault' | 'break' | 'stopped';
@@ -114,7 +115,13 @@ export class X64Runtime {
     this.ex = instance.exports as unknown as Exports;
     this.disk.onActivity = () => this.onDisk?.();
     await this.restoreDisk();
+    if (!this.disposed) this.unregister = registerLiveVfs(this);   // File Explorer / Notepad write through to this live disk copy
   }
+  private unregister: (() => void) | null = null;
+  private disposed = false;
+  /** the Programs window closed: stop the program, flush its files, leave the desktop-wide disk bus (a window closed
+   *  while init was still running must not register afterwards — that would pin the wasm memory for good) */
+  dispose() { this.disposed = true; this.stop(); this.unregister?.(); this.unregister = null; void this.syncDisk().finally(() => { this.disk.close(); this.disk.onActivity = null; }); }
 
   /** put every persisted file back on the virtual disk (called once from init, before any program runs) */
   private async restoreDisk() {

@@ -1,3 +1,42 @@
+# v1.29.0 — File Explorer and Notepad on the real C:\ (Android)
+
+**Why.** File Explorer showed a hard-coded demo tree (“118 GB free of 237 GB”, fake exe sizes) and Notepad a canned text —
+stubs. The desktop now has ONE disk: the persistent C:\ the emulator's Windows programs use (IndexedDB, restored before
+any program runs). Explorer lists exactly what is there; Notepad reads and writes the same bytes Notepad++ / 7-Zip inside
+Programs see.
+
+**File Explorer (src/components/apps/ExplorerApp.tsx, src/lib/x64/diskbus.ts).**
+- Browses the persistent disk: Program Files, ProgramData (Start Menu shortcuts), Users\user, Windows (the registry hive).
+  Implicit parent folders are shown (installers write deep paths without a mkdir for every level). Date modified, type,
+  real sizes; `.exe` rows show the icon extracted from the file's PE resources.
+- Double-click (or a second tap on a touch screen): `.exe`/`.com` → starts in **Programs** in its own folder; `.bat`/`.cmd`
+  → `cmd.exe /c`; `.lnk` → the shortcut target with its arguments and working directory (MS-SHLLINK parsed); text files →
+  Notepad; other binaries → downloaded to the device.
+- Import files from the device (file picker / drag-and-drop), New folder, Rename (files and whole folders), Delete
+  (recursive), Download. Every change goes to the store AND to every live emulator instance, so a program started next
+  sees it; before listing, Explorer asks live emulators to flush what their programs have written.
+- “Local Disk (C:)” free space is `navigator.storage.estimate()` — the browser's real quota for this origin on the device.
+- Temporary paths (C:\tmp, …\Temp, C:\nebula scratch) are deliberately not persisted and are not listed.
+
+**Notepad (src/components/apps/NotepadApp.tsx, src/lib/docs.ts).** Opens files from Explorer (UTF-8 / UTF-8 BOM /
+UTF-16 LE/BE detected), Save / Save As… to any path on C:\ (default C:\Users\user\Documents), Open from the device,
+Download to the device. Ln/Col from the real caret.
+
+**Programs.** `requestX64Launch` accepts a full path on the disk (+ working directory) — the Explorer launch path. A closed
+Programs window now releases its emulator: `X64Runtime.dispose()` leaves the disk bus and closes its IndexedDB connection.
+Found with the new `e2e/memcheck.mjs` (7 open/run/close cycles): with an open IDB connection holding an `onversionchange`
+handler the renderer grew ~115 MB per cycle and never came back; now it plateaus at ~425 MB like v1.28.1.
+
+**Tests.** New e2e “explorer + notepad”: after the 7-Zip install test, Explorer navigates to C:\Program Files\7-Zip
+(15 items, 7zFM.exe = 998 912 bytes with its icon), double-click starts 7zFM.exe in Programs (frames drawn); a file
+imported from the device opens in Notepad, is edited (Cyrillic) and saved (61 bytes), survives a reload, is visible from
+the Programs Files tab under C:\Users\user\Documents, rename / new folder / delete work. Local: 43/44 (the .NET pack
+exists only on the GitHub build). `E2E_GREP` now also takes a regex (`/seh32|cmd\.exe/`).
+
+**Honest limits.** The Command Prompt app's `dir` still walks the old demo tree (its `real` command opens the actual
+cmd.exe in Programs, which does see C:\). No file preview for images/PDF — they are downloaded. Large (multi-GB) games
+still need the OPFS-backed disk (next).
+
 # v1.28.1 — Programs & Games library (Android): real installers run from the device, a persistent C:\ drive, tiles with the programs' own icons, Play / fullscreen — the fake Steam / Epic demos are gone
 
 **Why.** The “x64 Runner” was a developer tool (a list of sample exes and a Run button) and Steam / Epic Games were stand‑in windows with a

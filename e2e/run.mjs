@@ -36,7 +36,8 @@ const results = [];
 let page;
 const errors = [];
 async function test(name, fn) {
-  if (process.env.E2E_GREP && !name.includes(process.env.E2E_GREP) && !name.startsWith('desktop loads')) return;   // run a subset locally: E2E_GREP=d3d11 node e2e/run.mjs
+  const g = process.env.E2E_GREP;   // run a subset locally: E2E_GREP=d3d11 node e2e/run.mjs, or a regex: E2E_GREP='/seh32|cmd\.exe/'
+  if (g && !name.startsWith('desktop loads') && !(g.startsWith('/') ? new RegExp(g.slice(1, g.lastIndexOf('/')), 'i').test(name) : name.includes(g))) return;
   const t = Date.now();
   try { await fn(); results.push({ name, ok: true, ms: Date.now() - t }); console.log(`  ✓ ${name} (${Date.now() - t} ms)`); }
   catch (e) {
@@ -515,6 +516,85 @@ await test('programs: the official 7-Zip 25.01 x64 setup installs onto the persi
   await page.waitForFunction(() => (Number(document.querySelector('[data-x64-screen]')?.getAttribute('data-frames')) || 0) > 0, null, { timeout: 90_000 });
   await page.screenshot({ path: resolve(SHOTS, 'programs-after-reload.png') });
   await w2.locator('[data-x64-stop]').click(); await sleep(500);
+  await closeAll();   // the disk is left in place: the File Explorer test below browses this install
+});
+
+await test('explorer + notepad: File Explorer browses the real C:\\ (the 7-Zip install), double-click 7zFM.exe starts it in Programs; a file imported from the device opens in Notepad, an edit saved there survives a reload, rename / new folder / delete are real', async () => {
+  await openFromDesktop('This PC');
+  const w = page.locator('[data-window][aria-label*="File Explorer"]');
+  await w.waitFor();
+  await w.locator('[data-explorer-usage]').waitFor({ timeout: 15_000 });
+  await page.waitForFunction(() => !/measuring/.test(document.querySelector('[data-explorer-usage]')?.textContent ?? ''), null, { timeout: 15_000 });
+  expect(/used/.test(await w.locator('[data-explorer-usage]').innerText()), 'disk usage is not the real storage estimate: ' + await w.locator('[data-explorer-usage]').innerText());
+  // the 7-Zip install from the previous test (if it ran): Program Files → 7-Zip → 7zFM.exe with its real icon; double-click starts it
+  await w.locator('[data-explorer-quick="Program Files"]').click(); await sleep(400);
+  const sevenZip = w.locator('[data-explorer-item="7-Zip"]');
+  if (await sevenZip.count()) {
+    await sevenZip.dblclick(); await sleep(400);
+    expect(await w.locator('[data-explorer]').getAttribute('data-explorer-path') === 'C:\\Program Files\\7-Zip', 'did not navigate into C:\\Program Files\\7-Zip: ' + await w.locator('[data-explorer]').getAttribute('data-explorer-path'));
+    const fm = w.locator('[data-explorer-item="7zFM.exe"]');
+    await fm.waitFor({ timeout: 10_000 });
+    expect(await fm.locator('[data-explorer-size]').getAttribute('data-explorer-size') === '998912', '7zFM.exe size is not the real file size: ' + await fm.locator('[data-explorer-size]').getAttribute('data-explorer-size'));
+    await fm.locator('img').waitFor({ timeout: 15_000 });   // icon extracted from the exe's resources
+    expect(Number(await w.locator('[data-explorer-count]').innerText().then(t => parseInt(t))) >= 10, 'too few files listed in the 7-Zip folder');
+    await page.screenshot({ path: resolve(SHOTS, 'explorer-7zip.png') });
+    await fm.dblclick();
+    const px = page.locator('[data-window][aria-label*="Programs"]');
+    await px.waitFor({ timeout: 30_000 });
+    await page.waitForFunction(() => (Number(document.querySelector('[data-x64-screen]')?.getAttribute('data-frames')) || 0) > 0, null, { timeout: 90_000 });
+    await sleep(800);
+    expect(await page.locator('[data-x64-status="running"]').count() === 1, '7zFM.exe not running after double-click in Explorer');
+    await page.screenshot({ path: resolve(SHOTS, 'explorer-run-7zfm.png') });
+    await px.locator('[data-x64-stop]').click(); await sleep(500);
+    await px.locator('[aria-label="Close"]').click(); await sleep(300);
+  } else console.log('      (7-Zip not installed in this run — the Programs test was skipped; launching from Explorer not exercised)');
+  // Documents: import a text file from the device → it is on C:\ → opens in Notepad → edited and saved → survives a reload
+  await w.locator('[data-explorer-quick="Documents"]').click(); await sleep(300);
+  await w.locator('[data-explorer-import]').setInputFiles({ name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('hello from the device\n', 'utf8') });
+  const notes = w.locator('[data-explorer-item="notes.txt"]');
+  await notes.waitFor({ timeout: 15_000 });
+  expect(await notes.locator('[data-explorer-size]').getAttribute('data-explorer-size') === '22', 'imported size wrong');
+  await notes.dblclick();
+  const np = page.locator('[data-window][aria-label*="Notepad"]');
+  await np.waitFor({ timeout: 10_000 });
+  await page.waitForFunction(() => /notes\.txt$/i.test(document.querySelector('[data-notepad-path]')?.getAttribute('data-notepad-path') ?? ''), null, { timeout: 15_000 });
+  expect((await np.locator('[data-notepad-text]').inputValue()) === 'hello from the device\n', 'Notepad did not load the imported bytes');
+  await np.locator('[data-notepad-text]').fill('hello from the device\nедited on Android — строка 2\n');
+  await np.locator('[data-notepad-save]').click();
+  await page.waitForFunction(() => /saved/.test(document.querySelector('[data-window][aria-label*="Notepad"]')?.textContent ?? ''), null, { timeout: 15_000 });
+  await np.locator('[aria-label="Close"]').click(); await sleep(300);
+  await page.waitForFunction(() => document.querySelector('[data-explorer-item="notes.txt"] [data-explorer-size]')?.getAttribute('data-explorer-size') === '61', null, { timeout: 15_000 });
+  // new folder, rename, move-by-rename check, delete
+  await w.locator('[data-explorer-newfolder]').click();
+  await w.locator('[data-explorer-newfolder-name]').fill('Projects'); await w.locator('[data-explorer-newfolder-name]').press('Enter');
+  await w.locator('[data-explorer-item="Projects"]').waitFor({ timeout: 10_000 });
+  await notes.click(); await w.locator('[data-explorer-rename]').click();
+  await w.locator('[data-explorer-rename-name]').fill('readme.txt'); await w.locator('[data-explorer-rename-name]').press('Enter');
+  await w.locator('[data-explorer-item="readme.txt"]').waitFor({ timeout: 10_000 });
+  expect(await notes.count() === 0, 'old name still listed after rename');
+  await page.screenshot({ path: resolve(SHOTS, 'explorer-documents.png') });
+  // reload = app restart: Documents still has readme.txt (61 bytes) and Projects
+  await closeAll();
+  await page.reload({ waitUntil: 'load' }); await page.waitForSelector('[aria-label="Start"]');
+  await openFromDesktop('This PC');
+  const w2 = page.locator('[data-window][aria-label*="File Explorer"]');
+  await w2.locator('[data-explorer-item="readme.txt"]').waitFor({ timeout: 15_000 });
+  expect(await w2.locator('[data-explorer-item="readme.txt"] [data-explorer-size]').getAttribute('data-explorer-size') === '61', 'edited file did not survive the reload');
+  expect(await w2.locator('[data-explorer-item="Projects"]').count() === 1, 'new folder did not survive the reload');
+  // and the Windows side sees the same bytes: Programs → Files tab lists C:\Users\user\Documents\readme.txt
+  await openFromDesktop('Programs');
+  const px2 = page.locator('[data-window][aria-label*="Programs"]');
+  await px2.locator('[data-x64-tab="files"]').waitFor({ timeout: 60_000 });
+  await px2.locator('[data-x64-tab="files"]').click();
+  await page.waitForFunction(() => /Users\\user\\Documents\\readme\.txt/.test(document.querySelector('[data-window][aria-label*="Programs"]')?.textContent ?? ''), null, { timeout: 30_000 });
+  await px2.locator('[aria-label="Close"]').click(); await sleep(300);
+  // delete: the folder and the file go away for good
+  page.once('dialog', d => d.accept());
+  await w2.locator('[data-explorer-item="Projects"]').click(); await w2.locator('[data-explorer-delete]').click();
+  await page.waitForFunction(() => !document.querySelector('[data-explorer-item="Projects"]'), null, { timeout: 15_000 });
+  page.once('dialog', d => d.accept());
+  await w2.locator('[data-explorer-item="readme.txt"]').click(); await w2.locator('[data-explorer-delete]').click();
+  await page.waitForFunction(() => !document.querySelector('[data-explorer-item="readme.txt"]'), null, { timeout: 15_000 });
   await closeAll();
   await page.evaluate(() => new Promise(res => { const r = indexedDB.deleteDatabase('nebula-x64-disk'); r.onsuccess = r.onerror = r.onblocked = () => res(); }));
 });

@@ -29,6 +29,8 @@ export class Disk {
         r.onupgradeneeded = () => { const d = r.result; if (!d.objectStoreNames.contains(STORE)) d.createObjectStore(STORE); };
         r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); r.onblocked = () => rej(new Error('blocked'));
       });
+      // another context wants to delete/upgrade the database (Settings → reset, tests): let go of the connection and reopen lazily
+      this.db.onversionchange = () => { this.db?.close(); this.db = null; };
       return true;
     } catch { this.available = false; return false; }
   }
@@ -57,6 +59,11 @@ export class Disk {
     if (!(await this.open())) return;
     const cur = await this.get(fk); this.pending.set(fk, null); if (cur) this.pending.set(diskKey(to), { ...cur, path: to }); this.schedule();
   }
+  /** drop the IndexedDB connection (the owner is going away; an open connection with event handlers would keep it — and
+   *  everything it references, including the emulator's memory — alive) */
+  close() { try { this.db?.close(); } catch { /* ignore */ } this.db = null; }
+  /** one stored entry (file or directory marker) by path */
+  async read(path: string): Promise<DiskFile | null> { if (!(await this.open())) return null; return this.get(diskKey(path)); }
   private get(key: string): Promise<DiskFile | null> {
     return new Promise(res => { const req = this.db!.transaction(STORE, 'readonly').objectStore(STORE).get(key); req.onsuccess = () => res((req.result as DiskFile) ?? null); req.onerror = () => res(null); });
   }

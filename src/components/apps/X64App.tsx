@@ -169,14 +169,21 @@ export default function X64App() {
   }, [loadSample]);
   const launchByName = useCallback(async (rt: X64Runtime, list: ExeEntry[], want: X64Launch) => {
     let e = list.find(x => x.name.toLowerCase() === want.exe.toLowerCase());
+    if (!e && want.exe.includes('\\')) {   // a full path on the persistent disk (File Explorer → double-click an .exe or a shortcut)
+      const bytes = rt.vfsRead(want.exe);
+      if (!bytes) { pushToast('Programs', `${want.exe} is not on the disk`, 'x64'); return; }
+      const dir = want.exe.slice(0, want.exe.lastIndexOf('\\'));
+      e = { id: nextId.current++, name: want.exe.slice(dir.length + 1), bytes, info: rt.inspect(bytes), source: 'disk', path: want.exe, cwd: want.cwd || dir, kind: classifyExe(want.exe, bytes) };
+      const got = e; setExes(l => [...l.filter(x => !(x.source === 'disk' && x.path?.toLowerCase() === got.path?.toLowerCase())), got]);
+    }
     if (!e) { const got = await loadSample(rt, want.exe); if (!got) return; e = got; setExes(l => [...l, got]); }
     if (!e || e.pending) return;
     if (rt.status === 'running' || rt.status === 'waiting-stdin') rt.stop();
     setSelected(e.id); setArgs(want.args); consoleBuf.current = ''; setConsoleText(''); setLog([]);
-    const err = rt.start(e.bytes, e.name, want.args.trim() ? `${e.name} ${want.args.trim()}` : e.name);
+    const err = rt.start(e.bytes, e.path ?? e.name, want.args.trim() ? `${e.name} ${want.args.trim()}` : e.name, e.cwd);
     if (err) setLog(l => [...l, 'LOADER: ' + err]);
     setStats(rt.stats()); setFiles(rt.vfsList()); setTab('console');
-  }, [loadSample]);
+  }, [loadSample, pushToast]);
 
   // init runtime once
   useEffect(() => {
@@ -199,7 +206,7 @@ export default function X64App() {
       const want = takeX64Launch();   // another app (the Command Prompt's `real` command) asked us to start a program right away
       if (want) void launchByName(rt, [], want);
     }).catch(e => { if (alive) { setInitError(String(e)); setReady('error'); } });
-    return () => { alive = false; rt.stop(); };
+    return () => { alive = false; rt.dispose(); const g = window as unknown as { __x64?: X64Runtime }; if (g.__x64 === rt) delete g.__x64; };
   }, [launchByName]);
 
   // launch requests from other apps while we are open (Command Prompt → `real`)
