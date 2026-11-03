@@ -345,8 +345,8 @@ check "7za.exe x86: extract"      "Everything is Ok"                            
 check "7za.exe x86: round-trip identical" "same" "$(cmp -s $W32/src/rand.bin $W32/out/src/rand.bin && cmp -s $W32/src/nums.txt $W32/out/src/nums.txt && echo same || echo different)"
 check "7za.exe x86: error path = MSVC C++ throw/catch (__CxxFrameHandler)" "System ERROR:" "$($X --quiet --max-ms 30000 --mount-rw $W32='C:\w' $Z7/7za.exe x '-oC:\w\o2' 'C:\w\nope.7z' 2>&1 || true)"
 echo "[19] dialog manager (user32 dialogs, standard controls, resources, shell folders, IShellLink) — same test built for x64 and x86"
-check "dlg.exe (x64): 148 checks (dialogs, controls, menus, icons, status bar / toolbar / rebar / tab control / tree view / list view)"    "ALL OK 148/148"   "$($X --quiet --no-stdin --max-ms 40000 tests/dlg.exe 2>&1 || true)"
-check "dlg32.exe (x86): 148 checks (dialogs, controls, menus, icons, status bar / toolbar / rebar / tab control / tree view / list view)"  "ALL OK 148/148"   "$($X --quiet --no-stdin --max-ms 40000 tests/dlg32.exe 2>&1 || true)"
+check "dlg.exe (x64): 151 checks (dialogs, controls, menus, icons, status bar / toolbar / rebar / tab control / tree view / list view)"    "ALL OK 151/151"   "$($X --quiet --no-stdin --max-ms 40000 tests/dlg.exe 2>&1 || true)"
+check "dlg32.exe (x86): 151 checks (dialogs, controls, menus, icons, status bar / toolbar / rebar / tab control / tree view / list view)"  "ALL OK 151/151"   "$($X --quiet --no-stdin --max-ms 40000 tests/dlg32.exe 2>&1 || true)"
 check "input.exe (x64): 30 checks (Raw Input WM_INPUT, DirectInput8 keyboard/mouse, buffered data)"  "ALL OK 30/30"   "$($X --quiet --no-stdin --max-ms 15000 --key 0x27@1000:1500 --key 0x28@3000:400 --move 300,300@4200 tests/input.exe 2>&1 || true)"
 check "input32.exe (x86): 30 checks (Raw Input WM_INPUT, DirectInput8 keyboard/mouse, buffered data)"  "ALL OK 30/30"   "$($X --quiet --no-stdin --max-ms 15000 --key 0x27@1000:1500 --key 0x28@3000:400 --move 300,300@4200 tests/input32.exe 2>&1 || true)"
 # the same real installer twice: the x86 build (32-bit files) and the x64 build (a 32-bit setup stub that probes
@@ -385,11 +385,22 @@ if [ -f tests/inst/npp32.exe ] && [ -f tests/inst/npp64.exe ]; then
   out=$(X64_LOG=1 X64_WNDDUMP=1 $X --no-stdin --max-ms 25000 --mount-rw "$ID/npp=C:\\nebula" $ID/npp/notepad++.exe 2>&1 3>&1 | grep -a "^\[wnd\]\|FAULT\|MessageBox\|not registered" || true)
   check "Notepad++ x64 (installed): starts to the main window — Scintilla editors, tab bar, status bar created, no fault / error box"   '"Scintilla" "Notepad++".*"SysTabControl32" "Tab".* builtin=16 .*"msctls_statusbar32" "" parent=0 .* vis=1 .* builtin=14'   "$(echo "$out" | grep -v "FAULT\|MessageBox\|not registered" | tr '\n' ' ')"
   check "Notepad++ x64: no fault, no exception message box during start-up"   "errors=0"   "errors=$(echo "$out" | grep -a -c "FAULT\|MessageBox\|not registered") $(echo "$out" | grep -a "FAULT\|MessageBox\|not registered" | head -1)"
+  # typing into the Scintilla editor (click into the document, keys h e Enter 1): the document becomes modified → title "*new 1", the
+  # periodic backup (ReplaceFileW) and the status bar updates must not fault
+  out=$(X64_LOG=1 X64_WNDDUMP=1 $X --no-stdin --max-ms 32000 --click 300,300@18000 --key 0x48@20000:100 --key 0x45@21000:100 --key 0x0D@22000:100 --key 0x31@23000:100 --mount-rw "$ID/npp=C:\\nebula" $ID/npp/notepad++.exe 2>&1 3>&1 | grep -a "^\[wnd\] #0 \|FAULT\|MessageBox" || true)
+  check "Notepad++ x64: typing in the editor marks the document modified (title '*new 1'), no fault"   '"\*new 1 - Notepad++'   "$(echo "$out" | grep -v FAULT | tr '\n' ' ') errors=$(echo "$out" | grep -a -c "FAULT\|MessageBox")"
+  check "Notepad++ x64: no fault while typing / autosave"   "errors=0"   "errors=$(echo "$out" | grep -a -c "FAULT\|MessageBox")"
   rm -rf $ID; ID=$(mktemp -d)
   out=$($X --no-stdin --max-ms 150000 --mount-rw "$ID=C:\\inst" --click 357,337@3000 --click 357,337@6000 --click 357,337@9000 --click 357,337@12000 --click 357,337@70000 --click 357,337@80000 --click 357,337@90000 --click 357,337@110000 tests/inst/npp32.exe '/D=C:\inst\npp' 2>&1 | grep -v "last blocks" || true)
   check "NSIS x86 setup: GUI wizard (license → components → directory → install → finish) exit 0"   "exit code 0"   "$out"
   check "NSIS x86 setup: frames presented"   "[1-9][0-9]* frames"   "$out"
   check "NSIS x86 setup: 32-bit notepad++.exe written through the wizard"   "PE32 "   "$(python3 -c "import struct;d=open('$ID/npp/notepad++.exe','rb').read();pe=struct.unpack_from('<I',d,0x3c)[0];print('PE32+' if struct.unpack_from('<H',d,pe+24)[0]==0x20b else 'PE32 ')" 2>/dev/null)"
+  # the 32-bit Notepad++ (PE32, MSVC x86: SEH frames, C++ throw/catch during start-up, comctl32 subclass chains, Scintilla) must
+  # reach the same main window as the x64 build and accept typing
+  out=$(X64_LOG=1 X64_WNDDUMP=1 $X --no-stdin --max-ms 36000 --click 300,300@20000 --key 0x48@22000:100 --key 0x45@23000:100 --key 0x0D@24000:100 --key 0x31@25000:100 --mount-rw "$ID/npp=C:\\nebula" $ID/npp/notepad++.exe 2>&1 3>&1 | grep -a "^\[wnd\]\|FAULT\|MessageBox\|not registered" || true)
+  check "Notepad++ x86 (installed): main window with Scintilla, tab bar, rebar + toolbar, status bar"   '"Scintilla" "Notepad++".*"SysTabControl32" "Tab".* builtin=16 .*"msctls_statusbar32" "" parent=0 .* vis=1 .* builtin=14.*"ReBarWindow32"'   "$(echo "$out" | grep -v "FAULT\|MessageBox\|not registered" | tr '\n' ' ')"
+  check "Notepad++ x86: typing in the editor marks the document modified (title '*new 1')"   '"\*new 1 - Notepad++'   "$(echo "$out" | grep -a "#0 " | tr '\n' ' ')"
+  check "Notepad++ x86: no fault, no 'Exception On WM_CREATE' box, no autosave fault"   "errors=0"   "errors=$(echo "$out" | grep -a -c "FAULT\|MessageBox\|not registered") $(echo "$out" | grep -a "FAULT\|MessageBox\|not registered" | head -1)"
   rm -rf $ID
 else echo "  skip Notepad++ (no network)"; fi
 # a real Delphi/VCL installer (Inno Setup 6.5.4 installing itself: SetupLdr → Setup child → Compil32 /ASSOC third process,

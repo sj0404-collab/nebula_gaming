@@ -218,6 +218,20 @@ static void menu_tests(void) {
     chk(hi && gi && ii.fIcon && bmi.bmWidth == 32 && bmi.bmHeight == 32 && painted >= 100 && outside == 0, "icon: LoadImage(IMAGE_ICON 32x32) from RT_GROUP_ICON, GetIconInfo bitmaps, DrawIconEx paints inside the 32x32 box only");
     HIMAGELIST il = ImageList_Create(32, 32, ILC_COLOR32 | ILC_MASK, 2, 2); int ai = ImageList_AddIcon(il, hi); HICON back = ImageList_GetIcon(il, ai, ILD_NORMAL); ICONINFO i2; memset(&i2, 0, sizeof i2); int g2 = back ? GetIconInfo(back, &i2) : 0;
     chk(ai == 0 && ImageList_GetImageCount(il) == 1 && back && g2 && i2.hbmColor, "icon: ImageList_AddIcon / ImageList_GetIcon round trip");
+    /* SetTextAlign: Scintilla draws with TA_BASELINE (y = baseline), editors with TA_UPDATECP; the glyphs must land above the baseline, not below it */
+    { HBITMAP tb = CreateCompatibleBitmap(dc, 64, 40); HGDIOBJ o2 = SelectObject(md, tb); RECT all = { 0, 0, 64, 40 }; FillRect(md, &all, (HBRUSH)GetStockObject(WHITE_BRUSH)); SetBkMode(md, TRANSPARENT); SetTextColor(md, RGB(0, 0, 0));
+      TEXTMETRICW tm; GetTextMetricsW(md, &tm); UINT oldta = SetTextAlign(md, TA_BASELINE | TA_LEFT); TextOutW(md, 2, 30, L"Hg", 2); int above = 0, below = 0; for (int y = 0; y < 40; y++) for (int x = 0; x < 64; x++) if (GetPixel(md, x, y) != RGB(255, 255, 255)) { if (y < 30) above++; else below++; }
+      chk(oldta == (TA_LEFT | TA_TOP | TA_NOUPDATECP) && GetTextAlign(md) == (TA_BASELINE | TA_LEFT) && tm.tmAscent > 0 && tm.tmAscent < tm.tmHeight && above > 10 && below <= above / 2, "gdi: SetTextAlign(TA_BASELINE) puts the glyphs above the baseline y; GetTextAlign, GetTextMetrics ascent");
+      SetTextAlign(md, TA_UPDATECP | TA_TOP); MoveToEx(md, 5, 2, NULL); TextOutW(md, 0, 0, L"ab", 2); POINT cp; GetCurrentPositionEx(md, &cp); SIZE sz; GetTextExtentPoint32W(md, L"ab", 2, &sz);
+      chk(cp.x == 5 + sz.cx && cp.y == 2, "gdi: TA_UPDATECP draws at the current position and advances it by the text width");
+      SetTextAlign(md, oldta); SelectObject(md, o2); DeleteObject(tb); }
+    /* ReplaceFileW: the atomic save used by Notepad++ (write to a temp file, then replace the original, keeping a backup) */
+    { wchar_t dir[MAX_PATH], f1[MAX_PATH], f2[MAX_PATH], f3[MAX_PATH]; GetTempPathW(MAX_PATH, dir); wsprintfW(f1, L"%snebula_rf_a.txt", dir); wsprintfW(f2, L"%snebula_rf_b.txt", dir); wsprintfW(f3, L"%snebula_rf_bak.txt", dir); DeleteFileW(f3);
+      HANDLE h1 = CreateFileW(f1, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL); DWORD wr; WriteFile(h1, "OLD", 3, &wr, NULL); CloseHandle(h1); HANDLE h2 = CreateFileW(f2, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL); WriteFile(h2, "NEW!", 4, &wr, NULL); CloseHandle(h2);
+      BOOL rep = ReplaceFileW(f1, f2, f3, 0, NULL, NULL); char rb[16] = { 0 }; DWORD rd = 0; HANDLE h3 = CreateFileW(f1, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL); if (h3 != INVALID_HANDLE_VALUE) { ReadFile(h3, rb, 15, &rd, NULL); CloseHandle(h3); } char bb[16] = { 0 }; DWORD bd = 0; HANDLE h4 = CreateFileW(f3, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL); if (h4 != INVALID_HANDLE_VALUE) { ReadFile(h4, bb, 15, &bd, NULL); CloseHandle(h4); }
+      BOOL rep2 = ReplaceFileW(f1, f2, NULL, 0, NULL, NULL); DWORD e2 = GetLastError();
+      chk(rep && rd == 4 && memcmp(rb, "NEW!", 4) == 0 && bd == 3 && memcmp(bb, "OLD", 3) == 0 && GetFileAttributesW(f2) == INVALID_FILE_ATTRIBUTES && !rep2 && e2 == ERROR_FILE_NOT_FOUND, "kernel32: ReplaceFileW moves the replacement over the original, keeps the backup, fails with ERROR_FILE_NOT_FOUND when the replacement is gone");
+      DeleteFileW(f1); DeleteFileW(f3); }
     if (ii.hbmColor) DeleteObject(ii.hbmColor); if (ii.hbmMask) DeleteObject(ii.hbmMask); if (i2.hbmColor) DeleteObject(i2.hbmColor); if (i2.hbmMask) DeleteObject(i2.hbmMask); if (back) DestroyIcon(back); ImageList_Destroy(il); DestroyIcon(hi); SelectObject(md, old); DeleteObject(cv); DeleteDC(md); ReleaseDC(NULL, dc); DestroyWindow(cm); }
   SetTimer(h, 3, 150, NULL);
   MSG msg; DWORD t0 = GetTickCount();

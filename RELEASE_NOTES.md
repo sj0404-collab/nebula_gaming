@@ -1,3 +1,43 @@
+# v1.24.0 — Nebula x64 (Android): Notepad++ x86 **and** x64 look and work as on Windows — real icons, class menus, ReBar, TB_ADDBITMAP, WM_PRINTCLIENT, text alignment; three emulator bugs that broke every MSVC program
+
+**Why.** The acceptance target is «как на Windows, без заглушек»: a real application must look and behave the same as on Windows,
+on both bitnesses. Notepad++ 8.8.9 was the yardstick — the x64 build started but had fake icons, no class menu, a black strip instead of
+the tab bar and status bar, and `$STR_REPLACE2$` in the status bar; the x86 build died at `WM_CREATE` with an access violation.
+Every change was tested for **x86 and x64 together** before it was committed. Android is the only shipped platform from this release on
+(the CI builds the emulator, runs the native + browser suites and produces the signed APK; the desktop/bridge jobs are gone).
+
+**Measured** (`emu/tests/run.sh` **203 native checks ALL OK**, x86 + x64 — Notepad++ x64 *and* x86 start to their main window and accept
+typing (title becomes `*new 1`), 7‑Zip, PuTTY, Inno Setup/Compil32 unchanged; e2e in headless Chromium; `tests/dlg.exe`/`dlg32.exe`
+**151/151**; `tests/input.exe` 30/30):
+
+* **Icons and cursors are real** — `RT_GROUP_ICON`/`RT_ICON` are decoded (1/4/8/24/32‑bpp + mask, PNG‑in‑ICO), `LoadIcon`/`LoadImage`/
+  `LoadIconWithScaleDown`/`LoadIconMetric`, `DrawIcon(Ex)`, `GetIconInfo`, `CreateIconIndirect`, `DestroyIcon`, `CopyImage`; class icons,
+  caption icons, `WM_SETICON`, `STM_SETICON`, the `MessageBox` system icons, `ImageList_AddIcon/GetIcon/ReplaceIcon` all use them.
+* **Class menus** — `WNDCLASS.lpszMenuName` is loaded for windows created without `hMenu` (`GetMenu` returned 0 before → Notepad++ had no menu bar).
+* **Toolbar `TB_ADDBITMAP`** — the `HINST_COMMCTRL` standard sets (IDB_STD/VIEW/HIST) and application bitmap strips (Notepad++, 7‑Zip)
+  feed the toolbar's own image list; `TB_GETBITMAP`, `TB_CHANGEBITMAP`, `TB_LOADIMAGES`; button size always fits the image
+  (`TB_SETBUTTONSIZE` is a minimum, `TB_GETPADDING` defaults 7×6 as on Windows).
+* **ReBarWindow32** — a real rebar control: bands with gripper/text/child, rows, `RB_INSERTBAND(A/W)`, `RB_SETBANDINFO`, `RB_GETBARHEIGHT`,
+  `RB_GETRECT`, `RB_GETBANDINFO`, `RB_IDTOINDEX`, `RB_SHOWBAND`, `RB_MINIMIZEBAND/MAXIMIZEBAND`, `RBN_HEIGHTCHANGE`; the bar keeps its own
+  height after `MoveWindow(…, 0)` exactly like comctl32 (Notepad++ relies on this), `CCS_NOPARENTALIGN` is honoured by rebar + status bar.
+* **`WM_PRINT` / `WM_PRINTCLIENT`** for every built‑in control — double‑buffering subclasses (Notepad++ paints its status bar and tab bar
+  into a memory DC and blits), `AnimateWindow`‑style code and print preview now get real pixels.
+* **`SetTextAlign` / `GetTextAlign`** — `TA_BASELINE`, `TA_BOTTOM`, `TA_RIGHT`, `TA_CENTER`, `TA_UPDATECP` (saved/restored by `SaveDC`).
+  Scintilla draws every line with `TA_BASELINE`; before this the typed text landed below the line box and was invisible.
+* `ReplaceFileW/A` (Notepad++ autosave/backup faulted on it as unimplemented).
+* **Emulator bugs found through Notepad++ and fixed for every program:**
+  1. **`pcmpestri`/`pcmpistri` equal‑ordered** did not count a needle prefix that runs off the end of the register (SDM: i = 0…UpperBound−j).
+     MSVC's `std::wstring::find` (`__std_search_2`) uses exactly that — only the *first* occurrence of a substring was ever found.
+  2. **32‑bit stdcall cleanup lost after a C++ throw**: a continuation abandoned by a non‑local exit hid the one a shim pushed afterwards,
+     so `SendMessageW` → guest window procedure returned without popping its 16 bytes → `esi/edi/ebx` of the caller were garbage → the
+     x86 Notepad++ "Exception On WM_CREATE: Access violation".
+  3. **Missing stdcall arities** for comctl32's ordinal‑only exports (`LoadIconWithScaleDown`, `LoadIconMetric`, `TaskDialog(Indirect)`),
+     `ImmSetHotKey`, `DrawThemeParentBackgroundEx`, WIC proxies — a 32‑bit caller's stack drifted by 20 bytes per call.
+
+**Honest limits.** Font glyphs outside ASCII/Latin‑1/Cyrillic are drawn as `?` (Notepad++'s «?» menu is one); NSIS header bitmap is still
+missing; OLE drag‑and‑drop and the clipboard are inert; no HTTPS/TLS, no WinForms/WPF; D3D11 partial, no D3D9/DDraw; runtime packs are
+x64‑only; US keyboard layout; file dialogs cancel; visual styles (uxtheme) are off.
+
 # v1.23.0 — Nebula x64: game input (Raw Input + DirectInput 8), real menus, common controls (status bar / toolbar / tab control), image lists, WIC, RichEdit — x86 and x64 together
 
 **Why.** A user's GOG (Inno Setup, Delphi) installer reported `Imports: 120 total · 119 implemented · 1 missing — user32.dll!GetKeyboardType`;

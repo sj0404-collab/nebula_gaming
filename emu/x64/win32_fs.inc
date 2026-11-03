@@ -200,6 +200,18 @@ static void s_RemoveDirectoryA(Cpu *c) { RET(vfs_remove(name_a(c, ARG(0)))); }
 static void s_RemoveDirectoryW(Cpu *c) { RET(vfs_remove(name_w(c, ARG(0)))); }
 static void s_MoveFileA(Cpu *c) { char from[1024]; e_snprintf(from, sizeof from, "%s", name_a(c, ARG(0))); RET(vfs_rename(from, name_a(c, ARG(1)))); }
 static void s_MoveFileW(Cpu *c) { char from[1024]; e_snprintf(from, sizeof from, "%s", name_w(c, ARG(0))); RET(vfs_rename(from, name_w(c, ARG(1)))); }
+/* ReplaceFile(replaced, replacement, backup, flags, ...): the replacement takes over the replaced file's name; the old contents go to the backup name when given.
+   Both names must exist (ERROR_FILE_NOT_FOUND otherwise); a MoveFileEx(REPLACE_EXISTING) pair is what Windows does underneath. */
+static void replace_file(Cpu *c, const char *replaced, const char *replacement, const char *backup) {
+  int f = vfs_open(replacement, 1, 3, 0); if (f < 0) { W->last_error = 2; RET(0); return; } vfs_close(f);
+  f = vfs_open(replaced, 1, 3, 0); if (f < 0) { W->last_error = 2; RET(0); return; } vfs_close(f);
+  if (backup && backup[0]) { vfs_remove(backup); if (!vfs_rename(replaced, backup)) { W->last_error = 0x499 /* ERROR_UNABLE_TO_MOVE_REPLACEMENT */; RET(0); return; } }
+  else vfs_remove(replaced);
+  if (!vfs_rename(replacement, replaced)) { W->last_error = 0x499; RET(0); return; }
+  RET(1);
+}
+static void s_ReplaceFileW(Cpu *c) { char a[1024], b[1024]; e_snprintf(a, sizeof a, "%s", name_w(c, ARG(0))); e_snprintf(b, sizeof b, "%s", name_w(c, ARG(1))); replace_file(c, a, b, ARG(2) ? name_w(c, ARG(2)) : 0); }
+static void s_ReplaceFileA(Cpu *c) { char a[1024], b[1024]; e_snprintf(a, sizeof a, "%s", name_a(c, ARG(0))); e_snprintf(b, sizeof b, "%s", name_a(c, ARG(1))); replace_file(c, a, b, ARG(2) ? name_a(c, ARG(2)) : 0); }
 static void copy_file(Cpu *c, const char *from, const char *to, int fail_exists) {
   int src = vfs_open(from, 1, 3, 0); if (src < 0) { W->last_error = 2; RET(0); return; }
   int dst = vfs_open(to, 2, fail_exists ? 1 : 2, 0); if (dst < 0) { vfs_close(src); W->last_error = lasterr_of(dst); RET(0); return; }
@@ -733,7 +745,7 @@ static void s_mktemp(Cpu *c) { u64 a = ARG(0); u64 l = e_strlen(gstr(c, a)); u32
   S(CreateFileA), S(CreateFileW), SA("CreateFile2", CreateFileW), S(ReadFile), S(WriteFile), S(CloseHandle), S(GetFileType), S(GetFileSize), S(GetFileSizeEx), S(SetFilePointer), S(SetFilePointerEx), S(SetEndOfFile), \
   S(GetFileAttributesA), S(GetFileAttributesW), S(GetFileAttributesExA), S(GetFileAttributesExW), S(GetFileInformationByHandle), S(GetFileTime), \
   S(FindFirstFileA), S(FindFirstFileW), S(FindFirstFileExA), S(FindFirstFileExW), S(FindNextFileA), S(FindNextFileW), S(FindClose), \
-  S(DeleteFileA), S(DeleteFileW), S(CreateDirectoryA), S(CreateDirectoryW), S(RemoveDirectoryA), S(RemoveDirectoryW), S(MoveFileA), S(MoveFileW), SA("MoveFileExA", MoveFileA), SA("MoveFileExW", MoveFileW), S(CopyFileA), S(CopyFileW), \
+  S(ReplaceFileA), S(ReplaceFileW), S(DeleteFileA), S(DeleteFileW), S(CreateDirectoryA), S(CreateDirectoryW), S(RemoveDirectoryA), S(RemoveDirectoryW), S(MoveFileA), S(MoveFileW), SA("MoveFileExA", MoveFileA), SA("MoveFileExW", MoveFileW), S(CopyFileA), S(CopyFileW), \
   S(GetCurrentDirectoryA), S(GetCurrentDirectoryW), S(SetCurrentDirectoryA), S(SetCurrentDirectoryW), S(GetFullPathNameA), S(GetFullPathNameW), S(GetTempPathA), S(GetTempPathW), SA("GetTempPath2A", GetTempPathA), SA("GetTempPath2W", GetTempPathW), S(GetTempFileNameA), S(GetTempFileNameW), \
   S(CreateFileMappingA), S(CreateFileMappingW), S(MapViewOfFile), S(MapViewOfFileEx), S(UnmapViewOfFile), \
   S(ReadConsoleA), S(ReadConsoleW), S(ReadConsoleInputW), SA("ReadConsoleInputA", ReadConsoleInputW), S(PeekConsoleInputW), S(PeekConsoleInputA), S(FlushConsoleInputBuffer), S(GetNumberOfConsoleInputEvents), \

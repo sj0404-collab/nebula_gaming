@@ -178,6 +178,7 @@ static void cont_finish(Cpu *c, u64 rax) {
   int i = --w->ncont;
   if (w->ncont && w->cont[i].chain) {   /* chained continuation pushed by the same shim step: it receives the result */
     c->r[RAX] = rax; if (c->mode32) c->r[RDX] = rax >> 32; c->r[RSP] = w->cont[i].rsp; w32_cont_resume(c); return; }
+  if (w->api_trace) e_log("[cont] finish kind=%d depth=%d rsp=%llx clean=%d ret=%llx rax=%llx\n", w->cont[i].kind, i + 1, (unsigned long long)w->cont[i].rsp, w->cont[i].clean32, (unsigned long long)w->cont[i].ret_addr, (unsigned long long)rax);
   c->r[RSP] = w->cont[i].rsp + w->cont[i].clean32; c->rip = w->cont[i].ret_addr; c->r[RAX] = rax; if (c->mode32) c->r[RDX] = rax >> 32; w->cont_seq++;
 }
 static void do_exit(Cpu *c, int code) { W->exited = 1; c->exit_code = code; c->status = RUN_EXIT; }
@@ -283,7 +284,8 @@ void w32_cont_finish(Cpu *c, u64 rax) { cont_finish(c, rax); }
    continuation it pushed (guest callback in progress); a retry/yield leaves the frame intact so the slot is re-entered unchanged.
    Doubles returned by the x64 shim in xmm0 go to x87 ST(0); 64-bit results to edx:eax. */
 static void w32_call32(Cpu *c, ShimSlot *s, u64 ret) {
-  Win32 *w = W; int nc0 = w->ncont; u64 sp0 = c->r[RSP]; g_a32_n = 0;   /* a call from guest code: arguments are on the stack (no override left over from a shim that started a guest call) */
+  Win32 *w = W; while (w->ncont && w->cont[w->ncont - 1].rsp < c->r[RSP]) w->ncont--;   /* drop continuations abandoned by a non-local exit (C++ throw / longjmp over them) BEFORE counting: otherwise a stale frame hides the one this shim pushes and its stdcall cleanup is lost */
+  int nc0 = w->ncont; u64 sp0 = c->r[RSP]; g_a32_n = 0;   /* a call from guest code: arguments are on the stack (no override left over from a shim that started a guest call) */
   if (s->sig32) w32_marshal32_in(c, s);
   s->fn(c); g_a32_n = 0;
   if (c->status == RUN_OK && c->rip == ret && w->ncont == nc0 && c->r[RSP] == sp0) c->r[RSP] = (u32)(c->r[RSP] + s->clean32);
