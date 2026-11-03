@@ -104,7 +104,7 @@ export class X64Runtime {
         host_audio_write: (lr: bigint, frames: number) => this.audio.write(new Float32Array(this.ex!.memory.buffer, Number(lr), frames * 2)),
         host_audio_queued: () => this.audio.queued(),
         // persistent disk (src/lib/x64/disk.ts): the emulator reports closed-after-write files, mkdir, delete and rename
-        host_fs_write: (path: bigint, data: bigint, n: bigint) => { this.disk.put(this.cstr(path), this.bytesAt(data, Number(n))); return 1; },
+        host_fs_write: (path: bigint, data: bigint, n: bigint) => this.disk.put(this.cstr(path), this.bytesAt(data, Number(n))) ? 1 : 0,
         host_fs_mkdir: (path: bigint) => { this.disk.mkdir(this.cstr(path)); return 1; },
         host_fs_remove: (path: bigint) => { this.disk.remove(this.cstr(path)); return 1; },
         host_fs_rename: (from: bigint, to: bigint) => { void this.disk.rename(this.cstr(from), this.cstr(to)); return 1; },

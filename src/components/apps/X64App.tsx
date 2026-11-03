@@ -116,6 +116,7 @@ export default function X64App() {
   const { pushToast } = useOS();
   const [showTests, setShowTests] = useState(false);          // the emulator's self-test / sample programs (hidden by default; loaded on demand)
   const samplesLoaded = useRef<Promise<ExeEntry[]> | null>(null);
+  const [samplesReady, setSamplesReady] = useState(false);
   const [library, setLibrary] = useState<LibraryItem[]>([]);  // what is installed on the persistent C:\ (Start Menu shortcuts + Uninstall registry keys)
   const libIds = useRef<Set<string>>(new Set());
   const [icons, setIcons] = useState<Record<string, string>>({});
@@ -162,7 +163,7 @@ export default function X64App() {
       for (const sm of SAMPLES) { const e = await loadSample(rt, sm.name); if (e) { loaded.push(e); setExes(l => l.some(x => x.name === e.name && x.source === 'sample') ? l : [...l, e]); } }
       for (const f of SAMPLE_DATA) { try { const r = await fetch('/x64/apps/' + f); if (r.ok) rt.vfsAdd('C:\\nebula\\' + f, new Uint8Array(await r.arrayBuffer())); } catch { /* optional */ } }
       rt.vfsAdd('C:\\nebula\\readme.txt', new TextEncoder().encode('Nebula x64 virtual disk\nThis file lives in C:\\nebula\\readme.txt inside the emulator.\nTry: busybox64.exe cat readme.txt | wc -l | sort | sha256sum readme.txt\n'));
-      setFiles(rt.vfsList()); return loaded;
+      setFiles(rt.vfsList()); setSamplesReady(true); return loaded;
     })();
     return samplesLoaded.current;
   }, [loadSample]);
@@ -617,7 +618,7 @@ export default function X64App() {
       <div className="flex min-h-0 flex-1">
         {/* test programs list (self-tests + bundled console tools); hidden unless “tests” is on */}
         {showTests && !fs && <div className="flex w-56 shrink-0 flex-col border-r border-slate-200 bg-white" onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); void addFiles(e.dataTransfer.files); }}>
-          <div className="border-b border-slate-100 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Executables ({exes.length})</div>
+          <div className="border-b border-slate-100 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-slate-400" data-x64-samples={samplesReady ? 'ready' : 'loading'}>Executables ({exes.length}){!samplesReady && <Loader2 size={10} className="ml-1 inline animate-spin" />}</div>
           <div className="min-h-0 flex-1 overflow-y-auto">
             {ready === 'loading' && <div className="p-3 text-slate-400">Loading wasm64 emulator…</div>}
             {ready === 'unsupported' && <div className="p-3 text-rose-700">This browser has no WebAssembly memory64 (wasm64). Chrome/Edge ≥ 133, Firefox ≥ 134 or Android WebView ≥ 133 is required.</div>}
@@ -760,7 +761,7 @@ export default function X64App() {
                   <tbody>
                     {files.map(f => (
                       <tr key={f.path} data-x64-vfs={f.path} className="border-b border-slate-100 hover:bg-indigo-50/40">
-                        <td className="px-3 py-1 font-mono">{f.dir ? '📁 ' : ''}{f.path}{!!f.written && !f.dir && <span className="ml-2 rounded bg-emerald-100 px-1 text-[9px] font-semibold text-emerald-800">written</span>}</td>
+                        <td className="px-3 py-1 font-mono">{f.dir ? '📁 ' : ''}{f.path}{!!f.written && !f.dir && <span className="ml-2 rounded bg-emerald-100 px-1 text-[9px] font-semibold text-emerald-800" title="written this session; not on the persistent disk (scratch path)">written</span>}</td>
                         <td className="px-2 py-1 text-right text-slate-500">{f.dir ? '' : f.size.toLocaleString() + ' B'}</td>
                         <td className="px-2 py-1 text-right whitespace-nowrap">
                           {!f.dir && <button title="download" data-x64-download onClick={() => downloadFile(f.path)} className="rounded p-0.5 text-slate-500 hover:bg-white hover:text-indigo-700"><Download size={13} /></button>}

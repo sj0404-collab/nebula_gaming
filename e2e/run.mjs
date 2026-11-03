@@ -232,7 +232,7 @@ const x64Open = async () => {
   await openFromDesktop('Programs');
   const w = page.locator('[data-window][aria-label*="Programs"]');
   await w.locator('[data-x64-tests]').click();   // the self-test / sample programs panel (downloaded on demand)
-  await w.locator('[data-x64-exe="NebulaStrike.exe"]').waitFor({ timeout: 60_000 });
+  await w.locator('[data-x64-samples="ready"]').waitFor({ timeout: 120_000 });
   return w;
 };
 await test('x64: emulator loads (wasm64), scans the bundled samples and reports verdicts', async () => {
@@ -948,7 +948,7 @@ await test('phone (Android-like 1000×560, touch): Programs — the soft-keyboar
   await iconOf(p5, 'Programs').tap();
   const w = p5.locator('[data-window][aria-label*="Programs"]');
   await w.locator('[data-x64-tests]').tap();
-  await w.locator('[data-x64-exe="typing.exe"]').waitFor({ timeout: 60_000 });
+  await w.locator('[data-x64-samples="ready"]').waitFor({ timeout: 120_000 });
   await w.locator('[data-x64-exe="typing.exe"]').tap();
   await w.locator('[data-x64-run]').tap(); await sleep(800);
   await w.getByRole('button', { name: /^screen$/i }).tap();   // a console-subsystem exe opens on the Console tab; the program's window is on the Screen tab
