@@ -27,8 +27,7 @@ Android‑like viewport; `tests/dlg.exe`/`dlg32.exe` **157/157**; `tests/typing.
 * x64 Runner toolbar is one scrollable row on phones (buttons no longer wrap over each other).
 
 **Honest limits.** No pinch‑zoom of the guest screen yet (the 1280×720 desktop is letter‑boxed to the phone, so small controls are small);
-no gamepad; the 8×8 built‑in font has no Cyrillic/CJK glyphs — typed text is stored correctly (`GetWindowText` returns it, as the test
-shows) but non‑ASCII glyphs render as `?` until the font work lands; no HTTPS/TLS, no WinForms/WPF, D3D11 partial, no D3D9/DDraw;
+no gamepad; the built‑in 8×8 font covers ASCII, Latin‑1 and Cyrillic (typed «Привет» renders), CJK/emoji glyphs render as `?`; no HTTPS/TLS, no WinForms/WPF, D3D11 partial, no D3D9/DDraw;
 runtime packs are x64‑only; file dialogs cancel; visual styles off.
 
 # v1.24.0 — Nebula x64 (Android): Notepad++ x86 **and** x64 look and work as on Windows — real icons, class menus, ReBar, TB_ADDBITMAP, WM_PRINTCLIENT, text alignment; three emulator bugs that broke every MSVC program
