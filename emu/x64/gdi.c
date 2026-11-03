@@ -27,6 +27,7 @@ void w32_cont_finish(Cpu *c, u64 rax);
 /* ---------- GDI objects ---------- */
 static GdiObj *gdi_new(Win32 *w, int kind) {
   for (int i = 1; i < MAX_GDI; i++) if (!w->gdi[i].kind) { GdiObj *o = &w->gdi[i]; e_memset(o, 0, sizeof *o); o->kind = kind; o->handle = GDI_TAG | (u64)i; if (i >= w->ngdi) w->ngdi = i + 1; return o; }
+  static int warned; if (!warned) { warned = 1; w32_report(w, "GDI: object table full (%d objects) — handles are leaking", MAX_GDI); }
   return 0;
 }
 static GdiObj *gdi_get(Win32 *w, u64 h) { if ((h & ~0xffffull) != GDI_TAG) return 0; u64 i = h & 0xffff; if (i >= MAX_GDI || !w->gdi[i].kind) return 0; return &w->gdi[i]; }

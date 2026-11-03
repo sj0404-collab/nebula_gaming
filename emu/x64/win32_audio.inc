@@ -698,6 +698,7 @@ static void s_CoCreateInstance(Cpu *c) {
   u32 d1 = rd32(c, clsid), i1 = rd32(c, riid); wrp(c, ppv, 0);
   if (shell_cocreate(c, d1, riid, ppv)) return;
   if (gdi_wic_cocreate(c, d1, riid, ppv)) return;
+  if (gdi_filedlg_cocreate(c, d1, riid, ppv)) return;
   const ComClass *k = 0; for (int i = 0; g_com_classes[i].what; i++) if (g_com_classes[i].d1 == d1) { k = &g_com_classes[i]; break; }
   if (!k) { aud_log("[com] CoCreateInstance({%08x-…}): class not registered — the emulator provides MMDeviceEnumerator, DirectSound(8), WICImagingFactory, ShellLink and routes XAudio2/XACT to the DirectX-pack DLLs\n", d1); RET(0x80040154u); return; }
   if (!k->dll) {

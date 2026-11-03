@@ -163,11 +163,39 @@ static void s_WTSRegisterSessionNotification(Cpu *c) { RET(1); }
 static void s_WTSUnRegisterSessionNotification(Cpu *c) { RET(1); }
 static void s_WinHttpQueryAuthSchemes(Cpu *c) { W->last_error = 12019; RET(0); }
 static void s_WinHttpSetCredentials(Cpu *c) { W->last_error = 12019; RET(0); }
-static void s_GetOpenFileNameW(Cpu *c) { RET(0); }   /* the file dialog is cancelled */
-static void s_GetSaveFileNameW(Cpu *c) { RET(0); }
-static void s_GetOpenFileNameA(Cpu *c) { RET(0); }
-static void s_GetSaveFileNameA(Cpu *c) { RET(0); }
 static void s_CommDlgExtendedError(Cpu *c) { RET(0); }
+/* wininet: InternetCrackUrl — Notepad++ asks it whether a path is a URL before opening. Real parser: scheme://[user[:pass]@]host[:port]/path[?extra].
+   Component rule (as in wininet): pointer set + length set → copy into the caller's buffer; pointer NULL + length set → point into the URL; both 0 → skip. */
+static void icu_put(Cpu *c, int wide, u64 url, const u8 *u8s, int off, int len, u64 cs, u64 pptr, u64 plen) {
+  u64 ptr = rdp(c, cs + pptr); u32 cap = rd32(c, cs + plen); if (!ptr && !cap) return;
+  if (ptr) { if (!cap) return; char tmp[1024]; int n = len < 1023 ? len : 1023; e_memcpy(tmp, u8s + off, (size_t)n); tmp[n] = 0; text_out_cap(c, ptr, tmp, cap, wide); wr32(c, cs + plen, (u32)len); }
+  else { wrp(c, cs + pptr, url + (u64)off * (wide ? 2 : 1)); wr32(c, cs + plen, (u32)len); } }
+static void internet_crack_url(Cpu *c, int wide) { u64 url = ARG(0); u32 ulen = (u32)ARG(1); u64 cs = ARG(3); int x86 = c->mode32; if (!url || !cs) { W->last_error = 87; RET(0); return; }
+  char s[1024]; if (wide) wstr_to_utf8(c, url, s, sizeof s, ulen ? (int)ulen : -1); else { const char *p = rd_str(c, url, 1023); e_snprintf(s, sizeof s, "%s", p ? p : ""); if (ulen && ulen < e_strlen(s)) s[ulen] = 0; }
+  int n = (int)e_strlen(s), i = 0; while (i < n && ((s[i] >= 'a' && s[i] <= 'z') || (s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= '0' && s[i] <= '9' && i) || s[i] == '+' || s[i] == '-' || s[i] == '.')) i++;
+  if (i == 0 || i + 1 > n || s[i] != ':' || i == 1 /* "C:" is a drive, not a scheme */) { W->last_error = 12006 /* ERROR_INTERNET_UNRECOGNIZED_SCHEME */; RET(0); return; }
+  int sch_len = i; u32 nscheme = 0; char sch[16]; e_snprintf(sch, sizeof sch, "%.*s", sch_len < 15 ? sch_len : 15, s); for (char *q = sch; *q; q++) if (*q >= 'A' && *q <= 'Z') *q += 32;
+  if (!e_strcmp(sch, "http")) nscheme = 3; else if (!e_strcmp(sch, "https")) nscheme = 4; else if (!e_strcmp(sch, "ftp")) nscheme = 1; else if (!e_strcmp(sch, "file")) nscheme = 7; else if (!e_strcmp(sch, "gopher")) nscheme = 2; else if (!e_strcmp(sch, "mailto")) nscheme = 10; else if (!e_strcmp(sch, "news")) nscheme = 8; else if (!e_strcmp(sch, "res")) nscheme = 11; else nscheme = 0;
+  int p = i + 1; int host_off = 0, host_len = 0, user_off = 0, user_len = 0, pass_off = 0, pass_len = 0, path_off = 0, path_len = 0, extra_off = 0, extra_len = 0; u32 port = 0;
+  if (p + 1 < n && s[p] == '/' && s[p + 1] == '/') { p += 2; int auth_end = p; while (auth_end < n && s[auth_end] != '/' && s[auth_end] != '?' && s[auth_end] != '#') auth_end++;
+    int at = -1; for (int k = p; k < auth_end; k++) if (s[k] == '@') at = k; int hs = p; if (at >= 0) { int colon = -1; for (int k = p; k < at; k++) if (s[k] == ':') { colon = k; break; } user_off = p; user_len = (colon >= 0 ? colon : at) - p; if (colon >= 0) { pass_off = colon + 1; pass_len = at - colon - 1; } hs = at + 1; }
+    int pc = -1; for (int k = hs; k < auth_end; k++) if (s[k] == ':') pc = k; host_off = hs; host_len = (pc >= 0 ? pc : auth_end) - hs; if (pc >= 0) { for (int k = pc + 1; k < auth_end; k++) if (s[k] >= '0' && s[k] <= '9') port = port * 10 + (u32)(s[k] - '0'); }
+    p = auth_end; }
+  if (!port) port = nscheme == 3 ? 80 : nscheme == 4 ? 443 : nscheme == 1 ? 21 : nscheme == 2 ? 70 : 0;
+  path_off = p; int q = p; while (q < n && s[q] != '?' && s[q] != '#') q++; path_len = q - p; if (q < n) { extra_off = q; extra_len = n - q; }
+  wr32(c, cs + (x86 ? 12 : 20), nscheme); wr16(c, cs + (x86 ? 24 : 36), (u16)port);
+  icu_put(c, wide, url, (const u8 *)s, 0, sch_len, cs, x86 ? 4 : 8, x86 ? 8 : 16);
+  icu_put(c, wide, url, (const u8 *)s, host_off, host_len, cs, x86 ? 16 : 24, x86 ? 20 : 32);
+  icu_put(c, wide, url, (const u8 *)s, user_off, user_len, cs, x86 ? 28 : 40, x86 ? 32 : 48);
+  icu_put(c, wide, url, (const u8 *)s, pass_off, pass_len, cs, x86 ? 36 : 56, x86 ? 40 : 64);
+  icu_put(c, wide, url, (const u8 *)s, path_off, path_len, cs, x86 ? 44 : 72, x86 ? 48 : 80);
+  icu_put(c, wide, url, (const u8 *)s, extra_off, extra_len, cs, x86 ? 52 : 88, x86 ? 56 : 96);
+  RET(1); }
+static void s_InternetCrackUrlW(Cpu *c) { internet_crack_url(c, 1); }
+static void s_InternetCrackUrlA(Cpu *c) { internet_crack_url(c, 0); }
+/* shlwapi AssocQueryString: the virtual registry holds no file associations → HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), *pcchOut = 0 */
+static void s_AssocQueryStringW(Cpu *c) { if (ARG(5)) wr32(c, ARG(5), 0); RET(0x80070002u); }
+static void s_AssocQueryStringA(Cpu *c) { if (ARG(5)) wr32(c, ARG(5), 0); RET(0x80070002u); }
 /* ---- ole32 / oleaut32 helpers ---- */
 static void s_IsEqualGUID(Cpu *c) { u64 a = ARG(0), b = ARG(1); for (int i = 0; i < 16; i++) if (rd8(c, a + i) != rd8(c, b + i)) { RET(0); return; } RET(1); }
 static void s_StringFromGUID2(Cpu *c) { u64 g = ARG(0), out = ARG(1); u32 cap = (u32)ARG(2); char s[48]; e_snprintf(s, sizeof s, "{%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}", rd32(c, g), rd16(c, g + 4), rd16(c, g + 6), rd8(c, g + 8), rd8(c, g + 9), rd8(c, g + 10), rd8(c, g + 11), rd8(c, g + 12), rd8(c, g + 13), rd8(c, g + 14), rd8(c, g + 15)); if (cap < 39) { RET(0); return; } for (int i = 0; i <= 38; i++) wr16(c, out + i * 2, (u8)s[i]); RET(39); }
@@ -193,7 +221,7 @@ static void s_GetActiveObject(Cpu *c) { RET(0x800401E3); }   /* MK_E_UNAVAILABLE
   S(InitializeFlatSB), S(UninitializeFlatSB), S(FlatSB_SetScrollInfo), S(FlatSB_GetScrollInfo), S(FlatSB_SetScrollPos), S(FlatSB_GetScrollPos), S(FlatSB_SetScrollProp), S(FlatSB_SetScrollRange), S(FlatSB_ShowScrollBar), S(FlatSB_EnableScrollBar), SA("_TrackMouseEvent", TrackMouseEvent_), SA("TrackMouseEvent", TrackMouseEvent_), \
   \
   S(TransactNamedPipe), S(InitializeSecurityDescriptor), S(SetSecurityDescriptorDacl), S(SetSecurityDescriptorOwner), S(SetSecurityDescriptorGroup), S(WNetOpenEnumW), S(WNetEnumResourceW), S(WNetCloseEnum), S(WNetGetConnectionW), S(WNetGetUniversalNameW), S(WNetOpenEnumA), S(WNetGetConnectionA), \
-  S(WTSRegisterSessionNotification), S(WTSUnRegisterSessionNotification), S(WinHttpQueryAuthSchemes), S(WinHttpSetCredentials), S(GetOpenFileNameW), S(GetSaveFileNameW), S(GetOpenFileNameA), S(GetSaveFileNameA), S(CommDlgExtendedError), \
+  S(WTSRegisterSessionNotification), S(WTSUnRegisterSessionNotification), S(WinHttpQueryAuthSchemes), S(WinHttpSetCredentials), S(CommDlgExtendedError), S(InternetCrackUrlW), S(InternetCrackUrlA), S(AssocQueryStringW), S(AssocQueryStringA), \
   S(IsEqualGUID), S(StringFromGUID2), S(StringFromCLSID), S(CoFreeUnusedLibraries), S(CoDisconnectObject), S(StgCreateDocfileOnILockBytes), S(CreateILockBytesOnHGlobal), S(LoadTypeLib), S(LoadTypeLibEx), S(RegisterTypeLib), S(GetErrorInfo), S(SetErrorInfo), S(GetActiveObject)
 /* ---- uxtheme: visual styles are OFF (classic look). Every query says "no theme", every draw call fails cleanly so the
    VCL/comctl fall back to classic drawing; BufferedPaint* exists but hands out no buffer (callers paint directly). ---- */

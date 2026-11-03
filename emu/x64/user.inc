@@ -27,7 +27,7 @@ static void combo_sync_edit(Cpu *c, int i);
 static void combo_sync_list(Cpu *c, int i);
 typedef struct {
   int used, destroyed; int parent, owner; int builtin; int superclassed; /* app-registered class whose wndproc delegates to a built-in proc (VCL TNewButton …): behaves like the built-in for painting but all messages flow through the guest wndproc */ int pid;   /* owning process: messages from other processes are posted to its queue */ char clsname[40]; u64 wndproc; u64 cls_brush; u32 cls_style; int cls_extra;
-  u32 style, exstyle; u64 id, inst;
+  u32 style, exstyle; u64 id, inst; int dc_gen;
   int x, y, w, h;            /* relative to the parent's client origin (top-level: framebuffer coordinates) */
   int ncx, ncy;              /* client offset inside the window (caption/border of secondary top-level windows) */
   char *text; int textcap; char tbuf[1024]; u32 bgcol; int bgcol_set; /* EM_SETBKGNDCOLOR */ char *stream; int stream_len, stream_cap; u64 stream_buf; u32 stream_flags; /* EM_STREAMIN in progress */ void *cc; /* common-control state (comctl.inc) */ u64 sub_proc[8], sub_id[8], sub_ref[8], sub_orig; int nsub, subcur; int unicode_wnd; /* created through CreateWindowExW (decides A/W notifications of common controls) */ /* comctl32 SetWindowSubclass chain: subcur = index of the subclass currently running (nsub = none) */   /* window text: inline buffer, grown on the heap for long edit contents (licence viewers) */
@@ -76,7 +76,7 @@ static int wnd_enabled_chain(int i) { for (int k = i; k >= 0; k = g_wnd[k].paren
 static int wnd_is_child_of(int i, int anc) { for (int k = g_wnd[i].parent; k >= 0; k = g_wnd[k].parent) if (k == anc) return 1; return 0; }
 static void wnd_invalidate(int i, int erase) { if (!wnd_alive(i)) return; g_wnd[i].invalid = 1; if (erase) g_wnd[i].erase = 1; for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && g_wnd[k].parent == i) wnd_invalidate(k, erase); }
 /* debug aid (X64_WNDDUMP): every live window with its geometry and paint state */
-void user_dump_windows(void) { for (int k = 0; k < MAX_WND; k++) { Wnd *n = &g_wnd[k]; if (!n->used) continue; e_log("[wnd] #%d hwnd=%llx pid=%d \"%s\" \"%.40s\" parent=%d at %d,%d %dx%d nc=%d,%d style=%08x vis=%d inv=%d erase=%d destroyed=%d builtin=%d proc=%llx\n", k, (unsigned long long)HWND_OF(k), n->pid, n->clsname, n->text, n->parent, n->x, n->y, n->w, n->h, n->ncx, n->ncy, n->style, n->visible, n->invalid, n->erase, n->destroyed, n->builtin, (unsigned long long)n->wndproc); } }
+void user_dump_windows(void) { for (int k = 0; k < MAX_WND; k++) { Wnd *n = &g_wnd[k]; if (!n->used) continue; e_log("[wnd] #%d hwnd=%llx pid=%d \"%s\" \"%.40s\" parent=%d at %d,%d %dx%d nc=%d,%d style=%08x vis=%d inv=%d erase=%d destroyed=%d builtin=%d proc=%llx z=%d\n", k, (unsigned long long)HWND_OF(k), n->pid, n->clsname, n->text, n->parent, n->x, n->y, n->w, n->h, n->ncx, n->ncy, n->style, n->visible, n->invalid, n->erase, n->destroyed, n->builtin, (unsigned long long)n->wndproc, n->zseq); } }
 /* a window painted underneath an open popup menu / dropped combo list: the popup repaints on top afterwards (window DCs are
    clipped to ancestors, not to overlapping top-level windows) */
 static void popups_over(int i) { if (!wnd_alive(i)) return; int ax, ay; wnd_window_origin(i, &ax, &ay); int aw = g_wnd[i].w, ah = g_wnd[i].h; int r = wnd_root(i); int rz = r >= 0 ? g_wnd[r].zseq : 0;
@@ -120,8 +120,27 @@ static void dc_bind_window(Win32 *w, GdiObj *dc, int i) {
   if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > w->screen_w) x1 = w->screen_w; if (y1 > w->screen_h) y1 = w->screen_h;
   dc->wnd = i + 1; dc->ox = ox < 0 ? 0 : ox; dc->oy = oy < 0 ? 0 : oy; dc->vw = x1 - dc->ox; dc->vh = y1 - dc->oy; if (dc->vw < 0) dc->vw = 0; if (dc->vh < 0) dc->vh = 0;
 }
-static u64 wnd_dc(Cpu *c, int i) { Win32 *w = W; u64 h = make_dc(w); GdiObj *dc = gdi_get(w, h); if (!dc) return 0; if (i >= 0) { dc_bind_window(w, dc, i); if (g_wnd[i].font) dc->font = g_wnd[i].font; } else { dc->wnd = -1; } return h; }
-static void wnd_dc_free(Win32 *w, u64 h) { GdiObj *dc = gdi_get(w, h); if (dc && dc->kind == K_DC && h != window_dc) { dc->kind = 0; dcsave_drop(h); } }
+/* WS_CLIPCHILDREN / WS_CLIPSIBLINGS: a window DC must not paint over its visible children (CLIPCHILDREN) or over siblings above it in z-order
+   (CLIPSIBLINGS). The surfaces are single rectangles, so instead of region clipping the covered pixels are saved when the DC is obtained and put
+   back when it is released — unless that window painted itself in between (its dc_gen moved on), in which case its fresh pixels win.
+   Notepad++'s tab control (full-size, double-buffered) would otherwise blank the Scintilla editor that lies on top of it. */
+#define DCSNAP_MAX 24
+typedef struct { u64 hdc; int n; struct { int x, y, w, h; int wnd; int gen; u32 *px; } r[DCSNAP_MAX]; } DcSnap;
+static DcSnap g_dcsnap[16]; static int g_dc_gen;
+static void dcsnap_add(Win32 *w, DcSnap *s, int k, int x0, int y0, int x1, int y1) { if (s->n >= DCSNAP_MAX) return; int wx, wy; wnd_window_origin(k, &wx, &wy); int ax = wx > x0 ? wx : x0, ay = wy > y0 ? wy : y0, bx = wx + g_wnd[k].w < x1 ? wx + g_wnd[k].w : x1, by = wy + g_wnd[k].h < y1 ? wy + g_wnd[k].h : y1;
+  if (ax < 0) ax = 0; if (ay < 0) ay = 0; if (bx > w->screen_w) bx = w->screen_w; if (by > w->screen_h) by = w->screen_h; if (bx <= ax || by <= ay) return;
+  u32 *px = emu_alloc((size_t)(bx - ax) * (by - ay) * 4); if (!px) return; for (int y = ay; y < by; y++) e_memcpy(px + (size_t)(y - ay) * (bx - ax), w->screen + (size_t)y * w->screen_w + ax, (size_t)(bx - ax) * 4);
+  s->r[s->n].x = ax; s->r[s->n].y = ay; s->r[s->n].w = bx - ax; s->r[s->n].h = by - ay; s->r[s->n].wnd = k; s->r[s->n].gen = g_wnd[k].dc_gen; s->r[s->n].px = px; s->n++; }
+static void dc_clip_snapshot(Win32 *w, GdiObj *dc, u64 h, int i) { if (!w->screen) return; u32 st = g_wnd[i].style; if (!(st & 0x06000000u)) return; int x0 = dc->ox, y0 = dc->oy, x1 = dc->ox + dc->vw, y1 = dc->oy + dc->vh; if (x1 <= x0 || y1 <= y0) return;
+  DcSnap *s = 0; for (int q = 0; q < 16; q++) if (!g_dcsnap[q].hdc) { s = &g_dcsnap[q]; break; } if (!s) return; s->n = 0;
+  if (st & 0x02000000u) for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].visible && g_wnd[k].parent == i) dcsnap_add(w, s, k, x0, y0, x1, y1);
+  if ((st & 0x04000000u) && g_wnd[i].parent >= 0) for (int k = 0; k < MAX_WND; k++) if (k != i && g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].visible && g_wnd[k].parent == g_wnd[i].parent && g_wnd[k].zseq > g_wnd[i].zseq) dcsnap_add(w, s, k, x0, y0, x1, y1);
+  if (s->n) s->hdc = h; }
+static void dc_clip_restore(Win32 *w, u64 h) { for (int q = 0; q < 16; q++) if (g_dcsnap[q].hdc == h) { DcSnap *s = &g_dcsnap[q];
+    for (int r = 0; r < s->n; r++) { int k = s->r[r].wnd; if (w->screen && wnd_alive(k) && g_wnd[k].visible && g_wnd[k].dc_gen == s->r[r].gen) for (int y = 0; y < s->r[r].h; y++) e_memcpy(w->screen + (size_t)(s->r[r].y + y) * w->screen_w + s->r[r].x, s->r[r].px + (size_t)y * s->r[r].w, (size_t)s->r[r].w * 4); emu_free(s->r[r].px); }
+    s->n = 0; s->hdc = 0; return; } }
+static u64 wnd_dc(Cpu *c, int i) { Win32 *w = W; u64 h = make_dc(w); GdiObj *dc = gdi_get(w, h); if (!dc) return 0; if (i >= 0) { dc_bind_window(w, dc, i); if (g_wnd[i].font) dc->font = g_wnd[i].font; g_wnd[i].dc_gen = ++g_dc_gen; dc_clip_snapshot(w, dc, h, i); } else { dc->wnd = -1; } return h; }
+static void wnd_dc_free(Win32 *w, u64 h) { GdiObj *dc = gdi_get(w, h); if (dc && dc->kind == K_DC && h != window_dc) { dc_clip_restore(w, h); dc->kind = 0; dcsave_drop(h); } }
 
 /* ---------- messages ---------- */
 static void post_msg_to(Win32 *w, u64 hwnd, u32 msg, u64 wp, u64 lp) {
@@ -773,12 +792,39 @@ static void s_ShowScrollBar(Cpu *c) { RET(1); }
 static void s_EnableScrollBar(Cpu *c) { RET(1); }
 static void s_ScrollWindowEx(Cpu *c) { int i = wnd_of(ARG(0)); if (i >= 0) wnd_invalidate(i, 1); RET(0); }
 static void s_ScrollWindow(Cpu *c) { int i = wnd_of(ARG(0)); if (i >= 0) wnd_invalidate(i, 1); RET(1); }
-static void s_LoadAcceleratorsW(Cpu *c) { RET(0x6A001); }
-static void s_LoadAcceleratorsA(Cpu *c) { RET(0x6A001); }
-static void s_CreateAcceleratorTableW(Cpu *c) { RET(0x6A002); }
-static void s_DestroyAcceleratorTable(Cpu *c) { RET(1); }
-static void s_TranslateAcceleratorW(Cpu *c) { RET(0); }
-static void s_TranslateAcceleratorA(Cpu *c) { RET(0); }
+/* ---- accelerator tables: real ones (Ctrl+O, Ctrl+S, F3 … in Notepad++, 7-Zip, PuTTY). Handle 0x6A001+idx*0x10; entries {fVirt, key, cmd}.
+   fVirt: FVIRTKEY 1, FNOINVERT 2, FSHIFT 4, FCONTROL 8, FALT 0x10. TranslateAccelerator sends WM_COMMAND(cmd, 1) synchronously and returns 1 (the message is consumed). */
+#define ACC_MAX 32
+#define ACC_ENT 512
+static struct { int used, n; u16 fvirt[ACC_ENT], key[ACC_ENT], cmd[ACC_ENT]; } g_acc[ACC_MAX];
+static u64 acc_handle(int k) { return 0x6A001u + (u64)k * 0x10; }
+static int acc_of(u64 h) { if (h < 0x6A001u || ((h - 0x6A001u) & 0xF)) return -1; u64 k = (h - 0x6A001u) / 0x10; return k < ACC_MAX && g_acc[k].used ? (int)k : -1; }
+static int acc_alloc(void) { for (int k = 0; k < ACC_MAX; k++) if (!g_acc[k].used) { g_acc[k].used = 1; g_acc[k].n = 0; return k; } return -1; }
+static void load_accelerators(Cpu *c, int wide) { u64 e = rsrc_lookup(c, ARG(0), ARG(1), 9 /* RT_ACCELERATOR */, wide, 0); if (!e) { W->last_error = 1814; RET(0); return; }
+  u64 base = ARG(0) ? ARG(0) : W->image_base, p = base + rd32(c, e); u32 size = rd32(c, e + 4); int k = acc_alloc(); if (k < 0) { RET(0); return; }
+  for (u32 off = 0; off + 8 <= size && g_acc[k].n < ACC_ENT; off += 8) { u16 fv = rd16(c, p + off); g_acc[k].fvirt[g_acc[k].n] = fv & 0x7F; g_acc[k].key[g_acc[k].n] = rd16(c, p + off + 2); g_acc[k].cmd[g_acc[k].n] = rd16(c, p + off + 4); g_acc[k].n++; if (fv & 0x80) break; }
+  RET(acc_handle(k)); }
+static void s_LoadAcceleratorsW(Cpu *c) { load_accelerators(c, 1); }
+static void s_LoadAcceleratorsA(Cpu *c) { load_accelerators(c, 0); }
+static void s_CreateAcceleratorTableW(Cpu *c) { u64 p = ARG(0); int n = (int)(s32)(u32)ARG(1); if (!p || n <= 0) { RET(0); return; } int k = acc_alloc(); if (k < 0) { RET(0); return; }   /* ACCEL: BYTE fVirt @0, WORD key @2, WORD cmd @4 (6 bytes) */
+  for (int i = 0; i < n && i < ACC_ENT; i++) { g_acc[k].fvirt[i] = rd8(c, p + (u64)i * 6) & 0x7F; g_acc[k].key[i] = rd16(c, p + (u64)i * 6 + 2); g_acc[k].cmd[i] = rd16(c, p + (u64)i * 6 + 4); g_acc[k].n = i + 1; } RET(acc_handle(k)); }
+static void s_CreateAcceleratorTableA(Cpu *c) { s_CreateAcceleratorTableW(c); }
+static void s_CopyAcceleratorTableW(Cpu *c) { int k = acc_of(ARG(0)); if (k < 0) { RET(0); return; } u64 p = ARG(1); int cap = (int)(s32)(u32)ARG(2); if (!p) { RET((u64)g_acc[k].n); return; } int n = g_acc[k].n < cap ? g_acc[k].n : cap;
+  for (int i = 0; i < n; i++) { wr8(c, p + (u64)i * 6, (u8)g_acc[k].fvirt[i]); wr8(c, p + (u64)i * 6 + 1, 0); wr16(c, p + (u64)i * 6 + 2, g_acc[k].key[i]); wr16(c, p + (u64)i * 6 + 4, g_acc[k].cmd[i]); } RET((u64)n); }
+static void s_CopyAcceleratorTableA(Cpu *c) { s_CopyAcceleratorTableW(c); }
+static void s_DestroyAcceleratorTable(Cpu *c) { int k = acc_of(ARG(0)); if (k >= 0) g_acc[k].used = 0; RET(k >= 0); }
+static void s_TranslateAcceleratorW(Cpu *c) { Win32 *w = W; u64 hwnd = ARG(0); int k = acc_of(ARG(1)); u64 m = ARG(2); if (k < 0 || !m) { RET(0); return; }
+  u32 msg = rd32(c, MSG_MSG(m)); u64 wp = rdp(c, MSG_WP(m)); int i = wnd_of(hwnd); if (i < 0 || !g_wnd[i].wndproc) { RET(0); return; }
+  if (msg != 0x100 && msg != 0x104 && msg != 0x102 && msg != 0x106) { RET(0); return; }   /* WM_KEYDOWN / WM_SYSKEYDOWN / WM_CHAR / WM_SYSCHAR */
+  int ctrl = w->key_state[0x11] != 0, shift = w->key_state[0x10] != 0, alt = w->key_state[0x12] != 0;
+  for (int e = 0; e < g_acc[k].n; e++) { u16 fv = g_acc[k].fvirt[e], key = g_acc[k].key[e];
+    if (fv & 1) { if (msg != 0x100 && msg != 0x104) continue; if ((u32)key != (u32)(wp & 0xFF)) continue; if (!!(fv & 8) != ctrl || !!(fv & 4) != shift || !!(fv & 0x10) != alt) continue; }
+    else { if (msg != 0x102 && msg != 0x106) continue; if ((u32)key != (u32)(wp & 0xFFFF)) continue; }
+    /* a disabled window gets nothing; the command goes as WM_COMMAND(cmd, accelerator=1) */
+    if (!g_wnd[i].enabled) { RET(1); return; }
+    send_to(c, i, 0x111, ((u64)1 << 16) | g_acc[k].cmd[e], 0, CONT_RET_VAL, 1); return; }
+  RET(0); }
+static void s_TranslateAcceleratorA(Cpu *c) { s_TranslateAcceleratorW(c); }
 static void s_CreateCaret(Cpu *c) { RET(1); }
 static void s_DestroyCaret(Cpu *c) { RET(1); }
 static void s_ShowCaret(Cpu *c) { RET(1); }
@@ -1313,11 +1359,12 @@ static void s_CreateDialogParamW(Cpu *c) { u64 e = rsrc_lookup(c, ARG(0), ARG(1)
 static void s_CreateDialogParamA(Cpu *c) { u64 e = rsrc_lookup(c, ARG(0), ARG(1), 5, 0, 0); if (!e) { W->last_error = 1814; RET(0); return; } u64 base = ARG(0) ? ARG(0) : W->image_base; int i = dlg_begin(c, ARG(0), base + rd32(c, e), ARG(2), ARG(3), ARG(4), 0); if (i < 0) { RET(0); return; } dlg_create_next(c); }
 /* modal loop: DialogBoxParam / MessageBox / SHBrowseForFolder re-execute their shim after every dispatched message until EndDialog.
    g_modal[].rip/rsp identify the re-entry; phase 1 = running, 2 = ending (window being destroyed) */
+static void fdlg_release(int wnd); static int fdlg_is_com(int wnd);
 static struct { u64 rip, rsp, slot; int wnd; int phase; } g_modal[8]; static int g_nmodal;
 static void modal_reexec(Cpu *c) { int m = g_nmodal - 1; if (m < 0) { RET(0); return; } cpu_push(c, c->rip); c->rip = g_modal[m].slot; }
 static int modal_reentry(Cpu *c) { int m = g_nmodal - 1; return m >= 0 && g_modal[m].rip == c->rip && g_modal[m].rsp == c->r[RSP]; }
 static void modal_resume(Cpu *c, u64 rax) { (void)rax; Win32 *w = W; int ci = w->ncont - 1; w->ncont--; c->r[RSP] = w->cont[ci].rsp; c->rip = w->cont[ci].ret_addr; modal_reexec(c); }
-static u64 modal_result(Win32 *w, int m) { int i = g_modal[m].wnd; u64 res = g_wnd[i].result; if (g_wnd[i].dlgproc == w32_shim_slot(w, "user32", "NebulaBrowseProc")) res = res ? pidl_make(w, g_wnd[i].text) : 0; return res; }
+static u64 modal_result(Win32 *w, int m) { int i = g_modal[m].wnd; u64 res = g_wnd[i].result; if (fdlg_is_com(i)) res = res ? 0 : 0x800704C7u; /* IFileDialog::Show: S_OK / HRESULT_FROM_WIN32(ERROR_CANCELLED) */ fdlg_release(i); if (g_wnd[i].dlgproc == w32_shim_slot(w, "user32", "NebulaBrowseProc")) res = res ? pidl_make(w, g_wnd[i].text) : 0; return res; }
 static void modal_loop(Cpu *c, int i) {
   Win32 *w = W; int m = g_nmodal - 1; Wnd *n = &g_wnd[i];
   if (!wnd_alive(i)) { u64 res = modal_result(w, m); g_nmodal--; RET(res); return; }
@@ -1415,6 +1462,97 @@ static void s_SHBrowseForFolderW(Cpu *c) { Win32 *w = W; int m; if (modal_reentr
   if (g_nmodal >= 8) { RET(0); return; } u64 proc = w32_shim_slot(w, "user32", "NebulaBrowseProc"); int i = dlg_begin(c, 0, tmpl, rdp(c, bi), proc, 0, 1); if (i < 0) { RET(0); return; } wnd_set_text(&g_wnd[i], start); g_wnd[i].builtin = BI_MSGBOX;
   m = g_nmodal++; g_modal[m].rip = c->rip; g_modal[m].rsp = c->r[RSP]; g_modal[m].slot = w32_cur_slot(); g_modal[m].wnd = i; g_modal[m].phase = 1; dlg_create_next(c); }
 static void s_SHBrowseForFolderA(Cpu *c) { s_SHBrowseForFolderW(c); }
+
+/* ---------- comdlg32: GetOpenFileName / GetSaveFileName — a real modal file dialog over the virtual disk ----------
+   Layout: "Look in" path label, a list of [folders] and files matching the active filter, a "File name" edit, a "Files of type" combo
+   built from lpstrFilter, Open/Save + Cancel. On OK the OPENFILENAME(A/W) fields are filled the way comdlg32 does
+   (lpstrFile, nFileOffset, nFileExtension, lpstrFileTitle, nFilterIndex; lpstrDefExt appended when the name has no extension).
+   The same dialog serves IFileOpenDialog / IFileSaveDialog (filedlg_com.inc). Hooks / custom templates / multi-select are not run. */
+#define FD_MAX_FILTERS 24
+typedef struct { u64 ofn; int wide, save; u32 flags; int nflt; char fname[FD_MAX_FILTERS][64], fpat[FD_MAX_FILTERS][128]; char defext[16]; int wnd; int used; int spec; int pickfolders; char dir[1024]; } FileDlg;
+/* IFileDialog (COM) state, host side; the guest object only carries the index */
+typedef struct { int used, save; u32 options; int nflt; char fname[FD_MAX_FILTERS][64], fpat[FD_MAX_FILTERS][128]; int ftype; char filename[520], title[256], defext[16], folder[1024], result[1024]; int chk_id[8], chk_val[8], nchk; u64 sink; } FdSpec;
+static FdSpec g_fdspec[8];
+static FileDlg g_fdlg[8];
+static int fdlg_is_com(int wnd) { for (int k = 0; k < 8; k++) if (g_fdlg[k].used && g_fdlg[k].wnd == wnd) return g_fdlg[k].spec >= 0; return 0; }
+static void fdlg_release(int wnd) { for (int k = 0; k < 8; k++) if (g_fdlg[k].used && g_fdlg[k].wnd == wnd) g_fdlg[k].used = 0; }
+static FileDlg *fdlg_of_wnd(int i) { for (int k = 0; k < 8; k++) if (g_fdlg[k].used && g_fdlg[k].wnd == i) return &g_fdlg[k]; return 0; }
+static void fd_refresh(Cpu *c, int i) { FileDlg *fd = fdlg_of_wnd(i); int lb = dlg_find_id(i, 100), lab = dlg_find_id(i, 103), cb = dlg_find_id(i, 104); if (!fd || lb < 0) return;
+  if (lab >= 0) { wnd_set_text(&g_wnd[lab], fd->dir); wnd_invalidate(lab, 1); }
+  Wnd *l = &g_wnd[lb]; items_free(l); items_add(l, "[..]", -1);
+  char pat[600]; e_snprintf(pat, sizeof pat, "%s%s*", fd->dir, fd->dir[e_strlen(fd->dir) - 1] == '\\' ? "" : "\\");
+  int h = vfs_find_first(pat); char nm[520]; u64 sz; int is_dir; while (h >= 0 && vfs_find_next(h, nm, sizeof nm, &sz, &is_dir)) { if (!is_dir || !e_strcmp(nm, ".") || !e_strcmp(nm, "..")) continue; char e[140]; e_snprintf(e, sizeof e, "[%s]", nm); items_add(l, e, -1); } if (h >= 0) vfs_find_close(h);
+  int fi = cb >= 0 ? g_wnd[cb].cursel : 0; const char *spec = (fd->nflt > 0 && fi >= 0 && fi < fd->nflt) ? fd->fpat[fi] : "*";
+  char specbuf[128]; e_snprintf(specbuf, sizeof specbuf, "%s", spec); char *s = specbuf; int first_file = l->nitems;
+  while (s && *s) { char *semi = (char *)e_strchr(s, ';'); if (semi) *semi = 0; while (*s == ' ') s++; if (*s) { const char *one = e_strcmp(s, "*.*") == 0 ? "*" : s; e_snprintf(pat, sizeof pat, "%s%s%s", fd->dir, fd->dir[e_strlen(fd->dir) - 1] == '\\' ? "" : "\\", one);
+      h = vfs_find_first(pat); while (h >= 0 && vfs_find_next(h, nm, sizeof nm, &sz, &is_dir)) { if (is_dir) continue; int dup = 0; for (int k = first_file; k < l->nitems; k++) if (!e_stricmp(l->items[k], nm)) { dup = 1; break; } if (!dup && l->nitems < MAX_ITEMS - 1) items_add(l, nm, -1); } if (h >= 0) vfs_find_close(h); }
+    s = semi ? semi + 1 : 0; }
+  /* files sorted (case-insensitive), folders stay first */
+  for (int a = first_file; a < l->nitems; a++) for (int b = a + 1; b < l->nitems; b++) if (e_stricmp(l->items[a], l->items[b]) > 0) { char tmp[128]; e_memcpy(tmp, l->items[a], 128); e_memcpy(l->items[a], l->items[b], 128); e_memcpy(l->items[b], tmp, 128); }
+  l->cursel = -1; l->top_index = 0; wnd_invalidate(lb, 1); (void)c; }
+static void fd_join(const char *dir, const char *name, char *out, size_t cap) { if ((name[0] && name[1] == ':') || name[0] == '\\') e_snprintf(out, cap, "%s", name); else e_snprintf(out, cap, "%s%s%s", dir, dir[e_strlen(dir) - 1] == '\\' ? "" : "\\", name); }
+static void fd_up(char *path) { size_t l = e_strlen(path); while (l > 3 && path[l - 1] != '\\') l--; if (l > 3) path[l - 1] = 0; else path[3] = 0; }
+/* OK: resolve the name; a folder navigates, a file ends the dialog and fills the OPENFILENAME (or the COM spec) */
+static void fd_accept(Cpu *c, int i, const char *name) { Wnd *n = &g_wnd[i]; FileDlg *fd = fdlg_of_wnd(i); if (!fd || !name[0]) return; Win32 *w = W;
+  char full[1024]; fd_join(fd->dir, name, full, sizeof full); u64 sz; int st = vfs_stat(full, &sz);
+  if (st == 2) { e_snprintf(fd->dir, sizeof fd->dir, "%s", full); fd_refresh(c, i); return; }
+  if (!e_strchr(name, '.') && fd->defext[0]) { size_t l = e_strlen(full); e_snprintf(full + l, sizeof full - l, ".%s", fd->defext); st = vfs_stat(full, &sz); }
+  if (!fd->save && (fd->flags & 0x1000 /* OFN_FILEMUSTEXIST */) && st != 1) { w32_report(w, "GetOpenFileName: '%s' does not exist", full); return; }
+  if (fd->spec >= 0) { FdSpec *sp = &g_fdspec[fd->spec]; e_snprintf(sp->result, sizeof sp->result, "%s", full); e_snprintf(sp->folder, sizeof sp->folder, "%s", fd->dir); const char *bb = full; for (const char *p = full; *p; p++) if (*p == '\\') bb = p + 1; e_snprintf(sp->filename, sizeof sp->filename, "%s", bb); int cb = dlg_find_id(i, 104); sp->ftype = (cb >= 0 && g_wnd[cb].cursel >= 0 ? g_wnd[cb].cursel : 0) + 1; wnd_set_text(n, full); n->ended = 1; n->result = 1; return; }
+  u64 o = fd->ofn; int x86 = c->mode32;
+  u64 lpstrFile = rdp(c, o + (x86 ? 28 : 48)); u32 nMaxFile = rd32(c, o + (x86 ? 32 : 56)); u64 lpstrTitle = rdp(c, o + (x86 ? 36 : 64)); u32 nMaxTitle = rd32(c, o + (x86 ? 40 : 72));
+  if (lpstrFile && nMaxFile) text_out_cap(c, lpstrFile, full, nMaxFile, fd->wide);
+  const char *base = full; for (const char *p = full; *p; p++) if (*p == '\\') base = p + 1; const char *ext = 0; for (const char *p = base; *p; p++) if (*p == '.') ext = p + 1;
+  /* offsets are in characters (UTF-16 units for W): count code units up to the name / extension */
+  int off_name = 0, off_ext = 0; { const char *p = full; while (p < base) { u32 cp = (u8)*p; int ex = cp >= 0xF0 ? 3 : cp >= 0xE0 ? 2 : cp >= 0xC0 ? 1 : 0; off_name += (fd->wide && ex == 3) ? 2 : 1; p += 1 + ex; } p = full; const char *stop = ext ? ext : full + e_strlen(full); while (p < stop) { u32 cp = (u8)*p; int ex = cp >= 0xF0 ? 3 : cp >= 0xE0 ? 2 : cp >= 0xC0 ? 1 : 0; off_ext += (fd->wide && ex == 3) ? 2 : 1; p += 1 + ex; } }
+  wr16(c, o + (x86 ? 56 : 100), (u16)off_name); wr16(c, o + (x86 ? 58 : 102), (u16)(ext ? off_ext : 0));
+  if (lpstrTitle && nMaxTitle) text_out_cap(c, lpstrTitle, base, nMaxTitle, fd->wide);
+  int cb = dlg_find_id(i, 104); wr32(c, o + (x86 ? 24 : 44), (u32)((cb >= 0 && g_wnd[cb].cursel >= 0 ? g_wnd[cb].cursel : 0) + 1));
+  wnd_set_text(n, full); n->ended = 1; n->result = 1; }
+static void s_NebulaFileDlgProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } u32 msg = (u32)ARG(1); u64 wp = ARG(2); Wnd *n = &g_wnd[i]; FileDlg *fd = fdlg_of_wnd(i);
+  if (msg == 0x110) { int cb = dlg_find_id(i, 104); if (cb >= 0 && fd) { Wnd *k = &g_wnd[cb]; items_free(k); for (int f = 0; f < fd->nflt; f++) items_add(k, fd->fname[f], -1); if (!fd->nflt) items_add(k, "All Files (*.*)", -1); u32 sel = fd->spec >= 0 ? (u32)g_fdspec[fd->spec].ftype : (u32)rd32(c, fd->ofn + (c->mode32 ? 24 : 44)); k->cursel = (sel >= 1 && (int)sel <= k->nitems) ? (int)sel - 1 : 0; wnd_set_text(k, k->items[k->cursel]); wnd_invalidate(cb, 1); }
+    int ed = dlg_find_id(i, 101); if (ed >= 0 && fd) { /* a preset file name in lpstrFile / IFileDialog::SetFileName */ char pre[520] = ""; if (fd->spec >= 0) e_snprintf(pre, sizeof pre, "%s", g_fdspec[fd->spec].filename); else { u64 lf = rdp(c, fd->ofn + (c->mode32 ? 28 : 48)); if (lf) text_in(c, lf, fd->wide, pre, sizeof pre); } const char *b = pre; for (const char *p = pre; *p; p++) if (*p == '\\') b = p + 1; wnd_set_text(&g_wnd[ed], b); g_wnd[ed].sel0 = 0; g_wnd[ed].sel1 = (int)e_strlen(b); /* preset name selected, typing replaces it */ }
+    fd_refresh(c, i); RET(1); return; }
+  if (msg == 0x111) { u32 id = (u32)(wp & 0xffff), code = (u32)(wp >> 16);
+    if (id == 100 && (code == 2 /* LBN_DBLCLK */ || code == 1 /* LBN_SELCHANGE */)) { int lb = dlg_find_id(i, 100), ed = dlg_find_id(i, 101); if (lb >= 0 && g_wnd[lb].cursel >= 0) { const char *it = g_wnd[lb].items[g_wnd[lb].cursel]; int isdir = it[0] == '[';
+        if (code == 1) { if (!isdir && ed >= 0) { wnd_set_text(&g_wnd[ed], it); wnd_invalidate(ed, 1); } RET(1); return; }
+        if (!e_strcmp(it, "[..]")) { if (fd) { fd_up(fd->dir); fd_refresh(c, i); } }
+        else if (isdir) { char nm[140]; e_snprintf(nm, sizeof nm, "%s", it + 1); size_t l = e_strlen(nm); if (l) nm[l - 1] = 0; if (fd) { char p[1024]; fd_join(fd->dir, nm, p, sizeof p); e_snprintf(fd->dir, sizeof fd->dir, "%s", p); fd_refresh(c, i); } }
+        else fd_accept(c, i, it); } RET(1); return; }
+    if (id == 104 && code == 1 /* CBN_SELCHANGE */) { fd_refresh(c, i); RET(1); return; }
+    if (id == 1) { int ed = dlg_find_id(i, 101); if (ed >= 0) { char nm[520]; e_snprintf(nm, sizeof nm, "%s", g_wnd[ed].text); size_t l = e_strlen(nm); while (l && nm[l - 1] == ' ') nm[--l] = 0; if (l) fd_accept(c, i, nm); else if (fd && fd->pickfolders && fd->spec >= 0) { FdSpec *sp = &g_fdspec[fd->spec]; e_snprintf(sp->result, sizeof sp->result, "%s", fd->dir); e_snprintf(sp->folder, sizeof sp->folder, "%s", fd->dir); n->ended = 1; n->result = 1; } } RET(1); return; }
+    if (id == 2) { n->ended = 1; n->result = 0; RET(1); return; } RET(0); return; }
+  RET(0); }
+static FileDlg *fd_alloc(void) { if (g_nmodal >= 8) return 0; for (int k = 0; k < 8; k++) if (!g_fdlg[k].used) { FileDlg *fd = &g_fdlg[k]; e_memset(fd, 0, sizeof *fd); fd->used = 1; fd->spec = -1; return fd; } return 0; }
+/* builds the dialog template and starts the modal loop (shared by GetOpenFileName and IFileDialog::Show) */
+static void fd_show(Cpu *c, FileDlg *fd, u64 owner_h, const char *title, const char *start) { Win32 *w = W; int m; int save = fd->save;
+  size_t n = 0; mb_put32(&n, 0x80C800C0u | 0x40 | 0x04); mb_put32(&n, 0); mb_put16(&n, 9); mb_put16(&n, 0); mb_put16(&n, 0); mb_put16(&n, 300); mb_put16(&n, 194); mb_put16(&n, 0); mb_put16(&n, 0); mb_puts(&n, title); mb_put16(&n, 8); mb_puts(&n, "MS Shell Dlg");
+  mb_item(&n, 0, 8, 7, 34, 10, 0xFFFF, 0x82, "Look in:"); mb_item(&n, 0, 44, 7, 248, 10, 103, 0x82, "");
+  mb_item(&n, 0x1 | 0x800000 /* WS_BORDER */ | 0x200000, 8, 20, 284, 108, 100, 0x83, "");   /* no tab stop: focus starts in the file-name edit like comdlg32 */
+  mb_item(&n, 0, 8, 136, 56, 10, 0xFFFF, 0x82, "File name:"); mb_item(&n, 0x80 | 0x10000 | 0x800000, 66, 134, 226, 13, 101, 0x81, "");
+  mb_item(&n, 0, 8, 154, 58, 10, 0xFFFF, 0x82, "Files of type:"); mb_item(&n, 0x3 | 0x10000 | 0x200000, 66, 152, 226, 80, 104, 0x85, "");
+  mb_item(&n, 1 | 0x10000, 184, 174, 50, 14, 1, 0x80, save ? "Save" : "Open"); mb_item(&n, 0x10000, 242, 174, 50, 14, 2, 0x80, "Cancel");
+  u64 tmpl = w32_heap_alloc(w, n * 2 + 16, 1); u8 *p = mem_ptr(w->mem, tmpl, n * 2, 1); if (!p) { fd->used = 0; RET(0); return; } e_memcpy(p, g_mb_tmpl, n * 2);
+  u64 proc = w32_shim_slot(w, "user32", "NebulaFileDlgProc"); int i = dlg_begin(c, 0, tmpl, owner_h, proc, 0, 1); if (i < 0) { fd->used = 0; RET(0); return; } e_snprintf(fd->dir, sizeof fd->dir, "%s", start); g_wnd[i].builtin = BI_MSGBOX; fd->wnd = i;
+  m = g_nmodal++; g_modal[m].rip = c->rip; g_modal[m].rsp = c->r[RSP]; g_modal[m].slot = w32_cur_slot(); g_modal[m].wnd = i; g_modal[m].phase = 1; dlg_create_next(c); }
+static void file_dialog(Cpu *c, int save, int wide) { Win32 *w = W; if (modal_reentry(c)) { modal_loop(c, g_modal[g_nmodal - 1].wnd); return; }
+  u64 o = ARG(0); int x86 = c->mode32; if (!o) { RET(0); return; }
+  if (g_msgbox_auto) { w32_report(w, "%s: headless run — cancelled", save ? "GetSaveFileName" : "GetOpenFileName"); RET(0); return; }
+  FileDlg *fd = fd_alloc(); if (!fd) { RET(0); return; } fd->ofn = o; fd->wide = wide; fd->save = save; fd->flags = rd32(c, o + (x86 ? 52 : 96));
+  /* filters: "Text files\0*.txt;*.log\0All files\0*.*\0\0" */
+  u64 flt = rdp(c, o + (x86 ? 12 : 24)); if (flt) { for (int f = 0; f < FD_MAX_FILTERS; f++) { char nm[64]; text_in(c, flt, wide, nm, sizeof nm); if (!nm[0]) break; int units = 0; if (wide) { while (rd16(c, flt + units * 2)) units++; flt += (units + 1) * 2; } else { while (rd8(c, flt + units)) units++; flt += units + 1; } char pt[128]; text_in(c, flt, wide, pt, sizeof pt); units = 0; if (wide) { while (rd16(c, flt + units * 2)) units++; flt += (units + 1) * 2; } else { while (rd8(c, flt + units)) units++; flt += units + 1; } if (!pt[0]) break; e_snprintf(fd->fname[f], 64, "%s", nm); e_snprintf(fd->fpat[f], 128, "%s", pt); fd->nflt = f + 1; } }
+  u64 de = rdp(c, o + (x86 ? 60 : 104)); if (de) text_in(c, de, wide, fd->defext, sizeof fd->defext);
+  char title[256] = ""; u64 lt = rdp(c, o + (x86 ? 48 : 88)); if (lt) text_in(c, lt, wide, title, sizeof title); if (!title[0]) e_snprintf(title, sizeof title, save ? "Save As" : "Open");
+  /* start folder: lpstrInitialDir, else the folder part of lpstrFile, else the current directory */
+  char start[1024] = ""; u64 idir = rdp(c, o + (x86 ? 44 : 80)); if (idir) text_in(c, idir, wide, start, sizeof start);
+  if (!start[0]) { u64 lf = rdp(c, o + (x86 ? 28 : 48)); if (lf) { text_in(c, lf, wide, start, sizeof start); char *last = 0; for (char *p = start; *p; p++) if (*p == '\\') last = p; if (last && last > start + 2) *last = 0; else if (last) last[1] = 0; else start[0] = 0; } }
+  u64 szd; if (!start[0] || vfs_stat(start, &szd) != 2) e_snprintf(start, sizeof start, "%s", vfs_cwd()[0] ? vfs_cwd() : "C:\\");
+  fd_show(c, fd, rdp(c, o + (x86 ? 4 : 8)), title, start); }
+static void s_GetOpenFileNameW(Cpu *c) { file_dialog(c, 0, 1); }
+static void s_GetSaveFileNameW(Cpu *c) { file_dialog(c, 1, 1); }
+static void s_GetOpenFileNameA(Cpu *c) { file_dialog(c, 0, 0); }
+static void s_GetSaveFileNameA(Cpu *c) { file_dialog(c, 1, 0); }
+#include "filedlg_com.inc"
 /* ---------- continuation dispatch for this module ---------- */
 void gdi_cont_resume(Cpu *c, int kind, u64 rax) {
   Win32 *w = W; int ci = w->ncont - 1;
@@ -1459,10 +1597,11 @@ void gdi_set_msgbox_auto(int on) { g_msgbox_auto = on; }
   S(GetMonitorInfoW), S(GetMonitorInfoA), S(MonitorFromWindow), S(MonitorFromPoint), S(MonitorFromRect), S(EnumDisplayMonitors), S(GetDpiForMonitor), \
   S(DrawTextExW), S(DrawTextExA), S(TabbedTextOutW), S(DrawEdge), S(DrawFocusRect), S(DrawFrameControl), S(DrawStateW), SA("DrawStateA", DrawStateW), S(FrameRect), S(InvertRect), S(DrawCaption), S(GrayStringW), SA("GrayStringA", GrayStringW), \
   S(OpenClipboard), S(CloseClipboard), S(EmptyClipboard), S(SetClipboardData), S(GetClipboardData), S(IsClipboardFormatAvailable), S(GetClipboardSequenceNumber), S(CountClipboardFormats), S(EnumClipboardFormats), S(GetClipboardOwner), S(SetClipboardViewer), S(ChangeClipboardChain), S(AddClipboardFormatListener), S(RemoveClipboardFormatListener), S(GetClipboardFormatNameW), SA("GetClipboardFormatNameA", GetClipboardFormatNameW), S(RegisterClipboardFormatW), S(RegisterWindowMessageW), S(RegisterWindowMessageA), \
-  S(SetScrollInfo), S(GetScrollInfo), S(SetScrollPos), S(GetScrollPos), S(SetScrollRange), S(GetScrollRange), S(ShowScrollBar), S(EnableScrollBar), S(ScrollWindowEx), S(ScrollWindow), S(LoadAcceleratorsW), S(LoadAcceleratorsA), S(CreateAcceleratorTableW), SA("CreateAcceleratorTableA", CreateAcceleratorTableW), S(DestroyAcceleratorTable), S(TranslateAcceleratorW), S(TranslateAcceleratorA), SA("TranslateAccelerator", TranslateAcceleratorA), \
+  S(SetScrollInfo), S(GetScrollInfo), S(SetScrollPos), S(GetScrollPos), S(SetScrollRange), S(GetScrollRange), S(ShowScrollBar), S(EnableScrollBar), S(ScrollWindowEx), S(ScrollWindow), S(LoadAcceleratorsW), S(LoadAcceleratorsA), S(CreateAcceleratorTableW), S(CreateAcceleratorTableA), S(CopyAcceleratorTableW), S(CopyAcceleratorTableA), S(DestroyAcceleratorTable), S(TranslateAcceleratorW), S(TranslateAcceleratorA), SA("TranslateAccelerator", TranslateAcceleratorA), \
   S(CreateCaret), S(DestroyCaret), S(ShowCaret), S(HideCaret), S(SetCaretPos), S(GetCaretPos), S(SetCaretBlinkTime), S(GetCaretBlinkTime), S(InitCommonControls), S(InitCommonControlsEx), \
   S(CreateStatusWindowW), S(CreateStatusWindowA), S(CreateToolbarEx), S(SetWindowSubclass), S(RemoveWindowSubclass), S(NebulaSubclassProc), S(DefSubclassProc), S(GetWindowSubclass), S(TaskDialogIndirect), S(TaskDialog), S(SetSysColors), \
-  S(NebulaButtonProc), S(NebulaStaticProc), S(NebulaLinkProc), S(NebulaEditProc), S(NebulaListBoxProc), S(NebulaComboListProc), S(NebulaComboProc), S(NebulaComboExProc), S(NebulaProgressProc), S(NebulaScrollBarProc), S(NebulaUnsupportedProc), S(NebulaMsgBoxProc), S(NebulaBrowseProc), \
+  S(NebulaButtonProc), S(NebulaStaticProc), S(NebulaLinkProc), S(NebulaEditProc), S(NebulaListBoxProc), S(NebulaComboListProc), S(NebulaComboProc), S(NebulaComboExProc), S(NebulaProgressProc), S(NebulaScrollBarProc), S(NebulaUnsupportedProc), S(NebulaMsgBoxProc), S(NebulaBrowseProc), S(NebulaFileDlgProc), S(GetOpenFileNameW), S(GetSaveFileNameW), S(GetOpenFileNameA), S(GetSaveFileNameA), \
+  FILEDLG_COM_SHIMS, \
   S(GetDlgCtrlID), S(SendDlgItemMessageW), S(SendDlgItemMessageA), S(SetDlgItemTextW), S(SetDlgItemTextA), S(GetDlgItemTextW), S(GetDlgItemTextA), S(SetDlgItemInt), S(GetDlgItemInt), S(CheckDlgButton), S(IsDlgButtonChecked), S(CheckRadioButton), S(MapDialogRect), S(GetDialogBaseUnits), S(GetNextDlgTabItem), S(GetNextDlgGroupItem), \
   S(DefDlgProcW), S(DefDlgProcA), S(CreateDialogIndirectParamW), S(CreateDialogIndirectParamA), S(CreateDialogParamW), S(CreateDialogParamA), S(DialogBoxIndirectParamW), S(DialogBoxIndirectParamA), S(DialogBoxParamW), S(DialogBoxParamA), S(EndDialog), S(IsDialogMessageW), S(IsDialogMessageA), S(IsDialogMessage), \
   S(GetDCEx), S(WindowFromDC), S(GetUpdateRgn), S(ExcludeUpdateRgn), S(PaintDesktop), S(MessageBoxExW), S(MessageBoxExA), S(MessageBoxIndirectW), SA("MessageBoxIndirectA", MessageBoxIndirectW), S(MessageBeep), S(SHBrowseForFolderW), S(SHBrowseForFolderA),

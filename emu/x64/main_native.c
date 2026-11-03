@@ -69,6 +69,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[ai], "--move") && ai + 1 < argc) { int x, y; double at; if (sscanf(argv[++ai], "%d,%d@%lf", &x, &y, &at) == 3 && nclicks < 63) { clicks[nclicks].x = x; clicks[nclicks].y = y; clicks[nclicks].at = at; clicks[nclicks].ev = 0; nclicks++; } }   /* --move x,y@ms: mouse move only (hover) */
     else { fprintf(stderr, "unknown option %s\n", argv[ai]); return 2; }
   }
+  for (int a1 = 1; a1 < nkeys; a1++) for (int a2 = a1; a2 > 0 && keys[a2 - 1].at > keys[a2].at; a2--) { int tv = keys[a2].vk, td = keys[a2].down; double ta = keys[a2].at; keys[a2].vk = keys[a2 - 1].vk; keys[a2].at = keys[a2 - 1].at; keys[a2].down = keys[a2 - 1].down; keys[a2 - 1].vk = tv; keys[a2 - 1].at = ta; keys[a2 - 1].down = td; }   /* key events in time order (a held modifier may span later keys) */
   if (ai >= argc) { fprintf(stderr, "usage: x64run [--inspect] [--frames N] [--max-ms T] [--key VK@ms[:dur]] [--click x,y@ms] [--move x,y@ms] [--type text@ms] file.exe [args]\n"); return 2; }
   const char *path = argv[ai];
   size_t flen = 0; u8 *bytes = map_file(path, &flen); if (!bytes) { perror(path); return 2; } long len = (long)flen;
@@ -82,6 +83,7 @@ int main(int argc, char **argv) {
   }
   host_set_dump(dump_every, prefix);
   for (int mi = 0; mi < nmounts; mi++) { int n = mount_dir(mounts[mi][0], mounts[mi][1], 0); if (!quiet) fprintf(stderr, "[x64run] mounted %s -> %s (%d files)\n", mounts[mi][0], mounts[mi][1], n); }   /* before load: DLLs next to the exe */
+  if (getenv("X64_MODAL")) gdi_set_msgbox_auto(0);   /* X64_MODAL=1: MessageBox / file dialogs are real modal dialogs driven by --click/--type instead of auto-answered */
   if (getenv("X64_TAP")) { extern const char *g_vfs_tap; g_vfs_tap = getenv("X64_TAP"); }
   if (getenv("X64_GUEST_ENV")) { extern void w32_add_env(const char *); char *ge = strdup(getenv("X64_GUEST_ENV")); for (char *t = strtok(ge, ";"); t; t = strtok(0, ";")) w32_add_env(t); }
   char guest_name[4200]; { char abs_[4096]; const char *an = realpath(path, abs_) ? abs_ : path; const char *nm = base;

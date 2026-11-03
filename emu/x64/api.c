@@ -114,6 +114,9 @@ EXPORT(x64_alloc) void *x64_alloc(size_t n) { return emu_alloc(n); }
 EXPORT(x64_reserve) int x64_reserve(size_t n) { return emu_reserve(n); }   /* grow the wasm arena once before a batch of x64_alloc/x64_vfs_add */
 EXPORT(x64_inspect) const char *x64_inspect(const u8 *bytes, size_t len) { pe_inspect(bytes, len, g_inspect, sizeof g_inspect); return g_inspect; }
 EXPORT(x64_load) int x64_load(const u8 *bytes, size_t len, const char *name, const char *cmdline) {
+#ifdef __wasm__
+  gdi_set_msgbox_auto(0);   /* in the browser the user answers MessageBox / file dialogs — never auto-dismiss */
+#endif
   /* tear down a previous session: every process dies, kernel objects are dropped, the VFS files stay */
   for (int i = 0; i < PROC_MAX; i++) if (g_procs[i] && g_procs[i]->used) { proc_exit(g_procs[i], 0); g_procs[i]->used = 0; }
   g_loaded = 0; g_want_stdin = 0; vfs_close_all(); vfs_mkdir("C:\\tmp"); vfs_mkdir("C:\\nebula");
