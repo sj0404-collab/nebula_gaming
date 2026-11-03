@@ -351,6 +351,13 @@ check "input.exe (x64): 30 checks (Raw Input WM_INPUT, DirectInput8 keyboard/mou
 check "input32.exe (x86): 30 checks (Raw Input WM_INPUT, DirectInput8 keyboard/mouse, buffered data)"  "ALL OK 30/30"   "$($X --quiet --no-stdin --max-ms 15000 --key 0x27@1000:1500 --key 0x28@3000:400 --move 300,300@4200 tests/input32.exe 2>&1 || true)"
 check "typing.exe (x64): host text input (Android soft keyboard / IME path): ASCII through WM_KEYDOWN+WM_CHAR+WM_KEYUP, Cyrillic through VK_PACKET, order preserved"  "TYPING OK"  "$($X --quiet --no-stdin --max-ms 8000 --type 'Hello, Nebula! 123 Привет {x}@600' tests/typing.exe 2>&1 || true)"
 check "typing32.exe (x86): the same host text input as a 32-bit process"  "TYPING OK"  "$($X --quiet --no-stdin --max-ms 8000 --type 'Hello, Nebula! 123 Привет {x}@600' tests/typing32.exe 2>&1 || true)"
+# file dialogs: GetOpenFileNameW / GetSaveFileNameA (comdlg32) and the COM IFileOpenDialog / IFileSaveDialog (+IFileDialogCustomize,
+# IShellItem, SHCreateItemFromParsingName) — the dialog is driven by typing the name + Enter, results/offsets/default extension checked by the exe
+FDT=$(mktemp -d)
+check "fdlg.exe (x64): GetOpenFileName / GetSaveFileName / IFileOpenDialog / IFileSaveDialog return the chosen files"  "FDLG OK"  "$(X64_MODAL=1 $X --quiet --no-stdin --max-ms 20000 --mount-rw "$FDT=C:\\nebula" --type 'fd_test.txt@800' --key 13@1500 --type 'report@2500' --key 13@3200 --type 'fd_test.txt@4200' --key 13@4900 --key 13@6000 tests/fdlg.exe 2>&1 || true)"
+check "fdlg32.exe (x86): the same file dialogs from a 32-bit process"  "FDLG OK"  "$(X64_MODAL=1 $X --quiet --no-stdin --max-ms 20000 --mount-rw "$FDT=C:\\nebula" --type 'fd_test.txt@800' --key 13@1500 --type 'report@2500' --key 13@3200 --type 'fd_test.txt@4200' --key 13@4900 --key 13@6000 tests/fdlg32.exe 2>&1 || true)"
+check "fdlg: GetSaveFileName / IFileSaveDialog results are plain paths (no file created by the dialog itself)"  "files=1"  "files=$(ls $FDT | wc -l) $(ls $FDT | tr '\n' ' ')"
+rm -rf $FDT
 # the same real installer twice: the x86 build (32-bit files) and the x64 build (a 32-bit setup stub that probes
 # IsWow64Process and installs 64-bit files) — both bitnesses end-to-end: setup dialog → installed 7z.exe round trip
 inst_fetch() { [ -f tests/inst/$1 ] && return 0; mkdir -p tests/inst; curl -fsSL -o tests/inst/$1 https://www.7-zip.org/a/$1 2>/dev/null || curl -fsSL -o tests/inst/$1 https://github.com/ip7z/7zip/releases/download/25.01/$1 2>/dev/null || rm -f tests/inst/$1; }
@@ -399,6 +406,16 @@ if [ -f tests/inst/npp32.exe ] && [ -f tests/inst/npp64.exe ]; then
   out=$(X64_LOG=1 X64_WNDDUMP=1 $X --no-stdin --max-ms 32000 --click 300,300@18000 --key 0x48@20000:100 --key 0x45@21000:100 --key 0x0D@22000:100 --key 0x31@23000:100 --mount-rw "$ID/npp=C:\\nebula" $ID/npp/notepad++.exe 2>&1 3>&1 | grep -a "^\[wnd\] #0 \|FAULT\|MessageBox" || true)
   check "Notepad++ x64: typing in the editor marks the document modified (title '*new 1'), no fault"   '"\*new 1 - Notepad++'   "$(echo "$out" | grep -v FAULT | tr '\n' ' ') errors=$(echo "$out" | grep -a -c "FAULT\|MessageBox")"
   check "Notepad++ x64: no fault while typing / autosave"   "errors=0"   "errors=$(echo "$out" | grep -a -c "FAULT\|MessageBox")"
+  # dialogs on top of the editor: F1 (About, owner-drawn logo static + WM_DRAWITEM) → Esc hides it and activation returns to the main
+  # window → Ctrl+O accelerator → the Open dialog (IFileOpenDialog) → type change.log + Enter → the file is loaded into the Scintilla view,
+  # which stays above the tab bar (Windows z-order: the tab created later sits below the editor; WS_CLIPSIBLINGS keeps the editor intact)
+  out=$(X64_LOG=1 X64_WNDDUMP=1 X64_MODAL=1 $X --no-stdin --max-ms 40000 --key 112@20000 --key 27@27000 --key 17@29000:1500 --key 79@29500:100 --type 'change.log@34000' --key 13@36000 --mount-rw "$ID/npp=C:\\nebula" $ID/npp/notepad++.exe 2>&1 3>&1 | grep -a "^\[wnd\] #0 \|^\[wnd\].*Scintilla\|^\[wnd\].*SysTabControl32\|FAULT\|MessageBox" || true)
+  check "Notepad++ x64: About (F1) → Esc → Ctrl+O → change.log opened (title 'change.log - Notepad++')"   'change.log - Notepad++'   "$(printf '%s\n' "$out" | grep -a "#0 " | tr '\n' ' ')"
+  check "Notepad++ x64: the editor stays above the tab bar after the dialogs (Scintilla z > tab z)"   "above"   "$(printf '%s\n' "$out" | python3 -c "
+import re,sys
+t=sys.stdin.read(); sc=[int(m) for m in re.findall(r'\[wnd\] #1 hwnd=10052 .* z=(\d+)', t)]; tb=[int(m) for m in re.findall(r'\[wnd\] #4 hwnd=10082 .* z=(\d+)', t)]
+print('above' if sc and tb and sc[-1] > tb[-1] else 'below %r %r' % (sc, tb))")"
+  check "Notepad++ x64: no fault through About / Open dialogs"   "errors=0"   "errors=$(echo "$out" | grep -a -c "FAULT\|MessageBox")"
   rm -rf $ID; ID=$(mktemp -d)
   out=$($X --no-stdin --max-ms 150000 --mount-rw "$ID=C:\\inst" --click 357,337@3000 --click 357,337@6000 --click 357,337@9000 --click 357,337@12000 --click 357,337@70000 --click 357,337@80000 --click 357,337@90000 --click 357,337@110000 tests/inst/npp32.exe '/D=C:\inst\npp' 2>&1 | grep -v "last blocks" || true)
   check "NSIS x86 setup: GUI wizard (license → components → directory → install → finish) exit 0"   "exit code 0"   "$out"

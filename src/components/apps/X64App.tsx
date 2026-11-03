@@ -13,6 +13,8 @@ const SAMPLES: { name: string; href: string; desc: string; args?: string; files?
   { name: 'NebulaStrike.exe', href: '/downloads/NebulaStrike.exe', desc: 'Win32 GDI game, PE32+ x64 (light GUI exe)' },
   { name: 'NebulaStrike32.exe', href: '/x64/samples/NebulaStrike32.exe', desc: 'The same Win32 GDI game built as a 32-bit x86 PE32 exe: runs as a 32-bit process (IA-32 mode, fs:[0] TEB, stdcall shims)' },
   { name: 'typing.exe', href: '/x64/samples/typing.exe', desc: 'Text input test: an EDIT control reports what arrived from the keyboard — on Android open the ⌨ button on the screen and type (Latin, Cyrillic, punctuation); prints TYPING OK for the reference sentence', args: '20000' },
+  { name: 'fdlg.exe', href: '/x64/samples/fdlg.exe', desc: 'File dialogs (x64): GetOpenFileNameW, GetSaveFileNameA and the COM IFileOpenDialog / IFileSaveDialog (what Notepad++ uses) — four real modal dialogs one after another; type a name (fd_test.txt, report, fd_test.txt, Enter to accept notes.txt) and the program checks what came back — prints FDLG OK' },
+  { name: 'fdlg32.exe', href: '/x64/samples/fdlg32.exe', desc: 'The same file-dialog test as a 32-bit PE32 exe (OPENFILENAME x86 layout, COM vtables through stdcall)' },
   { name: 'dlg.exe', href: '/x64/samples/dlg.exe', desc: 'Dialog-manager self-test (x64): DialogBoxParam from a resource template, 42 checks — static/edit/button/checkbox/radio/listbox/combobox, nested modal + MessageBox, LoadString with Cyrillic text, SHGetFolderPath, IShellLink, modeless dialog with Tab/Escape' },
   { name: 'dlg32.exe', href: '/x64/samples/dlg32.exe', desc: 'The same dialog-manager self-test built as a 32-bit PE32 exe (IA-32 mode, stdcall shims) — must also print ALL OK 42/42' },
   { name: 'hello32.exe', href: '/x64/samples/hello32.exe', args: 'a b', desc: '32-bit x86 console exe (PE32): argv, heap, 64-bit math on 32-bit, threads, TLS, files — exit code 42' },
@@ -120,6 +122,7 @@ export default function X64App() {
   const [moduleKB, setModuleKB] = useState(0);
   const [apiStats, setApiStats] = useState('');
   const [frames, setFrames] = useState(0);
+  const autoTabRef = useRef(true);   // true until the user picks a tab during a run: a console program that opens a window (dlg.exe, a Python GUI) is then shown on the screen tab as soon as its first frame arrives, like on Windows
   const nextId = useRef(1);
   const consoleBuf = useRef('');
 
@@ -140,7 +143,7 @@ export default function X64App() {
     rt.onConsole = (_fd, text) => { consoleBuf.current = (consoleBuf.current + text).slice(-60000); setConsoleText(consoleBuf.current); };
     rt.onLog = (text) => setLog(l => [...l.slice(-199), text.trimEnd()]);
     rt.onStdinWait = (w) => { setWaitingStdin(w); if (w) { setTab('console'); setTimeout(() => stdinRef.current?.focus(), 30); } };
-    rt.onPresent = (px, w, h) => { presenterRef.current?.present(px, w, h); setFrames(f => f + 1); };
+    rt.onPresent = (px, w, h) => { presenterRef.current?.present(px, w, h); setFrames(f => { if (f === 0 && autoTabRef.current) setTab('screen'); return f + 1; }); };
     rt.onStop = (s) => { setStats(s); setApiStats(rt.apiStats()); setFiles(rt.vfsList()); if (s.status !== 'exited' || !s.hasWindow) setTab(t => (s.hasWindow && s.status === 'exited') ? t : (s.status === 'fault' ? 'report' : t === 'screen' && !s.hasWindow ? 'console' : t)); };
     rt.init().then(async () => {
       if (!alive) return;
@@ -314,7 +317,7 @@ export default function X64App() {
     const err = rt.start(current.bytes, current.path ?? base, args.trim() ? `${base} ${args.trim()}` : base);
     if (err) { setLog(l => [...l, 'LOADER: ' + err]); setStats(rt.stats()); setTab('report'); return; }
     setStats(rt.stats()); setFiles(rt.vfsList());
-    setTab(current.info.subsystem === 'GUI' ? 'screen' : 'console');
+    setTab(current.info.subsystem === 'GUI' ? 'screen' : 'console'); autoTabRef.current = true;
     setTimeout(() => screenRef.current?.focus(), 50);
   }, [current, args, pack, installPack, dotnet, installDotnet, dx, installDx]);
   const stop = useCallback(() => { const rt = rtRef.current; if (!rt) return; rt.stop(); setStats(rt.stats()); setFiles(rt.vfsList()); }, []);
@@ -445,7 +448,7 @@ export default function X64App() {
         </button>
         <div className="ml-auto flex items-center gap-1 rounded bg-slate-100 p-0.5">
           {(['screen', 'console', 'files', 'report'] as const).map(t => (
-            <button key={t} data-x64-tab={t} onClick={() => setTab(t)} className={`flex items-center gap-1 rounded px-2 py-1 capitalize ${tab === t ? 'bg-white shadow-sm font-semibold' : 'text-slate-500 hover:text-slate-800'}`}>
+            <button key={t} data-x64-tab={t} onClick={() => { autoTabRef.current = false; setTab(t); }} className={`flex items-center gap-1 rounded px-2 py-1 capitalize ${tab === t ? 'bg-white shadow-sm font-semibold' : 'text-slate-500 hover:text-slate-800'}`}>
               {t === 'screen' ? <Monitor size={12} /> : t === 'console' ? <TerminalIcon size={12} /> : t === 'files' ? <HardDrive size={12} /> : <FileSearch size={12} />}{t}
             </button>
           ))}

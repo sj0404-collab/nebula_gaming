@@ -410,6 +410,12 @@ await test('x64: dlg.exe — user32 dialog manager + common controls (dialogs, m
   const w = await x64Open();
   await w.locator('[data-x64-exe="dlg.exe"]').click();
   await w.locator('[data-x64-run]').click();
+  // the test program pops a real MessageBox (in the browser message boxes are answered by the user, never auto-dismissed): wait for its
+  // console line, give the screen the keyboard focus and press Enter — the default button (OK) closes it
+  await page.waitForFunction(() => Number(document.querySelector('[data-x64-screen]')?.getAttribute('data-frames') ?? 0) >= 1, null, { timeout: 60_000 });   // a console exe that opens a window is switched to the screen tab
+  let up = false; for (let k = 0; k < 120 && !up; k++) { await w.locator('[data-x64-tab="console"]').click(); await sleep(400); up = /\[dlg\] MessageBox up/.test(await w.locator('[data-x64-console]').innerText()); await w.locator('[data-x64-tab="screen"]').click(); await sleep(100); }
+  expect(up, 'dlg.exe never reached its MessageBox');
+  await sleep(500); await w.locator('[data-x64-screen]').click({ position: { x: 5, y: 5 } }); await page.keyboard.press('Enter');
   await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout: 90_000 });
   const con = await w.locator('[data-x64-console]').innerText();
   expect(/ALL OK 157\/157/.test(con), 'dlg.exe checks failed: ' + con.split('\n').filter((l) => /FAIL|FAULT|ALL OK/.test(l)).join('\n').slice(0, 1500));
@@ -420,6 +426,12 @@ await test('x64: dlg32.exe — the same dialog-manager / common-controls test as
   const w = await x64Open();
   await w.locator('[data-x64-exe="dlg32.exe"]').click();
   await w.locator('[data-x64-run]').click();
+  // the test program pops a real MessageBox (in the browser message boxes are answered by the user, never auto-dismissed): wait for its
+  // console line, give the screen the keyboard focus and press Enter — the default button (OK) closes it
+  await page.waitForFunction(() => Number(document.querySelector('[data-x64-screen]')?.getAttribute('data-frames') ?? 0) >= 1, null, { timeout: 60_000 });   // a console exe that opens a window is switched to the screen tab
+  let up = false; for (let k = 0; k < 120 && !up; k++) { await w.locator('[data-x64-tab="console"]').click(); await sleep(400); up = /\[dlg\] MessageBox up/.test(await w.locator('[data-x64-console]').innerText()); await w.locator('[data-x64-tab="screen"]').click(); await sleep(100); }
+  expect(up, 'dlg.exe never reached its MessageBox');
+  await sleep(500); await w.locator('[data-x64-screen]').click({ position: { x: 5, y: 5 } }); await page.keyboard.press('Enter');
   await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout: 90_000 });
   const con = await w.locator('[data-x64-console]').innerText();
   expect(/ALL OK 157\/157/.test(con), 'dlg32.exe checks failed: ' + con.split('\n').filter((l) => /FAIL|FAULT|ALL OK/.test(l)).join('\n').slice(0, 1500));

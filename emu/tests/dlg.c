@@ -124,6 +124,7 @@ static INT_PTR CALLBACK main_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
           INT_PTR r = DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_ABOUT), h, about_proc, 0);
           chk(r == 7, "nested modal DialogBoxParamW returned EndDialog's value");
           chk(IsWindowEnabled(h), "owner re-enabled after the nested dialog");
+          printf("[dlg] MessageBox up — press Enter or Esc\n"); fflush(stdout);   /* the browser e2e waits for this line and answers the box like a user would */
           int mb = MessageBoxW(h, L"Continue the installation?", L"Question", MB_OKCANCEL | MB_ICONQUESTION);
           chk(mb == IDOK || mb == IDCANCEL, "MessageBoxW returned a button id");
           SetTimer(h, 1, 30, NULL); return TRUE; }

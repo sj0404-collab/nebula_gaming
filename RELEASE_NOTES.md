@@ -1,3 +1,49 @@
+# v1.26.0 — Nebula x64 (Android): real file dialogs (Open / Save As, Win32 + COM), Windows z‑order, owner‑draw controls; Notepad++ opens and saves files
+
+**Why.** A Windows program that cannot open or save a file is a toy. Notepad++ (x86 and x64) showed its editor, accepted typing — and
+`Ctrl+O` / `Ctrl+Alt+S` did nothing, because the Vista‑style **IFileOpenDialog / IFileSaveDialog** COM objects and `GetOpenFileName` were
+stubs, and the accelerator table (`LoadAccelerators` / `TranslateAccelerator`) was not wired. On top of that the editor went **blank**
+after any dialog (About, Open): the document tab bar painted over the Scintilla view. The root cause was a wrong z‑order model, now
+replaced by the Windows one. Everything below was tested on **x86 and x64 together** before it was committed.
+
+**Measured** (`emu/tests/run.sh` **220 native checks ALL OK**, x86 + x64; `tests/fdlg.exe` / `fdlg32.exe` **FDLG OK**; `tests/dlg.exe`
+157/157; Notepad++ x64 end‑to‑end: F1 About → Esc → Ctrl+O → `change.log` typed + Enter → file loaded, editor intact; Notepad++ x86 Ctrl+O →
+`change.log` loaded; Notepad++ x64 Ctrl+Alt+S → `hello` saved with the typed text; e2e in headless Chromium):
+
+* **File dialogs (comdlg32)** — `GetOpenFileNameA/W`, `GetSaveFileNameA/W`: a real modal dialog (folder path, file list with directories,
+  file name edit, file‑type combo from `lpstrFilter`, Open/Save + Cancel, Enter/Esc, double click, `..`), `OFN_FILEMUSTEXIST`, `lpstrInitialDir`,
+  `lpstrTitle`, `lpstrDefExt`, `nFileOffset` / `nFileExtension` / `nFilterIndex` / `lpstrFileTitle` filled exactly as Windows does, both
+  x64 and x86 `OPENFILENAME` layouts; Cancel returns 0 (`CommDlgExtendedError()` = 0).
+* **COM file dialogs (shell32)** — `CoCreateInstance(CLSID_FileOpenDialog / CLSID_FileSaveDialog)` returns a real object implementing
+  `IFileDialog` / `IFileOpenDialog` / `IFileSaveDialog` (all 27 + 5 methods), `IFileDialogCustomize` (check buttons keep state),
+  `IShellItem` (`GetDisplayName` with the `SIGDN_*` family, `GetParent`, `GetAttributes`, `Compare`), `IShellItemArray`,
+  `SHCreateItemFromParsingName`, `SHCreateItemFromIDList`, `SHGetIDListFromObject`; `Show` runs the same modal dialog, `GetResult` /
+  `GetResults` / `GetFileTypeIndex` / `GetFolder` return what the user picked; Cancel = `HRESULT_FROM_WIN32(ERROR_CANCELLED)`.
+* **Accelerators** — `LoadAcceleratorsA/W` (RT_ACCELERATOR resources), `DestroyAcceleratorTable`,
+  `TranslateAcceleratorA/W` (FVIRTKEY / FCONTROL / FALT / FSHIFT, `WM_COMMAND` with the accelerator flag). Notepad++'s Ctrl+O, Ctrl+S,
+  Ctrl+Alt+S, F1 … reach the program.
+* **Windows z‑order model** (`user.inc`): a new **child** window is linked at the **bottom** of its siblings and a new top‑level window
+  at the top — exactly what `CreateWindowEx` does (first‑created control = top of the z‑order = first in the tab order); `SetWindowPos` /
+  `DeferWindowPos` honour `HWND_TOP`, `HWND_BOTTOM`, `HWND_TOPMOST/NOTOPMOST` and *insert‑after a sibling*; `GetWindow(GW_CHILD /
+  HWNDFIRST / HWNDLAST / HWNDNEXT / HWNDPREV)`, `GetTopWindow`, `FindWindowEx(after)` and `GetNextDlgTabItem` follow the same list.
+  Children are painted **top‑down** like Windows dispatches `WM_PAINT`; with `WS_CLIPSIBLINGS` the pixels of higher siblings are
+  protected (the DC clip snapshot), without it the lower sibling overwrites — dialog statics behave as on Windows, and Notepad++'s
+  Scintilla view (created before the tab bar) stays visible after every dialog.
+* **Owner‑draw controls** — `BS_OWNERDRAW` buttons and `SS_OWNERDRAW` statics send `WM_DRAWITEM` with a real `DRAWITEMSTRUCT`
+  (x64 and x86 layouts, `ODS_SELECTED/DISABLED/FOCUS/CHECKED`) to the parent instead of painting themselves.
+* **Activation** — when the active top‑level window is hidden or destroyed, activation moves to its owner (or the top visible window of the
+  process) with `WM_ACTIVATE` + `WM_SETFOCUS`, so the keyboard returns to the main window after a dialog (Notepad++ puts the caret back
+  into the editor; accelerators work again).
+* Also: `InternetCrackUrlA/W`, `AssocQueryStringA/W`; `fdlg.exe` / `fdlg32.exe` in the sample list.
+
+**Honest limits.** File dialog: single selection only (`OFN_ALLOWMULTISELECT` returns one file), no `OFN_ENABLEHOOK` / template hooks,
+no overwrite prompt, no `CreateAcceleratorTable`, no `IFileDialogEvents` callbacks and no `WH_KEYBOARD` / `WH_CALLWNDPROC` hooks yet — therefore Notepad++'s own
+"append extension" trick does not run: Save As `hello` writes `hello`, not `hello.txt` (type the extension); the custom controls of
+`IFileDialogCustomize` are accepted but not drawn; no "Recent" / "Desktop" places, the dialog browses the emulator's drives. The
+built‑in 8×8 font is wider than Segoe UI, so some dialog texts are clipped (Notepad++ About). No pinch‑zoom; no gamepad; ASCII /
+Latin‑1 / Cyrillic glyphs only; OLE drag‑and‑drop and clipboard formats other than text inert; no HTTPS/TLS, no WinForms/WPF; D3D11
+partial, no D3D9/DDraw; runtime packs x64‑only; visual styles off.
+
 # v1.25.0 — Nebula x64 (Android): touch and the soft keyboard drive real Windows programs; 7‑Zip File Manager x86 + x64 as on Windows
 
 **Why.** Android is the only platform being shipped. On a phone the emulator screen had mouse‑only input: no drag, no right click,
