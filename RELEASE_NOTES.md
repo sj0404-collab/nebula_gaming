@@ -1,4 +1,4 @@
-# v1.28.0 — Programs & Games library (Android): real installers run from the device, a persistent C:\ drive, tiles with the programs' own icons, Play / fullscreen — the fake Steam / Epic demos are gone
+# v1.28.1 — Programs & Games library (Android): real installers run from the device, a persistent C:\ drive, tiles with the programs' own icons, Play / fullscreen — the fake Steam / Epic demos are gone
 
 **Why.** The “x64 Runner” was a developer tool (a list of sample exes and a Run button) and Steam / Epic Games were stand‑in windows with a
 `setInterval` progress bar. The user flow on Android must be the Windows one: open a setup program from the phone → it runs with its own
@@ -38,6 +38,8 @@ the tile is restored from IndexedDB and Play works again):
   (no raw TCP from a WebView page); saying so is better than a demo.
 * The self‑test / sample programs (hello.exe, threads.exe, sqlite3, jq, lua, python, NebulaStrike…) moved behind a **tests** toggle and download on
   demand — the app no longer pulls ~40 MB of samples at start.
+
+**v1.28.1** = v1.28.0 + one e2e fix: the d3d11tri test reads the console after explicitly selecting the Console tab (a console program that opens a window is shown on the Screen tab once its first frame arrives — a race that failed the v1.27.0 CI run on the runner, so v1.27.0 got no APK).
 
 **Honest limits.** One Windows program (process tree) at a time per Programs window. MSI packages do not run (no `msiexec`). The library relies on
 the installer leaving a Start Menu shortcut or an Uninstall key (NSIS, Inno Setup, 7‑Zip's SFX setup and MSI‑less installers do); a bare copy of

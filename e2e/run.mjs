@@ -552,6 +552,7 @@ await test('x64: d3d11tri.exe — Direct3D 11 draw calls rendered by WebGL2 (DXB
   await w.locator('[data-x64-exe="d3d11tri.exe"]').click();
   await w.locator('[data-x64-run]').click();
   await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout: 60_000 });
+  await w.locator('[data-x64-tab="console"]').click();   // a console program that opened a window is shown on the Screen tab once its first frame arrives
   const con = await w.locator('[data-x64-console]').innerText();
   expect(/frame 2: triangle \+ quad drawn and presented/.test(con) && /d3d11tri ok/.test(con), 'd3d11tri did not finish: ' + con.slice(-400));
   await w.locator('[data-x64-tab="screen"]').click(); await sleep(500);
