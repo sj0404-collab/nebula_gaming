@@ -312,6 +312,11 @@ static void s_WakeByAddressAll(Cpu *c) { W->wake_gen++; }
 
 /* events / mutexes / semaphores */
 static void s_CreateEventA(Cpu *c) { KObj *k = 0; int ex = 0; u64 h = new_kobj_handle(c, KO_EVENT, ARG(3) ? name_a(c, ARG(3)) : 0, ARG(0), &ex, &k); if (h && k && !ex) { k->manual = (u32)ARG(1) != 0; k->signaled = (u32)ARG(2) != 0; } RET(h); }
+/* directory change notifications (7-Zip FM watches the folder it shows): a manual-reset event that stays unsignalled — the VFS has no
+   external writers, so no change ever arrives; FindNextChangeNotification re-arms, FindCloseChangeNotification closes the handle */
+static void s_FindFirstChangeNotificationW(Cpu *c) { KObj *k = 0; int ex = 0; u64 h = new_kobj_handle(c, KO_EVENT, 0, 0, &ex, &k); if (h && k) { k->manual = 1; k->signaled = 0; } RET(h ? h : (u64)-1); }
+static void s_FindNextChangeNotification(Cpu *c) { RET(ARG(0) && ARG(0) != (u64)-1); }
+static void s_FindCloseChangeNotification(Cpu *c) { call_shim_tail(c, s_CloseHandle, ARG(0), 0, 0, 0); }
 static void s_CreateEventW(Cpu *c) { KObj *k = 0; int ex = 0; u64 h = new_kobj_handle(c, KO_EVENT, ARG(3) ? name_w(c, ARG(3)) : 0, ARG(0), &ex, &k); if (h && k && !ex) { k->manual = (u32)ARG(1) != 0; k->signaled = (u32)ARG(2) != 0; } RET(h); }
 static void s_CreateEventExW(Cpu *c) { KObj *k = 0; int ex = 0; u64 h = new_kobj_handle(c, KO_EVENT, ARG(1) ? name_w(c, ARG(1)) : 0, ARG(0), &ex, &k); if (h && k && !ex) { k->manual = ((u32)ARG(2) & 1) != 0; k->signaled = ((u32)ARG(2) & 2) != 0; } RET(h); }
 static void s_CreateEventExA(Cpu *c) { KObj *k = 0; int ex = 0; u64 h = new_kobj_handle(c, KO_EVENT, ARG(1) ? name_a(c, ARG(1)) : 0, ARG(0), &ex, &k); if (h && k && !ex) { k->manual = ((u32)ARG(2) & 1) != 0; k->signaled = ((u32)ARG(2) & 2) != 0; } RET(h); }
@@ -410,7 +415,7 @@ static void s_InterlockedXor(Cpu *c) { u32 old = rd32(c, ARG(0)); wr32(c, ARG(0)
   S(InitializeSRWLock), S(AcquireSRWLockExclusive), S(AcquireSRWLockShared), S(ReleaseSRWLockExclusive), S(ReleaseSRWLockShared), S(TryAcquireSRWLockExclusive), S(TryAcquireSRWLockShared), \
   S(InitializeConditionVariable), S(WakeConditionVariable), S(WakeAllConditionVariable), S(SleepConditionVariableCS), S(SleepConditionVariableSRW), \
   S(InitOnceExecuteOnce), S(InitOnceBeginInitialize), S(InitOnceComplete), S(InitOnceInitialize), S(WaitOnAddress), S(WakeByAddressSingle), S(WakeByAddressAll), \
-  S(CreateEventA), S(CreateEventW), S(CreateEventExW), S(CreateEventExA), S(OpenEventA), S(OpenEventW), S(SetEvent), S(ResetEvent), S(PulseEvent), \
+  S(FindFirstChangeNotificationW), SA("FindFirstChangeNotificationA", FindFirstChangeNotificationW), S(FindNextChangeNotification), S(FindCloseChangeNotification), S(CreateEventA), S(CreateEventW), S(CreateEventExW), S(CreateEventExA), S(OpenEventA), S(OpenEventW), S(SetEvent), S(ResetEvent), S(PulseEvent), \
   S(CreateMutexA), S(CreateMutexW), S(CreateMutexExW), S(CreateMutexExA), S(OpenMutexA), S(OpenMutexW), S(ReleaseMutex), \
   S(CreateSemaphoreA), S(CreateSemaphoreW), S(CreateSemaphoreExW), S(CreateSemaphoreExA), S(OpenSemaphoreA), S(OpenSemaphoreW), S(ReleaseSemaphore), \
   S(WaitForSingleObject), S(WaitForSingleObjectEx), S(WaitForMultipleObjects), S(WaitForMultipleObjectsEx), S(SignalObjectAndWait), \

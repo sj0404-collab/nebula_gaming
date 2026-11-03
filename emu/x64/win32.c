@@ -932,6 +932,13 @@ static void s_set_new_mode(Cpu *c) { RET(0); }
 static void s_CryptAcquireContextA(Cpu *c) { if (ARG(0)) wrp(c, ARG(0), 0xC0FFEE); RET(1); }
 static void s_CryptGenRandom(Cpu *c) { Win32 *w = W; u64 a = ARG(2); u32 n = (u32)ARG(1); for (u32 i = 0; i < n; i++) { w->rand_state = w->rand_state * 1103515245u + 12345u; wr8(c, a + i, (u8)(w->rand_state >> 16)); } RET(1); }
 static void s_OpenProcessToken(Cpu *c) { if (ARG(2)) wrp(c, ARG(2), 0x7001); RET(1); }
+/* LSA policy (7-Zip FM asks for SeLockMemoryPrivilege at start-up through LsaOpenPolicy/LsaAddAccountRights): behave like a
+   non-elevated Windows session — the policy cannot be opened for the requested access (STATUS_ACCESS_DENIED) */
+static void s_LsaOpenPolicy(Cpu *c) { if (ARG(3)) wrp(c, ARG(3), 0); RET(0xC0000022); }
+static void s_LsaAddAccountRights(Cpu *c) { RET(0xC0000022); }
+static void s_LsaClose(Cpu *c) { RET(0); }
+static void s_LsaFreeMemory(Cpu *c) { RET(0); }
+static void s_LsaNtStatusToWinError(Cpu *c) { u32 st = (u32)ARG(0); RET(st == 0 ? 0 : st == 0xC0000022 ? 5 : st == 0xC0000034 ? 2 : 1); }
 /* GetTokenInformation: one administrator account. TokenUser → S-1-5-21-1000-2000-3000-500; TokenGroups → Administrators only; TokenElevation 1;
    TokenElevationType 2 (full); TokenIntegrityLevel high (S-1-16-12288); TokenSessionId 1; TokenType primary; everything else ERROR_NOT_SUPPORTED. */
 static u32 sid_put(Cpu *c, u64 at, u32 nsub, const u32 *sub) { if (at) { wr8(c, at, 1); wr8(c, at + 1, (u8)nsub); for (int i = 0; i < 6; i++) wr8(c, at + 2 + i, i == 5 ? 5 : 0); for (u32 i = 0; i < nsub; i++) wr32(c, at + 8 + i * 4, sub[i]); } return 8 + nsub * 4; }
@@ -1368,7 +1375,7 @@ static const ShimDef shims[] = {
   /* COMCTL32 */
   SA("InitCommonControls", ret0), SA("InitCommonControlsEx", ret1), SA("MakeDragList", ret1), SA("LBItemFromPt", retm1), SA("DrawInsert", ret0),
   /* ADVAPI32 (minimal) */
-  S(CryptAcquireContextA), SA("CryptAcquireContextW", CryptAcquireContextA), S(CryptGenRandom), SA("CryptReleaseContext", ret1), S(OpenProcessToken), S(GetTokenInformation), S(CheckTokenMembership), SA("DuplicateToken", ret0), SA("EqualSid", ret0), SA("AccessCheck", ret0), SA("GetSecurityInfo", ret1), SA("SaferCreateLevel", ret0), SA("SaferComputeTokenFromLevel", ret0), SA("SetTokenInformation", ret0),
+  S(CryptAcquireContextA), SA("CryptAcquireContextW", CryptAcquireContextA), S(CryptGenRandom), SA("CryptReleaseContext", ret1), S(OpenProcessToken), S(LsaOpenPolicy), S(LsaAddAccountRights), S(LsaClose), S(LsaFreeMemory), S(LsaNtStatusToWinError), S(GetTokenInformation), S(CheckTokenMembership), SA("DuplicateToken", ret0), SA("EqualSid", ret0), SA("AccessCheck", ret0), SA("GetSecurityInfo", ret1), SA("SaferCreateLevel", ret0), SA("SaferComputeTokenFromLevel", ret0), SA("SetTokenInformation", ret0),
   /* CRT */
   S(malloc), S(calloc), S(realloc), S(free), SA("_msize", msize), SA("_aligned_malloc", aligned_malloc), SA("_aligned_free", aligned_free), SA("_set_new_mode", set_new_mode), SA("_callnewh", ret0), SA("_query_new_handler", ret0), SA("_set_new_handler", ret0),
   SA("_initterm", initterm), SA("_initterm_e", initterm_e), S(atexit), SA("_onexit", onexit), SA("_crt_atexit", atexit), SA("_crt_at_quick_exit", atexit), SA("_register_onexit_function", register_onexit_function), SA("_initialize_onexit_table", ret0), SA("_execute_onexit_table", ret0),

@@ -345,8 +345,8 @@ check "7za.exe x86: extract"      "Everything is Ok"                            
 check "7za.exe x86: round-trip identical" "same" "$(cmp -s $W32/src/rand.bin $W32/out/src/rand.bin && cmp -s $W32/src/nums.txt $W32/out/src/nums.txt && echo same || echo different)"
 check "7za.exe x86: error path = MSVC C++ throw/catch (__CxxFrameHandler)" "System ERROR:" "$($X --quiet --max-ms 30000 --mount-rw $W32='C:\w' $Z7/7za.exe x '-oC:\w\o2' 'C:\w\nope.7z' 2>&1 || true)"
 echo "[19] dialog manager (user32 dialogs, standard controls, resources, shell folders, IShellLink) — same test built for x64 and x86"
-check "dlg.exe (x64): 151 checks (dialogs, controls, menus, icons, status bar / toolbar / rebar / tab control / tree view / list view)"    "ALL OK 151/151"   "$($X --quiet --no-stdin --max-ms 40000 tests/dlg.exe 2>&1 || true)"
-check "dlg32.exe (x86): 151 checks (dialogs, controls, menus, icons, status bar / toolbar / rebar / tab control / tree view / list view)"  "ALL OK 151/151"   "$($X --quiet --no-stdin --max-ms 40000 tests/dlg32.exe 2>&1 || true)"
+check "dlg.exe (x64): 157 checks (dialogs, controls, menus, icons, status bar / toolbar / rebar / tab control / tree view / list view)"    "ALL OK 157/157"   "$($X --quiet --no-stdin --max-ms 40000 tests/dlg.exe 2>&1 || true)"
+check "dlg32.exe (x86): 157 checks (dialogs, controls, menus, icons, status bar / toolbar / rebar / tab control / tree view / list view)"  "ALL OK 157/157"   "$($X --quiet --no-stdin --max-ms 40000 tests/dlg32.exe 2>&1 || true)"
 check "input.exe (x64): 30 checks (Raw Input WM_INPUT, DirectInput8 keyboard/mouse, buffered data)"  "ALL OK 30/30"   "$($X --quiet --no-stdin --max-ms 15000 --key 0x27@1000:1500 --key 0x28@3000:400 --move 300,300@4200 tests/input.exe 2>&1 || true)"
 check "input32.exe (x86): 30 checks (Raw Input WM_INPUT, DirectInput8 keyboard/mouse, buffered data)"  "ALL OK 30/30"   "$($X --quiet --no-stdin --max-ms 15000 --key 0x27@1000:1500 --key 0x28@3000:400 --move 300,300@4200 tests/input32.exe 2>&1 || true)"
 # the same real installer twice: the x86 build (32-bit files) and the x64 build (a 32-bit setup stub that probes
@@ -368,6 +368,13 @@ for V in "7z2501.exe x86 32-bit" "7z2501-x64.exe x64 64-bit"; do
     check "$B GUI install: dialog from the resource template, Install clicked, Close clicked → exit 0"   "exit code 0"   "$out"
     check "$B GUI install: frames were presented while installing"   "[1-9][0-9]* frames"   "$out"
     check "$B GUI install: files written through the dialog flow"   "7z.exe"   "$(ls $ID/7z 2>/dev/null | tr '\n' ' ')"
+    # the 7-Zip File Manager (7zFM.exe): main toolbar with labels under the icons, ReBar with the parent-folder toolbar + ComboBoxEx32
+    # path bar (real inner ComboBox + Edit, subclassed by 7-Zip), SysListView32 report view, status bar; double-click navigates
+    # Computer → C:\ (FindFirstChangeNotification), the path bar shows the folder, the list shows the mounted tree
+    out=$(X64_LOG=1 X64_WNDDUMP=1 $X --no-stdin --max-ms 24000 --click 30,130@9000 --click 30,130@9200 --click 30,130@15000 --click 30,130@15200 --mount-rw "$ID/7z=C:\\nebula" $ID/7z/7zFM.exe 2>&1 3>&1 | grep -a "^\[wnd\]\|FAULT\|MessageBox\|not registered" || true)
+    check "$B 7zFM.exe: main window with toolbar, panel, ReBarWindow32 → ToolbarWindow32 + ComboBoxEx32 → ComboBox → Edit, SysListView32, status bar"   '"ToolbarWindow32".*"7-Zip::Panel".*"SysListView32".*"ReBarWindow32".*"ToolbarWindow32".*"ComboBoxEx32".*"ComboBox".*"Edit".*"msctls_statusbar32"'   "$(echo "$out" | grep -v "FAULT\|MessageBox\|not registered" | tr '\n' ' ')"
+    check "$B 7zFM.exe: double-click Computer, then C: — the path bar reads C:\\ (SetWindowText through the ComboBoxEx into the Edit)"   '"ComboBox" "C:\\"'   "$(echo "$out" | grep -a '"ComboBox"' | tr '\n' ' ')"
+    check "$B 7zFM.exe: no fault, no error box"   "errors=0"   "errors=$(echo "$out" | grep -a -c "FAULT\|MessageBox\|not registered") $(echo "$out" | grep -a "FAULT\|MessageBox\|not registered" | head -1)"
     rm -rf $ID
   else echo "  skip $B (no $1 and no network)"; fi
 done

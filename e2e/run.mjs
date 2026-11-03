@@ -406,23 +406,23 @@ await test('x64: hello32.exe (32-bit x86 PE32) runs as a 32-bit process to exit 
   await page.screenshot({ path: resolve(SHOTS, 'x64-hello32.png') });
   await closeAll();
 });
-await test('x64: dlg.exe — user32 dialog manager + common controls (dialogs, menus, icons, status bar, toolbar, rebar, tabs, tree view, list view) passes 151/151 as a 64-bit process', async () => {
+await test('x64: dlg.exe — user32 dialog manager + common controls (dialogs, menus, icons, status bar, toolbar, rebar, tabs, tree view, list view) passes 157/157 as a 64-bit process', async () => {
   const w = await x64Open();
   await w.locator('[data-x64-exe="dlg.exe"]').click();
   await w.locator('[data-x64-run]').click();
   await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout: 90_000 });
   const con = await w.locator('[data-x64-console]').innerText();
-  expect(/ALL OK 151\/151/.test(con), 'dlg.exe checks failed: ' + con.split('\n').filter((l) => /FAIL|FAULT|ALL OK/.test(l)).join('\n').slice(0, 1500));
+  expect(/ALL OK 157\/157/.test(con), 'dlg.exe checks failed: ' + con.split('\n').filter((l) => /FAIL|FAULT|ALL OK/.test(l)).join('\n').slice(0, 1500));
   await page.screenshot({ path: resolve(SHOTS, 'x64-dlg.png') });
   await closeAll();
 });
-await test('x64: dlg32.exe — the same dialog-manager / common-controls test as a 32-bit PE32 process passes 151/151', async () => {
+await test('x64: dlg32.exe — the same dialog-manager / common-controls test as a 32-bit PE32 process passes 157/157', async () => {
   const w = await x64Open();
   await w.locator('[data-x64-exe="dlg32.exe"]').click();
   await w.locator('[data-x64-run]').click();
   await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout: 90_000 });
   const con = await w.locator('[data-x64-console]').innerText();
-  expect(/ALL OK 151\/151/.test(con), 'dlg32.exe checks failed: ' + con.split('\n').filter((l) => /FAIL|FAULT|ALL OK/.test(l)).join('\n').slice(0, 1500));
+  expect(/ALL OK 157\/157/.test(con), 'dlg32.exe checks failed: ' + con.split('\n').filter((l) => /FAIL|FAULT|ALL OK/.test(l)).join('\n').slice(0, 1500));
   await closeAll();
 });
 await test('x64: seh32.exe — 32-bit structured exception handling (fs:[0] chain, RtlUnwind, context fix-up, VEH)', async () => {
