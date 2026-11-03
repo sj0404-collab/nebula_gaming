@@ -1,3 +1,36 @@
+# v1.25.0 — Nebula x64 (Android): touch and the soft keyboard drive real Windows programs; 7‑Zip File Manager x86 + x64 as on Windows
+
+**Why.** Android is the only platform being shipped. On a phone the emulator screen had mouse‑only input: no drag, no right click,
+no way to type into a Windows program at all (there was no text field for the soft keyboard), no mouse wheel. 7‑Zip's File Manager
+(`7zFM.exe`) — the most common "real program" after Notepad++ — still relied on stubs (`CreateToolbarEx`, `CreateStatusWindow`,
+`ComboBoxEx32`). Everything below was tested for **x86 and x64 together** before it was committed.
+
+**Measured** (`emu/tests/run.sh` **211 native checks ALL OK**, x86 + x64; e2e in headless Chromium incl. a touch/IME scenario on an
+Android‑like viewport; `tests/dlg.exe`/`dlg32.exe` **157/157**; `tests/typing.exe`/`typing32.exe` TYPING OK; `tests/input.exe` 30/30):
+
+* **Touch on the guest screen** (`X64App`, pointer events, `touch-action: none`): tap = left click where the finger landed; drag = press
+  and move (scrollbars, selections, window moves); hold still 550 ms = right click (haptic tick); a second finger while holding = right
+  click; two‑finger vertical drag = mouse wheel; mouse/pen pointers keep their real buttons (middle button included); the wheel on
+  desktops/Chromebooks now reaches the program (`WM_MOUSEWHEEL` to the focus window, pointer position untouched — it used to corrupt it).
+* **Soft keyboard / IME** — the ⌨ button on the screen bar opens an invisible text field; whatever the Android keyboard inserts
+  (Latin, Cyrillic, CJK, emoji, autocorrect replacements) is diffed and delivered to the program: characters the US layout can produce go
+  through a real `WM_KEYDOWN` → `WM_CHAR` → `WM_KEYUP` sequence (accelerators and Scintilla see the key), everything else through
+  `VK_PACKET` exactly like `SendInput(KEYEVENTF_UNICODE)` on Windows — order is preserved, Backspace/Enter/arrows work, hardware keyboards
+  still work directly. New emulator entry point `x64_char`, native runner option `--type "text@ms"`, new test `typing.exe` (x86 + x64).
+* **Sticky modifiers on the touch bar** — Ctrl / Alt / Shift stay down until the next key (Ctrl+S, Ctrl+Z, Alt+F, Shift+arrows on a phone),
+  plus Esc, Tab, ⌫, ↵, arrows, Space.
+* **7‑Zip File Manager x86 + x64**: `ComboBoxEx32` is a real wrapper over a real ComboBox + Edit (`CBEM_INSERT/SET/GETITEM`, image list,
+  indent), `CBS_DROPDOWN` combos own a real Edit (`GetComboBoxInfo.hwndItem`), `CreateToolbarEx` / `CreateStatusWindowA/W` are real,
+  toolbar labels under icons grow the button/bar, `WM_LBUTTONDBLCLK`/`WM_RBUTTONDBLCLK` are generated (500 ms, 4 px, `CS_DBLCLKS`),
+  the rebar forwards `WM_COMMAND`/`WM_NOTIFY`, `GetWindowPlacement` uses parent‑client coordinates for children, `LsaOpenPolicy` & co,
+  `FindFirstChangeNotification`. The suite navigates 7zFM folders by double click on both bitnesses.
+* x64 Runner toolbar is one scrollable row on phones (buttons no longer wrap over each other).
+
+**Honest limits.** No pinch‑zoom of the guest screen yet (the 1280×720 desktop is letter‑boxed to the phone, so small controls are small);
+no gamepad; the 8×8 built‑in font has no Cyrillic/CJK glyphs — typed text is stored correctly (`GetWindowText` returns it, as the test
+shows) but non‑ASCII glyphs render as `?` until the font work lands; no HTTPS/TLS, no WinForms/WPF, D3D11 partial, no D3D9/DDraw;
+runtime packs are x64‑only; file dialogs cancel; visual styles off.
+
 # v1.24.0 — Nebula x64 (Android): Notepad++ x86 **and** x64 look and work as on Windows — real icons, class menus, ReBar, TB_ADDBITMAP, WM_PRINTCLIENT, text alignment; three emulator bugs that broke every MSVC program
 
 **Why.** The acceptance target is «как на Windows, без заглушек»: a real application must look and behave the same as on Windows,

@@ -12,6 +12,7 @@ const PY_FILES = ['python312.dll', 'python312.zip', 'python312._pth', '_sqlite3.
 const SAMPLES: { name: string; href: string; desc: string; args?: string; files?: string[]; lazy?: boolean; needsPack?: boolean; needsDx?: boolean; dir?: string }[] = [   // dir: subdirectory of C:\nebula for the exe + files
   { name: 'NebulaStrike.exe', href: '/downloads/NebulaStrike.exe', desc: 'Win32 GDI game, PE32+ x64 (light GUI exe)' },
   { name: 'NebulaStrike32.exe', href: '/x64/samples/NebulaStrike32.exe', desc: 'The same Win32 GDI game built as a 32-bit x86 PE32 exe: runs as a 32-bit process (IA-32 mode, fs:[0] TEB, stdcall shims)' },
+  { name: 'typing.exe', href: '/x64/samples/typing.exe', desc: 'Text input test: an EDIT control reports what arrived from the keyboard — on Android open the ⌨ button on the screen and type (Latin, Cyrillic, punctuation); prints TYPING OK for the reference sentence', args: '20000' },
   { name: 'dlg.exe', href: '/x64/samples/dlg.exe', desc: 'Dialog-manager self-test (x64): DialogBoxParam from a resource template, 42 checks — static/edit/button/checkbox/radio/listbox/combobox, nested modal + MessageBox, LoadString with Cyrillic text, SHGetFolderPath, IShellLink, modeless dialog with Tab/Escape' },
   { name: 'dlg32.exe', href: '/x64/samples/dlg32.exe', desc: 'The same dialog-manager self-test built as a 32-bit PE32 exe (IA-32 mode, stdcall shims) — must also print ALL OK 42/42' },
   { name: 'hello32.exe', href: '/x64/samples/hello32.exe', args: 'a b', desc: '32-bit x86 console exe (PE32): argv, heap, 64-bit math on 32-bit, threads, TLS, files — exit code 42' },
@@ -52,9 +53,14 @@ const VERDICT: Record<string, { label: string; cls: string; Icon: typeof CheckCi
   invalid:     { label: 'not a PE',     cls: 'bg-slate-100 text-slate-700 border-slate-300',       Icon: XCircle },
 };
 
-const TOUCH_KEYS: { label: string; vk: number }[] = [
-  { label: '◀', vk: 0x25 }, { label: '▶', vk: 0x27 }, { label: '▲', vk: 0x26 }, { label: '▼', vk: 0x28 }, { label: 'SPACE', vk: 0x20 }, { label: 'R', vk: 0x52 }, { label: 'ENTER', vk: 0x0d }, { label: 'ESC', vk: 0x1b },
+const TOUCH_KEYS: { label: string; vk: number; sticky?: boolean }[] = [
+  { label: 'Ctrl', vk: 0x11, sticky: true }, { label: 'Alt', vk: 0x12, sticky: true }, { label: 'Shift', vk: 0x10, sticky: true },
+  { label: 'Esc', vk: 0x1b }, { label: 'Tab', vk: 0x09 }, { label: '⌫', vk: 0x08 }, { label: '↵', vk: 0x0d }, { label: '◀', vk: 0x25 }, { label: '▲', vk: 0x26 }, { label: '▼', vk: 0x28 }, { label: '▶', vk: 0x27 }, { label: '␣', vk: 0x20 }, { label: 'R', vk: 0x52 },
 ];
+/* Touch on the guest screen (Android): tap = left click, drag = press and move, hold still = right click (released on lift), two fingers = wheel.
+   Mouse / pen pointers keep their real buttons. */
+interface TouchState { id: number; sx: number; sy: number; gx: number; gy: number; t0: number; pressed: boolean; done: boolean; timer: number; fingers: number; lastY2: number }
+const IME_SENTINEL = '\u200b\u200b';   // the IME field is never empty, so Backspace on an empty guest line still produces an input event
 
 /* Runtime pack: the x64 DLLs of the VC++ 2015–2022 Redistributable, built by emu/tools/runtime-pack.sh into public/x64/sys32/
    at build time and installed on demand into C:\Windows\System32 of the virtual disk (the emulator prefers these real
@@ -319,21 +325,97 @@ export default function X64App() {
     const vk = vkFromEvent(e.nativeEvent); if (!vk) return;
     rt.key(vk, down); e.preventDefault(); e.stopPropagation();
   }, []);
-  const touchKey = useCallback((vk: number, down: boolean) => { rtRef.current?.key(vk, down); }, []);
-  const guestMouse = useCallback((e: React.MouseEvent, ev: number) => {
-    const rt = rtRef.current, p = presenterRef.current; if (!rt || !p || rt.status !== 'running') return;
-    const r = p.canvas.getBoundingClientRect(); const { w, h } = rt.screenSize(); const g = p.toGuest(e.clientX - r.left, e.clientY - r.top, w, h); if (!g) return;
-    rt.mouse(g.x, g.y, ev); if (ev) screenRef.current?.focus();
+  const [sticky, setSticky] = useState<number[]>([]);   // modifier VKs held down by the touch bar until the next key
+  const stickyRef = useRef<number[]>([]);
+  const releaseSticky = useCallback(() => { const rt = rtRef.current; for (const vk of stickyRef.current) rt?.key(vk, false); stickyRef.current = []; setSticky([]); }, []);
+  const touchKey = useCallback((vk: number, down: boolean, isSticky?: boolean) => {
+    const rt = rtRef.current; if (!rt) return;
+    if (isSticky) { if (!down) return; if (stickyRef.current.includes(vk)) { rt.key(vk, false); stickyRef.current = stickyRef.current.filter(v => v !== vk); } else { rt.key(vk, true); stickyRef.current = [...stickyRef.current, vk]; } setSticky([...stickyRef.current]); return; }
+    rt.key(vk, down); if (!down) releaseSticky();
+  }, [releaseSticky]);
+  const toGuest = useCallback((clientX: number, clientY: number) => {
+    const rt = rtRef.current, p = presenterRef.current; if (!rt || !p || rt.status !== 'running') return null;
+    const r = p.canvas.getBoundingClientRect(); const { w, h } = rt.screenSize(); return p.toGuest(clientX - r.left, clientY - r.top, w, h);
   }, []);
+  const imeRef = useRef<HTMLTextAreaElement | null>(null);
+  const imePrev = useRef(IME_SENTINEL);
+  const [imeOpen, setImeOpen] = useState(false);
+  const focusGuest = useCallback(() => { if (imeOpen && imeRef.current) imeRef.current.focus({ preventScroll: true }); else screenRef.current?.focus(); }, [imeOpen]);
+  const ts = useRef<TouchState | null>(null);
+  const clearHold = () => { const t = ts.current; if (t?.timer) { clearTimeout(t.timer); t.timer = 0; } };
+  const guestPointer = useCallback((e: React.PointerEvent, kind: 'down' | 'move' | 'up' | 'cancel') => {
+    const rt = rtRef.current; if (!rt || rt.status !== 'running') return;
+    if (e.pointerType !== 'touch') {   // mouse / pen: real buttons
+      const g = toGuest(e.clientX, e.clientY); if (!g) return;
+      if (kind === 'down') { e.currentTarget.setPointerCapture(e.pointerId); rt.mouse(g.x, g.y, e.button === 2 ? 3 : e.button === 1 ? 5 : 1); focusGuest(); }
+      else if (kind === 'up') rt.mouse(g.x, g.y, e.button === 2 ? 4 : e.button === 1 ? 6 : 2);
+      else if (kind === 'move') rt.mouse(g.x, g.y, 0);
+      return;
+    }
+    e.preventDefault();
+    const t = ts.current;
+    if (kind === 'down') {
+      if (t && !t.done) {   // a second finger while the first is held: right click (or the start of a two-finger scroll)
+        t.fingers++; t.lastY2 = e.clientY; clearHold();
+        if (!t.pressed) { rt.mouse(t.gx, t.gy, 3); rt.mouse(t.gx, t.gy, 4); t.done = true; }
+        return;
+      }
+      const g = toGuest(e.clientX, e.clientY); if (!g) return;
+      e.currentTarget.setPointerCapture(e.pointerId); focusGuest();
+      rt.mouse(g.x, g.y, 0);
+      const st: TouchState = { id: e.pointerId, sx: e.clientX, sy: e.clientY, gx: g.x, gy: g.y, t0: performance.now(), pressed: false, done: false, timer: 0, fingers: 1, lastY2: 0 };
+      st.timer = window.setTimeout(() => { const c = ts.current; if (!c || c !== st || c.pressed || c.done) return; c.done = true; c.timer = 0; rt.mouse(c.gx, c.gy, 3); rt.mouse(c.gx, c.gy, 4); if (navigator.vibrate) navigator.vibrate(15); }, 550);
+      ts.current = st; return;
+    }
+    if (!t) return;
+    if (kind === 'move') {
+      if (t.fingers >= 2 && e.pointerId !== t.id) {   // two-finger vertical drag → wheel notches
+        const dy = e.clientY - t.lastY2; if (Math.abs(dy) >= 24) { rt.mouse(dy < 0 ? -120 : 120, 0, 7); t.lastY2 = e.clientY; } return;
+      }
+      if (e.pointerId !== t.id || t.done) return;
+      const g = toGuest(e.clientX, e.clientY); if (!g) return;
+      if (!t.pressed) { if (Math.hypot(e.clientX - t.sx, e.clientY - t.sy) < 8) return; clearHold(); rt.mouse(t.gx, t.gy, 1); t.pressed = true; }   // a drag: press where the finger landed
+      rt.mouse(g.x, g.y, 0); return;
+    }
+    if (e.pointerId !== t.id) { if (t.fingers > 0) t.fingers--; return; }
+    clearHold(); ts.current = null;
+    if (t.done) return;
+    const g = toGuest(e.clientX, e.clientY) ?? { x: t.gx, y: t.gy };
+    if (kind === 'cancel') { if (t.pressed) rt.mouse(g.x, g.y, 2); return; }
+    if (t.pressed) rt.mouse(g.x, g.y, 2); else { rt.mouse(t.gx, t.gy, 1); rt.mouse(t.gx, t.gy, 2); }   // a tap: click where the finger landed
+  }, [toGuest, focusGuest]);
+  const guestWheel = useCallback((e: React.WheelEvent) => { const rt = rtRef.current; if (!rt || rt.status !== 'running') return; const n = e.deltaMode === 1 ? e.deltaY * 40 : e.deltaY; if (n) rt.mouse(n < 0 ? 120 : -120, 0, 7); }, []);
+  /* the IME field: whatever the soft keyboard inserts is diffed against the previous value and sent as text; deletions become Backspace */
+  const imeInput = useCallback(() => {
+    const el = imeRef.current, rt = rtRef.current; if (!el || !rt) return; const v = el.value, p = imePrev.current;
+    let k = 0; while (k < v.length && k < p.length && v[k] === p[k]) k++;
+    let del = p.length - k; let ins = v.slice(k);
+    if (del > 0 && ins.length > 0) { let tail = 0; while (tail < del && tail < ins.length && p[p.length - 1 - tail] === ins[ins.length - 1 - tail]) tail++; del -= tail; ins = ins.slice(0, ins.length - tail); }
+    for (let i = 0; i < del; i++) { rt.key(0x08, true); rt.key(0x08, false); }
+    if (ins) { rt.text(ins); releaseSticky(); }
+    imePrev.current = v;
+    const composing = (el as unknown as { isComposing?: boolean }).isComposing;
+    if (!composing && (v.length > 400 || v.length < IME_SENTINEL.length)) { el.value = IME_SENTINEL; imePrev.current = IME_SENTINEL; el.setSelectionRange(IME_SENTINEL.length, IME_SENTINEL.length); }
+  }, [releaseSticky]);
+  const imeKey = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>, down: boolean) => {
+    e.stopPropagation();   // never let the screen's key handler see these: printable keys reach the guest through the input event
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;   // the soft keyboard composes; the input event carries the text
+    const k = e.key; const printable = k.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey;
+    if (printable || k === 'Backspace' || k === 'Process' || k === 'Unidentified') return;   // reaches us through the input event (Backspace is a deletion there)
+    if (k === 'Enter' && !e.ctrlKey && !e.altKey && !e.shiftKey) { if (down) { imePrev.current = (e.currentTarget.value || IME_SENTINEL); } }
+    guestKey(e as unknown as React.KeyboardEvent, down); e.preventDefault();
+  }, [guestKey]);
+  const toggleIme = useCallback(() => { setImeOpen(o => { const n = !o; setTimeout(() => { if (n && imeRef.current) { imeRef.current.value = IME_SENTINEL; imePrev.current = IME_SENTINEL; imeRef.current.focus({ preventScroll: true }); imeRef.current.setSelectionRange(IME_SENTINEL.length, IME_SENTINEL.length); } else screenRef.current?.focus(); }, 0); return n; }); }, []);
+  useEffect(() => { if (!running) { setImeOpen(false); ts.current = null; } }, [running]);
 
   const V = (v?: string) => VERDICT[v ?? 'invalid'] ?? VERDICT.invalid;
 
   return (
     <div className="flex h-full flex-col bg-[#f3f3f3] text-[12px] text-[#1b1b1b]" data-x64-status={stats?.status ?? 'idle'}>
       {/* toolbar */}
-      <div className="flex h-11 shrink-0 items-center gap-2 border-b border-slate-200 bg-white px-3">
-        <Cpu size={16} className="text-indigo-600" />
-        <span className="font-semibold">x64 Runner</span>
+      <div className="flex h-11 shrink-0 items-center gap-2 overflow-x-auto whitespace-nowrap border-b border-slate-200 bg-white px-3 [scrollbar-width:none]">   {/* phones: one scrollable row instead of wrapped, overlapping buttons */}
+        <Cpu size={16} className="shrink-0 text-indigo-600" />
+        <span className="shrink-0 font-semibold">x64 Runner</span>
         <span className="hidden text-[10px] text-slate-400 sm:inline">x86-64 + x86 · PE32+/PE32 · wasm64 + WebGL</span>
         <label className="ml-3 flex cursor-pointer items-center gap-1 rounded border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50">
           <FolderOpen size={13} /> Open .exe…
@@ -394,9 +476,13 @@ export default function X64App() {
         {/* main */}
         <div className="flex min-w-0 flex-1 flex-col">
           {tab === 'screen' && (
-            <div ref={screenRef} tabIndex={0} onKeyDown={e => guestKey(e, true)} onKeyUp={e => guestKey(e, false)} className="relative flex min-h-0 flex-1 items-center justify-center bg-black outline-none" onClick={() => screenRef.current?.focus()}>
-              <canvas ref={canvasRef} data-x64-screen data-frames={frames} className="h-full w-full" style={{ imageRendering: 'pixelated' }}
-                onMouseMove={e => guestMouse(e, 0)} onMouseDown={e => guestMouse(e, e.button === 2 ? 3 : 1)} onMouseUp={e => guestMouse(e, e.button === 2 ? 4 : 2)} onContextMenu={e => e.preventDefault()} />
+            <div ref={screenRef} tabIndex={0} onKeyDown={e => guestKey(e, true)} onKeyUp={e => guestKey(e, false)} className="relative flex min-h-0 flex-1 items-center justify-center bg-black outline-none" onClick={focusGuest}>
+              <canvas ref={canvasRef} data-x64-screen data-frames={frames} className="h-full w-full" style={{ imageRendering: 'pixelated', touchAction: 'none' }}
+                onPointerDown={e => guestPointer(e, 'down')} onPointerMove={e => guestPointer(e, 'move')} onPointerUp={e => guestPointer(e, 'up')} onPointerCancel={e => guestPointer(e, 'cancel')} onWheel={guestWheel} onContextMenu={e => e.preventDefault()} />
+              {/* IME / soft-keyboard field: invisible, focused while the keyboard toggle is on; its text is diffed and sent to the guest */}
+              <textarea ref={imeRef} aria-label="Type into the Windows program" data-x64-ime autoCapitalize="off" autoCorrect="off" autoComplete="off" spellCheck={false} rows={1} defaultValue={IME_SENTINEL}
+                className="absolute bottom-0 left-0 h-px w-px resize-none opacity-0" style={{ fontSize: 16, pointerEvents: imeOpen ? 'auto' : 'none' }} tabIndex={imeOpen ? 0 : -1}
+                onInput={imeInput} onCompositionEnd={imeInput} onKeyDown={e => imeKey(e, true)} onKeyUp={e => imeKey(e, false)} onBlur={() => { if (imeOpen && running) setTimeout(() => { const a = document.activeElement; if (imeOpen && a && a !== imeRef.current && !a.closest?.('[data-x64-touchbar]')) setImeOpen(false); }, 0); }} />
               {!running && frames === 0 && (
                 <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center text-slate-400">
                   <Monitor size={40} strokeWidth={1} />
@@ -405,13 +491,15 @@ export default function X64App() {
                 </div>
               )}
               {running && stats?.hasWindow && (
-                <div className={`absolute bottom-2 left-1/2 flex -translate-x-1/2 gap-1 rounded-full bg-black/50 px-2 py-1 ${touch ? '' : 'opacity-0 hover:opacity-100'}`} onMouseDown={e => e.stopPropagation()}>
-                  <Gamepad2 size={14} className="my-auto text-white/60" />
+                <div data-x64-touchbar className={`absolute bottom-2 left-1/2 flex max-w-full -translate-x-1/2 gap-1 overflow-x-auto rounded-full bg-black/50 px-2 py-1 ${touch ? '' : 'opacity-0 hover:opacity-100'}`} onMouseDown={e => e.stopPropagation()}>
+                  <button data-x64-kbd className={`min-w-9 select-none rounded-full px-2 py-1.5 text-white ${imeOpen ? 'bg-indigo-500' : 'bg-white/15'}`} title="Soft keyboard: type into the Windows program" aria-pressed={imeOpen}
+                    onPointerDown={e => { e.preventDefault(); e.stopPropagation(); }} onClick={e => { e.preventDefault(); toggleIme(); }}><Keyboard size={14} className="mx-auto" /></button>
+                  <Gamepad2 size={14} className="my-auto shrink-0 text-white/60" />
                   {TOUCH_KEYS.map(k => (
-                    <button key={k.vk} className="min-w-9 select-none rounded-full bg-white/15 px-2 py-1.5 text-[11px] font-bold text-white active:bg-indigo-500"
-                      onPointerDown={e => { e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); touchKey(k.vk, true); }}
-                      onPointerUp={e => { e.preventDefault(); touchKey(k.vk, false); }}
-                      onPointerCancel={() => touchKey(k.vk, false)}>{k.label}</button>
+                    <button key={k.vk} className={`min-w-9 shrink-0 select-none rounded-full px-2 py-1.5 text-[11px] font-bold text-white active:bg-indigo-500 ${sticky.includes(k.vk) ? 'bg-indigo-500' : 'bg-white/15'}`} aria-pressed={k.sticky ? sticky.includes(k.vk) : undefined}
+                      onPointerDown={e => { e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); touchKey(k.vk, true, k.sticky); }}
+                      onPointerUp={e => { e.preventDefault(); touchKey(k.vk, false, k.sticky); }}
+                      onPointerCancel={() => touchKey(k.vk, false, k.sticky)}>{k.label}</button>
                   ))}
                 </div>
               )}

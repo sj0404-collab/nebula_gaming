@@ -339,6 +339,7 @@ void   w32_io_poll(void);                                          /* finish par
 void   w32_io_drop(Win32 *w);                                      /* process exit: forget its IOCP associations and parked operations */
 void   w32_tick(Win32 *w);                                         /* called by host once per frame: input + timers */
 void   w32_key(Win32 *w, int vk, int down);
+void   w32_char(Win32 *w, u32 ch);                                   /* host text input (IME / soft keyboard): one Unicode code point */
 void   w32_mouse(Win32 *w, int x, int y, int event);                 /* event: 0 move, 1 ldown, 2 lup, 3 rdown, 4 rup */
 void   w32_wheel(Win32 *w, int delta);
 u64    w32_cur_slot(void);

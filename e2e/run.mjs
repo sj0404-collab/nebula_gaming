@@ -871,6 +871,34 @@ await test('responsive: 390×844 phone viewport still shows taskbar + icons and 
   await c3.close();
 });
 
+await test('phone (Android-like 1000×560, touch): x64 Runner — the soft-keyboard field types into a Windows EDIT control (Latin, Cyrillic, punctuation) and a tap on the screen is a click', async () => {
+  const c5 = await browser.newContext({ viewport: { width: 1000, height: 560 }, hasTouch: true, isMobile: true });
+  const p5 = await c5.newPage();
+  await p5.goto(url, { waitUntil: 'load' });
+  await iconOf(p5, 'x64 Runner').tap();
+  const w = p5.locator('[data-window][aria-label*="x64 Runner"]');
+  await w.locator('[data-x64-exe="typing.exe"]').waitFor({ timeout: 30_000 });
+  await w.locator('[data-x64-exe="typing.exe"]').tap();
+  await w.locator('[data-x64-run]').tap(); await sleep(800);
+  await w.getByRole('button', { name: /^screen$/i }).tap();   // a console-subsystem exe opens on the Console tab; the program's window is on the Screen tab
+  await p5.waitForFunction(() => (document.querySelector('[data-x64-screen]')?.getAttribute('data-frames') | 0) > 0, null, { timeout: 60_000 });
+  await sleep(400);
+  const canvas = w.locator('[data-x64-screen]');
+  await canvas.tap({ position: { x: 200, y: 120 } });   // a touch tap on the guest screen = left click (focus stays in the program)
+  const kbd = w.locator('[data-x64-kbd]');
+  expect(await kbd.count() === 1, 'keyboard toggle missing on the touch screen bar');
+  await kbd.tap(); await sleep(150);
+  expect(await p5.evaluate(() => document.activeElement?.hasAttribute('data-x64-ime')), 'the IME field did not take focus');
+  await p5.keyboard.type('Hello, Nebula! 123 ');
+  await p5.keyboard.insertText('Привет');          // what an Android IME does for a composed word
+  await p5.keyboard.type(' {xx'); await p5.keyboard.press('Backspace'); await p5.keyboard.type('}');
+  await p5.waitForFunction(() => /TYPING (OK|FAIL)/.test(document.querySelector('[data-x64-console]')?.textContent ?? ''), null, { timeout: 40_000 }).catch(() => {});
+  const con = await w.locator('[data-x64-console]').innerText().catch(() => '');
+  expect(/TYPING OK/.test(con), 'typed text did not reach the EDIT control intact: ' + con.split('\n').filter(l => /text=|TYPING/.test(l)).join(' | ').slice(0, 400));
+  await p5.screenshot({ path: resolve(SHOTS, 'phone-x64-typing.png') });
+  await c5.close();
+});
+
 await test('PWA: manifest, icons and service worker are served', async () => {
   const m = await (await fetch(`${url}/manifest.webmanifest`)).json();
   expect(m.name && m.icons?.length >= 3 && m.display === 'standalone', 'manifest incomplete');

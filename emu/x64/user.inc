@@ -146,15 +146,16 @@ static int hit_in(int i, int fx, int fy) {
 }
 static int hit_test(int fx, int fy) { int best = -1, bestz = -1; for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].parent < 0 && g_wnd[k].zseq > bestz) { int r = hit_in(k, fx, fy); if (r >= 0) { best = r; bestz = g_wnd[k].zseq; } } return best; }
 void w32_mouse(Win32 *w, int x, int y, int ev) {
+  int wheel = 0; if (ev == 7) { /* wheel: x is the delta (+120 up / -120 down per notch), the pointer stays where it is */ wheel = x ? (x > 0 ? (x < 120 ? 120 : x) : (x > -120 ? -120 : x)) : 0; x = g_mouse_x; y = g_mouse_y; }
   int dx = x - g_mouse_x, dy = y - g_mouse_y; g_mouse_x = x; g_mouse_y = y;
   if (ev == 1) g_mouse_btn |= 1; else if (ev == 2) g_mouse_btn &= ~1; else if (ev == 3) g_mouse_btn |= 2; else if (ev == 4) g_mouse_btn &= ~2; else if (ev == 5) g_mouse_btn |= 4; else if (ev == 6) g_mouse_btn &= ~4;
-  di_mouse(w, dx, dy, ev == 7 ? 0 : ev, ev == 7 ? (x < 0 ? -120 : 120) : 0); if (raw_mouse(w, dx, dy, ev, ev == 7 ? (x < 0 ? -120 : 120) : 0)) return;   /* RIDEV_NOLEGACY */
+  di_mouse(w, dx, dy, ev == 7 ? 0 : ev, wheel); if (raw_mouse(w, dx, dy, ev, wheel)) return;   /* RIDEV_NOLEGACY */
   static const u32 msgs[] = { 0x200, 0x201, 0x202, 0x204, 0x205, 0x207, 0x208, 0x20A };
   int t = wnd_alive(g_capture) ? g_capture : hit_test(x, y); int mt = menu_top_wnd(); if (mt >= 0) t = mt;   /* an open menu takes all mouse input */ if (t < 0) t = g_wnd[0].used ? 0 : -1; if (t < 0) return;
   if (!wnd_enabled_chain(t)) { /* a disabled window (owner of a modal dialog): mouse input is dropped, like Windows */ if (ev != 0) return; }
   int cx, cy; wnd_client_origin(t, &cx, &cy); int lx = x - cx, ly = y - cy; u64 lp = (u64)(u16)lx | ((u64)(u16)ly << 16);
   if (ev == 1 && ly < 0 && mt < 0 && menu_bar_hit(w, t, x, y) != -1) { /* the menu bar: WM_NCLBUTTONDOWN(HTMENU) → DefWindowProc opens the popup */ post_msg_to(w, HWND_OF(t), 0xA1, 5, (u64)(u16)(x + SCREEN_X0) | ((u64)(u16)(y + SCREEN_Y0) << 16)); return; }
-  if (ev == 7) { /* wheel: wParam high word = delta, lParam = screen coords */ post_msg_to(w, HWND_OF(t), 0x20A, ((u64)(u16)(x < 0 ? -120 : 120) << 16) | (u64)g_mouse_btn, (u64)(u16)(x + SCREEN_X0) | ((u64)(u16)(y + SCREEN_Y0) << 16)); return; }
+  if (ev == 7) { /* wheel: wParam high word = delta, lParam = screen coords; goes to the focus window like Windows */ int kt = wnd_of(key_target()); if (kt >= 0 && mt < 0) t = kt; post_msg_to(w, HWND_OF(t), 0x20A, ((u64)(u16)(s16)wheel << 16) | (u64)g_mouse_btn, (u64)(u16)(x + SCREEN_X0) | ((u64)(u16)(y + SCREEN_Y0) << 16)); return; }
   if (ev == 1 || ev == 3) { /* double clicks: a second press within GetDoubleClickTime (500 ms) and 4 px on the same window becomes WM_xBUTTONDBLCLK when the class has CS_DBLCLKS (all built-in controls do) */ static double dc_t; static int dc_x, dc_y, dc_t_wnd, dc_ev; double now = host_now_ms(); int dbl = dc_t_wnd == t + 1 && dc_ev == ev && now - dc_t < 500 && x - dc_x <= 4 && dc_x - x <= 4 && y - dc_y <= 4 && dc_y - y <= 4 && (g_wnd[t].builtin || (g_wnd[t].cls_style & 8));
     if (dbl) { dc_t_wnd = 0; post_msg_to(w, HWND_OF(t), ev == 1 ? 0x203 : 0x206, (u64)g_mouse_btn, lp); return; } dc_t = now; dc_x = x; dc_y = y; dc_t_wnd = t + 1; dc_ev = ev; }
   post_msg_to(w, HWND_OF(t), msgs[ev < 8 ? ev : 0], (u64)g_mouse_btn, lp);
@@ -199,6 +200,27 @@ static void s_GetMessageA(Cpu *c) {
   GuestMsg m; if (next_message(c, &m, 1, ARG(1))) { write_msg(c, ARG(0), &m); RET(m.msg == 0x12 ? 0 : 1); return; }
   W->blits_since_yield = 0; w32_retry_yield(c);
 }
+/* text typed on the host (Android soft keyboard / IME, hardware keyboards of other layouts, --type in the native runner):
+   characters the US layout can produce go through a real WM_KEYDOWN / WM_CHAR / WM_KEYUP sequence (apps that drive on WM_KEYDOWN —
+   accelerators, Scintilla navigation — see the key; TranslateMessage then emits exactly this character instead of re-deriving it
+   from the shift state, which is not held); anything else (Cyrillic, CJK, emoji, …) arrives as WM_CHAR with the UTF-16 unit(s). */
+#define PRECHAR_MAX 64
+static struct { u32 vk, ch; } g_prechar[PRECHAR_MAX]; static int g_prechar_r, g_prechar_w;
+static int char_to_vk(u32 ch, int *shift) { *shift = 0;
+  if (ch >= 'a' && ch <= 'z') return (int)ch - 32; if (ch >= 'A' && ch <= 'Z') { *shift = 1; return (int)ch; } if (ch >= '0' && ch <= '9') return (int)ch;
+  if (ch == ' ' || ch == '\r' || ch == 8 || ch == 27 || ch == 9) return (int)ch; if (ch == '\n') return 0x0D;
+  { static const char sh[] = ")!@#$%^&*("; for (int k = 0; k < 10; k++) if ((u32)sh[k] == ch) { *shift = 1; return '0' + k; } }
+  static const struct { u8 vk; char n, s; } oem[] = { { 0xBA, ';', ':' }, { 0xBB, '=', '+' }, { 0xBC, ',', '<' }, { 0xBD, '-', '_' }, { 0xBE, '.', '>' }, { 0xBF, '/', '?' }, { 0xC0, '`', '~' }, { 0xDB, '[', '{' }, { 0xDC, '\\', '|' }, { 0xDD, ']', '}' }, { 0xDE, '\'', '"' } };
+  for (size_t i = 0; i < sizeof oem / sizeof oem[0]; i++) { if ((u32)oem[i].n == ch) return oem[i].vk; if ((u32)oem[i].s == ch) { *shift = 1; return oem[i].vk; } }
+  return 0; }
+void w32_char(Win32 *w, u32 ch) {
+  if (ch >= 0x10000) { ch -= 0x10000; w32_char(w, 0xD800 | (ch >> 10)); w32_char(w, 0xDC00 | (ch & 0x3FF)); return; }   /* astral plane → surrogate pair */
+  int shift; int vk = char_to_vk(ch, &shift);
+  u32 out = ch == '\n' ? '\r' : ch;
+  if (!vk) vk = 0xE7;   /* VK_PACKET: the Windows way to deliver a Unicode character through the key queue (keeps order with ordinary keys) */
+  if (((g_prechar_w + 1) % PRECHAR_MAX) != g_prechar_r) { g_prechar[g_prechar_w].vk = (u32)vk; g_prechar[g_prechar_w].ch = out; g_prechar_w = (g_prechar_w + 1) % PRECHAR_MAX; w32_key(w, vk, 1); w32_key(w, vk, 0); return; }
+  post_msg_to(w, key_target(), 0x102, out, 1);
+}
 /* US keyboard layout for WM_CHAR synthesis */
 static u32 vk_to_char(Win32 *w, u64 vk) { int shift = w->key_state[0x10], ctrl = w->key_state[0x11]; u32 ch = 0;
   if (vk >= 'A' && vk <= 'Z') ch = ctrl ? (u32)vk - 'A' + 1 : shift ? (u32)vk : (u32)vk + 32;
@@ -208,7 +230,7 @@ static u32 vk_to_char(Win32 *w, u64 vk) { int shift = w->key_state[0x10], ctrl =
   else { static const struct { u8 vk; char n, s; } oem[] = { { 0xBA, ';', ':' }, { 0xBB, '=', '+' }, { 0xBC, ',', '<' }, { 0xBD, '-', '_' }, { 0xBE, '.', '>' }, { 0xBF, '/', '?' }, { 0xC0, '`', '~' }, { 0xDB, '[', '{' }, { 0xDC, '\\', '|' }, { 0xDD, ']', '}' }, { 0xDE, '\'', '"' } };
     for (size_t i = 0; i < sizeof oem / sizeof oem[0]; i++) if (oem[i].vk == vk) { ch = (u32)(shift ? oem[i].s : oem[i].n); break; } }
   return ch; }
-static void translate_msg(Cpu *c, u64 hwnd, u32 msg, u64 vk, u64 lp) { if (msg == 0x100 || msg == 0x104) { u32 ch = vk_to_char(W, vk); if (ch) post_msg_to(W, hwnd, msg == 0x104 ? 0x106 : 0x102, ch, lp); } }
+static void translate_msg(Cpu *c, u64 hwnd, u32 msg, u64 vk, u64 lp) { if (msg == 0x100 || msg == 0x104) { u32 ch; if (g_prechar_r != g_prechar_w && g_prechar[g_prechar_r].vk == (u32)vk) { ch = g_prechar[g_prechar_r].ch; g_prechar_r = (g_prechar_r + 1) % PRECHAR_MAX; } else ch = vk_to_char(W, vk); if (ch) post_msg_to(W, hwnd, msg == 0x104 ? 0x106 : 0x102, ch, lp); } }
 static void s_TranslateMessage(Cpu *c) { u64 a = ARG(0); u32 msg = rd32(c, MSG_MSG(a)); translate_msg(c, rdp(c, a), msg, rdp(c, MSG_WP(a)), rdp(c, MSG_LP(a))); RET(msg == 0x100 || msg == 0x101 || msg == 0x104 || msg == 0x105); }
 /* deliver a message to a window procedure (guest call; builtin classes are shim slots too) with a continuation that returns its result */
 static void send_to(Cpu *c, int i, u32 msg, u64 wp, u64 lp, int cont_kind, u64 cont_val) { w32_push_cont(c, cont_kind, cont_val); w32_guest_call(c, g_wnd[i].wndproc, HWND_OF(i), msg, wp, lp); }

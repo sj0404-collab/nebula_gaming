@@ -48,7 +48,8 @@ int main(int argc, char **argv) {
   int inspect = 0, dump_every = 0; double max_ms = 60000; const char *prefix = "frame"; int quiet = 0;
   const char *mounts[16][2]; int nmounts = 0; int no_stdin = 0;
   struct { int vk; double at; int down; } keys[64]; int nkeys = 0; int ai = 1; int stats = 0;
-  struct { int x, y; double at; int ev; } clicks[64]; int nclicks = 0;   /* --click x,y@ms: move + left down + up (ev 0 move, 1 down, 2 up) */
+  struct { int x, y; double at; int ev; } clicks[64]; int nclicks = 0;
+  struct { const char *s; double at; } types[16]; int ntypes = 0;   /* --type "text@ms": host text input (UTF-8) through x64_char, one code point per ~15 ms */   /* --click x,y@ms: move + left down + up (ev 0 move, 1 down, 2 up) */
   for (; ai < argc && argv[ai][0] == '-'; ai++) {
     if (!strcmp(argv[ai], "--inspect")) inspect = 1;
     else if (!strcmp(argv[ai], "--frames") && ai + 1 < argc) dump_every = atoi(argv[++ai]);
@@ -62,12 +63,13 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[ai], "--no-stdin")) no_stdin = 1;
     else if (!strcmp(argv[ai], "--stats")) stats = 1;
     else if (!strcmp(argv[ai], "--key") && ai + 1 < argc) { int vk; double at; int dur = 100; if (sscanf(argv[++ai], "%i@%lf:%d", &vk, &at, &dur) >= 2 && nkeys < 62) { keys[nkeys].vk = vk; keys[nkeys].at = at; keys[nkeys].down = 1; nkeys++; keys[nkeys].vk = vk; keys[nkeys].at = at + dur; keys[nkeys].down = 0; nkeys++; } }
+    else if (!strcmp(argv[ai], "--type") && ai + 1 < argc) { char *arg = strdup(argv[++ai]); char *at = strrchr(arg, '@'); if (at && ntypes < 16) { *at = 0; types[ntypes].s = arg; types[ntypes].at = atof(at + 1); ntypes++; } }
     else if (!strcmp(argv[ai], "--click") && ai + 1 < argc) { int x, y; double at; if (sscanf(argv[++ai], "%d,%d@%lf", &x, &y, &at) == 3 && nclicks < 61) { clicks[nclicks].x = x; clicks[nclicks].y = y; clicks[nclicks].at = at; clicks[nclicks].ev = 0; nclicks++; clicks[nclicks] = clicks[nclicks - 1]; clicks[nclicks].ev = 1; clicks[nclicks].at = at + 1; nclicks++; clicks[nclicks] = clicks[nclicks - 1]; clicks[nclicks].ev = 2; clicks[nclicks].at = at + 60; nclicks++; } }
     else if (!strcmp(argv[ai], "--rclick") && ai + 1 < argc) { int x, y; double at; if (sscanf(argv[++ai], "%d,%d@%lf", &x, &y, &at) == 3 && nclicks < 61) { clicks[nclicks].x = x; clicks[nclicks].y = y; clicks[nclicks].at = at; clicks[nclicks].ev = 0; nclicks++; clicks[nclicks] = clicks[nclicks - 1]; clicks[nclicks].ev = 3; clicks[nclicks].at = at + 1; nclicks++; clicks[nclicks] = clicks[nclicks - 1]; clicks[nclicks].ev = 4; clicks[nclicks].at = at + 60; nclicks++; } }   /* --rclick: right button */
     else if (!strcmp(argv[ai], "--move") && ai + 1 < argc) { int x, y; double at; if (sscanf(argv[++ai], "%d,%d@%lf", &x, &y, &at) == 3 && nclicks < 63) { clicks[nclicks].x = x; clicks[nclicks].y = y; clicks[nclicks].at = at; clicks[nclicks].ev = 0; nclicks++; } }   /* --move x,y@ms: mouse move only (hover) */
     else { fprintf(stderr, "unknown option %s\n", argv[ai]); return 2; }
   }
-  if (ai >= argc) { fprintf(stderr, "usage: x64run [--inspect] [--frames N] [--max-ms T] [--key VK@ms[:dur]] [--click x,y@ms] [--move x,y@ms] file.exe [args]\n"); return 2; }
+  if (ai >= argc) { fprintf(stderr, "usage: x64run [--inspect] [--frames N] [--max-ms T] [--key VK@ms[:dur]] [--click x,y@ms] [--move x,y@ms] [--type text@ms] file.exe [args]\n"); return 2; }
   const char *path = argv[ai];
   size_t flen = 0; u8 *bytes = map_file(path, &flen); if (!bytes) { perror(path); return 2; } long len = (long)flen;
   if (inspect) { puts(x64_inspect(bytes, len)); return 0; }
@@ -98,6 +100,7 @@ int main(int argc, char **argv) {
     if (el > max_ms) { if (!quiet) { fprintf(stderr, "[x64run] time limit reached\n"); if (getenv("X64_HIST")) { extern u64 x64_rip(void); fprintf(stderr, "[x64run] rip=%llx regs: %s\n[x64run] last blocks: %s\n", (unsigned long long)x64_rip(), x64_regs(), x64_history()); unsigned char b[512]; u64 a = (x64_rip() & ~0xfull) - 256; if (x64_mem_copy(a, b, 512)) { FILE *f = fopen("/tmp/rip_tl.bin", "wb"); if (f) { fwrite(b, 1, 512, f); fclose(f); fprintf(stderr, "[x64run] dumped 512 bytes from 0x%llx to /tmp/rip_tl.bin\n", (unsigned long long)a); } } } } r = -1; break; }
     while (ki < nkeys && keys[ki].at <= el) { x64_key(keys[ki].vk, keys[ki].down); ki++; }
     while (ci < nclicks && clicks[ci].at <= el) { x64_mouse(clicks[ci].x, clicks[ci].y, clicks[ci].ev); ci++; }
+    for (int q = 0; q < ntypes; q++) if (types[q].s && types[q].at <= el) { const unsigned char *u = (const unsigned char *)types[q].s; while (*u) { unsigned cp = *u++; int ex = cp >= 0xF0 ? 3 : cp >= 0xE0 ? 2 : cp >= 0xC0 ? 1 : 0; cp &= ex == 3 ? 7 : ex == 2 ? 15 : ex == 1 ? 31 : 255; while (ex-- > 0 && *u) cp = (cp << 6) | (*u++ & 63); extern void x64_char(unsigned); x64_char(cp); } types[q].s = 0; }
     if (g_prof) { extern u64 x64_rip(void); r = x64_run(20000); prof_sample(x64_rip()); } else r = x64_run(2000000);
     if (trace_after && !trace_on && x64_icount() >= trace_after) { extern void w32_api_trace(int); w32_api_trace(1); trace_on = 1; fprintf(stderr, "[x64run] apitrace enabled at %llu instructions\n", (unsigned long long)x64_icount()); }
     if (!no_stdin && !stdin_eof) {   /* feed host stdin as raw bytes whenever some arrive (TUIs read single key presses; never block the emulator on the terminal) */

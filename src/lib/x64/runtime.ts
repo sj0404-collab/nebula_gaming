@@ -28,7 +28,7 @@ export interface RunStats {
 type Exports = {
   memory: WebAssembly.Memory;
   x64_alloc(n: bigint): bigint; x64_inspect(p: bigint, n: bigint): bigint; x64_load(p: bigint, n: bigint, name: bigint, cmd: bigint): number;
-  x64_reserve(n: bigint): number; x64_run(budget: bigint): number; x64_key(vk: number, down: number): void; x64_mouse(x: number, y: number, ev: number): void;
+  x64_reserve(n: bigint): number; x64_run(budget: bigint): number; x64_key(vk: number, down: number): void; x64_char(cp: number): void; x64_mouse(x: number, y: number, ev: number): void;
   x64_icount(): bigint; x64_exit_code(): number; x64_error(): bigint; x64_error_rip(): bigint; x64_rip(): bigint; x64_report(): bigint; x64_console(): bigint;
   x64_screen_w(): number; x64_screen_h(): number; x64_screen(): bigint; x64_title(): bigint; x64_subsystem(): number; x64_sleep_ms(): number; x64_mem_used(): bigint; x64_has_window(): number; x64_proc_count(): number; x64_thread_count(): number; x64_audio_frames(): bigint;
   x64_api_stats(): bigint; x64_error_bytes(): bigint;
@@ -180,6 +180,9 @@ export class X64Runtime {
   }
 
   key(vk: number, down: boolean) { if (this.running) this.ex!.x64_key(vk, down ? 1 : 0); }
+  /** host text input (soft keyboard / IME / pasted text): one Unicode code point → WM_KEYDOWN + WM_CHAR + WM_KEYUP (VK_PACKET for non-US characters) */
+  char(cp: number) { if (this.running) this.ex!.x64_char(cp >>> 0); }
+  text(s: string) { for (const ch of s) this.char(ch.codePointAt(0) ?? 0); }
   mouse(x: number, y: number, ev: number) { if (this.running) this.ex!.x64_mouse(x | 0, y | 0, ev); }
 
   stats(): RunStats {

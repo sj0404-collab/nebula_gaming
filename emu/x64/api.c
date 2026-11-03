@@ -202,6 +202,7 @@ EXPORT(x64_stdin_eof) void x64_stdin_eof(void) { vfs_stdin_eof(); }
 EXPORT(x64_trace) void x64_trace(int on) { g_trace = on; }
 EXPORT(x64_wants_stdin) int x64_wants_stdin(void) { return g_want_stdin; }
 EXPORT(x64_key) void x64_key(int vk, int down) { w32_key(&g_w32, vk, down); }
+EXPORT(x64_char) void x64_char(unsigned ch) { w32_char(&g_w32, ch); }
 EXPORT(x64_mouse) void x64_mouse(int x, int y, int ev) { w32_mouse(&g_w32, x, y, ev); }
 EXPORT(x64_icount) u64 x64_icount(void) { u64 n = 0; for (int i = 0; i < g_nprocs; i++) if (g_procs[i]) { n += g_procs[i]->cpu.icount; for (int t = 1; t < THREAD_MAX; t++) n += g_procs[i]->w32.tcpu[t].icount; } return n; }
 EXPORT(x64_exit_code) int x64_exit_code(void) { return g_cpu.exit_code; }
