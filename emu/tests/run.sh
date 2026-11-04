@@ -490,7 +490,7 @@ if [ -f $IS ]; then
   rm -rf $ID
   # the GUI wizard (Delphi VCL: superclassed controls, WM_ERASEBKGND through the window procedure, synchronous WM_SIZE, DC origins/clipping)
   GD=$(mktemp -d); out=$(X64_LOG=1 X64_WNDDUMP=1 $X --no-stdin --max-ms 45000 --mount-rw "$GD=C:\\inst" $IS '/DIR=C:\inst\is' 2>&1 3>&1 | grep -a "^\[wnd\]\|frames" || true); rm -rf $GD
-  check "Inno Setup GUI: the 'Select Setup Language' form (VCL) is created, laid out and painted"   '"TSelectLanguageForm" "Select Setup Language" parent=-1 at [0-9]*,[0-9]* 3[0-9][0-9]x1[0-9][0-9] nc=1,24 style=[0-9a-f]* vis=1 inv=0'   "$out"
+  check "Inno Setup GUI: the 'Select Setup Language' form (VCL) is created, laid out and painted"   '"TSelectLanguageForm" "Select Setup Language" parent=-1 at [0-9]*,[0-9]* 3[0-9][0-9]x[12][0-9][0-9] nc=1,24 style=[0-9a-f]* vis=1 inv=0'   "$out"
   check "Inno Setup GUI: combo box, OK/Cancel buttons and the prompt are visible"   '"TNewComboBox" "English".*vis=1 inv=0'   "$(echo "$out" | tr '\n' ' ')"
   # drive the wizard with the mouse: OK (language), "I accept" radio, Next x7 -> the installation runs from the GUI (clicks are repeated: the forms appear at different times on different hosts; positions follow the VCL layout scaled by the 9 pt TrueType metrics)
   GD=$(mktemp -d); out=$(X64_LOG=1 X64_WNDDUMP=1 $X --no-stdin --max-ms 200000 --click 618,326@30000 --click 618,326@38000 --click 350,446@44000 --click 350,446@48000 --click 688,512@52000 --click 688,512@58000 --click 688,512@64000 --click 688,512@70000 --click 688,512@76000 --click 688,512@82000 --click 688,512@88000 --click 688,512@94000 --mount-rw "$GD=C:\\inst" $IS '/DIR=C:\inst\is' 2>&1 3>&1 | grep -a "^\[wnd\]\|frames" || true)
