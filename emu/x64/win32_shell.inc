@@ -16,11 +16,14 @@ u32 put_w8(Cpu *c, u64 dst, const char *s, u32 cap) {
 u32 utf8_u16len(const char *s) { u32 n = 0; for (const u8 *p = (const u8 *)s; *p; p++) if ((*p & 0xC0) != 0x80) n += (*p >= 0xF0) ? 2 : 1; return n; }
 
 /* ---------- lstr* ---------- */
-static void s_lstrcpyW(Cpu *c) { u64 d = ARG(0), s = ARG(1); for (u64 i = 0;; i++) { u16 ch = rd16(c, s + i * 2); wr16(c, d + i * 2, ch); if (!ch || c->status) break; } RET(d); }
-static void s_lstrcatW(Cpu *c) { u64 d = ARG(0), s = ARG(1); u64 l = 0; while (rd16(c, d + l * 2)) l++; for (u64 i = 0;; i++) { u16 ch = rd16(c, s + i * 2); wr16(c, d + (l + i) * 2, ch); if (!ch || c->status) break; } RET(d); }
-static void s_lstrcatA(Cpu *c) { u64 d = ARG(0), s = ARG(1); u64 l = 0; while (rd8(c, d + l)) l++; for (u64 i = 0;; i++) { u8 ch = rd8(c, s + i); wr8(c, d + l + i, ch); if (!ch || c->status) break; } RET(d); }
-static void s_lstrcpynW(Cpu *c) { u64 d = ARG(0), s = ARG(1); int n = (int)ARG(2); if (n <= 0) { RET(d); return; } int i = 0; for (; i < n - 1; i++) { u16 ch = rd16(c, s + i * 2); if (!ch) break; wr16(c, d + i * 2, ch); } wr16(c, d + i * 2, 0); RET(d); }
-static void s_lstrcpynA(Cpu *c) { u64 d = ARG(0), s = ARG(1); int n = (int)ARG(2); if (n <= 0) { RET(d); return; } int i = 0; for (; i < n - 1; i++) { u8 ch = rd8(c, s + i); if (!ch) break; wr8(c, d + i, ch); } wr8(c, d + i, 0); RET(d); }
+/* lstr* are SEH-protected on Windows: a bad source or destination pointer makes them return NULL (lstrlen: 0) instead of raising */
+static int lstr_bad(Cpu *c, u64 a, int w) { return !a || !mem_ptr(c->mem, a, w ? 2 : 1, 0); }
+static int lstr_recover(Cpu *c) { if (c->status != RUN_FAULT) return 0; c->status = RUN_OK; c->err[0] = 0; return 1; }
+static void s_lstrcpyW(Cpu *c) { u64 d = ARG(0), s = ARG(1); if (lstr_bad(c, s, 1) || lstr_bad(c, d, 1)) { RET(0); return; } for (u64 i = 0;; i++) { u16 ch = rd16(c, s + i * 2); wr16(c, d + i * 2, ch); if (!ch || c->status) break; } if (lstr_recover(c)) { RET(0); return; } RET(d); }
+static void s_lstrcatW(Cpu *c) { u64 d = ARG(0), s = ARG(1); if (lstr_bad(c, s, 1) || lstr_bad(c, d, 1)) { RET(0); return; } u64 l = 0; while (rd16(c, d + l * 2) && !c->status) l++; for (u64 i = 0;; i++) { u16 ch = rd16(c, s + i * 2); wr16(c, d + (l + i) * 2, ch); if (!ch || c->status) break; } if (lstr_recover(c)) { RET(0); return; } RET(d); }
+static void s_lstrcatA(Cpu *c) { u64 d = ARG(0), s = ARG(1); if (lstr_bad(c, s, 0) || lstr_bad(c, d, 0)) { RET(0); return; } u64 l = 0; while (rd8(c, d + l) && !c->status) l++; for (u64 i = 0;; i++) { u8 ch = rd8(c, s + i); wr8(c, d + l + i, ch); if (!ch || c->status) break; } if (lstr_recover(c)) { RET(0); return; } RET(d); }
+static void s_lstrcpynW(Cpu *c) { u64 d = ARG(0), s = ARG(1); int n = (int)ARG(2); if (n <= 0) { RET(d); return; } if (lstr_bad(c, s, 1) || lstr_bad(c, d, 1)) { RET(0); return; } int i = 0; for (; i < n - 1; i++) { u16 ch = rd16(c, s + i * 2); if (!ch || c->status) break; wr16(c, d + i * 2, ch); } wr16(c, d + i * 2, 0); if (lstr_recover(c)) { RET(0); return; } RET(d); }
+static void s_lstrcpynA(Cpu *c) { u64 d = ARG(0), s = ARG(1); int n = (int)ARG(2); if (n <= 0) { RET(d); return; } if (lstr_bad(c, s, 0) || lstr_bad(c, d, 0)) { RET(0); return; } int i = 0; for (; i < n - 1; i++) { u8 ch = rd8(c, s + i); if (!ch || c->status) break; wr8(c, d + i, ch); } wr8(c, d + i, 0); if (lstr_recover(c)) { RET(0); return; } RET(d); }
 static void s_lstrcmpiW(Cpu *c) { char a[2048], b[2048]; wstr_to_utf8(c, ARG(0), a, sizeof a, -1); wstr_to_utf8(c, ARG(1), b, sizeof b, -1); int r = e_stricmp(a, b); RET((u64)(s64)(r < 0 ? -1 : r > 0 ? 1 : 0)); }
 
 /* ---------- resources ---------- */
@@ -353,6 +356,7 @@ static void shell_execute(Cpu *c, u64 verb_a, u64 file_a, u64 params_a, u64 dir_
     if (ok) { w32_report(W, "ShellExecute: started %s", file); RET(42); } else { W->last_error = 2; RET(2); } return; }
   w32_report(W, "ShellExecute(%s, %s): no shell associations here — only .exe files can be started", verb[0] ? verb : "open", file); e_log("[shell] ShellExecute(%s, %s) not available\n", verb[0] ? verb : "open", file); W->last_error = 1155; RET(31);   /* SE_ERR_NOASSOC */
 }
+void w32_shell_open(Cpu *c, const char *path) { u64 a = w32_heap_alloc(W, (e_strlen(path) + 1) * 2, 1); if (!a) { RET(0); return; } put_w8(c, a, path, 0); shell_execute(c, 0, a, 0, 0, 1, 0); }   /* defview.inc: item activation */
 static void s_ShellExecuteW(Cpu *c) { shell_execute(c, ARG(1), ARG(2), ARG(3), ARG(4), 1, 0); }
 static void s_ShellExecuteA(Cpu *c) { shell_execute(c, ARG(1), ARG(2), ARG(3), ARG(4), 0, 0); }
 /* SHELLEXECUTEINFO: cbSize@0 fMask@4 hwnd@8 verb@P file@P+P params parent dir show@… hInstApp … hProcess (last) */

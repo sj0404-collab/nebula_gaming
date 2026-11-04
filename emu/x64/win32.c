@@ -1,6 +1,7 @@
 /* Win32 personality: import trampolines, process environment, kernel32 + UCRT/msvcrt shims, guest callbacks. */
 #include "emu.h"
 #include <stdarg.h>
+u64 gdi_shell_view_create(Cpu *c, u64 folder_obj, const char *path);   /* defview.inc (gdi.c) */
 
 #define ARG(n) w32_arg(c, n)
 #define RET(v) (c->r[RAX] = (u64)(v))
@@ -922,8 +923,8 @@ static void s_WideCharToMultiByte(Cpu *c) { u64 src = ARG(2); int n = (int)(s32)
   if (used) wr32(c, used, 0); RET(out); }
 static void s_CharUpperA(Cpu *c) { u64 a = ARG(0); if (a < 0x10000) { u8 ch = (u8)a; RET(ch >= 'a' && ch <= 'z' ? ch - 32 : ch); return; } for (u64 i = 0;; i++) { u8 ch = rd8(c, a + i); if (!ch) break; if (ch >= 'a' && ch <= 'z') wr8(c, a + i, ch - 32); } RET(a); }
 static void s_lstrlenA(Cpu *c) { const char *s = rd_str(c, ARG(0), 1 << 20); RET(s ? e_strlen(s) : 0); }
-static void s_lstrlenW(Cpu *c) { int n = 0; while (rd16(c, ARG(0) + n * 2)) n++; RET(n); }
-static void s_lstrcpyA(Cpu *c) { const char *s = rd_str(c, ARG(1), 1 << 20); if (s) { size_t l = e_strlen(s) + 1; u8 *d = mem_ptr(c->mem, ARG(0), l, 1); if (d) e_memmove(d, s, l); } RET(ARG(0)); }
+static void s_lstrlenW(Cpu *c) { if (!ARG(0) || !mem_ptr(c->mem, ARG(0), 2, 0)) { RET(0); return; } int n = 0; while (rd16(c, ARG(0) + n * 2) && !c->status) n++; if (c->status == RUN_FAULT) { c->status = RUN_OK; c->err[0] = 0; RET(0); return; } RET(n); }
+static void s_lstrcpyA(Cpu *c) { const char *s = rd_str(c, ARG(1), 1 << 20); if (!s || !ARG(0)) { RET(0); return; } if (s) { size_t l = e_strlen(s) + 1; u8 *d = mem_ptr(c->mem, ARG(0), l, 1); if (d) e_memmove(d, s, l); } RET(ARG(0)); }
 static void s_lstrcmpiA(Cpu *c) { const char *a = rd_str(c, ARG(0), 1 << 20), *b = rd_str(c, ARG(1), 1 << 20); RET(a && b ? e_stricmp(a, b) : 0); }
 static void s_lstrcmpA(Cpu *c) { const char *a = rd_str(c, ARG(0), 1 << 20), *b = rd_str(c, ARG(1), 1 << 20); RET(a && b ? e_strcmp(a, b) : 0); }
 static void s_InterlockedCompareExchange(Cpu *c) { u32 old = rd32(c, ARG(0)); if (old == (u32)ARG(2)) wr32(c, ARG(0), (u32)ARG(1)); RET(old); }

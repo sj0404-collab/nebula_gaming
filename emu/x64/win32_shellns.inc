@@ -64,7 +64,9 @@ static void s_IShellFolder_BindToObject(Cpu *c) { /* (pidl, bc, riid, **ppv) */ 
 static void s_IShellFolder_BindToStorage(Cpu *c) { if (ARG(4)) wrp(c, ARG(4), 0); RET(0x80004002u); }
 static void s_IShellFolder_CompareIDs(Cpu *c) { /* (lParam, pidl1, pidl2): folders first, then case-insensitive by path; HRESULT with the result in the low word */
   const char *a = pidl_path(c, ARG(2)), *b = pidl_path(c, ARG(3)); u64 sz; int da = a[0] ? vfs_stat(a, &sz) == 2 : 1, db = b[0] ? vfs_stat(b, &sz) == 2 : 1; int r = da != db ? (da ? -1 : 1) : e_stricmp(a, b); r = r < 0 ? -1 : r > 0 ? 1 : 0; RET((u32)(u16)(s16)r); }
-static void s_IShellFolder_CreateViewObject(Cpu *c) { if (ARG(3)) wrp(c, ARG(3), 0); RET(0x80004002u); }
+static void s_IShellFolder_CreateViewObject(Cpu *c) { /* (hwndOwner, riid, **ppv): IShellView over the default folder view (defview.inc); other view objects (IContextMenu, IDropTarget, IQueryInfo) are not provided */ if (ARG(3)) wrp(c, ARG(3), 0); if (!ARG(3)) { RET(0x80070057u); return; }
+  u32 d1 = rd32(c, ARG(2)); u16 d2 = rd16(c, ARG(2) + 4); if (!(d1 == 0x000214E3 && d2 == 0) && !(d1 == 0x88E39E80 && d2 == 0x3578)) { e_log("[shell] IShellFolder::CreateViewObject({%08x-%04x-…}) not provided\n", d1, d2); RET(0x80004002u); return; }
+  u64 v = gdi_shell_view_create(c, ARG(0), ns_path(c, ARG(0))); if (!v) { RET(0x8007000Eu); return; } u64 P = PSZ_OF(c); wr32(c, ARG(0) + 2 * P, rd32(c, ARG(0) + 2 * P) + 1); wrp(c, ARG(3), v); RET(0); }
 static void s_IShellFolder_GetAttributesOf(Cpu *c) { /* (cidl, apidl, *inout) */ u32 n = (u32)ARG(1); u64 P = PSZ_OF(c); if (!ARG(3)) { RET(0x80070057u); return; } u32 mask = rd32(c, ARG(3)), acc = 0xFFFFFFFFu;
   if (!n) acc = ns_attrs(ns_path(c, ARG(0))); else for (u32 i = 0; i < n; i++) { char full[1040]; ns_join(ns_path(c, ARG(0)), pidl_path(c, rdp(c, ARG(2) + (u64)i * P)), full, sizeof full); acc &= ns_attrs(full); }
   wr32(c, ARG(3), acc & mask); RET(0); }
