@@ -1,7 +1,7 @@
 import { WebGLGfx } from './gfx';
 import { HostAudio } from './audio';
 import { registerLiveVfs } from './diskbus';
-import { Disk } from './disk';
+import { Disk, diskKey, isScratch } from './disk';
 // Nebula x64 — JS host for the wasm64 x86-64 emulator (emu/x64).  Pointers/sizes cross the boundary as BigInt (memory64).
 export type RunStatus = 'idle' | 'running' | 'waiting-stdin' | 'exited' | 'fault' | 'break' | 'stopped';
 export interface VfsEntry { path: string; size: number; dir: boolean; written: boolean }
@@ -35,7 +35,7 @@ type Exports = {
   x64_screen_w(): number; x64_screen_h(): number; x64_screen(): bigint; x64_title(): bigint; x64_subsystem(): number; x64_sleep_ms(): number; x64_mem_used(): bigint; x64_has_window(): number; x64_proc_count(): number; x64_thread_count(): number; x64_audio_frames(): bigint;
   x64_api_stats(): bigint; x64_error_bytes(): bigint;
   x64_vfs_add(path: bigint, data: bigint, n: bigint): number; x64_vfs_mkdir(path: bigint): number; x64_vfs_remove(path: bigint): number;
-  x64_vfs_size(path: bigint): bigint; x64_vfs_data(path: bigint): bigint; x64_vfs_list(): bigint;
+  x64_vfs_size(path: bigint): bigint; x64_vfs_data(path: bigint): bigint; x64_vfs_list(): bigint; x64_vfs_add_lazy?(path: bigint, n: bigint): number; x64_vfs_written?(path: bigint): number;
   x64_stdin_write(data: bigint, n: bigint): void; x64_stdin_eof(): void; x64_wants_stdin(): number;
   x64_vfs_sync(): void; x64_chdir(path: bigint): number;
 };
@@ -105,10 +105,13 @@ export class X64Runtime {
         host_audio_write: (lr: bigint, frames: number) => this.audio.write(new Float32Array(this.ex!.memory.buffer, Number(lr), frames * 2)),
         host_audio_queued: () => this.audio.queued(),
         // persistent disk (src/lib/x64/disk.ts): the emulator reports closed-after-write files, mkdir, delete and rename
-        host_fs_write: (path: bigint, data: bigint, n: bigint) => this.disk.put(this.cstr(path), this.bytesAt(data, Number(n))) ? 1 : 0,
+        host_fs_write: (path: bigint, data: bigint, n: bigint) => { const p = this.cstr(path); const copy = this.bytesAt(data, Number(n)).slice(); if (!this.disk.putOwned(p, copy)) return 0; this.cache.set(diskKey(p), copy); return 1; },
+        // lazy files: the page keeps the bytes (this.cache); the emulator asks for the size (exists?) and copies them in when a program opens the file
+        host_fs_size: (path: bigint) => { const c = this.cache.get(diskKey(this.cstr(path))); return c ? BigInt(c.length) : -1n; },
+        host_fs_read: (path: bigint, dst: bigint, n: bigint) => { const c = this.cache.get(diskKey(this.cstr(path))); if (!c || c.length !== Number(n)) return 0; this.bytesAt(dst, c.length).set(c); return 1; },
         host_fs_mkdir: (path: bigint) => { this.disk.mkdir(this.cstr(path)); return 1; },
-        host_fs_remove: (path: bigint) => { this.disk.remove(this.cstr(path)); return 1; },
-        host_fs_rename: (from: bigint, to: bigint) => { void this.disk.rename(this.cstr(from), this.cstr(to)); return 1; },
+        host_fs_remove: (path: bigint) => { const p = this.cstr(path); this.cache.delete(diskKey(p)); this.disk.remove(p); return 1; },
+        host_fs_rename: (from: bigint, to: bigint) => { const f = this.cstr(from), t = this.cstr(to); const c = this.cache.get(diskKey(f)); if (c) { this.cache.delete(diskKey(f)); this.cache.set(diskKey(t), c); } void this.disk.rename(f, t); return 1; },
       },
     };
     const { instance } = await WebAssembly.instantiate(bytes, imports);
@@ -124,14 +127,20 @@ export class X64Runtime {
   dispose() { this.disposed = true; this.stop(); this.unregister?.(); this.unregister = null; void this.syncDisk().finally(() => { this.disk.close(); this.disk.onActivity = null; }); }
 
   /** put every persisted file back on the virtual disk (called once from init, before any program runs) */
+  /** bytes of persisted files, kept on the page side (the IndexedDB read already produced these arrays: no extra copy).
+   *  The emulator only holds a file in wasm memory while a program has it open (or an image mapped); wasm memory cannot
+   *  shrink, so this keeps the arena to the working set instead of the whole disk (a 110 MB game install stays here). */
+  readonly cache = new Map<string, Uint8Array>();
+  cacheBytes() { let n = 0; for (const b of this.cache.values()) n += b.length; return n; }
+  /** total wasm linear memory of this emulator instance (never shrinks: the number to keep small on a phone) */
+  memoryBytes() { return this.ex?.memory.buffer.byteLength ?? 0; }
   private async restoreDisk() {
     const ex = this.ex!; let files: Awaited<ReturnType<Disk['loadAll']>> = [];
     try { files = await this.disk.loadAll(); } catch { return; }
-    let total = 0; for (const f of files) total += f.data?.length ?? 0;
-    if (total) this.reserve(total + (4 << 20));
     for (const f of files) {
       if (f.data === null) ex.x64_vfs_mkdir(this.putStr(f.path));
-      else ex.x64_vfs_add(this.putStr(f.path), this.put(f.data), BigInt(f.data.length));   // x64_vfs_add references the buffer: the bytes live once, in wasm memory
+      else if (ex.x64_vfs_add_lazy) { this.cache.set(diskKey(f.path), f.data); ex.x64_vfs_add_lazy(this.putStr(f.path), BigInt(f.data.length)); }
+      else ex.x64_vfs_add(this.putStr(f.path), this.put(f.data), BigInt(f.data.length));
     }
     this.diskFiles = files.length;
   }
@@ -206,12 +215,20 @@ export class X64Runtime {
   get waitingForStdin() { return this.waitingStdin; }
 
   /* ---- virtual file system (shared by every program run in this runtime; survives start()) ---- */
-  vfsAdd(path: string, data: Uint8Array): boolean { const ex = this.ex!; return !!ex.x64_vfs_add(this.putStr(path), this.put(data), BigInt(data.length)); }
+  /** add a file from the page. Persistent paths become lazy nodes (bytes stay in this.cache until a program opens the
+   *  file); scratch paths (C:\\nebula samples, Temp) and `resident` callers are copied into wasm memory as before. */
+  vfsAdd(path: string, data: Uint8Array, resident = false): boolean {
+    const ex = this.ex!;
+    if (!resident && ex.x64_vfs_add_lazy && !isScratch(path)) { this.cache.set(diskKey(path), data); return !!ex.x64_vfs_add_lazy(this.putStr(path), BigInt(data.length)); }
+    return !!ex.x64_vfs_add(this.putStr(path), this.put(data), BigInt(data.length));
+  }
   vfsMkdir(path: string): boolean { return !!this.ex!.x64_vfs_mkdir(this.putStr(path)); }
-  vfsRemove(path: string): boolean { return !!this.ex!.x64_vfs_remove(this.putStr(path)); }
+  vfsRemove(path: string): boolean { const ok = !!this.ex!.x64_vfs_remove(this.putStr(path)); if (ok) this.cache.delete(diskKey(path)); return ok; }
   vfsList(): VfsEntry[] { if (!this.ex) return []; try { return JSON.parse(this.cstr(this.ex.x64_vfs_list())) as VfsEntry[]; } catch { return []; } }
   vfsRead(path: string): Uint8Array | null {
     const ex = this.ex!; const n = Number(ex.x64_vfs_size(this.putStr(path))); if (n < 0) return null;
+    // the page's copy is authoritative unless a program has written the file and it is not flushed yet (x64_vfs_data would also pull the bytes into wasm memory and pin them there)
+    const c = this.cache.get(diskKey(path)); if (c && !(ex.x64_vfs_written && ex.x64_vfs_written(this.putStr(path)))) return c;
     const p = ex.x64_vfs_data(this.putStr(path)); if (!p && n > 0) return null;
     return n ? this.bytesAt(p, n).slice() : new Uint8Array(0);
   }

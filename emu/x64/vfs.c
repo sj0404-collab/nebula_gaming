@@ -88,13 +88,13 @@ static void ensure_parents(const char *norm) {
 static int grow(VNode *v, u64 need) {
   if (need <= v->cap) return 1;
   u64 nc = v->cap ? v->cap : 4096; while (nc < need) nc *= 2;
-  u8 *nd = emu_alloc((size_t)nc); if (!nd) return 0;
+  u8 *nd = vfs_mem_alloc((size_t)nc); if (!nd) return 0;
   if (v->size) e_memcpy(nd, v->data, (size_t)v->size);
-  if (v->data && v->owned) emu_free(v->data);
+  if (v->data && v->owned) vfs_mem_free(v->data, (size_t)v->cap);
   v->data = nd; v->cap = nc; v->owned = 1; return 1;
 }
 /* write-back mounts: a node whose bytes were persisted by the host and that nobody has open drops its memory copy */
-static void node_drop_data(VNode *v) { if (v->data) { if (v->owned) emu_free(v->data); else { u8 *d = v->data; u64 n = v->cap; host_fs_op(6, 0, 0, &d, &n); } } v->data = 0; v->cap = 0; v->owned = 0; }
+static void node_drop_data(VNode *v) { if (v->data) { if (v->owned) vfs_mem_free(v->data, (size_t)v->cap); else { u8 *d = v->data; u64 n = v->cap; host_fs_op(6, 0, 0, &d, &n); } } v->data = 0; v->cap = 0; v->owned = 0; }
 static int node_load(int i) {
   VNode *v = &g_nodes[i]; if (!v->evicted) return 1;
   u8 *d = 0; u64 n = 0; if (!host_fs_op(2, v->path, 0, &d, &n)) { v->evicted = 0; v->size = 0; return 0; }   /* vanished on the host: behave like an empty file */
@@ -120,7 +120,15 @@ int vfs_add_ref(const char *path, u8 *data, u64 n) {
   char norm[VFS_PATH]; vfs_normalize(path, norm, sizeof norm);
   int i = vfs_find_node(norm); if (i == -2) return -1;
   if (i < 0) { i = node_alloc(norm); if (i < 0) return -1; ensure_parents(norm); }
-  VNode *v = &g_nodes[i]; v->is_dir = 0; if (v->data && v->owned) emu_free(v->data); v->data = data; v->cap = n; v->size = n; v->written = 0; v->owned = 0; v->evicted = 0; return i;
+  VNode *v = &g_nodes[i]; v->is_dir = 0; if (v->data && v->owned) vfs_mem_free(v->data, (size_t)v->cap); v->data = data; v->cap = n; v->size = n; v->written = 0; v->owned = 0; v->evicted = 0; return i;
+}
+/* a file whose bytes stay with the host until a program opens it (the browser's persistent disk: the page keeps the bytes, the
+   emulator loads them through host_fs_op(2) on first open and drops them again after the last close — see node_load / node_sync) */
+int vfs_add_lazy(const char *path, u64 n) {
+  char norm[VFS_PATH]; vfs_normalize(path, norm, sizeof norm);
+  int i = vfs_find_node(norm); if (i == -2) return -1;
+  if (i < 0) { i = node_alloc(norm); if (i < 0) return -1; ensure_parents(norm); }
+  VNode *v = &g_nodes[i]; v->is_dir = 0; if (v->data) node_drop_data(v); v->data = 0; v->cap = 0; v->size = n; v->written = 0; v->owned = 0; v->evicted = 1; return i;
 }
 int vfs_mkdir(const char *path) {
   char norm[VFS_PATH]; vfs_normalize(path, norm, sizeof norm);

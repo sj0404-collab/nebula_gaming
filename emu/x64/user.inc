@@ -341,6 +341,11 @@ static void s_GetMessageExtraInfo(Cpu *c) { RET(0); }
 /* ---------- window classes ---------- */
 static int cls_find(Win32 *w, const char *name) { for (int i = 0; i < 64; i++) if (g_cls[i].used && g_cls[i].pid == w->pid && !e_stricmp(g_cls[i].name, name)) return i; return -1; }
 /* WNDCLASS(EX): x64 proc@8(16) extra@20(28) inst@24(32) icon@32(40) cursor@40(48) brush@48(56) menu@56(64) name@64(72); x86 proc@4(8) extra@12(16) inst@16(20) icon@20(24) cursor@24(28) brush@28(32) name@36(40) */
+/* class name argument: string, or the ATOM RegisterClass returned (0xC001 + slot), or a built-in ordinal (#32770 ...) */
+static void cls_name_in(Cpu *c, u64 p, int wide, char *out, size_t cap) {
+  if (p >= 0x10000) { text_in(c, p, wide, out, cap); return; }
+  if (p >= 0xC001 && p < 0xC001 + 64 && g_cls[p - 0xC001].used && g_cls[p - 0xC001].pid == W->pid) { e_snprintf(out, cap, "%s", g_cls[p - 0xC001].name); return; }
+  e_snprintf(out, cap, "#%u", (u32)p); }
 static void register_class(Cpu *c, u64 a, int ex, int wide) { Win32 *w = W; int m = c->mode32; u64 off = ex ? (m ? 4 : 0) : 0; /* WNDCLASSEX: x86 shifts every field by cbSize; x64 keeps the WNDCLASS offsets (style moves into the padding at +4) */ char name[64]; u64 np = rdp(c, a + off + (m ? 36 : 64));
   if (np < 0x10000) e_snprintf(name, sizeof name, "#%u", (u32)np); else text_in(c, np, wide, name, sizeof name);
   int i = cls_find(W, name); if (i >= 0 && g_cls[i].inst == rdp(c, a + off + (m ? 16 : 24))) { W->last_error = 1410; RET(0); return; }   /* ERROR_CLASS_ALREADY_EXISTS */
@@ -351,8 +356,8 @@ static void s_RegisterClassA(Cpu *c) { register_class(c, ARG(0), 0, 0); }
 static void s_RegisterClassExA(Cpu *c) { register_class(c, ARG(0), 1, 0); }
 static void s_RegisterClassW(Cpu *c) { register_class(c, ARG(0), 0, 1); }
 static void s_RegisterClassExW(Cpu *c) { register_class(c, ARG(0), 1, 1); }
-static void s_UnregisterClassA(Cpu *c) { char name[64]; if (ARG(0) < 0x10000) { RET(1); return; } text_in(c, ARG(0), 0, name, sizeof name); int i = cls_find(W, name); if (i >= 0) g_cls[i].used = 0; RET(1); }
-static void s_UnregisterClassW(Cpu *c) { char name[64]; if (ARG(0) < 0x10000) { RET(1); return; } text_in(c, ARG(0), 1, name, sizeof name); int i = cls_find(W, name); if (i >= 0) g_cls[i].used = 0; RET(1); }
+static void s_UnregisterClassA(Cpu *c) { char name[64]; cls_name_in(c, ARG(0), 0, name, sizeof name); int i = cls_find(W, name); if (i >= 0) g_cls[i].used = 0; RET(1); }
+static void s_UnregisterClassW(Cpu *c) { char name[64]; cls_name_in(c, ARG(0), 1, name, sizeof name); int i = cls_find(W, name); if (i >= 0) g_cls[i].used = 0; RET(1); }
 static int builtin_of_class(const char *n) {
   if (!e_strnicmp(n, "RichEdit", 8) || !e_stricmp(n, "RICHEDIT50W")) return BI_EDIT;   /* rich edit = multi-line edit that understands RTF streams (licence viewers) */
   if (!e_stricmp(n, "Button")) return BI_BUTTON; if (!e_stricmp(n, "Static")) return BI_STATIC; if (!e_stricmp(n, "Edit")) return BI_EDIT; if (!e_stricmp(n, "ComboBox")) return BI_COMBO; if (!e_stricmp(n, "ListBox")) return BI_LISTBOX;
@@ -367,15 +372,17 @@ static void builtin_init_slots(Win32 *w) { if (g_slot_button && g_slot_w == w) r
   g_slot_listbox = w32_shim_slot(w, "user32", "NebulaListBoxProc"); g_slot_dialog = w32_shim_slot(w, "user32", "DefDlgProcW"); g_slot_progress = w32_shim_slot(w, "user32", "NebulaProgressProc"); g_slot_unsupported = w32_shim_slot(w, "user32", "NebulaUnsupportedProc"); g_slot_status = w32_shim_slot(w, "user32", "NebulaStatusProc"); g_slot_toolbar = w32_shim_slot(w, "user32", "NebulaToolbarProc"); g_slot_tab = w32_shim_slot(w, "user32", "NebulaTabProc"); g_slot_tree = w32_shim_slot(w, "user32", "NebulaTreeProc"); g_slot_list = w32_shim_slot(w, "user32", "NebulaListViewProc"); g_slot_rebar = w32_shim_slot(w, "user32", "NebulaRebarProc"); g_slot_subclass = w32_shim_slot(w, "user32", "NebulaSubclassProc");
   g_slot_scrollbar = w32_shim_slot(w, "user32", "NebulaScrollBarProc"); g_slot_msgbox = w32_shim_slot(w, "user32", "NebulaMsgBoxProc"); g_slot_combolist = w32_shim_slot(w, "user32", "NebulaComboListProc"); g_slot_menu = w32_shim_slot(w, "user32", "NebulaMenuProc"); g_slot_link = w32_shim_slot(w, "user32", "NebulaLinkProc");
   { GdiObj *f = gdi_new(w, K_FONT); f->font_h = 13; f->font_em = 11; g_dlg_font = f->handle; } }
-static void s_GetClassInfoExA(Cpu *c) { RET(0); }
-static void s_GetClassInfoExW(Cpu *c) { char name[64]; if (ARG(1) < 0x10000) { RET(0); return; } text_in(c, ARG(1), 1, name, sizeof name); int i = cls_find(W, name); int bi = builtin_of_class(name); u64 a = ARG(2); int m = c->mode32; u64 off = m ? 4 : 0, so = m ? 4 : 4; /* WNDCLASSEX layout: see register_class */
+static void get_class_info_ex(Cpu *c, int wide) { char name[64]; cls_name_in(c, ARG(1), wide, name, sizeof name); int i = cls_find(W, name); int bi = builtin_of_class(name); u64 a = ARG(2); int m = c->mode32; u64 off = m ? 4 : 0, so = m ? 4 : 4; /* WNDCLASSEX layout: see register_class */
   if (i < 0 && !bi) { W->last_error = 1411; RET(0); return; } u8 *p = mem_ptr(c->mem, a, m ? 48 : 80, 1); if (p) e_memset(p, 0, m ? 48 : 80); wr32(c, a, m ? 48 : 80);
   if (i >= 0) { wr32(c, a + so, g_cls[i].style); wrp(c, a + off + (m ? 4 : 8), g_cls[i].proc); wr32(c, a + off + (m ? 12 : 20), (u32)g_cls[i].extra); wrp(c, a + off + (m ? 16 : 24), g_cls[i].inst); wrp(c, a + off + (m ? 28 : 48), g_cls[i].brush); }
   else { builtin_init_slots(W); wrp(c, a + off + (m ? 4 : 8), builtin_slot(bi)); wr32(c, a + so, 0x0008 | 0x0003); }
   wrp(c, a + off + (m ? 36 : 64), ARG(1)); RET(1); }
-static void s_GetClassInfoW(Cpu *c) { char name[64]; if (ARG(1) < 0x10000) { RET(0); return; } text_in(c, ARG(1), 1, name, sizeof name); int i = cls_find(W, name); int bi = builtin_of_class(name); u64 a = ARG(2); int m = c->mode32; if (i < 0 && !bi) { RET(0); return; } u8 *p = mem_ptr(c->mem, a, m ? 40 : 72, 1); if (p) e_memset(p, 0, m ? 40 : 72);
+static void get_class_info(Cpu *c, int wide) { char name[64]; cls_name_in(c, ARG(1), wide, name, sizeof name); int i = cls_find(W, name); int bi = builtin_of_class(name); u64 a = ARG(2); int m = c->mode32; if (i < 0 && !bi) { RET(0); return; } u8 *p = mem_ptr(c->mem, a, m ? 40 : 72, 1); if (p) e_memset(p, 0, m ? 40 : 72);
   builtin_init_slots(W); if (i >= 0) { wr32(c, a, g_cls[i].style); wrp(c, a + (m ? 4 : 8), g_cls[i].proc); wrp(c, a + (m ? 28 : 48), g_cls[i].brush); } else wrp(c, a + (m ? 4 : 8), builtin_slot(bi)); wrp(c, a + (m ? 36 : 64), ARG(1)); RET(1); }
-static void s_GetClassInfoA(Cpu *c) { s_GetClassInfoW(c); }
+static void s_GetClassInfoA(Cpu *c) { get_class_info(c, 0); }
+static void s_GetClassInfoW(Cpu *c) { get_class_info(c, 1); }
+static void s_GetClassInfoExA(Cpu *c) { get_class_info_ex(c, 0); }
+static void s_GetClassInfoExW(Cpu *c) { get_class_info_ex(c, 1); }
 static void s_GetClassNameA(Cpu *c) { int i = wnd_of(ARG(0)); const char *n = i >= 0 ? g_wnd[i].clsname : ""; RET(text_out_cap(c, ARG(1), n, (u32)ARG(2), 0)); }
 static void s_GetClassNameW(Cpu *c) { int i = wnd_of(ARG(0)); const char *n = i >= 0 ? g_wnd[i].clsname : ""; RET(text_out_cap(c, ARG(1), n, (u32)ARG(2), 1)); }
 static void s_RealGetWindowClassW(Cpu *c) { s_GetClassNameW(c); }
@@ -440,7 +447,7 @@ static void builtin_proc_direct(Cpu *c, int i, u32 msg, u64 wp, u64 lp);
 /* finish creation after WM_CREATE: WM_SIZE / WM_MOVE / show — guest classes get them through the CONT_WNDCREATE steps */
 static void wnd_show_now(Cpu *c, int i) { Win32 *w = W; Wnd *n = &g_wnd[i]; if (n->visible) return; n->visible = 1; n->invalid = 1; n->erase = 1; wnd_invalidate(i, 1); if (n->parent < 0) { g_active = i; if (n->is_dlg || n->builtin == BI_MSGBOX) { /* focus goes to the dialog's first control if nothing has it */ } } if (i == 0) sync_main(w); w->dirty = 1; (void)c; }
 static void create_window(Cpu *c, u64 cls_a, u64 title_a, int wide, u32 style, u32 exstyle, int x, int y, int cx, int cy, u64 parent_h, u64 id, u64 inst, u64 param) {
-  Win32 *w = W; char cls[64], title[1024]; if (cls_a < 0x10000) e_snprintf(cls, sizeof cls, "#%u", (u32)cls_a); else text_in(c, cls_a, wide, cls, sizeof cls); text_in(c, title_a, wide, title, sizeof title);
+  Win32 *w = W; char cls[64], title[1024]; cls_name_in(c, cls_a, wide, cls, sizeof cls); text_in(c, title_a, wide, title, sizeof title);
   if (!e_stricmp(cls, "#32770") || !e_stricmp(cls, "#32768")) { /* dialog class (also used for message boxes) */ }
   int i = wnd_create_obj(c, cls, title, style, exstyle, x, y, cx, cy, parent_h, id, inst, param, wide, title_a); if (i < 0) { RET(0); return; }
   Wnd *n = &g_wnd[i];
@@ -699,6 +706,8 @@ static void set_focus(Cpu *c, int i) { Win32 *w = W; int old = g_focus; if (old 
 static void s_SetFocus(Cpu *c) { int i = wnd_of(ARG(0)); int old = g_focus; if (ARG(0) && i < 0) { RET(0); return; } set_focus(c, i); RET(wnd_alive(old) ? HWND_OF(old) : 0); }
 static void s_GetFocus(Cpu *c) { RET(wnd_alive(g_focus) ? HWND_OF(g_focus) : 0); }
 static void s_SetForegroundWindow(Cpu *c) { int i = wnd_of(ARG(0)); if (i >= 0) { g_active = wnd_root(i); g_wnd[g_active].zseq = ++g_zseq; wnd_invalidate_all(); } RET(1); }
+static void s_AllowSetForegroundWindow(Cpu *c) { RET(1); }   /* one desktop, one session: every process may take the foreground */
+static void s_LockSetForegroundWindow(Cpu *c) { RET(1); }
 static void s_GetForegroundWindow(Cpu *c) { RET(wnd_alive(g_active) ? HWND_OF(g_active) : g_wnd[0].used ? HWND_OF(0) : 0); }
 static void s_GetActiveWindow(Cpu *c) { RET(wnd_alive(g_active) ? HWND_OF(g_active) : g_wnd[0].used ? HWND_OF(0) : 0); }
 static void s_SetActiveWindow(Cpu *c) { int i = wnd_of(ARG(0)); int old = g_active; if (i >= 0) g_active = wnd_root(i); RET(wnd_alive(old) ? HWND_OF(old) : 0); }
@@ -755,6 +764,51 @@ static void s_SystemParametersInfoA(Cpu *c) { u32 a = (u32)ARG(0); u64 p = ARG(2
   RET(0); }
 static void s_SystemParametersInfoW(Cpu *c) { s_SystemParametersInfoA(c); }
 static void s_SystemParametersInfoForDpi(Cpu *c) { s_SystemParametersInfoA(c); }
+/* ---- display enumeration: one adapter (\\.\DISPLAY1) with one monitor, one video mode = the real screen (W->screen_w x screen_h, 32 bpp, 60 Hz) ---- */
+static void put_a8(Cpu *c, u64 dst, const char *s, u32 cap) { u32 i = 0; for (; s[i] && i + 1 < cap; i++) wr8(c, dst + i, (u8)s[i]); wr8(c, dst + i, 0); }
+static void dd_put(Cpu *c, u64 dst, int wide, const char *s, u32 cap) { if (wide) put_w8(c, dst, s, cap); else put_a8(c, dst, s, cap); }
+/* DISPLAY_DEVICE: cb@0 DeviceName[32]@4 DeviceString[128] StateFlags DeviceID[128] DeviceKey[128] (W: 840 B, A: 424 B) */
+static void enum_display_devices(Cpu *c, int wide) {
+  u64 dev = ARG(0), dd = ARG(2); u32 idx = (u32)ARG(1); char name[64] = ""; if (dev) text_in(c, dev, wide, name, sizeof name);
+  if (!dd || idx != 0) { RET(0); return; }
+  u32 u = wide ? 2 : 1; u64 o_str = 4 + 32 * u, o_flags = o_str + 128 * u, o_id = o_flags + 4, o_key = o_id + 128 * u;
+  if (!name[0]) { dd_put(c, dd + 4, wide, "\\\\.\\DISPLAY1", 32); dd_put(c, dd + o_str, wide, "Nebula WebGL Display Adapter", 128); wr32(c, dd + o_flags, 0x1 | 0x4 /* ATTACHED_TO_DESKTOP | PRIMARY_DEVICE */);
+    dd_put(c, dd + o_id, wide, "PCI\\VEN_1AF4&DEV_1050&SUBSYS_00000000&REV_01", 128); dd_put(c, dd + o_key, wide, "\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Video\\{NEBULA-0000-0000-0000-000000000001}\\0000", 128); RET(1); return; }
+  if (!e_stricmp(name, "\\\\.\\DISPLAY1")) { dd_put(c, dd + 4, wide, "\\\\.\\DISPLAY1\\Monitor0", 32); dd_put(c, dd + o_str, wide, "Generic PnP Monitor", 128); wr32(c, dd + o_flags, 0x1 | 0x2 /* ACTIVE | ATTACHED */);
+    dd_put(c, dd + o_id, wide, "MONITOR\\NEB0720\\{4d36e96e-e325-11ce-bfc1-08002be10318}\\0000", 128); dd_put(c, dd + o_key, wide, "\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Class\\{4d36e96e-e325-11ce-bfc1-08002be10318}\\0000", 128); RET(1); return; }
+  RET(0); }
+static void s_EnumDisplayDevicesW(Cpu *c) { enum_display_devices(c, 1); }
+static void s_EnumDisplayDevicesA(Cpu *c) { enum_display_devices(c, 0); }
+/* DEVMODE: W = 220 B (name[32]@0 spec@64 drv@66 size@68 extra@70 fields@72 pos@76 orient@84 fixed@88 ... logpixels@166 bpp@168 w@172 h@176 flags@180 freq@184), A = 156 B (name[32]@0 spec@32 ... fields@40 pos@44 logpixels@102 bpp@104 w@108 h@112 flags@116 freq@120) */
+static void enum_display_settings(Cpu *c, int wide) {
+  u64 dm = ARG(2); u32 mode = (u32)ARG(1); char name[64] = ""; if (ARG(0)) text_in(c, ARG(0), wide, name, sizeof name);
+  if (name[0] && e_stricmp(name, "\\\\.\\DISPLAY1")) { RET(0); return; }
+  if (!dm || !(mode == 0 || mode == 0xffffffffu || mode == 0xfffffffeu)) { RET(0); return; }   /* a single mode: the real screen */
+  u32 sz = wide ? 220 : 156, base = wide ? 64 : 32;   /* offset of dmSpecVersion */
+  u8 *p = mem_ptr(c->mem, dm, sz, 1); if (p) e_memset(p, 0, sz);
+  dd_put(c, dm, wide, "\\\\.\\DISPLAY1", 32); wr16(c, dm + base, 0x0401); wr16(c, dm + base + 2, 0x0401); wr16(c, dm + base + 4, (u16)sz);
+  wr32(c, dm + base + 8, 0x20 | 0x80 | 0x40000 | 0x80000 | 0x100000 | 0x200000 | 0x400000);   /* POSITION | DISPLAYORIENTATION | BITSPERPEL | PELSWIDTH | PELSHEIGHT | DISPLAYFLAGS | DISPLAYFREQUENCY */
+  u32 o = wide ? 168 : 104; wr32(c, dm + o, 32); wr32(c, dm + o + 4, (u32)W->screen_w); wr32(c, dm + o + 8, (u32)W->screen_h); wr32(c, dm + o + 12, 0); wr32(c, dm + o + 16, 60); RET(1); }
+static void s_EnumDisplaySettingsW(Cpu *c) { enum_display_settings(c, 1); }
+static void s_EnumDisplaySettingsA(Cpu *c) { enum_display_settings(c, 0); }
+static void s_EnumDisplaySettingsExW(Cpu *c) { enum_display_settings(c, 1); }
+static void s_EnumDisplaySettingsExA(Cpu *c) { enum_display_settings(c, 0); }
+/* ChangeDisplaySettings: the screen has exactly one mode, so a request for it (or NULL = restore) succeeds, anything else is DISP_CHANGE_BADMODE */
+static void change_display_settings(Cpu *c, u64 dm, int wide) {
+  if (!dm) { RET(0); return; }
+  u32 o = wide ? 168 : 104, fields = rd32(c, dm + (wide ? 72 : 40));
+  if ((fields & 0x80000) && rd32(c, dm + o + 4) != (u32)W->screen_w) { RET((u64)(s64)-2); return; }
+  if ((fields & 0x100000) && rd32(c, dm + o + 8) != (u32)W->screen_h) { RET((u64)(s64)-2); return; }
+  if ((fields & 0x40000) && rd32(c, dm + o) != 32 && rd32(c, dm + o) != 24) { RET((u64)(s64)-2); return; }
+  RET(0); }
+static void s_ChangeDisplaySettingsW(Cpu *c) { change_display_settings(c, ARG(0), 1); }
+static void s_ChangeDisplaySettingsA(Cpu *c) { change_display_settings(c, ARG(0), 0); }
+static void s_ChangeDisplaySettingsExW(Cpu *c) { change_display_settings(c, ARG(1), 1); }
+static void s_ChangeDisplaySettingsExA(Cpu *c) { change_display_settings(c, ARG(1), 0); }
+/* CCD API (QueryDisplayConfig): not provided — callers (GLFW monitor names) fall back to the DISPLAY_DEVICE strings */
+static void s_GetDisplayConfigBufferSizes(Cpu *c) { RET(50); }   /* ERROR_NOT_SUPPORTED */
+static void s_QueryDisplayConfig(Cpu *c) { RET(50); }
+static void s_DisplayConfigGetDeviceInfo(Cpu *c) { RET(50); }
 static void s_GetMonitorInfoW(Cpu *c) { u64 p = ARG(1); u32 sz = rd32(c, p); wr32(c, p + 4, 0); wr32(c, p + 8, 0); wr32(c, p + 12, 1280); wr32(c, p + 16, 720); wr32(c, p + 20, 0); wr32(c, p + 24, 0); wr32(c, p + 28, 1280); wr32(c, p + 32, 680); wr32(c, p + 36, 1); if (sz >= 40 + 64) put_w8(c, p + 40, "\\\\.\\DISPLAY1", 32); RET(1); }
 static void s_GetMonitorInfoA(Cpu *c) { s_GetMonitorInfoW(c); }
 static void s_MonitorFromWindow(Cpu *c) { RET(0x6D001); }
@@ -1438,7 +1492,8 @@ static void modal_loop(Cpu *c, int i) {
   if (msg.msg == 0x12) { w->quit_posted = 1; n->ended = 1; n->result = 0; modal_loop(c, i); return; }
   if (dlg_key_message(c, i, &msg)) return;
   translate_msg(c, msg.hwnd, msg.msg, msg.wparam, msg.lparam);
-  int t = wnd_of(msg.hwnd); if (t < 0 || !g_wnd[t].wndproc) { modal_reexec(c); return; }
+  int t = wnd_of(msg.hwnd); if (w->api_trace) e_log("[modal] msg hwnd=%llx msg=%x wp=%llx lp=%llx t=%d proc=%llx\n", (unsigned long long)msg.hwnd, msg.msg, (unsigned long long)msg.wparam, (unsigned long long)msg.lparam, t, t >= 0 ? (unsigned long long)g_wnd[t].wndproc : 0ull);
+  if (t < 0 || !g_wnd[t].wndproc) { modal_reexec(c); return; }
   if (msg.msg == 0x113 && msg.lparam > 0x10000) { w32_push_cont(c, CONT_MODAL, (u64)i); w32_guest_call(c, msg.lparam, msg.hwnd, msg.msg, msg.wparam, (u64)(u32)(host_now_ms() - w->start_ms)); return; }
   w32_push_cont(c, CONT_MODAL, (u64)i); w32_guest_call(c, g_wnd[t].wndproc, msg.hwnd, msg.msg, msg.wparam, msg.lparam); }
 static void dialog_box(Cpu *c, u64 hinst, u64 tmpl, u64 owner_h, u64 dlgproc, u64 param) {
@@ -1679,7 +1734,7 @@ void gdi_set_msgbox_auto(int on) { g_msgbox_auto = on; }
   S(EnumChildWindows), S(EnumWindows), S(EnumThreadWindows), S(FindWindowW), S(FindWindowExW), S(FindWindowExA), S(WindowFromPoint), S(ChildWindowFromPoint), S(ChildWindowFromPointEx), S(GetWindowThreadProcessId), S(IsHungAppWindow), S(IsWindowUnicode), S(IsGUIThread), S(FlashWindowEx), S(FlashWindow), S(SetLayeredWindowAttributes), S(UpdateLayeredWindow), S(AnimateWindow), S(SetWindowRgn), S(GetWindowRgn), S(LockWindowUpdate), S(SetWindowDisplayAffinity), S(GetWindowDisplayAffinity), \
   S(GetWindowTextW), S(GetWindowTextLengthW), S(GetWindowTextLengthA), S(InternalGetWindowText), S(SetWindowLongW), S(GetWindowLongW), S(GetPropW), S(SetPropW), S(RemovePropW), S(GetPropA), S(SetPropA), S(RemovePropA), S(GetCapture), S(GetCursor), S(GetClipCursor), S(LoadCursorFromFileW), S(LoadBitmapW), S(LoadBitmapA), \
   S(MapVirtualKeyExW), SA("MapVirtualKeyW", MapVirtualKeyA), SA("MapVirtualKeyExA", MapVirtualKeyA), S(GetKeyboardLayout), S(GetKeyboardLayoutList), S(ActivateKeyboardLayout), S(GetKeyNameTextW), SA("GetKeyNameTextA", GetKeyNameTextW), S(ToUnicode), S(ToUnicodeEx), S(ToAscii), SA("ToAsciiEx", ToAscii), S(VkKeyScanW), S(VkKeyScanA), SA("VkKeyScanExW", VkKeyScanW), S(keybd_event), S(mouse_event), S(SendInput), S(BlockInput), S(GetLastInputInfo), S(GetDoubleClickTime), S(SetDoubleClickTime), S(GetSystemMetricsForDpi), S(SystemParametersInfoW), S(SystemParametersInfoForDpi), \
-  S(GetMonitorInfoW), S(GetMonitorInfoA), S(MonitorFromWindow), S(MonitorFromPoint), S(MonitorFromRect), S(EnumDisplayMonitors), S(GetDpiForMonitor), \
+  S(GetMonitorInfoW), S(EnumDisplayDevicesW), S(EnumDisplayDevicesA), S(EnumDisplaySettingsW), S(EnumDisplaySettingsA), S(EnumDisplaySettingsExW), S(EnumDisplaySettingsExA), S(ChangeDisplaySettingsW), S(ChangeDisplaySettingsA), S(ChangeDisplaySettingsExW), S(ChangeDisplaySettingsExA), S(GetDisplayConfigBufferSizes), S(QueryDisplayConfig), S(DisplayConfigGetDeviceInfo), S(GetMonitorInfoA), S(MonitorFromWindow), S(MonitorFromPoint), S(MonitorFromRect), S(EnumDisplayMonitors), S(GetDpiForMonitor), \
   S(DrawTextExW), S(DrawTextExA), S(TabbedTextOutW), S(DrawEdge), S(DrawFocusRect), S(DrawFrameControl), S(DrawStateW), SA("DrawStateA", DrawStateW), S(FrameRect), S(InvertRect), S(DrawCaption), S(GrayStringW), SA("GrayStringA", GrayStringW), \
   S(OpenClipboard), S(CloseClipboard), S(EmptyClipboard), S(SetClipboardData), S(GetClipboardData), S(IsClipboardFormatAvailable), S(GetClipboardSequenceNumber), S(CountClipboardFormats), S(EnumClipboardFormats), S(GetClipboardOwner), S(SetClipboardViewer), S(ChangeClipboardChain), S(AddClipboardFormatListener), S(RemoveClipboardFormatListener), S(GetClipboardFormatNameW), SA("GetClipboardFormatNameA", GetClipboardFormatNameW), S(RegisterClipboardFormatW), S(RegisterWindowMessageW), S(RegisterWindowMessageA), \
   S(SetScrollInfo), S(GetScrollInfo), S(SetScrollPos), S(GetScrollPos), S(SetScrollRange), S(GetScrollRange), S(ShowScrollBar), S(EnableScrollBar), S(ScrollWindowEx), S(ScrollWindow), S(LoadAcceleratorsW), S(LoadAcceleratorsA), S(CreateAcceleratorTableW), S(CreateAcceleratorTableA), S(CopyAcceleratorTableW), S(CopyAcceleratorTableA), S(DestroyAcceleratorTable), S(TranslateAcceleratorW), S(TranslateAcceleratorA), SA("TranslateAccelerator", TranslateAcceleratorA), \

@@ -240,6 +240,8 @@ int   vfs_fd_kobj(int fd);             /* idx or -1 */
 /* ---- process table (api.c) ---- */
 enum { BLOCK_NONE = 0, BLOCK_STDIN, BLOCK_PROC, BLOCK_PIPE_R, BLOCK_PIPE_W, BLOCK_SLEEP, BLOCK_OBJ, BLOCK_CS, BLOCK_SRW, BLOCK_CV, BLOCK_ADDR, BLOCK_SELECT };
 int  proc_main_thread_kobj(int pid);
+void proc_suspend_main(int pid);
+struct Thread *proc_thread_by_tid(int pid, int tid);
 Win32 *proc_w32_at(int i);                          /* iterate live processes (NULL when i is past the table) */
 int  proc_spawn(Win32 *parent, const char *exe_path, const char *cmdline, const int std_fd[3]);   /* returns pid or -errno */
 extern const char *const *g_spawn_env; extern int g_spawn_nenv; extern const char *g_spawn_cwd;   /* CreateProcess lpCurrentDirectory (0 = inherit) */   /* CreateProcess lpEnvironment: when set, the child gets exactly these "NAME=value" strings instead of inheriting */
@@ -268,7 +270,7 @@ int  proc_enum(int idx, int *pid, int *ppid, const char **name);   /* 1 if idx v
   struct { u64 fn, a0, a1, a2; } apc[8]; int napc;                                  /* user APCs queued by ReadFileEx/WriteFileEx/QueueUserAPC, delivered by alertable SleepEx */
 typedef struct { THREAD_CTX_FIELDS } ThreadCtx;
 #define MAX_TLS_IMAGES 8
-typedef struct {
+typedef struct Thread {
   int used, state, tid, suspend, kobj;   /* state 1 running, 2 exited */
   Cpu *cpu; u64 teb, stack, stack_size, tls_blk[MAX_TLS_IMAGES], tls_arr, start, param; u32 exit_code;
   ThreadCtx ctx;                         /* saved while not current */
@@ -313,6 +315,7 @@ struct Win32 {
   int exited;
   u64 loc_c, loc_wc, sys_nerr, sys_errlist;
   int api_trace;
+  struct { u64 base, table, lo, hi; u32 count, growable; } dynft[32]; int ndynft;   /* RtlAddFunctionTable / RtlAddGrowableFunctionTable: unwind data for JIT code (HotSpot code cache, V8) */
   u64 veh[16]; int nveh; u64 uef; char hw_msg[160]; u32 hw_code; u64 cxx32_obj, cxx32_ti;   /* x86: the exception being handled (for `throw;`) */   /* vectored exception handlers, top-level filter, text of the last hardware fault */
   int wndclass_registered; u64 wndclass_proc; char wndclass_name[64];
   u64 ubuf;                              /* small scratch buffer in guest memory */
@@ -399,6 +402,8 @@ void vfs_normalize(const char *in, char *out, size_t cap);
 int  vfs_find_node(const char *path);
 int  vfs_add(const char *path, const u8 *data, u64 n);
 int  vfs_add_ref(const char *path, u8 *data, u64 n);
+int  vfs_add_lazy(const char *path, u64 n);
+void *vfs_mem_alloc(size_t n); void vfs_mem_free(void *p, size_t cap);   /* file-data blocks: freeable (native malloc/free; wasm: a reuse pool in host_wasm.c) */
 int  vfs_mkdir(const char *path);
 int  vfs_remove(const char *path);
 int  vfs_rename(const char *from, const char *to);

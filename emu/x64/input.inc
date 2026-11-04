@@ -145,7 +145,13 @@ static void s_EnableMouseInPointer(Cpu *c) { RET(1); }
 
 #define DI_M(m) SA("IDirectInput8::" #m, IDirectInput8_##m)
 #define DD_M(m) SA("IDirectInputDevice8::" #m, IDirectInputDevice8_##m)
-#define INPUT_SHIMS S(RegisterRawInputDevices), S(GetRegisteredRawInputDevices), S(GetRawInputData), S(GetRawInputBuffer), S(DefRawInputProc), S(GetRawInputDeviceList), S(GetRawInputDeviceInfoW), S(GetRawInputDeviceInfoA), \
+/* device-arrival notifications (RegisterDeviceNotification): the registration is recorded per window; no device ever arrives or leaves here
+   (the emulated machine has a fixed HID set), so the handle is real but never fires. WM_DEVICECHANGE broadcasts stay available to the shell. */
+static u64 g_devnotify_seq;
+static void s_RegisterDeviceNotificationW(Cpu *c) { if (!ARG(0) || !ARG(1)) { W->last_error = 87; RET(0); return; } RET(0x44e0000ull + (++g_devnotify_seq) * 0x10); }
+static void s_RegisterDeviceNotificationA(Cpu *c) { s_RegisterDeviceNotificationW(c); }
+static void s_UnregisterDeviceNotification(Cpu *c) { RET(ARG(0) >= 0x44e0000ull && ARG(0) <= 0x44e0000ull + g_devnotify_seq * 0x10); }
+#define INPUT_SHIMS S(RegisterDeviceNotificationW), S(RegisterDeviceNotificationA), S(UnregisterDeviceNotification), S(RegisterRawInputDevices), S(GetRegisteredRawInputDevices), S(GetRawInputData), S(GetRawInputBuffer), S(DefRawInputProc), S(GetRawInputDeviceList), S(GetRawInputDeviceInfoW), S(GetRawInputDeviceInfoA), \
   S(GetKeyboardType), S(OemKeyScan), S(GetMouseMovePointsEx), S(EnableMouseInPointer), S(DirectInput8Create), \
   SA("IDirectInput8::QueryInterface", DirectInput8_QueryInterface), SA("IDirectInput8::AddRef", DirectInput8_AddRef), SA("IDirectInput8::Release", DirectInput8_Release), DI_M(CreateDevice), DI_M(EnumDevices), DI_M(GetDeviceStatus), DI_M(RunControlPanel), DI_M(Initialize), DI_M(FindDevice), DI_M(EnumDevicesBySemantics), DI_M(ConfigureDevices), \
   SA("IDirectInputDevice8::QueryInterface", DirectInput8_QueryInterface), SA("IDirectInputDevice8::AddRef", DirectInput8_AddRef), SA("IDirectInputDevice8::Release", DirectInput8_Release), DD_M(GetCapabilities), DD_M(EnumObjects), DD_M(GetProperty), DD_M(SetProperty), DD_M(Acquire), DD_M(Unacquire), DD_M(GetDeviceState), DD_M(GetDeviceData), DD_M(SetDataFormat), DD_M(SetEventNotification), DD_M(SetCooperativeLevel), DD_M(GetObjectInfo), DD_M(GetDeviceInfo), DD_M(RunControlPanel), DD_M(Initialize), DD_M(CreateEffect), DD_M(EnumEffects), DD_M(GetEffectInfo), DD_M(GetForceFeedbackState), DD_M(SendForceFeedbackCommand), DD_M(EnumCreatedEffectObjects), DD_M(Escape), DD_M(Poll), DD_M(SendDeviceData), DD_M(EnumEffectsInFile), DD_M(WriteEffectToFile), DD_M(BuildActionMap), DD_M(SetActionMap), DD_M(GetImageInfo)

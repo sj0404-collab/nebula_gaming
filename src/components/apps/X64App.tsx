@@ -180,7 +180,8 @@ export default function X64App() {
     if (!e || e.pending) return;
     if (rt.status === 'running' || rt.status === 'waiting-stdin') rt.stop();
     setSelected(e.id); setArgs(want.args); consoleBuf.current = ''; setConsoleText(''); setLog([]);
-    const err = rt.start(e.bytes, e.path ?? e.name, want.args.trim() ? `${e.name} ${want.args.trim()}` : e.name, e.cwd);
+    const argv0 = e.path && e.path.includes(' ') ? `"${e.path}"` : e.path ?? e.name;   // like Explorer: a quoted full path when it has spaces (launchers re-parse GetCommandLineW)
+    const err = rt.start(e.bytes, e.path ?? e.name, want.args.trim() ? `${argv0} ${want.args.trim()}` : argv0, e.cwd);
     if (err) setLog(l => [...l, 'LOADER: ' + err]);
     setStats(rt.stats()); setFiles(rt.vfsList()); setTab('console');
   }, [loadSample, pushToast]);
@@ -275,7 +276,6 @@ export default function X64App() {
     const added: ExeEntry[] = []; let n = 0;
     const root = install ? 'C:\\Program Files\\' + top.replace(/[<>:"|?*]/g, '_') : 'C:\\nebula';
     if (install) { rt.vfsMkdir(root); rt.disk.mkdir(root); }
-    let total = 0; for (const f of items) total += f.size; rt.reserve(total + (1 << 20));
     let done = 0;
     for (const f of items) {
       const parts = f.rel; if (!parts.length) continue; const path = root + '\\' + parts.join('\\');
@@ -370,8 +370,7 @@ export default function X64App() {
     const man = st.manifest; let done = 0, bytes = 0;
     set({ status: 'installing', manifest: man, done: 0 }); setFetching(`installing ${pk.label} (${man.files.length} files)…`); setTab('console');
     try {
-      const total = man.files.reduce((a, f) => a + f.size, 0);
-      if (!rt.reserve(total + (total >> 4) + (1 << 20))) throw new Error(`cannot grow guest memory by ${(total / 1048576).toFixed(0)} MB`);   // one memory.grow, not one per file
+      // the files stay on the page side (lazy nodes); only the DLLs a program actually loads enter wasm memory
       const queue = man.files.slice(); const PAR = 6; const t0 = performance.now(); const inflight = new Set<string>(); let failed = false;
       const label = () => `installing ${pk.label}: ${done}/${man.files.length}, ${(bytes / 1048576).toFixed(1)} MB` + (done + inflight.size >= man.files.length ? ` — waiting for ${[...inflight].join(', ')}` : '');
       const worker = async () => { for (;;) { const f = queue.shift(); if (!f || failed) return; inflight.add(f.gz.slice(f.gz.lastIndexOf('/') + 1));

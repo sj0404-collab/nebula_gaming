@@ -74,7 +74,7 @@ int main(int argc, char **argv) {
   const char *path = argv[ai];
   size_t flen = 0; u8 *bytes = map_file(path, &flen); if (!bytes) { perror(path); return 2; } long len = (long)flen;
   if (inspect) { puts(x64_inspect(bytes, len)); return 0; }
-  char cmdline[4096]; const char *base = strrchr(path, '/'); base = base ? base + 1 : path; snprintf(cmdline, sizeof cmdline, "%s", base);
+  char cmdline[4096]; const char *base = strrchr(path, '/'); base = base ? base + 1 : path; snprintf(cmdline, sizeof cmdline, strchr(base, ' ') ? "\"%s\"" : "%s", base);   /* argv[0] quoted when it has spaces, as Explorer does */
   for (int i = ai + 1; i < argc; i++) {   /* MSVC command-line quoting rules */
     const char *s = argv[i]; size_t o = strlen(cmdline); if (o + 1 < sizeof cmdline) cmdline[o++] = ' ';
     int q = !s[0] || strpbrk(s, " \t\"") != 0; if (q && o + 1 < sizeof cmdline) cmdline[o++] = '"';

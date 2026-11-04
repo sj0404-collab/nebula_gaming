@@ -119,8 +119,6 @@ static void s_SetProcessDPIAware(Cpu *c) { RET(1); }
 static void s_SetProcessDpiAwarenessContext(Cpu *c) { RET(1); }
 static void s_GetDpiForWindow(Cpu *c) { RET(96); }
 static void s_GetDpiForSystem(Cpu *c) { RET(96); }
-static void s_EnumDisplaySettingsA(Cpu *c) { RET(0); }
-static void s_ChangeDisplaySettingsA(Cpu *c) { RET(0); }
 static void s_SetRect(Cpu *c) { u64 r = ARG(0); wr32(c, r, (u32)ARG(1)); wr32(c, r + 4, (u32)ARG(2)); wr32(c, r + 8, (u32)ARG(3)); wr32(c, r + 12, (u32)ARG(4)); RET(1); }
 static void s_PtInRect(Cpu *c) { u64 r = ARG(0); s32 x = (s32)(u32)ARG(1), y = (s32)(u32)(ARG(1) >> 32); RET(x >= (s32)rd32(c, r) && x < (s32)rd32(c, r + 8) && y >= (s32)rd32(c, r + 4) && y < (s32)rd32(c, r + 12)); }
 static void s_FillRect(Cpu *c) { Win32 *w = W; Surf s; if (!dc_surf(c, ARG(0), &s)) { RET(0); return; } u64 r = ARG(1); u64 hb = ARG(2); u32 px = 0;
@@ -129,6 +127,7 @@ static void s_FillRect(Cpu *c) { Win32 *w = W; Surf s; if (!dc_surf(c, ARG(0), &
 static u64 make_dc(Win32 *w) { GdiObj *dc = gdi_new(w, K_DC); if (!dc) return 0; dc->text_color = 0; dc->bk_color = 0xffffff; dc->bk_mode = 2; dc->pen = stock[7]; dc->brush = stock[0]; dc->font = stock[13]; return dc->handle; }
 static void s_CreateCompatibleDC(Cpu *c) { RET(make_dc(W)); }
 static void s_CreateDCA(Cpu *c) { RET(window_dc); }
+static void s_CreateDCW(Cpu *c) { RET(window_dc); }   /* "DISPLAY" / "\\\\.\\DISPLAY1": the one screen */
 static void dcsave_drop(u64 hdc);
 static void s_DeleteDC(Cpu *c) { GdiObj *o = gdi_get(W, ARG(0)); if (o && o->kind == K_DC && ARG(0) != window_dc) { o->kind = 0; dcsave_drop(ARG(0)); RET(1); } else RET(0); }
 static u64 make_bitmap(Cpu *c, int bw, int bh, int bottom_up, u64 *bits_out) {
@@ -386,7 +385,26 @@ static void s_OleIsCurrentClipboard(Cpu *c) { RET(1); }
 static void s_DoDragDrop(Cpu *c) { if (ARG(3)) wr32(c, ARG(3), 0); RET(0x00040101u); }   /* DRAGDROP_S_CANCEL */
 static void s_OleUninitialize(Cpu *c) { }
 static void s_CoCreateInstance(Cpu *c) { w32_report(W, "CoCreateInstance: COM objects are not available"); RET(0x80040154u); }
-static void s_CommandLineToArgvW(Cpu *c) { wr32(c, ARG(1), rd32(c, W->ubuf + 0x200)); RET(rd64(c, W->ubuf + 0x218)); }
+/* CommandLineToArgvW: parses the GIVEN string with the MSVC rules into ONE LocalAlloc block (pointer table + UTF-16 strings),
+   exactly like Windows - callers LocalFree it, so it must not alias the CRT's __wargv table (jpackage launchers do just that) */
+static void s_CommandLineToArgvW(Cpu *c) { Win32 *w = W; u64 P = PSZ; char cmd[8192]; if (ARG(0)) wstr_to_utf8(c, ARG(0), cmd, sizeof cmd, -1); else cmd[0] = 0;
+  static char tok[64][1024]; int argc = 0; const char *p = cmd;
+  if (!cmd[0]) { e_snprintf(tok[0], sizeof tok[0], "%s", w->exe_path); argc = 1; }
+  while (*p && argc < 64) {
+    while (*p == ' ' || *p == '\t') p++; if (!*p) break;
+    int tl = 0, q = 0; char *t = tok[argc];
+    if (argc == 0) { /* the program name: quotes only, no backslash rules */ if (*p == '"') { p++; while (*p && *p != '"') { if (tl < 1023) t[tl++] = *p; p++; } if (*p) p++; } else while (*p && *p != ' ' && *p != '\t') { if (tl < 1023) t[tl++] = *p; p++; } t[tl] = 0; argc++; continue; }
+    while (*p && (q || (*p != ' ' && *p != '\t'))) {
+      if (*p == '\\') { int bs = 0; while (*p == '\\') { bs++; p++; } if (*p == '"') { for (int k = 0; k < bs / 2 && tl < 1023; k++) t[tl++] = '\\'; if (bs & 1) { if (tl < 1023) t[tl++] = '"'; p++; } } else { for (int k = 0; k < bs && tl < 1023; k++) t[tl++] = '\\'; } continue; }
+      if (*p == '"') { if (q && p[1] == '"') { if (tl < 1023) t[tl++] = '"'; p += 2; continue; } q = !q; p++; continue; }
+      if (tl < 1023) t[tl++] = *p; p++;
+    }
+    t[tl] = 0; argc++;
+  }
+  u64 need = (u64)(argc + 1) * P; for (int i = 0; i < argc; i++) need += (e_strlen(tok[i]) + 1) * 2 * 2;   /* UTF-8 bytes x2 is a safe UTF-16 bound */
+  u64 blk = w32_heap_alloc(w, need, 1); if (!blk) { if (ARG(1)) wr32(c, ARG(1), 0); RET(0); return; }
+  u64 sp = blk + (u64)(argc + 1) * P; for (int i = 0; i < argc; i++) { wrp(c, blk + (u64)i * P, sp); u32 wl = put_w8(c, sp, tok[i], 0); sp += ((u64)wl + 1) * 2; } wrp(c, blk + (u64)argc * P, 0);
+  if (ARG(1)) wr32(c, ARG(1), (u32)argc); RET(blk); }
 
 #define PSZ_OF(cpu) ((cpu)->mode32 ? 4 : 8)
 #include "user.inc"
@@ -409,9 +427,9 @@ static void s_PostMessageW(Cpu *c) { s_PostMessageA(c); }
 static const ShimDef gdi_shims[] = {
   S(PeekMessageA), S(PeekMessageW), S(GetMessageA), S(GetMessageW), S(TranslateMessage), S(DispatchMessageA), S(DispatchMessageW), S(SendMessageA), S(SendMessageW), S(PostMessageA), S(PostMessageW), S(PostQuitMessage), S(SetTimer), S(KillTimer), S(MsgWaitForMultipleObjects), S(WaitMessage),
   S(RegisterClassA), S(RegisterClassExA), S(RegisterClassW), S(RegisterClassExW), S(UnregisterClassA), S(GetClassInfoExA), S(AdjustWindowRect), S(AdjustWindowRectEx), S(CreateWindowExA), S(CreateWindowExW), S(DefWindowProcA), S(DefWindowProcW), S(DestroyWindow), S(ShowWindow), S(UpdateWindow), S(InvalidateRect), S(InvalidateRgn), S(ValidateRect), S(RedrawWindow), S(GetClientRect), S(GetWindowRect), S(BeginPaint), S(EndPaint), S(GetDC), S(GetWindowDC), S(ReleaseDC),
-  S(SetWindowTextA), S(SetWindowTextW), S(GetWindowTextA), S(SetWindowPos), S(MoveWindow), S(SetWindowLongPtrA), S(GetWindowLongPtrA), S(SetWindowLongPtrW), S(GetWindowLongPtrW), S(SetWindowLongA), S(GetWindowLongA), S(SetFocus), S(GetFocus), S(SetForegroundWindow), S(GetForegroundWindow), S(GetActiveWindow), S(SetActiveWindow), S(IsWindow), S(IsWindowVisible), S(IsIconic), S(IsZoomed), S(GetDesktopWindow), S(GetParent), S(FindWindowA), S(EnableWindow), S(BringWindowToTop), S(SetCapture), S(ReleaseCapture), S(ClientToScreen), S(ScreenToClient), S(MapWindowPoints),
-  S(GetCursorPos), S(SetCursorPos), S(ShowCursor), S(SetCursor), S(ClipCursor), S(GetAsyncKeyState), S(GetKeyState), S(GetKeyboardState), S(MapVirtualKeyA), S(GetSystemMetrics), S(SystemParametersInfoA), S(MessageBoxA), S(MessageBoxW), S(wsprintfA), S(wsprintfW), S(SetProcessDPIAware), S(SetProcessDpiAwarenessContext), S(GetDpiForWindow), S(GetDpiForSystem), S(EnumDisplaySettingsA), S(ChangeDisplaySettingsA), S(RegisterClipboardFormatA), S(GetDlgItem), S(SetRect), S(PtInRect), S(FillRect), S(DrawTextA), S(DrawTextW), S(GetClassNameA), S(GetUpdateRect), S(GetSysColor), S(GetSysColorBrush),
-  S(CreateCompatibleDC), S(CreateDCA), S(DeleteDC), S(CreateDIBSection), S(CreateCompatibleBitmap), S(CreateBitmap), S(DeleteObject), S(SelectObject), S(GetStockObject), VCL_SHIMS, MENU_SHIMS, COMCTL_SHIMS, TREEVIEW_SHIMS, LISTVIEW_SHIMS, INPUT_SHIMS, IMAGELIST_SHIMS, WIC_SHIMS, ICON_SHIMS, THEME_SHIMS, DPI_SHIMS, IMM_SHIMS, S(CreatePalette), S(GetPaletteEntries), S(SetPaletteEntries), S(SelectPalette), S(RealizePalette), S(GetSystemPaletteEntries), S(GetNearestPaletteIndex), S(ResizePalette), S(GetSystemPaletteUse), S(SetSystemPaletteUse), S(UpdateColors), S(AnimatePalette), S(UnrealizeObject), S(GetCurrentObject), S(CreateSolidBrush), S(CreateHatchBrush), S(CreatePatternBrush), S(CreateBrushIndirect), S(CreatePen), S(ExtCreatePen), S(CreateFontA), S(CreateFontW), S(CreateFontIndirectA), S(CreateFontIndirectW), S(SetTextColor), S(SetBkColor), S(SetBkMode), S(GetTextColor), S(GetBkColor), S(SetTextAlign), S(GetTextAlign), S(SetROP2), S(SetStretchBltMode), S(SetBrushOrgEx), S(GdiFlush), S(SaveDC), S(RestoreDC), S(SelectClipRgn), S(IntersectClipRect), S(SetMapMode), S(SetViewportOrgEx), S(SetWindowOrgEx), S(GetDeviceCaps), S(GetObjectA), S(GetObjectW),
+  S(SetWindowTextA), S(SetWindowTextW), S(GetWindowTextA), S(SetWindowPos), S(MoveWindow), S(SetWindowLongPtrA), S(GetWindowLongPtrA), S(SetWindowLongPtrW), S(GetWindowLongPtrW), S(SetWindowLongA), S(GetWindowLongA), S(SetFocus), S(GetFocus), S(SetForegroundWindow), S(AllowSetForegroundWindow), S(LockSetForegroundWindow), S(GetForegroundWindow), S(GetActiveWindow), S(SetActiveWindow), S(IsWindow), S(IsWindowVisible), S(IsIconic), S(IsZoomed), S(GetDesktopWindow), S(GetParent), S(FindWindowA), S(EnableWindow), S(BringWindowToTop), S(SetCapture), S(ReleaseCapture), S(ClientToScreen), S(ScreenToClient), S(MapWindowPoints),
+  S(GetCursorPos), S(SetCursorPos), S(ShowCursor), S(SetCursor), S(ClipCursor), S(GetAsyncKeyState), S(GetKeyState), S(GetKeyboardState), S(MapVirtualKeyA), S(GetSystemMetrics), S(SystemParametersInfoA), S(MessageBoxA), S(MessageBoxW), S(wsprintfA), S(wsprintfW), S(SetProcessDPIAware), S(SetProcessDpiAwarenessContext), S(GetDpiForWindow), S(GetDpiForSystem), S(RegisterClipboardFormatA), S(GetDlgItem), S(SetRect), S(PtInRect), S(FillRect), S(DrawTextA), S(DrawTextW), S(GetClassNameA), S(GetUpdateRect), S(GetSysColor), S(GetSysColorBrush),
+  S(CreateCompatibleDC), S(CreateDCA), S(CreateDCW), S(DeleteDC), S(CreateDIBSection), S(CreateCompatibleBitmap), S(CreateBitmap), S(DeleteObject), S(SelectObject), S(GetStockObject), VCL_SHIMS, MENU_SHIMS, COMCTL_SHIMS, TREEVIEW_SHIMS, LISTVIEW_SHIMS, INPUT_SHIMS, IMAGELIST_SHIMS, WIC_SHIMS, ICON_SHIMS, THEME_SHIMS, DPI_SHIMS, IMM_SHIMS, S(CreatePalette), S(GetPaletteEntries), S(SetPaletteEntries), S(SelectPalette), S(RealizePalette), S(GetSystemPaletteEntries), S(GetNearestPaletteIndex), S(ResizePalette), S(GetSystemPaletteUse), S(SetSystemPaletteUse), S(UpdateColors), S(AnimatePalette), S(UnrealizeObject), S(GetCurrentObject), S(CreateSolidBrush), S(CreateHatchBrush), S(CreatePatternBrush), S(CreateBrushIndirect), S(CreatePen), S(ExtCreatePen), S(CreateFontA), S(CreateFontW), S(CreateFontIndirectA), S(CreateFontIndirectW), S(SetTextColor), S(SetBkColor), S(SetBkMode), S(GetTextColor), S(GetBkColor), S(SetTextAlign), S(GetTextAlign), S(SetROP2), S(SetStretchBltMode), S(SetBrushOrgEx), S(GdiFlush), S(SaveDC), S(RestoreDC), S(SelectClipRgn), S(IntersectClipRect), S(SetMapMode), S(SetViewportOrgEx), S(SetWindowOrgEx), S(GetDeviceCaps), S(GetObjectA), S(GetObjectW),
   S(GetTextExtentPoint32A), S(GetTextExtentPoint32W), S(GetTextExtentExPointA), S(GetTextExtentExPointW), S(GetTextMetricsA), S(GetTextMetricsW), S(TextOutA), S(TextOutW), S(ExtTextOutA), S(ExtTextOutW), S(BitBlt), S(StretchBlt), S(ExtSelectClipRgn), S(GetViewportOrgEx), S(OffsetWindowOrgEx), S(OffsetViewportOrgEx), S(DPtoLP), S(LPtoDP), S(ExcludeClipRect), S(RectVisible), S(PtVisible), S(GetClipBox), S(GetClipRgn), S(GetWindowOrgEx), S(AlphaBlend), SA("GdiAlphaBlend", AlphaBlend), S(TransparentBlt), SA("GdiTransparentBlt", TransparentBlt), S(GradientFill), SA("GdiGradientFill", GradientFill), S(PatBlt), S(StretchDIBits), S(SetDIBitsToDevice), S(Rectangle), S(RoundRect), S(Ellipse), S(MoveToEx), S(LineTo), S(Polyline), S(Polygon), S(SetPixel), S(SetPixelV), S(GetPixel),
   S(CreatePolygonRgn), S(CreateRectRgn), S(CreateRectRgnIndirect), S(CreateEllipticRgn), S(CombineRgn), S(FillRgn), S(PaintRgn), S(OffsetRgn), S(PtInRegion), S(GetRgnBox), S(GetNearestColor), S(GetTextFaceA), S(GetCharWidth32A),
   S(timeGetTime), S(timeBeginPeriod), S(timeEndPeriod), S(PlaySoundA), S(waveOutGetNumDevs), S(CoInitialize), S(CoInitializeEx), S(CoUninitialize), S(OleInitialize), S(OleUninitialize), S(RegisterDragDrop), S(RevokeDragDrop), S(OleSetClipboard), S(OleGetClipboard), S(OleFlushClipboard), S(OleIsCurrentClipboard), S(DoDragDrop), S(CoCreateInstance), S(CommandLineToArgvW),

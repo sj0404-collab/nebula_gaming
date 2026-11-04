@@ -117,9 +117,16 @@ static void s_SetThreadContext(Cpu *c) {
 static void s_OpenThreadToken(Cpu *c) { W->last_error = 1008; RET(0); }   /* ERROR_NO_TOKEN: no impersonation */
 static void s_RevertToSelf(Cpu *c) { RET(1); }
 static void s_SetThreadToken(Cpu *c) { RET(1); }
-static void s_SetKernelObjectSecurity(Cpu *c) { RET(1); }
 static void s_GetSidSubAuthorityCount(Cpu *c) { RET(ARG(0) + 1); }
 static void s_GetSidSubAuthority(Cpu *c) { RET(ARG(0) + 8 + ARG(1) * 4); }
+static u32 sid_len(Cpu *c, u64 sid) { return sid ? 8u + 4u * rd8(c, sid + 1) : 0; }
+static void s_GetLengthSid(Cpu *c) { RET(sid_len(c, ARG(0))); }
+static void s_IsValidSid(Cpu *c) { RET(ARG(0) && rd8(c, ARG(0)) == 1 && rd8(c, ARG(0) + 1) <= 15); }
+static void s_EqualSid(Cpu *c) { u32 la = sid_len(c, ARG(0)), lb = sid_len(c, ARG(1)); if (!la || la != lb) { RET(0); return; } const u8 *a = mem_ptr(W->mem, ARG(0), la, 0), *b = mem_ptr(W->mem, ARG(1), lb, 0); RET(a && b && !e_memcmp(a, b, la)); }
+static void s_CopySid(Cpu *c) { /* (destLen, dest, src) */ u32 l = sid_len(c, ARG(2)); if (!l || (u32)ARG(0) < l || !ARG(1)) { W->last_error = 122; RET(0); return; } const u8 *src = mem_ptr(W->mem, ARG(2), l, 0); u8 *d = mem_ptr(W->mem, ARG(1), l, 1); if (!src || !d) { RET(0); return; } e_memcpy(d, src, l); RET(1); }
+static void s_GetSidLengthRequired(Cpu *c) { RET(8 + 4 * (u32)(u8)ARG(0)); }
+static void s_GetSidIdentifierAuthority(Cpu *c) { RET(ARG(0) + 2); }
+static void s_EqualPrefixSid(Cpu *c) { u32 la = sid_len(c, ARG(0)), lb = sid_len(c, ARG(1)); if (!la || la != lb) { RET(0); return; } const u8 *a = mem_ptr(W->mem, ARG(0), la - 4, 0), *b = mem_ptr(W->mem, ARG(1), lb - 4, 0); RET(a && b && !e_memcmp(a, b, la - 4)); }
 /* ---- ole32 (COM is not provided: the runtime only touches it for interop/apartments) ---- */
 static void s_CoTaskMemAlloc(Cpu *c) { RET(w32_heap_alloc(W, ARG(0) ? ARG(0) : 1, 0)); }
 static void s_CoTaskMemRealloc(Cpu *c) { if (!ARG(1)) { if (ARG(0)) w32_heap_free(W, ARG(0)); RET(0); return; } RET(heap_realloc(W, ARG(0), ARG(1), 0)); }
@@ -153,7 +160,7 @@ static void s_GetThreadIOPendingFlag(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), 0); R
   S(SetThreadIdealProcessorEx), S(GetThreadIdealProcessorEx), S(VirtualAllocExNuma), S(QueryInformationJobObject), S(RaiseFailFastException), S(GetEnabledXStateFeatures), S(InitializeContext), S(SetXStateFeaturesMask), \
   S(LocateXStateFeature), S(CopyContext), S(WerRegisterRuntimeExceptionModule), S(GetSystemDefaultLCID), S(GetSystemTimes), S(QueryUnbiasedInterruptTime), SA("QueryUnbiasedInterruptTimePrecise", QueryUnbiasedInterruptTime), SA("QueryInterruptTime", QueryUnbiasedInterruptTime), SA("QueryInterruptTimePrecise", QueryUnbiasedInterruptTime), S(DisconnectNamedPipe), \
   S(GetThreadContext), S(SetThreadContext), \
-  S(OpenThreadToken), S(RevertToSelf), S(SetThreadToken), S(SetKernelObjectSecurity), S(GetSidSubAuthorityCount), S(GetSidSubAuthority), \
+  S(OpenThreadToken), S(RevertToSelf), S(SetThreadToken), S(GetSidSubAuthorityCount), S(GetSidSubAuthority), S(GetLengthSid), S(IsValidSid), S(EqualSid), S(CopySid), S(GetSidLengthRequired), S(GetSidIdentifierAuthority), S(EqualPrefixSid), \
   S(CoTaskMemAlloc), S(CoTaskMemRealloc), S(CoCreateGuid), S(CoGetContextToken), S(CoGetObjectContext), S(CoRegisterInitializeSpy), S(CoRevokeInitializeSpy), S(CoWaitForMultipleHandles), \
   SA("CoCreateFreeThreadedMarshaler", CoNotImpl), SA("CoGetClassObject", CoNotImpl), SA("CoUnmarshalInterface", CoNotImpl), SA("CoMarshalInterface", CoNotImpl), SA("CoGetMarshalSizeMax", CoNotImpl), SA("CLSIDFromProgID", CoNotImpl), SA("CoReleaseMarshalData", CoNotImpl), \
   S(WinHttpGetIEProxyConfigForCurrentUser), S(WinHttpGetDefaultProxyConfiguration), S(WinHttpOpen), S(WinHttpGetProxyForUrl), S(WinHttpCloseHandle), SA("WinHttpConnect", WinHttpFail), SA("WinHttpOpenRequest", WinHttpFail), SA("WinHttpSendRequest", WinHttpFail), SA("WinHttpReceiveResponse", WinHttpFail), SA("WinHttpSetOption", ret1), SA("WinHttpQueryOption", WinHttpFail), SA("WinHttpSetStatusCallback", ret0), SA("WinHttpSetTimeouts", ret1), SA("WinHttpQueryHeaders", WinHttpFail), SA("WinHttpQueryDataAvailable", WinHttpFail), SA("WinHttpReadData", WinHttpFail), SA("WinHttpWriteData", WinHttpFail), SA("WinHttpAddRequestHeaders", WinHttpFail), SA("WinHttpCrackUrl", WinHttpFail), SA("WinHttpCreateUrl", WinHttpFail), SA("WinHttpResetAutoProxy", ret0), SA("WinHttpGetProxyForUrlEx", WinHttpFail), SA("WinHttpCreateProxyResolver", WinHttpFail), SA("WinHttpFreeProxyResult", ret0), \

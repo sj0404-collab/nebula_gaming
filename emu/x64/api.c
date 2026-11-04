@@ -39,6 +39,10 @@ double proc_start_ms(int pid) { Proc *p = proc_find(pid); return p ? p->w32.star
 void proc_kill(int pid, int code) { Proc *p = proc_find(pid); if (p) proc_exit(p, code); }
 Win32 *proc_w32_at(int i) { if (i < 0 || i >= PROC_MAX) return 0; Proc *p = g_procs[i]; return p && p->used && p->state == 1 ? &p->w32 : (Win32 *)1; }
 int proc_main_thread_kobj(int pid) { Proc *p = proc_find(pid); return p ? p->w32.th[0].kobj : -1; }
+/* CREATE_SUSPENDED: the new process's main thread waits for ResumeThread (launchers assign a job object first) */
+void proc_suspend_main(int pid) { Proc *p = proc_find(pid); if (p) p->w32.th[0].suspend = 1; }
+/* a thread of ANY live process by (pid, tid): ResumeThread on PROCESS_INFORMATION.hThread of a child */
+Thread *proc_thread_by_tid(int pid, int tid) { Proc *p = proc_find(pid); if (!p || p->state != 1) return 0; for (int i = 0; i < THREAD_MAX; i++) if (p->w32.th[i].used && p->w32.th[i].tid == tid) return &p->w32.th[i]; return 0; }
 /* idx 0 is a synthetic parent for the root process ("explorer.exe", pid 1000): busybox treats getppid()==1 as "orphan, do not wait" */
 #define HOST_PID 1000
 int proc_enum(int idx, int *pid, int *ppid, const char **name) { if (idx == 0) { *pid = HOST_PID; *ppid = 4; *name = "explorer.exe"; return 1; } idx--; int k = 0; for (int i = 0; i < PROC_MAX; i++) { Proc *p = g_procs[i]; if (!p || !p->used || p->state == 2) continue; if (k++ == idx) { *pid = p->pid; *ppid = p->ppid; *name = p->name; return 1; } } return 0; }
@@ -186,10 +190,12 @@ EXPORT(x64_run) int x64_run(u64 budget) {
 /* ---- virtual file system / stdin (host side) ---- */
 EXPORT(x64_vfs_add) int x64_vfs_add(const char *path, const u8 *data, size_t n) { return vfs_add_ref(path, (u8 *)data, n) >= 0; }   /* host-owned buffer, referenced not copied */
 EXPORT(x64_chdir) int x64_chdir(const char *path) { return vfs_chdir(path); }   /* working directory of the loaded process (a shortcut's "Start in"); call after x64_load */
+EXPORT(x64_vfs_add_lazy) int x64_vfs_add_lazy(const char *path, size_t n) { return vfs_add_lazy(path, n) >= 0; }   /* bytes stay in JS until a program opens the file (host_fs_size / host_fs_read) */
 EXPORT(x64_vfs_sync) void x64_vfs_sync(void) { vfs_sync_all(); }   /* flush written files (open or never closed) to the persistent disk */
 EXPORT(x64_vfs_mkdir) int x64_vfs_mkdir(const char *path) { return vfs_mkdir(path); }
 EXPORT(x64_vfs_remove) int x64_vfs_remove(const char *path) { return vfs_remove(path); }
 EXPORT(x64_vfs_size) s64 x64_vfs_size(const char *path) { u64 sz; int k = vfs_stat(path, &sz); return k == 1 ? (s64)sz : -1; }
+EXPORT(x64_vfs_written) int x64_vfs_written(const char *path) { int i = vfs_find_node(path); VNodeInfo in; if (i < 0 || !vfs_node_info(i, &in) || in.is_dir) return 0; return in.written ? 1 : 0; }   /* 1: the wasm copy is newer than the page's (open / not yet flushed) */
 EXPORT(x64_vfs_data) const u8 *x64_vfs_data(const char *path) { int i = vfs_find_node(path); VNodeInfo in; if (i < 0 || !vfs_node_info(i, &in) || in.is_dir) return 0; return vfs_node_data(i); }
 static char g_vfs_json[65536];
 EXPORT(x64_vfs_list) const char *x64_vfs_list(void) {

@@ -382,6 +382,9 @@ static void s_wopen(Cpu *c) { RET(crt_open(c, name_w(c, ARG(0)), (u32)ARG(1))); 
 static void s_sopen_s(Cpu *c) { u64 fd = crt_open(c, name_a(c, ARG(1)), (u32)ARG(2)); wr32(c, ARG(0), (u32)fd); RET(fd == ~0ull ? rd32(c, ERRNO_ADDR) : 0); }
 static void s_wsopen_s(Cpu *c) { u64 fd = crt_open(c, name_w(c, ARG(1)), (u32)ARG(2)); wr32(c, ARG(0), (u32)fd); RET(fd == ~0ull ? rd32(c, ERRNO_ADDR) : 0); }
 static void s_sopen(Cpu *c) { s_open(c); }
+/* UCRT internal entry points behind _sopen_s / _wsopen_s (inline wrappers in <corecrt_io.h>): (path, oflag, shflag, pmode, int *pfh, secure) -> errno */
+static void s_sopen_dispatch(Cpu *c) { u64 fd = crt_open(c, name_a(c, ARG(0)), (u32)ARG(1)); if (ARG(4)) wr32(c, ARG(4), (u32)fd); RET(fd == ~0ull ? rd32(c, ERRNO_ADDR) : 0); }
+static void s_wsopen_dispatch(Cpu *c) { u64 fd = crt_open(c, name_w(c, ARG(0)), (u32)ARG(1)); if (ARG(4)) wr32(c, ARG(4), (u32)fd); RET(fd == ~0ull ? rd32(c, ERRNO_ADDR) : 0); }
 static void s_close(Cpu *c) { RET(vfs_close((int)ARG(0)) ? 0 : ~0ull); }
 static void s_read(Cpu *c) { int fd = (int)ARG(0); if (fd == 0) fd = -1; s64 r = fd_read(c, fd, ARG(1), (u32)ARG(2)); if (r == -2) { blocked_io(c, 0); return; } if (r < 0) { set_errno(c, 9); RET(~0ull); return; } RET((u64)r); }
 static void s_write(Cpu *c) { s64 r = fd_write(c, (int)ARG(0), ARG(1), (u32)ARG(2)); if (r == -2) { blocked_io(c, 1); return; } if (r == -3) { set_errno(c, 32); RET(~0ull); return; } if (r < 0) { set_errno(c, 9); RET(~0ull); return; } RET((u64)r); }
@@ -444,6 +447,7 @@ static void create_process(Cpu *c, const char *app, const char *cmd, const char 
   g_spawn_env = 0; g_spawn_nenv = 0; g_spawn_cwd = 0; if (envbuf) emu_free(envbuf);
   { char m[900]; e_snprintf(m, sizeof m, "[x64] CreateProcess(%s | %s) flags=0x%x std=%d,%d,%d cwd=%s -> pid %d\n", cand, cmd ? cmd : "", (u32)ARG(5), std[0], std[1], std[2], cwd && cwd[0] ? cwd : "(inherit)", pid); host_write(3, m, e_strlen(m)); }
   if (pid < 0) { W->last_error = pid == -8 ? 8 : 2; RET(0); return; }
+  if ((u32)ARG(5) & 4) proc_suspend_main(pid);   /* CREATE_SUSPENDED */
   u64 pi = ARG(9); if (pi) { int h = vfs_proc_handle(pid); wr64(c, pi, h >= 0 ? H_OF(h) : 0); { int tk = proc_main_thread_kobj(pid); int tf = tk >= 0 ? vfs_kobj_handle(tk) : -1; wr64(c, pi + 8, tf >= 0 ? H_OF(tf) : 0); } wr32(c, pi + 16, (u32)pid); wr32(c, pi + 20, (u32)pid + 1); }
   RET(1);
 }
@@ -727,6 +731,39 @@ static void s_itoa(Cpu *c) { itoa_impl(c, (s32)(u32)ARG(0), 1, ARG(1), (int)ARG(
 static void s_ultoa(Cpu *c) { itoa_impl(c, (s64)(u32)ARG(0), 0, ARG(1), (int)ARG(2)); }
 static void s_i64toa(Cpu *c) { itoa_impl(c, (s64)ARG(0), 1, ARG(1), (int)ARG(2)); }
 static void s_ui64toa(Cpu *c) { itoa_impl(c, (s64)ARG(0), 0, ARG(1), (int)ARG(2)); }
+/* wide variants: render to a scratch ASCII buffer, then widen */
+static void itow_impl(Cpu *c, s64 v, int is_signed, u64 dst, int radix) {
+  char buf[72]; int n = 0; u64 u = (u64)v; int neg = 0; if (radix < 2 || radix > 36) radix = 10;
+  if (is_signed && radix == 10 && v < 0) { neg = 1; u = (u64)(-v); }
+  do { int d = (int)(u % (u64)radix); buf[n++] = (char)(d < 10 ? '0' + d : 'a' + d - 10); u /= (u64)radix; } while (u);
+  if (neg) buf[n++] = '-';
+  for (int i = 0; i < n; i++) wr16(c, dst + i * 2, (u16)(u8)buf[n - 1 - i]); wr16(c, dst + n * 2, 0); RET(dst); }
+static void s_itow(Cpu *c) { itow_impl(c, (s32)(u32)ARG(0), 1, ARG(1), (int)ARG(2)); }
+static void s_ultow(Cpu *c) { itow_impl(c, (s64)(u32)ARG(0), 0, ARG(1), (int)ARG(2)); }
+static void s_i64tow(Cpu *c) { itow_impl(c, (s64)ARG(0), 1, ARG(1), (int)ARG(2)); }
+static void s_ui64tow(Cpu *c) { itow_impl(c, (s64)ARG(0), 0, ARG(1), (int)ARG(2)); }
+/* secure variants (value, buffer, size, radix) -> errno; EINVAL 22 / ERANGE 34 as the UCRT does */
+static int itoa_s_check(Cpu *c, s64 v, int is_signed, u64 dst, u64 size, int radix, int wide) {
+  if (!dst || !size || radix < 2 || radix > 36) { if (dst && size) wr8(c, dst, 0); set_errno(c, 22); RET(22); return 0; }
+  u64 u = (u64)v; int n = 0; if (is_signed && radix == 10 && v < 0) { u = (u64)(-v); n++; } do { n++; u /= (u64)radix; } while (u);
+  if ((u64)n + 1 > size) { if (wide) wr16(c, dst, 0); else wr8(c, dst, 0); set_errno(c, 34); RET(34); return 0; }
+  return 1; }
+static void s_itoa_s(Cpu *c) { if (itoa_s_check(c, (s32)(u32)ARG(0), 1, ARG(1), ARG(2), (int)ARG(3), 0)) { itoa_impl(c, (s32)(u32)ARG(0), 1, ARG(1), (int)ARG(3)); RET(0); } }
+static void s_ultoa_s(Cpu *c) { if (itoa_s_check(c, (s64)(u32)ARG(0), 0, ARG(1), ARG(2), (int)ARG(3), 0)) { itoa_impl(c, (s64)(u32)ARG(0), 0, ARG(1), (int)ARG(3)); RET(0); } }
+static void s_i64toa_s(Cpu *c) { if (itoa_s_check(c, (s64)ARG(0), 1, ARG(1), ARG(2), (int)ARG(3), 0)) { itoa_impl(c, (s64)ARG(0), 1, ARG(1), (int)ARG(3)); RET(0); } }
+static void s_ui64toa_s(Cpu *c) { if (itoa_s_check(c, (s64)ARG(0), 0, ARG(1), ARG(2), (int)ARG(3), 0)) { itoa_impl(c, (s64)ARG(0), 0, ARG(1), (int)ARG(3)); RET(0); } }
+static void s_itow_s(Cpu *c) { if (itoa_s_check(c, (s32)(u32)ARG(0), 1, ARG(1), ARG(2), (int)ARG(3), 1)) { itow_impl(c, (s32)(u32)ARG(0), 1, ARG(1), (int)ARG(3)); RET(0); } }
+static void s_ultow_s(Cpu *c) { if (itoa_s_check(c, (s64)(u32)ARG(0), 0, ARG(1), ARG(2), (int)ARG(3), 1)) { itow_impl(c, (s64)(u32)ARG(0), 0, ARG(1), (int)ARG(3)); RET(0); } }
+static void s_i64tow_s(Cpu *c) { if (itoa_s_check(c, (s64)ARG(0), 1, ARG(1), ARG(2), (int)ARG(3), 1)) { itow_impl(c, (s64)ARG(0), 1, ARG(1), (int)ARG(3)); RET(0); } }
+static void s_ui64tow_s(Cpu *c) { if (itoa_s_check(c, (s64)ARG(0), 0, ARG(1), ARG(2), (int)ARG(3), 1)) { itow_impl(c, (s64)ARG(0), 0, ARG(1), (int)ARG(3)); RET(0); } }
+/* <ctype.h>: iscntrl and the classification-mask entry point _isctype(ch, mask) with the UCRT bit layout */
+static u32 ctype_mask(int ch) { u32 m = 0; if (ch < 0 || ch > 255) return 0;
+  if (ch >= 'A' && ch <= 'Z') m |= 0x1 | 0x100; if (ch >= 'a' && ch <= 'z') m |= 0x2 | 0x100; if (ch >= '0' && ch <= '9') m |= 0x4;
+  if (ch == ' ' || (ch >= 9 && ch <= 13)) m |= 0x8; if (ch == ' ' || ch == 9) m |= 0x40; if (ch < 32 || ch == 127) m |= 0x20;
+  if ((ch >= 33 && ch <= 47) || (ch >= 58 && ch <= 64) || (ch >= 91 && ch <= 96) || (ch >= 123 && ch <= 126)) m |= 0x10;
+  if ((ch >= '0' && ch <= '9') || ((ch | 32) >= 'a' && (ch | 32) <= 'f')) m |= 0x80; return m; }
+static void s_iscntrl(Cpu *c) { RET(ctype_mask((int)(s32)(u32)ARG(0)) & 0x20); }
+static void s_isctype(Cpu *c) { RET(ctype_mask((int)(s32)(u32)ARG(0)) & (u32)ARG(1)); }
 static const char *errstr(int e) {
   switch (e) { case 0: return "No error"; case 1: return "Operation not permitted"; case 2: return "No such file or directory"; case 4: return "Interrupted function call"; case 5: return "Input/output error"; case 6: return "No such device or address"; case 7: return "Arg list too long"; case 8: return "Exec format error"; case 9: return "Bad file descriptor"; case 10: return "No child processes"; case 11: return "Resource temporarily unavailable"; case 12: return "Not enough memory"; case 13: return "Permission denied"; case 16: return "Resource device"; case 17: return "File exists"; case 18: return "Improper link"; case 19: return "No such device"; case 20: return "Not a directory"; case 21: return "Is a directory"; case 22: return "Invalid argument"; case 23: return "Too many open files in system"; case 24: return "Too many open files"; case 25: return "Inappropriate I/O control operation"; case 27: return "File too large"; case 28: return "No space left on device"; case 29: return "Invalid seek"; case 30: return "Read-only file system"; case 31: return "Too many links"; case 32: return "Broken pipe"; case 33: return "Math argument"; case 34: return "Result too large"; case 36: return "Resource deadlock avoided"; case 38: return "File name too long"; case 39: return "Directory not empty"; case 41: return "Not a directory"; default: return "Unknown error"; }
 }
@@ -751,11 +788,11 @@ static void s_mktemp(Cpu *c) { u64 a = ARG(0); u64 l = e_strlen(gstr(c, a)); u32
   S(ReadConsoleA), S(ReadConsoleW), S(ReadConsoleInputW), SA("ReadConsoleInputA", ReadConsoleInputW), S(PeekConsoleInputW), S(PeekConsoleInputA), S(FlushConsoleInputBuffer), S(GetNumberOfConsoleInputEvents), \
   SA("_filbuf", filbuf), SA("_flsbuf", flsbuf), SA("_fdopen", fdopen), SA("fdopen", fdopen), S(setvbuf), S(fopen), SA("_wfopen", wfopen), S(fopen_s), SA("_wfopen_s", wfopen_s), SA("_fsopen", fsopen), SA("_wfsopen", wfopen), S(freopen), S(fclose), S(fread), SA("fread_s", fread), S(fwrite), S(fgets), S(fgetc), SA("getc", fgetc), S(getchar), S(ungetc), \
   S(fseek), SA("_fseeki64", fseeki64), S(ftell), S(fgetpos), S(fsetpos), SA("_ftelli64", ftell), S(rewind), S(feof), S(ferror), S(clearerr), SA("_fileno", fileno), SA("fileno", fileno), SA("_filelengthi64", filelengthi64), SA("_filelength", filelengthi64), SA("_isatty", isatty), SA("isatty", isatty), SA("_get_osfhandle", get_osfhandle), SA("_open_osfhandle", open_osfhandle), \
-  SA("_open", open), SA("open", open), SA("_wopen", wopen), SA("_sopen_s", sopen_s), SA("_wsopen_s", wsopen_s), SA("_sopen", sopen), SA("_close", close), SA("close", close), SA("_read", read), SA("read", read), SA("_write", write), SA("write", write), \
+  SA("_open", open), SA("open", open), SA("_wopen", wopen), SA("_sopen_s", sopen_s), SA("_wsopen_s", wsopen_s), SA("_sopen", sopen), SA("_sopen_dispatch", sopen_dispatch), SA("_wsopen_dispatch", wsopen_dispatch), SA("_close", close), SA("close", close), SA("_read", read), SA("read", read), SA("_write", write), SA("write", write), \
   S(SetHandleInformation), S(GetHandleInformation), S(GetProcessImageFileNameA), S(GetProcessImageFileNameW), S(QueryFullProcessImageNameA), S(QueryFullProcessImageNameW), S(EnumProcessModules), S(EnumProcessModulesEx), S(GetModuleFileNameExA), S(GetModuleFileNameExW), S(GetModuleBaseNameA), S(ReadProcessMemory), S(IsWow64Process), S(IsWow64Process2), S(CreateRemoteThread), S(GetProcessTimes), SA("_spawnve", spawnve), SA("_spawnvpe", spawnve), SA("_spawnv", spawnv), SA("_spawnvp", spawnv), SA("_execve", execve), SA("_execvpe", execve), SA("_execv", execv), SA("_execvp", execv), SA("_wspawnve", spawnve), SA("_lseek", lseek), SA("lseek", lseek), SA("_lseeki64", lseeki64), SA("_tell", tell), SA("_telli64", tell), SA("_eof", eof), SA("_chsize", chsize), SA("_chsize_s", chsize), SA("_dup", dup), SA("dup", dup), SA("_dup2", dup2), S(setbuf), S(CreateToolhelp32Snapshot), S(Process32First), S(Process32Next), S(Process32FirstW), S(Process32NextW), S(CreateProcessA), S(CreateProcessW), S(WaitForSingleObject), S(WaitForSingleObjectEx), S(WaitForMultipleObjects), SA("WaitForMultipleObjectsEx", WaitForMultipleObjects), S(GetExitCodeProcess), S(GetProcessId), S(TerminateProcess), S(OpenProcess), S(CreatePipe), S(PeekNamedPipe), S(DuplicateHandle), S(GetCurrentProcessId), SA("_getpid", getpid), SA("getpid", getpid), SA("_cwait", cwait), SA("_pipe", pipe), S(FlushViewOfFile), SA("_commit", commit), \
   SA("_stat64", stat64), SA("_stat64i32", stat64i32), SA("_stat32", stat64i32), SA("_stat", stat64i32), SA("stat", stat64i32), SA("_wstat64", wstat64), SA("_wstat64i32", wstat64i32), SA("_fstat64", fstat64), SA("_fstat64i32", fstat64i32), SA("_fstat32", fstat64i32), SA("_fstat", fstat64i32), SA("fstat", fstat64i32), \
   SA("_access", access), SA("access", access), SA("_waccess", waccess), SA("_access_s", access_s), SA("_unlink", unlink), SA("unlink", unlink), SA("remove", unlink), SA("_wunlink", wunlink), SA("_wremove", wunlink), SA("_mkdir", mkdir), SA("mkdir", mkdir), SA("_wmkdir", wmkdir), SA("_rmdir", rmdir), SA("rmdir", rmdir), SA("_wrmdir", rmdir), \
   S(rename), SA("_wrename", wrename), SA("_getcwd", getcwd), SA("getcwd", getcwd), SA("_wgetcwd", wgetcwd), SA("_chdir", chdir), SA("chdir", chdir), SA("_wchdir", wchdir), SA("_fullpath", fullpath), SA("_wfullpath", wfullpath), \
   SA("_findfirst64", findfirst64), SA("_findfirst64i32", findfirst64), SA("_findnext64", findnext64), SA("_findnext64i32", findnext64), SA("_findclose", findclose), SA("_kbhit", kbhit), SA("_getch", getch), SA("_getche", getch), SA("gets_s", gets_s), \
   S(getenv), SA("__p___initenv", p__environ), SA("__p___winitenv", p__wenviron), SA("_wgetenv", wgetenv), S(getenv_s), SA("_dupenv_s", dupenv_s), SA("_putenv", putenv), SA("putenv", putenv), SA("_wputenv", wputenv), SA("_putenv_s", putenv_s), SA("_wputenv_s", wputenv_s), S(GetEnvironmentVariableA), S(GetEnvironmentVariableW), S(SetEnvironmentVariableA), S(SetEnvironmentVariableW), S(ExpandEnvironmentStringsA), S(ExpandEnvironmentStringsW), S(GetEnvironmentStrings), SA("GetEnvironmentStringsA", GetEnvironmentStrings), S(GetEnvironmentStringsW), SA("__p__environ", p__environ), SA("_get_initial_narrow_environment", get_initial_narrow_environment), SA("__getmainargs", getmainargs), \
-  S(strspn), S(strcspn), S(strpbrk), S(strtok), S(strtok_s), SA("_strlwr", strlwr), SA("strlwr", strlwr), SA("_strupr", strupr), SA("strupr", strupr), SA("_strrev", strrev), SA("_itoa", itoa), SA("itoa", itoa), SA("_ltoa", itoa), SA("_ultoa", ultoa), SA("_i64toa", i64toa), SA("_ui64toa", ui64toa), S(strerror), S(__sys_nerr), S(__sys_errlist), SA("_strerror", strerror), S(strerror_s), S(strcpy_s), S(strcat_s), S(strncpy_s), S(memcpy_s), SA("memmove_s", memcpy_s), SA("_mktemp", mktemp),
+  S(strspn), S(strcspn), S(strpbrk), S(strtok), S(strtok_s), SA("_strlwr", strlwr), SA("strlwr", strlwr), SA("_strupr", strupr), SA("strupr", strupr), SA("_strrev", strrev), SA("_itoa", itoa), SA("itoa", itoa), SA("_ltoa", itoa), SA("_ultoa", ultoa), SA("_i64toa", i64toa), SA("_ui64toa", ui64toa), SA("_itow", itow), SA("_ltow", itow), SA("_ultow", ultow), SA("_i64tow", i64tow), SA("_ui64tow", ui64tow), SA("_itoa_s", itoa_s), SA("_ltoa_s", itoa_s), SA("_ultoa_s", ultoa_s), SA("_i64toa_s", i64toa_s), SA("_ui64toa_s", ui64toa_s), SA("_itow_s", itow_s), SA("_ltow_s", itow_s), SA("_ultow_s", ultow_s), SA("_i64tow_s", i64tow_s), SA("_ui64tow_s", ui64tow_s), S(iscntrl), SA("_isctype", isctype), S(strerror), S(__sys_nerr), S(__sys_errlist), SA("_strerror", strerror), S(strerror_s), S(strcpy_s), S(strcat_s), S(strncpy_s), S(memcpy_s), SA("memmove_s", memcpy_s), SA("_mktemp", mktemp),

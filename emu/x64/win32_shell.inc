@@ -469,8 +469,10 @@ static int shell_cocreate(Cpu *c, u32 clsid_d1, u64 riid, u64 ppv) {
   SA("IShellLink::SetRelativePath", IShellLink_SetRelativePath), SA("IShellLink::Resolve", IShellLink_Resolve), SA("IShellLink::SetPath", IShellLink_SetPath), \
   SA("IShellLinkProps::QueryInterface", IPropertyStore_QueryInterface), SA("IShellLinkProps::AddRef", IPropertyStore_AddRef), SA("IShellLinkProps::Release", IPropertyStore_Release), SA("IShellLinkProps::GetCount", IPropertyStore_GetCount), SA("IShellLinkProps::GetAt", IPropertyStore_GetAt), SA("IShellLinkProps::GetValue", IPropertyStore_GetValue), SA("IShellLinkProps::SetValue", IPropertyStore_SetValue), SA("IShellLinkProps::Commit", IPropertyStore_Commit), SA("IPersistFile::QueryInterface", IPersistFile_QueryInterface), SA("IPersistFile::AddRef", IPersistFile_AddRef), SA("IPersistFile::Release", IPersistFile_Release), SA("IPersistFile::GetClassID", IPersistFile_GetClassID), SA("IPersistFile::IsDirty", IPersistFile_IsDirty), SA("IPersistFile::Load", IPersistFile_Load), SA("IPersistFile::Save", IPersistFile_Save), SA("IPersistFile::SaveCompleted", IPersistFile_SaveCompleted), SA("IPersistFile::GetCurFile", IPersistFile_GetCurFile),
 
+#include "win32_shellns.inc"
 #define SHELL_SHIMS \
   SHELLLINK_SHIMS \
+  SHELLNS_SHIMS \
   S(lstrcpyW), S(lstrcatW), S(lstrcatA), S(lstrcpynW), S(lstrcpynA), S(lstrcmpiW), \
   S(FindResourceW), S(FindResourceA), S(FindResourceExW), S(FindResourceExA), S(LoadResource), S(LockResource), S(SizeofResource), S(FreeResource), S(LoadStringW), S(LoadStringA), S(EnumResourceNamesW), \
   S(RegOpenKeyExW), S(RegOpenKeyExA), S(RegOpenKeyW), S(RegOpenKeyA), S(RegCreateKeyExW), S(RegCreateKeyExA), S(RegCreateKeyW), S(RegCreateKeyA), S(RegCloseKey), S(RegFlushKey), S(RegSetValueExW), S(RegSetValueExA), S(RegSetValueW), S(RegSetValueA), \

@@ -63,8 +63,6 @@ static void s_VariantCopy(Cpu *c) { u64 d = ARG(0), s = ARG(1); if (d == s) { RE
 /* ---------- ADVAPI32: privileges / security / registry → "not available", never a crash ---------- */
 static void s_LookupPrivilegeValueW(Cpu *c) { W->last_error = 1313; RET(0); }      /* ERROR_NO_SUCH_PRIVILEGE */
 static void s_AdjustTokenPrivileges(Cpu *c) { W->last_error = 0; RET(1); }
-static void s_GetFileSecurityW(Cpu *c) { W->last_error = 50; RET(0); }            /* ERROR_NOT_SUPPORTED */
-static void s_SetFileSecurityW(Cpu *c) { W->last_error = 50; RET(0); }
 
 /* ---------- KERNEL32 odds and ends ---------- */
 static void s_GetLargePageMinimum(Cpu *c) { RET(0); }
@@ -245,7 +243,7 @@ static void s_XInputEnable(Cpu *c) { RET(0); }
   SA("FileTimeToSystemTime", FileTimeToSystemTime2), SA("SystemTimeToFileTime", SystemTimeToFileTime2), S(SystemTimeToTzSpecificLocalTime), S(TzSpecificLocalTimeToSystemTime), \
   S(FileTimeToDosDateTime), S(DosDateTimeToFileTime), S(CompareFileTime), SA("_mkgmtime64", mkgmtime64), SA("_mkgmtime", mkgmtime64), \
   S(SysAllocString), S(SysAllocStringLen), S(SysAllocStringByteLen), S(SysFreeString), S(SysStringLen), S(SysStringByteLen), S(SysReAllocStringLen), S(VariantInit), S(VariantClear), S(VariantCopy), \
-  S(LookupPrivilegeValueW), S(AdjustTokenPrivileges), S(GetFileSecurityW), S(SetFileSecurityW), \
+  S(LookupPrivilegeValueW), S(AdjustTokenPrivileges), \
   S(GetLargePageMinimum), S(OpenFileMappingW), S(GetLogicalDriveStringsW), S(GetLogicalDriveStringsA), S(GetDriveTypeW), S(GetDiskFreeSpaceExW), S(GetDiskFreeSpaceW), S(GetDiskFreeSpaceA), \
   S(CreateHardLinkW), S(FindFirstStreamW), S(FindNextStreamW), S(DeviceIoControl), S(GetLogicalProcessorInformation), S(GetLogicalProcessorInformationEx), \
   S(CharUpperW), S(CharLowerW), S(CharPrevExA), S(CharPrevA), S(CharNextA), S(PathIsRelativeA), S(PathIsRelativeW), S(PathIsNetworkPathW), S(PathIsNetworkPathA), S(PathMatchSpecW), S(PathMatchSpecA), S(ColorRGBToHLS), S(ColorHLSToRGB), S(ColorAdjustLuma), \

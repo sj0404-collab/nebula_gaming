@@ -19,12 +19,36 @@ __attribute__((import_module("env"), import_name("host_fs_write"))) int js_fs_wr
 __attribute__((import_module("env"), import_name("host_fs_mkdir"))) int js_fs_mkdir(const char *path);
 __attribute__((import_module("env"), import_name("host_fs_remove"))) int js_fs_remove(const char *path, int is_dir);
 __attribute__((import_module("env"), import_name("host_fs_rename"))) int js_fs_rename(const char *from, const char *to);
+__attribute__((import_module("env"), import_name("host_fs_size"))) s64 js_fs_size(const char *path);          /* -1: the page cannot hand the bytes back synchronously */
+__attribute__((import_module("env"), import_name("host_fs_read"))) int js_fs_read(const char *path, u8 *dst, u64 n);
+/* file-data blocks: the wasm arena never frees, so blocks a file no longer needs (closed and persisted → evicted; grown → old
+   buffer) are kept in a pool and handed out again. Sizes are rounded up to 64 KB classes so a re-opened or re-grown file finds
+   its block again instead of taking fresh arena pages. */
+#define POOL_MAX 1024
+static struct { u8 *p; size_t cap; } g_pool[POOL_MAX]; static int g_pool_n = 0;
+static size_t pool_round(size_t n) { return n <= 4096 ? 4096 : (n + 65535) & ~(size_t)65535; }
+void *vfs_mem_alloc(size_t n) {
+  size_t want = pool_round(n); int best = -1;
+  for (int i = 0; i < g_pool_n; i++) if (g_pool[i].cap >= want && (best < 0 || g_pool[i].cap < g_pool[best].cap)) { best = i; if (g_pool[i].cap == want) break; }
+  if (best >= 0 && g_pool[best].cap <= want * 2) { u8 *p = g_pool[best].p; size_t cap = g_pool[best].cap; g_pool[best] = g_pool[--g_pool_n]; e_memset(p, 0, cap); return p; }
+  return emu_alloc(want);
+}
+void vfs_mem_free(void *p, size_t cap) {
+  if (!p) return; size_t c = pool_round(cap);
+  if (g_pool_n < POOL_MAX) { g_pool[g_pool_n].p = p; g_pool[g_pool_n].cap = c; g_pool_n++; }
+}
 int host_fs_op(int op, const char *a, const char *b, u8 **data, u64 *size) {
   if (op == 1) return a && data && size ? js_fs_write(a, *data, *size) : 0;
+  if (op == 2) {   /* exists on the page's disk? / load the bytes into a pooled block (node_load); the page answers from its in-memory copy */
+    if (!a) return 0; s64 n = js_fs_size(a); if (n < 0) return 0; if (!data || !size) return 1;
+    u8 *buf = n ? vfs_mem_alloc((size_t)n) : 0; if (n && !buf) return 0;
+    if (n && !js_fs_read(a, buf, (u64)n)) { vfs_mem_free(buf, (size_t)n); return 0; }
+    *data = buf; *size = (u64)n; return 1;
+  }
   if (op == 3) return a ? js_fs_mkdir(a) : 0;
   if (op == 4) return a ? js_fs_remove(a, size && *size ? 1 : 0) : 0;
   if (op == 5) return a && b ? js_fs_rename(a, b) : 0;
-  if (op == 6) return 1;
+  if (op == 6) { if (data && *data && size) vfs_mem_free(*data, (size_t)*size); return 1; }
   return 0;
 }
 /* networking: no raw TCP from a browser page — every call fails cleanly (WSAENETDOWN); a WebSocket relay can plug in here later */

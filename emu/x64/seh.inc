@@ -45,21 +45,39 @@ static void ctx_load(Cpu *c, u64 a) {
 }
 
 /* ---- function tables ---- */
-static int seh_module(Win32 *w, u64 pc, u64 *base, u32 *pdata, u32 *psize) {
-  if (pc - w->image_base < w->image_size) { *base = w->image_base; *pdata = w->exe_pdata_rva; *psize = w->exe_pdata_size; return 1; }
-  for (int i = 0; i < w->nmods; i++) if (pc - w->mods[i].base < w->mods[i].size) { *base = w->mods[i].base; *pdata = w->mods[i].pdata_rva; *psize = w->mods[i].pdata_size; return 1; }
+/* image (or dynamic table range) containing pc: *base = image base / RangeBase, *tab = absolute address of the RUNTIME_FUNCTION array, *psize = bytes */
+static int seh_module(Win32 *w, u64 pc, u64 *base, u64 *tab, u32 *psize) {
+  if (pc - w->image_base < w->image_size) { *base = w->image_base; *tab = w->exe_pdata_rva ? w->image_base + w->exe_pdata_rva : 0; *psize = w->exe_pdata_size; return 1; }
+  for (int i = 0; i < w->nmods; i++) if (pc - w->mods[i].base < w->mods[i].size) { *base = w->mods[i].base; *tab = w->mods[i].pdata_rva ? w->mods[i].base + w->mods[i].pdata_rva : 0; *psize = w->mods[i].pdata_size; return 1; }
+  for (int i = 0; i < w->ndynft; i++) if (pc >= w->dynft[i].lo && pc < w->dynft[i].hi) { *base = w->dynft[i].base; *tab = w->dynft[i].table; *psize = w->dynft[i].count * 12; return 1; }   /* JIT code registered with RtlAddFunctionTable */
   return 0;
 }
 /* RUNTIME_FUNCTION containing pc (guest address of the 12-byte entry) or 0; *base = image base */
 static u64 seh_lookup(Cpu *c, u64 pc, u64 *base) {
-  Win32 *w = W; u32 pdata, psize; if (!seh_module(w, pc, base, &pdata, &psize) || !pdata) return 0;
-  u32 rva = (u32)(pc - *base); u64 tab = *base + pdata; u32 lo = 0, hi = psize / 12;
+  Win32 *w = W; u64 tab; u32 psize; if (!seh_module(w, pc, base, &tab, &psize) || !tab) return 0;
+  u32 rva = (u32)(pc - *base); u32 lo = 0, hi = psize / 12;
   while (lo < hi) {
     u32 mid = (lo + hi) / 2; u64 e = tab + 12ull * mid; u32 b = rd32(c, e), en = rd32(c, e + 4);
     if (rva < b) hi = mid; else if (rva >= en) lo = mid + 1; else { while (rd32(c, e + 8) & 1) e = *base + (rd32(c, e + 8) & ~1u); return e; }   /* indirect entry → chained parent */
   }
   return 0;
 }
+/* dynamic function tables: RtlAddFunctionTable(table, count, base) — HotSpot registers its code cache this way (one entry with an EHANDLER that
+   routes every fault in JIT code to topLevelExceptionFilter: implicit null checks, safepoint polls, division by zero) */
+static void s_RtlAddFunctionTable(Cpu *c) {
+  Win32 *w = W; u64 tab = ARG(0), base = ARG(2); u32 n = (u32)ARG(1); if (!tab || !n || w->ndynft >= 32) { RET(0); return; }
+  u64 lo = ~0ull, hi = 0; for (u32 i = 0; i < n; i++) { u64 b = base + rd32(c, tab + 12ull * i), e = base + rd32(c, tab + 12ull * i + 4); if (b < lo) lo = b; if (e > hi) hi = e; }
+  w->dynft[w->ndynft].base = base; w->dynft[w->ndynft].table = tab; w->dynft[w->ndynft].lo = lo; w->dynft[w->ndynft].hi = hi; w->dynft[w->ndynft].count = n; w->dynft[w->ndynft].growable = 0; w->ndynft++;
+  seh_log("[x64] RtlAddFunctionTable: %u entries for 0x%llx-0x%llx\n", n, (unsigned long long)lo, (unsigned long long)hi); RET(1); }
+static void dynft_remove(Win32 *w, int i) { for (int j = i; j + 1 < w->ndynft; j++) w->dynft[j] = w->dynft[j + 1]; w->ndynft--; }
+static void s_RtlDeleteFunctionTable(Cpu *c) { Win32 *w = W; for (int i = 0; i < w->ndynft; i++) if (w->dynft[i].table == ARG(0) && !w->dynft[i].growable) { dynft_remove(w, i); RET(1); return; } RET(0); }
+/* RtlAddGrowableFunctionTable(out handle, table, count, max, range_base, range_end): V8 / .NET JIT; the handle is the table address */
+static void s_RtlAddGrowableFunctionTable(Cpu *c) {
+  Win32 *w = W; u64 tab = ARG(1); if (!ARG(0) || !tab || w->ndynft >= 32) { RET(0xC000009A); return; }
+  w->dynft[w->ndynft].base = ARG(4); w->dynft[w->ndynft].table = tab; w->dynft[w->ndynft].lo = ARG(4); w->dynft[w->ndynft].hi = ARG(5); w->dynft[w->ndynft].count = (u32)ARG(2); w->dynft[w->ndynft].growable = 1; w->ndynft++;
+  wr64(c, ARG(0), tab); RET(0); }
+static void s_RtlGrowFunctionTable(Cpu *c) { Win32 *w = W; for (int i = 0; i < w->ndynft; i++) if (w->dynft[i].table == ARG(0) && w->dynft[i].growable) w->dynft[i].count = (u32)ARG(1); RET(0); }
+static void s_RtlDeleteGrowableFunctionTable(Cpu *c) { Win32 *w = W; for (int i = 0; i < w->ndynft; i++) if (w->dynft[i].table == ARG(0) && w->dynft[i].growable) { dynft_remove(w, i); break; } RET(0); }
 /* epilogue detection: `add rsp, imm` / `lea rsp, [fp+disp]`, then pops of non-volatiles, then ret (or jmp = tail call) */
 static int seh_in_epilog(Cpu *c, u64 pc, UCtx *x) {
   u64 p = pc; u8 b0 = rd8(c, p); int rex = 0;
@@ -227,7 +245,7 @@ static void s_RaiseException(Cpu *c) {
 /* vcruntime!_CxxThrowException(pExceptionObject, pThrowInfo): the MSVC C++ throw = RaiseException(0xE06D7363, 1, 4, {magic, obj, throwinfo, imagebase}) */
 static void s__CxxThrowException(Cpu *c) {
   if (c->mode32) { u64 obj = ARG(0), ti = ARG(1); if (!obj && !ti) { obj = W->cxx32_obj; ti = W->cxx32_ti; } u64 a32[3] = { 0x19930520, obj, ti }; raise_exception32(c, 0xE06D7363u, 1, 3, a32, c->rip); return; }
-  u64 base = W->image_base; u32 pd, ps; u64 b2; if (seh_module(W, c->rip, &b2, &pd, &ps)) base = b2;
+  u64 base = W->image_base; u64 pd; u32 ps; u64 b2; if (seh_module(W, c->rip, &b2, &pd, &ps)) base = b2;
   u64 args[4] = { 0x19930520, ARG(0), ARG(1), base }; raise_exception(c, 0xE06D7363u, 1, 4, args, c->rip);
 }
 
@@ -302,7 +320,7 @@ static void s_UnhandledExceptionFilter(Cpu *c) { Win32 *w = W; u64 ptrs = ARG(0)
   char msg[200]; e_snprintf(msg, sizeof msg, "unhandled exception 0x%08x at 0x%llx (UnhandledExceptionFilter, no top-level filter) — process terminated", code, (unsigned long long)addr); w32_report(w, "%s", msg);
   seh_log("[x64] %s\n", msg); do_exit(c, (int)code); }
 static void s_RtlLookupFunctionEntry(Cpu *c) { u64 base = 0; u64 fe = seh_lookup(c, ARG(0), &base); if (ARG(1)) wr64(c, ARG(1), base); RET(fe); }
-static void s_RtlPcToFileHeader(Cpu *c) { u64 base = 0; u32 pd, ps; if (!seh_module(W, ARG(0), &base, &pd, &ps)) base = 0; if (ARG(1)) wr64(c, ARG(1), base); RET(base); }
+static void s_RtlPcToFileHeader(Cpu *c) { u64 base = 0; u64 pd; u32 ps; if (!seh_module(W, ARG(0), &base, &pd, &ps)) base = 0; if (ARG(1)) wr64(c, ARG(1), base); RET(base); }
 static void s_RtlCaptureContext(Cpu *c) { ctx_capture(c, ARG(0)); }
 /* RtlVirtualUnwind(HandlerType, ImageBase, ControlPc, FunctionEntry, ContextRecord, HandlerData*, EstablisherFrame*, ContextPointers) */
 static void s_RtlVirtualUnwind(Cpu *c) {
@@ -373,5 +391,5 @@ static int seh_cont_resume(Cpu *c, int kind, u64 rax) {
   return 0;
 }
 #define SEH_SHIMS \
-  S(RaiseException), S(AddVectoredExceptionHandler), S(RemoveVectoredExceptionHandler), S(SetUnhandledExceptionFilter), S(UnhandledExceptionFilter), S(RtlUnwindEx), S(RtlUnwind), S(RtlRestoreContext), S(RtlLookupFunctionEntry), S(RtlPcToFileHeader), S(RtlCaptureContext), S(RtlVirtualUnwind), \
+  S(RaiseException), S(AddVectoredExceptionHandler), S(RemoveVectoredExceptionHandler), S(SetUnhandledExceptionFilter), S(UnhandledExceptionFilter), S(RtlUnwindEx), S(RtlUnwind), S(RtlRestoreContext), S(RtlLookupFunctionEntry), S(RtlAddFunctionTable), S(RtlDeleteFunctionTable), S(RtlAddGrowableFunctionTable), S(RtlGrowFunctionTable), S(RtlDeleteGrowableFunctionTable), S(RtlPcToFileHeader), S(RtlCaptureContext), S(RtlVirtualUnwind), \
   SA("__C_specific_handler", __C_specific_handler), SA("_CxxThrowException", _CxxThrowException), SA("RtlCaptureStackBackTrace", ret0),

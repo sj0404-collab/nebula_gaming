@@ -143,10 +143,6 @@ static void s_FlatSB_EnableScrollBar(Cpu *c) { RET(1); }
 static void s_TrackMouseEvent_(Cpu *c) { RET(1); }   /* WM_MOUSELEAVE/hover are not generated */
 /* ---- kernel32 / advapi32 / mpr / wtsapi32 / winhttp / comdlg32 ---- */
 static void s_TransactNamedPipe(Cpu *c) { W->last_error = 50; RET(0); }
-static void s_InitializeSecurityDescriptor(Cpu *c) { u64 sd = ARG(0); if (sd) { u8 *p = mem_ptr(c->mem, sd, 20, 1); if (p) e_memset(p, 0, 20); wr8(c, sd, 1); } RET(1); }
-static void s_SetSecurityDescriptorDacl(Cpu *c) { RET(1); }
-static void s_SetSecurityDescriptorOwner(Cpu *c) { RET(1); }
-static void s_SetSecurityDescriptorGroup(Cpu *c) { RET(1); }
 static void s_WNetOpenEnumW(Cpu *c) { RET(1222); }   /* ERROR_NO_NETWORK */
 static void s_WNetEnumResourceW(Cpu *c) { RET(259); }
 static void s_WNetCloseEnum(Cpu *c) { RET(0); }
@@ -215,7 +211,7 @@ static void s_GetActiveObject(Cpu *c) { RET(0x800401E3); }   /* MK_E_UNAVAILABLE
   S(AddFontResourceW), S(AddFontResourceA), S(RemoveFontResourceW), S(RemoveFontResourceA), S(CreateHalftonePalette), S(GetEnhMetaFileHeader), S(GetEnhMetaFileBits), S(SetEnhMetaFileBits), S(GetWinMetaFileBits), S(SetWinMetaFileBits), S(PlayEnhMetaFile), S(DeleteEnhMetaFile), S(CopyEnhMetaFileW), S(GetEnhMetaFileDescriptionW), S(GetEnhMetaFilePaletteEntries), S(CreateEnhMetaFileW), S(CloseEnhMetaFile), \
   S(InitializeFlatSB), S(UninitializeFlatSB), S(FlatSB_SetScrollInfo), S(FlatSB_GetScrollInfo), S(FlatSB_SetScrollPos), S(FlatSB_GetScrollPos), S(FlatSB_SetScrollProp), S(FlatSB_SetScrollRange), S(FlatSB_ShowScrollBar), S(FlatSB_EnableScrollBar), SA("_TrackMouseEvent", TrackMouseEvent_), SA("TrackMouseEvent", TrackMouseEvent_), \
   \
-  S(TransactNamedPipe), S(InitializeSecurityDescriptor), S(SetSecurityDescriptorDacl), S(SetSecurityDescriptorOwner), S(SetSecurityDescriptorGroup), S(WNetOpenEnumW), S(WNetEnumResourceW), S(WNetCloseEnum), S(WNetGetConnectionW), S(WNetGetUniversalNameW), S(WNetOpenEnumA), S(WNetGetConnectionA), \
+  S(TransactNamedPipe), S(WNetOpenEnumW), S(WNetEnumResourceW), S(WNetCloseEnum), S(WNetGetConnectionW), S(WNetGetUniversalNameW), S(WNetOpenEnumA), S(WNetGetConnectionA), \
   S(WTSRegisterSessionNotification), S(WTSUnRegisterSessionNotification), S(WinHttpQueryAuthSchemes), S(WinHttpSetCredentials), S(CommDlgExtendedError), S(InternetCrackUrlW), S(InternetCrackUrlA), S(AssocQueryStringW), S(AssocQueryStringA), \
   S(IsEqualGUID), S(StringFromGUID2), S(StringFromCLSID), S(CoFreeUnusedLibraries), S(CoDisconnectObject), S(StgCreateDocfileOnILockBytes), S(CreateILockBytesOnHGlobal), S(LoadTypeLib), S(LoadTypeLibEx), S(RegisterTypeLib), S(GetErrorInfo), S(SetErrorInfo), S(GetActiveObject)
 /* ---- uxtheme: visual styles are OFF (classic look). Every query says "no theme", every draw call fails cleanly so the

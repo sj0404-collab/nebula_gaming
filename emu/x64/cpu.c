@@ -536,7 +536,7 @@ static void exec_body(Ins *i, u8 op) {
     case 0x98: if (osz == 8) c->r[RAX] = sext(c->r[RAX], 4); else if (osz == 4) c->r[RAX] = sext(c->r[RAX], 2) & 0xffffffff; else set_reg(i, RAX, 2, sext(c->r[RAX], 1)); return;
     case 0x99: { u64 s = (s64)sext(c->r[RAX], osz) < 0 ? ~0ull : 0; set_reg(i, RDX, osz, s); return; }
     case 0x9C: cpu_push(c, c->rflags); return;
-    case 0x9D: c->rflags = (cpu_pop(c) & 0xcd5) | 0x202; return;
+    case 0x9D: c->rflags = (cpu_pop(c) & (0xcd5 | 0x200000 | 0x40000)) | 0x202; return;   /* popf: arithmetic flags + ID (bit 21, the CPUID-presence test flips it) + AC */
     case 0x9E: c->rflags = (c->rflags & ~0xd5ull) | ((c->r[RAX] >> 8) & 0xd5); return;
     case 0x9F: c->r[RAX] = (c->r[RAX] & ~0xff00ull) | (((c->rflags & 0xd5) | 2) << 8); return;
     case 0xA4: case 0xA5: case 0xAA: case 0xAB: case 0xAC: case 0xAD: case 0xA6: case 0xA7: case 0xAE: case 0xAF: string_op(i, op & ~1, op & 1 ? osz : 1); return;
@@ -682,6 +682,7 @@ static void exec_0f(Ins *i, Cpu *c) {
       if (sub == 0 || sub == 1 || sub == 4 || sub == 5) { /* fxsave/fxrstor/xsave/xrstor: minimal — save/restore xmm block */ u64 a = EA(i);
         if (sub == 0 || sub == 4) { for (int k = 0; k < 16; k++) { wr64(c, a + 160 + k * 16, c->x[k].q[0]); wr64(c, a + 168 + k * 16, c->x[k].q[1]); } wr32(c, a + 24, c->mxcsr); }
         else { for (int k = 0; k < 16; k++) { c->x[k].q[0] = rd64(c, a + 160 + k * 16); c->x[k].q[1] = rd64(c, a + 168 + k * 16); } c->mxcsr = rd32(c, a + 24); } return; }
+      if (sub == 7 || sub == 6) { (void)EA(i); return; }                       /* clflush / clflushopt (66 prefix) / clwb: cache hints — no architectural effect here */
       UNSUP("0F AE /%d", sub); }
 
     /* ---------------- SSE ---------------- */

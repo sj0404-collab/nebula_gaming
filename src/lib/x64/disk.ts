@@ -49,7 +49,9 @@ export class Disk {
   }
 
   /** false for scratch paths: the emulator then keeps the node's `written` flag (session-only file) */
-  put(path: string, data: Uint8Array): boolean { if (isScratch(path)) return false; this.writes++; this.bytes += data.length; this.pending.set(diskKey(path), { path, data: data.slice(), mtime: Date.now() }); this.schedule(); return true; }
+  put(path: string, data: Uint8Array): boolean { return this.putOwned(path, data.slice()); }
+  /** like put, but the array is handed over (no copy): the caller keeps the same array as its in-page cache */
+  putOwned(path: string, data: Uint8Array): boolean { if (isScratch(path)) return false; this.writes++; this.bytes += data.length; this.pending.set(diskKey(path), { path, data, mtime: Date.now() }); this.schedule(); return true; }
   mkdir(path: string) { if (isScratch(path)) return; this.pending.set(diskKey(path), { path, data: null, mtime: Date.now() }); this.schedule(); }
   remove(path: string) { if (isScratch(path)) return; this.pending.set(diskKey(path), null); this.schedule(); }
   async rename(from: string, to: string) {

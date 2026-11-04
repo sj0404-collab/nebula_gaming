@@ -146,6 +146,7 @@ static u64 thread_create(Cpu *c, u64 start, u64 param, u64 stack_size, int suspe
 static void thread_mark_exited(Win32 *w, int k, u32 code) {
   Thread *t = &w->th[k]; if (!t->used || t->state == 2) return;
   t->state = 2; t->exit_code = code;
+  if (w->api_trace) e_log("[x64] thread %d exited code=%u (rip=0x%llx)\n", t->tid, code, t->cpu ? (unsigned long long)t->cpu->rip : 0ull);
   KObj *ko = kobj_get(t->kobj); if (ko) { ko->state = 2; ko->exit_code = code; }
   for (int i = 0; i < KOBJ_MAX; i++) { KObj *m = kobj_get(i); if (m && m->kind == KO_MUTEX && m->owner_pid == w->pid && m->owner_tid == t->tid) { m->owner_tid = 0; m->owner_pid = 0; m->recursion = 0; m->abandoned = 1; } }
   if (k) for (int i = 0; i < MAX_TLS_IMAGES; i++) if (t->tls_blk[i]) { w32_heap_free(w, t->tls_blk[i]); t->tls_blk[i] = 0; }
@@ -182,7 +183,7 @@ static int thread_cont_resume(Cpu *c, int kind, u64 rax) {
 }
 /* first instruction of a new thread lands in the start-up slot: run TLS callbacks, then start(param) */
 static void thread_startup(Cpu *c) { Win32 *w = W; Thread *t = cur_thread(w); int i = cont_push(c, CONT_TSTART); if (i < 0) return; w->cont[i].data[0] = t->start; w->cont[i].data[1] = t->param; w32_cont_resume(c); }
-static Thread *thread_of_handle(Cpu *c, u64 h) { KObj *k = kobj_of_handle(c, h, KO_THREAD); if (!k || k->pid != W->pid) return 0; for (int i = 0; i < THREAD_MAX; i++) if (W->th[i].used && W->th[i].tid == k->tid) return &W->th[i]; return 0; }
+static Thread *thread_of_handle(Cpu *c, u64 h) { KObj *k = kobj_of_handle(c, h, KO_THREAD); if (!k) return 0; if (k->pid != W->pid) return proc_thread_by_tid(k->pid, k->tid); for (int i = 0; i < THREAD_MAX; i++) if (W->th[i].used && W->th[i].tid == k->tid) return &W->th[i]; return 0; }
 
 u64 w32_thread_create_api(Cpu *c, u64 start, u64 param, u64 stack, int suspended, u32 *tid) { return thread_create(c, start, param, stack, suspended, tid); }
 

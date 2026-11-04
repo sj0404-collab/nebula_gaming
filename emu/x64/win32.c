@@ -628,7 +628,7 @@ static void load_library(Cpu *c, const char *n) {
   RET(fake_module(n));
 }
 /* GetModuleHandle of a DLL that exists only as a real file (DirectX pack) and is not loaded: NULL, so the program goes on to LoadLibrary it */
-static u64 fake_module_gmh(Win32 *w, const char *n) { if (pe_dll_native_only(mod_basename(n))) { w->last_error = 126; return 0; } return fake_module(n); }
+static u64 fake_module_gmh(Win32 *w, const char *n) { const char *b = mod_basename(n); if (pe_dll_native_only(b) || !pe_is_system_dll(b)) { w->last_error = 126; return 0; } return fake_module(n); }   /* likewise a non-system DLL that was never loaded (jimage asks for zip.dll before HotSpot loads it): NULL */
 static void s_GetModuleHandleA(Cpu *c) { const char *n = rd_str(c, ARG(0), 260); if (!n) { RET(W->image_base); return; } int m = mod_find(W, n); if (m >= 0) { RET(W->mods[m].base); return; } if ((mod_name_eq(mod_basename(n), W->exe_name) || mod_name_eq(mod_basename(n), "node.exe"))) { RET(W->image_base); return; } RET(fake_module_gmh(W, n)); }
 static void s_GetModuleHandleW(Cpu *c) { if (!ARG(0)) { RET(W->image_base); return; } char n[260]; wstr_to_utf8(c, ARG(0), n, sizeof n, -1); c->r[RCX] = 0; int m = mod_find(W, n); if (m >= 0) { RET(W->mods[m].base); return; } if ((mod_name_eq(mod_basename(n), W->exe_name) || mod_name_eq(mod_basename(n), "node.exe"))) { RET(W->image_base); return; } RET(fake_module_gmh(W, n)); }
 static void s_GetModuleHandleExW(Cpu *c) { u64 h = W->image_base; u32 flags = (u32)ARG(0);
@@ -682,12 +682,7 @@ static void s_GetSystemInfo(Cpu *c) { u64 a = ARG(0);
   u8 *p = mem_ptr(c->mem, a, 48, 1); if (!p) return; e_memset(p, 0, 48); wr16(c, a, 9); wr32(c, a + 4, 4096); wr64(c, a + 8, 0x10000); wr64(c, a + 16, 0x7ffffffeffff); wr64(c, a + 24, 1); wr32(c, a + 32, 1); wr32(c, a + 36, 586); wr32(c, a + 40, 0x10000); }
 static void s_GetNativeSystemInfo(Cpu *c) { s_GetSystemInfo(c); if (c->mode32) wr16(c, ARG(0), 9); }   /* the native machine is x64 */
 static void s_GlobalMemoryStatusEx(Cpu *c) { u64 a = ARG(0); wr32(c, a + 4, 30); wr64(c, a + 8, 4ull << 30); wr64(c, a + 16, 3ull << 30); wr64(c, a + 24, 4ull << 30); wr64(c, a + 32, 3ull << 30); wr64(c, a + 40, 8ull << 40); wr64(c, a + 48, 8ull << 40); RET(1); }
-static void s_RtlAddFunctionTable(Cpu *c) { RET(1); }
-static void s_RtlAddGrowableFunctionTable(Cpu *c) { if (ARG(0)) wr64(c, ARG(0), 0x4747); RET(0); }   /* V8 registers JIT unwind data; we never unwind through JIT frames */
-static void s_RtlGrowFunctionTable(Cpu *c) { RET(0); }
-static void s_RtlDeleteGrowableFunctionTable(Cpu *c) { RET(0); }
 static void s_RtlInstallFunctionTableCallback(Cpu *c) { RET(1); }
-static void s_RtlDeleteFunctionTable(Cpu *c) { RET(1); }
 static void s_EncodePointer(Cpu *c) { RET(ARG(0) ^ 0xA5A5A5A5ull); }
 static void s_DecodePointer(Cpu *c) { RET(ARG(0) ^ 0xA5A5A5A5ull); }
 static void s_OutputDebugStringA(Cpu *c) { const char *s = rd_str(c, ARG(0), 4096); if (s) e_log("[dbg] %s", s); }
@@ -787,7 +782,11 @@ static void s_VirtualAlloc(Cpu *c) { u64 addr = ARG(0), size = ARG(1);
     if (vi >= 0) {   /* inside a RELEASED reservation: V8 re-reserves an aligned sub-range of a block it just freed — hand that sub-range out again */
       if (end <= g_vm[vi].base + g_vm[vi].size && vm_add(a0, end - a0, 0) >= 0) { u8 *p = mem_ptr(c->mem, a0, end - a0, 1); if (p) e_memset(p, 0, (size_t)(end - a0)); RET(a0); return; }
       W->last_error = 487; RET(0); return; }
-    if (mem_ptr(c->mem, a0, 1, 0)) { W->last_error = 487; RET(0); return; }   /* image / stack / heap / DLL: not available (Windows: ERROR_INVALID_ADDRESS) */
+    if (mem_ptr(c->mem, a0, 1, 0)) {
+      /* MEM_COMMIT (no RESERVE) of pages that are already mapped: thread stacks and heap are "reserved + committed" here, so committing them again
+         succeeds in place (HotSpot commits its stack guard pages this way); reserving over them is ERROR_INVALID_ADDRESS as on Windows */
+      if (((u32)ARG(2) & 0x3000) == 0x1000 && mem_ptr(c->mem, a0, end - a0, 1)) { RET(a0); return; }
+      W->last_error = 487; RET(0); return; }
     /* a hint into free address space: V8 scatters these randomly (ASLR) and falls back to VirtualAlloc(NULL) when they fail, so only
      * honour large ones (alignment-sensitive reservations); small pages would each cost a region (MAX_REGIONS) and slow down mem_ptr */
     u64 a64 = addr & ~0xffffull, len = (end - a64 + 0xffff) & ~0xffffull;
@@ -836,6 +835,14 @@ static void s_GetLocaleInfoEx(Cpu *c) { RET(0); }
 static void s_IsValidLocale(Cpu *c) { RET(1); }
 static void s_IsValidCodePage(Cpu *c) { RET(1); }
 static void s_EnumSystemLocalesW(Cpu *c) { RET(1); }
+/* date / time format enumeration: success without callbacks (like EnumCalendarInfo*) — callers fall back to GetLocaleInfo's defaults */
+static void s_EnumDateFormatsW(Cpu *c) { RET(1); }
+static void s_EnumDateFormatsA(Cpu *c) { RET(1); }
+static void s_EnumDateFormatsExW(Cpu *c) { RET(1); }
+static void s_EnumDateFormatsExEx(Cpu *c) { RET(1); }
+static void s_EnumTimeFormatsW(Cpu *c) { RET(1); }
+static void s_EnumTimeFormatsA(Cpu *c) { RET(1); }
+static void s_EnumTimeFormatsEx(Cpu *c) { RET(1); }
 static void s_GetUserDefaultLocaleName(Cpu *c) { const char *n = "en-US"; for (int i = 0; i <= 5; i++) wr16(c, ARG(0) + i * 2, (u8)n[i]); RET(6); }
 static void s_LCMapStringW(Cpu *c) { u32 flags = (u32)ARG(1); u64 src = ARG(2); int n = (int)(s32)ARG(3); u64 dst = ARG(4); int dn = (int)ARG(5);
   int len = n; if (n < 0) { len = 0; while (rd16(c, src + len * 2)) len++; len++; }
@@ -977,6 +984,29 @@ static void s_sock_err(Cpu *c) { W->last_error = 10093; RET((u64)(s64)-1); }
 static void s_gethostname(Cpu *c) { const char *h = "nebula"; if ((u32)ARG(1) > 6) { u8 *p = mem_ptr(c->mem, ARG(0), 7, 1); if (p) e_memcpy(p, h, 7); } RET(0); }
 static void s_htons(Cpu *c) { u16 v = (u16)ARG(0); RET((u16)((v >> 8) | (v << 8))); }
 static void s_htonl(Cpu *c) { RET(__builtin_bswap32((u32)ARG(0))); }
+/* VerifyVersionInfo against the reported OS (Windows 10.0.19045, SP 0, workstation, no suites): real comparison semantics —
+   major/minor/service pack are compared hierarchically (a GREATER on the major decides unless the majors are equal, then the minor is checked …),
+   the other fields individually; VER_AND / VER_OR for the suite mask */
+static int ver_cmp(u32 have, u32 want, u32 cond) { switch (cond) { case 1: return have == want; case 2: return have > want; case 3: return have >= want; case 4: return have < want; case 5: return have <= want; default: return 1; } }
+static int verify_version(Cpu *c, u64 vi, u32 type, u64 cm, int wide) {
+  u32 sp_off = wide ? 276 : 148; u32 major = rd32(c, vi + 4), minor = rd32(c, vi + 8), build = rd32(c, vi + 12), plat = rd32(c, vi + 16);
+  u32 spmaj = rd16(c, vi + sp_off), spmin = rd16(c, vi + sp_off + 2), suite = rd16(c, vi + sp_off + 4), prod = rd8(c, vi + sp_off + 6);
+  u32 c_min = (cm >> 0) & 7, c_maj = (cm >> 3) & 7, c_build = (cm >> 6) & 7, c_plat = (cm >> 9) & 7, c_spmin = (cm >> 12) & 7, c_spmaj = (cm >> 15) & 7, c_suite = (cm >> 18) & 7, c_prod = (cm >> 21) & 7;
+  const u32 H_MAJ = 10, H_MIN = 0, H_BUILD = 19045, H_PLAT = 2, H_SPMAJ = 0, H_SPMIN = 0, H_SUITE = 0x100 /* VER_SUITE_SINGLEUSERTS */, H_PROD = 1;
+  if (type & 0x40) { if (c_suite == 6 ? (H_SUITE & suite) != suite : c_suite == 7 ? !(H_SUITE & suite) : 0) return 0; }
+  if ((type & 0x08) && !ver_cmp(H_PLAT, plat, c_plat)) return 0;
+  if ((type & 0x04) && !ver_cmp(H_BUILD, build, c_build)) return 0;
+  if ((type & 0x80) && !ver_cmp(H_PROD, prod, c_prod)) return 0;
+  if (type & 0x33) {   /* hierarchical: major, minor, sp major, sp minor */
+    u32 cond = (type & 2) ? c_maj : (type & 1) ? c_min : (type & 0x20) ? c_spmaj : c_spmin; if (!cond) cond = 1;
+    u32 have[4] = { H_MAJ, H_MIN, H_SPMAJ, H_SPMIN }, want[4] = { major, minor, spmaj, spmin }, use[4] = { !!(type & 2), !!(type & 1), !!(type & 0x20), !!(type & 0x10) };
+    for (int i = 0; i < 4; i++) { if (!use[i]) continue; if (have[i] != want[i]) return ver_cmp(have[i], want[i], cond); }
+    return cond == 1 || cond == 3 || cond == 5;   /* all compared fields equal */
+  }
+  return 1; }
+static void s_VerifyVersionInfoW(Cpu *c) { int ok = verify_version(c, ARG(0), (u32)ARG(1), ARG(2), 1); if (!ok) W->last_error = 1150; RET(ok); }   /* ERROR_OLD_WIN_VERSION */
+static void s_VerifyVersionInfoA(Cpu *c) { int ok = verify_version(c, ARG(0), (u32)ARG(1), ARG(2), 0); if (!ok) W->last_error = 1150; RET(ok); }
+static void s_RtlVerifyVersionInfo(Cpu *c) { RET(verify_version(c, ARG(0), (u32)ARG(1), ARG(2), 1) ? 0 : 0xC0000059); }   /* STATUS_REVISION_MISMATCH */
 static void s_VerSetConditionMask(Cpu *c) { u64 mask = ARG(0); u32 type = (u32)ARG(1), cond = (u32)ARG(2) & 7; u64 shift = 0; for (u32 b = 0; b < 32; b++) if (type & (1u << b)) { shift = (u64)b * 3; break; } RET(mask | ((u64)cond << shift)); }
 static void s_InterlockedPushEntrySList(Cpu *c) { u64 head = ARG(0), e = ARG(1); u64 old = rdp(c, head); wrp(c, e, old); wrp(c, head, e); RET(old); }
 static void s_InterlockedPopEntrySList(Cpu *c) { u64 head = ARG(0); u64 e = rdp(c, head); if (e) wrp(c, head, rdp(c, e)); RET(e); }
@@ -1316,6 +1346,7 @@ static void s_dsign(Cpu *c) { RET(c->x[0].f64[0] < 0 ? 1 : 0); }
 #include "win32_rt.inc"
 #include "win32_math.inc"
 #include "win32_clr.inc"
+#include "win32_acl.inc"
 #include "win32_bcrypt.inc"
 #include "win32_x86.inc"
 /* ---------- table ---------- */
@@ -1347,7 +1378,7 @@ static const ShimDef shims[] = {
   S(GetModuleHandleA), S(GetModuleHandleW), S(GetModuleHandleExW), S(GetModuleHandleExA), S(LoadLibraryA), S(LoadLibraryW), S(LoadLibraryExA), S(LoadLibraryExW), S(FreeLibrary), S(GetProcAddress), S(GetModuleFileNameA), S(GetModuleFileNameW), S(GetSystemDirectoryA), S(GetWindowsDirectoryA),
   S(GetVersion), S(GetVersionExA), S(GetVersionExW), S(GetProductInfo), S(GetApplicationRestartSettings), S(RegisterApplicationRestart), S(UnregisterApplicationRestart), S(IsProcessorFeaturePresent), S(IsDebuggerPresent), S(IsDBCSLeadByte), S(IsDBCSLeadByteEx), S(GetACP), S(GetOEMCP), S(GetCPInfo), S(GetSystemInfo), S(GetNativeSystemInfo), S(GlobalMemoryStatusEx),
   NODE_SHIMS,
-  S(RtlAddFunctionTable), S(RtlAddGrowableFunctionTable), S(RtlGrowFunctionTable), S(RtlDeleteGrowableFunctionTable), S(RtlInstallFunctionTableCallback), S(RtlDeleteFunctionTable), S(EncodePointer), S(DecodePointer),
+  S(RtlInstallFunctionTableCallback), S(EncodePointer), S(DecodePointer),
   S(OutputDebugStringA), S(OutputDebugStringW), S(FormatMessageA), S(FormatMessageW), S(SetErrorMode), S(GetErrorMode), S(SetThreadErrorMode), S(GetLogicalProcessorInformation), S(GetProcessAffinityMask), S(SetThreadAffinityMask), S(SetProcessAffinityMask), S(GetSystemTimeAdjustment), S(SetSystemTime), S(GetThreadPriority), S(SetThreadPriority), S(SetPriorityClass), S(GetPriorityClass), S(GetThreadTimes),
   S(GetProcessHeap), S(HeapCreate), S(HeapDestroy), S(HeapAlloc), S(HeapFree), S(HeapReAlloc), S(HeapSize), S(HeapValidate), S(HeapSetInformation), S(HeapQueryInformation), S(HeapCompact), S(HeapLock), S(HeapUnlock), S(HeapWalk), S(GlobalAlloc), S(GlobalFree), S(GlobalLock), S(GlobalUnlock), S(LocalAlloc), S(LocalFree),
   S(VirtualAlloc), S(VirtualAllocEx), S(VirtualFree), S(VirtualProtect), S(VirtualLock), S(VirtualUnlock), S(VirtualQuery), S(FlushInstructionCache),
@@ -1355,10 +1386,11 @@ static const ShimDef shims[] = {
   S(EventRegister), SA("EventUnregister", ret0), SA("EventSetInformation", ret0), SA("EventWriteTransfer", ret0), SA("EventWrite", ret0), SA("EventEnabled", ret0), SA("EventActivityIdControl", ret0),
   SA("RegisterEventSourceW", ret1), SA("RegisterEventSourceA", ret1), SA("DeregisterEventSource", ret1), SA("ReportEventW", ret1), SA("ReportEventA", ret1),
   S(GetProcessWindowStation), S(GetUserObjectInformationW), SA("GetUserObjectInformationA", GetUserObjectInformationW), S(MapVirtualKeyW),
-  S(AllocateAndInitializeSid), S(FreeSid), S(SetEntriesInAclA), S(SetEntriesInAclW), SA("SetSecurityInfo", ret0), SA("SetNamedSecurityInfoW", ret0), SA("GetSecurityInfo", ret50), S(ConvertStringSecurityDescriptorToSecurityDescriptorW), S(ConvertStringSecurityDescriptorToSecurityDescriptorA),
+  ACL_SHIMS \
+  S(AllocateAndInitializeSid), S(FreeSid), S(SetEntriesInAclA), S(SetEntriesInAclW), S(ConvertStringSecurityDescriptorToSecurityDescriptorW), S(ConvertStringSecurityDescriptorToSecurityDescriptorA),
   SA("RegEnumKeyExA", ret2), SA("RegEnumKeyExW", ret2), SA("RegEnumValueW", ret2), SA("RegEnumValueA", ret2), SA("RegGetValueA", RegGetValueW), SA("RegNotifyChangeKeyValue", ret0), SA("RegQueryInfoKeyA", RegQueryInfoKeyW), SA("RegDeleteKeyW", ret2), SA("RegDeleteValueW", ret2), SA("RegFlushKey", ret0),
   S(GetAdaptersAddresses), S(GetUnicastIpAddressTable), SA("FreeMibTable", ret0), SA("CancelMibChangeNotify2", ret0), SA("NotifyIpInterfaceChange", ret50), SA("ConvertInterfaceIndexToLuid", ret50), SA("ConvertInterfaceLuidToNameW", ret50), SA("ConvertInterfaceLuidToIndex", ret50), SA("GetBestInterfaceEx", ret50), SA("GetIfEntry2", ret50), SA("GetIpForwardTable2", ret50), SA("GetAdaptersInfo", ret50), SA("GetNetworkParams", ret50), SA("NotifyAddrChange", ret50), SA("NotifyRouteChange", ret50), SA("GetPerAdapterInfo", ret50), SA("if_nametoindex", ret0), SA("if_indextoname", ret0), SA("ConvertInterfaceLuidToGuid", ret50), SA("ConvertInterfaceGuidToLuid", ret50),
-  S(GetThreadLocale), S(GetUserDefaultLCID), S(GetUserDefaultLangID), S(GetSystemDefaultLangID), S(GetUserDefaultUILanguage), S(GetLocaleInfoA), S(GetLocaleInfoW), S(GetLocaleInfoEx), S(IsValidLocale), S(IsValidCodePage), S(EnumSystemLocalesW), S(GetUserDefaultLocaleName), S(LCMapStringW), S(LCMapStringEx), S(LCMapStringA), S(CompareStringW), S(CompareStringA), S(CompareStringEx), S(CompareStringOrdinal), S(GetStringTypeW), S(GetStringTypeA), S(MultiByteToWideChar), S(WideCharToMultiByte), S(CharUpperA),
+  S(GetThreadLocale), S(GetUserDefaultLCID), S(GetUserDefaultLangID), S(GetSystemDefaultLangID), S(GetUserDefaultUILanguage), S(GetLocaleInfoA), S(GetLocaleInfoW), S(GetLocaleInfoEx), S(IsValidLocale), S(IsValidCodePage), S(EnumSystemLocalesW), S(EnumDateFormatsW), S(EnumDateFormatsA), S(EnumDateFormatsExW), S(EnumDateFormatsExEx), S(EnumTimeFormatsW), S(EnumTimeFormatsA), S(EnumTimeFormatsEx), S(GetUserDefaultLocaleName), S(LCMapStringW), S(LCMapStringEx), S(LCMapStringA), S(CompareStringW), S(CompareStringA), S(CompareStringEx), S(CompareStringOrdinal), S(GetStringTypeW), S(GetStringTypeA), S(MultiByteToWideChar), S(WideCharToMultiByte), S(CharUpperA),
   S(lstrlenA), S(lstrlenW), S(lstrcpyA), S(lstrcmpiA), S(lstrcmpA), S(InterlockedCompareExchange), S(InterlockedExchange), S(InterlockedIncrement), S(InterlockedDecrement), S(InterlockedExchangeAdd), S(QueueUserAPC),
   S(CreateNamedPipeW), S(CreateNamedPipeA), S(ConnectNamedPipe), S(ReadFileEx), S(WriteFileEx), S(RtlNtStatusToDosError), S(CancelIo), SA("CancelIoEx", CancelIo),
   S(GetTimeZoneInformation), S(FileTimeToSystemTime), S(SystemTimeToFileTime), S(FileTimeToLocalFileTime), S(GetDateFormatA), S(GetTimeFormatA), S(SystemFunction036), SA("ProcessPrng", SystemFunction036), SA("BCryptGenRandom", BCryptGenRandom), S(GetComputerNameA), S(GetUserNameA), S(GetDriveTypeA), S(GetLogicalDrives), S(GetDiskFreeSpaceExA), S(SetHandleCount), S(GetHandleInformation), S(SetHandleInformation), S(DuplicateHandle), S(CreatePipe), S(PeekNamedPipe), S(GetOverlappedResult), S(Beep), S(DebugBreak), S(GetProcessId), S(K32GetProcessMemoryInfo), SA("GetProcessMemoryInfo", K32GetProcessMemoryInfo),
@@ -1372,7 +1404,7 @@ static const ShimDef shims[] = {
   SA("AreFileApisANSI", ret1), SA("SetFileApisToANSI", ret0), SA("SetFileApisToOEM", ret0),
   /* WS2_32 */
   NET_SHIMS
-  SA("InitializeSListHead", ret0), S(VerSetConditionMask), SA("VerifyVersionInfoW", ret1), SA("VerifyVersionInfoA", ret1), SA("SetStdHandle", ret1), S(GlobalMemoryStatus), S(ReadConsoleW), SA("ReadConsoleA", ReadConsoleW), SA("GetDateFormatW", ret0), SA("GetTimeFormatW", ret0), SA("GetDateFormatEx", ret0), S(LocalFileTimeToFileTime), S(InterlockedPushEntrySList), S(InterlockedPopEntrySList), S(InterlockedFlushSList), SA("QueryDepthSList", ret0), S(GetSystemDirectoryW), SA("GetWindowsDirectoryW", GetSystemDirectoryW), SA("GetWindowsDirectoryA", GetSystemDirectoryA), S(SearchPathW), S(SearchPathA), S(GetUserNameW), S(GetComputerNameW), S(GetComputerNameExW), SA("GetComputerNameExA", GetComputerNameA), SA("GetCompressedFileSizeA", retm1), SA("GetCompressedFileSizeW", retm1),
+  SA("InitializeSListHead", ret0), S(VerSetConditionMask), S(VerifyVersionInfoW), S(VerifyVersionInfoA), S(RtlVerifyVersionInfo), SA("SetStdHandle", ret1), S(GlobalMemoryStatus), S(ReadConsoleW), SA("ReadConsoleA", ReadConsoleW), SA("GetDateFormatW", ret0), SA("GetTimeFormatW", ret0), SA("GetDateFormatEx", ret0), S(LocalFileTimeToFileTime), S(InterlockedPushEntrySList), S(InterlockedPopEntrySList), S(InterlockedFlushSList), SA("QueryDepthSList", ret0), S(GetSystemDirectoryW), SA("GetWindowsDirectoryW", GetSystemDirectoryW), SA("GetWindowsDirectoryA", GetSystemDirectoryA), S(SearchPathW), S(SearchPathA), S(GetUserNameW), S(GetComputerNameW), S(GetComputerNameExW), SA("GetComputerNameExA", GetComputerNameA), SA("GetCompressedFileSizeA", retm1), SA("GetCompressedFileSizeW", retm1),
   /* COMCTL32 */
   SA("InitCommonControls", ret0), SA("InitCommonControlsEx", ret1), SA("MakeDragList", ret1), SA("LBItemFromPt", retm1), SA("DrawInsert", ret0),
   /* ADVAPI32 (minimal) */
@@ -1389,7 +1421,7 @@ static const ShimDef shims[] = {
   S(puts), SA("_putws", putws), S(fputs), S(putchar), S(fputc), SA("putc", fputc), S(fwrite), S(fflush), S(setvbuf), S(fopen), S(fopen_s), S(fclose), S(fgets), S(fread), S(getchar), S(fgetc), S(getc), S(feof), S(ferror), SA("_fileno", fileno), SA("_isatty", isatty), SA("_write", write), SA("_read", read), SA("_open", open), SA("_close", close), SA("_fdopen", ret0), SA("_wfopen", ret0), SA("_lseek", retm1), SA("_lseeki64", retm1), SA("_stat64", retm1), SA("_fstat64", retm1), SA("_wstat64", retm1), SA("_access", retm1), SA("_chsize", retm1), SA("_unlink", retm1), SA("remove", retm1), SA("rename", retm1), SA("_mkdir", retm1), SA("_getcwd", ret0), SA("_dup", retm1), SA("_dup2", retm1), SA("_pipe", retm1), SA("_commit", ret0), SA("_locking", ret0), SA("_filelengthi64", retm1), SA("ungetc", retm1),
   SA("_time64", time64), SA("time", time64), S(clock), SA("_localtime64", localtime64), SA("_gmtime64", gmtime64), SA("_localtime64_s", localtime64_s), SA("_gmtime64_s", localtime64_s), SA("_wcsicmp", wcsicmp), S(wcsncpy_s), S(wcscpy_s), S(wcscat_s), SA("DisableThreadLibraryCalls", ret1), S(GetActiveProcessorCount), S(InitializeProcThreadAttributeList), S(UpdateProcThreadAttribute), S(DeleteProcThreadAttributeList), SA("GetMaximumProcessorCount", GetActiveProcessorCount), SA("GetActiveProcessorGroupCount", ret1), S(wcsncmp), SA("__fpe_flt_rounds", ret1), S(wcschr), S(wcsrchr), S(wcstombs), S(AddDllDirectory), SA("RemoveDllDirectory", ret1), S(SetDllDirectoryW), S(SetDllDirectoryA), SA("CancelIoEx", ret1), SA("SetNamedPipeHandleState", ret1), SA("GetFileVersionInfoSizeW", ret0), SA("GetFileVersionInfoW", ret0), SA("VerQueryValueW", ret0), SA("PssQuerySnapshot", ret1), SA("LookupPrivilegeValueA", ret0), SA("CreateSymbolicLinkW", ret0), SA("_mktime64", mktime64), S(strftime), SA("_tzset", tzset), SA("__timezone", timezone), SA("__daylight", daylight), SA("__tzname", tzname), SA("_get_timezone", ret0), SA("_ftime64", ret0), SA("_difftime64", ret0),
   S(getenv), S(getenv_s), SA("_dupenv_s", ret0), SA("_putenv", ret0), S(system), S(rand), S(srand), SA("rand_s", ret0),
-  S(sscanf), S(strlen), S(wcslen), S(strnlen), S(wcscpy), S(wcsncpy), S(wcscat), S(wcsncat), S(wcsspn), S(wcscspn), S(wcspbrk), S(strcmp), SA("_stricmp", stricmp), SA("_strcmpi", stricmp), SA("stricmp", stricmp), S(strncmp), SA("_strnicmp", strnicmp), S(wcscmp), S(strcpy), S(strncpy), S(strcat), S(strchr), S(strrchr), S(strstr), SA("_strdup", strdup), S(strdup), S(strtol), S(strtoul), S(strtoll), SA("_strtoi64", strtoll), SA("_strtoui64", strtoll), SA("strtoull", strtoll), S(atoi), S(atol), S(atoll), SA("_atoi64", atoll), S(strtod), S(atof), S(toupper), S(tolower), S(isdigit), S(isalpha), S(isalnum), S(isspace), S(isupper), S(islower), S(isprint), S(isxdigit), S(ispunct), SA("iscntrl", ret0), SA("isgraph", isprint), SA("iswspace", isspace), SA("iswdigit", isdigit), SA("iswalpha", isalpha), SA("towupper", toupper), SA("towlower", tolower), SA("_isctype", ret0), SA("strerror", ret0), SA("_strerror", ret0), SA("strerror_s", ret0), SA("strcpy_s", ret0), SA("strcat_s", ret0), SA("strncpy_s", ret0), SA("memcpy_s", ret0), SA("memmove_s", ret0), SA("strtok", ret0), SA("strtok_s", ret0), SA("strspn", ret0), SA("strcspn", ret0), SA("strpbrk", ret0), SA("_strlwr", ret0), SA("_strupr", ret0), SA("_strrev", ret0), SA("strcoll", strcmp), SA("_itoa", ret0), SA("_ltoa", ret0), SA("_ultoa", ret0), SA("_i64toa", ret0), SA("_ui64toa", ret0),
+  S(sscanf), S(strlen), S(wcslen), S(strnlen), S(wcscpy), S(wcsncpy), S(wcscat), S(wcsncat), S(wcsspn), S(wcscspn), S(wcspbrk), S(strcmp), SA("_stricmp", stricmp), SA("_strcmpi", stricmp), SA("stricmp", stricmp), S(strncmp), SA("_strnicmp", strnicmp), S(wcscmp), S(strcpy), S(strncpy), S(strcat), S(strchr), S(strrchr), S(strstr), SA("_strdup", strdup), S(strdup), S(strtol), S(strtoul), S(strtoll), SA("_strtoi64", strtoll), SA("_strtoui64", strtoll), SA("strtoull", strtoll), S(atoi), S(atol), S(atoll), SA("_atoi64", atoll), S(strtod), S(atof), S(toupper), S(tolower), S(isdigit), S(isalpha), S(isalnum), S(isspace), S(isupper), S(islower), S(isprint), S(isxdigit), S(ispunct), SA("isgraph", isprint), SA("iswspace", isspace), SA("iswdigit", isdigit), SA("iswalpha", isalpha), SA("towupper", toupper), SA("towlower", tolower), SA("strcoll", strcmp),
   S(memcpy), SA("memmove", memcpy), S(memset), S(memcmp), S(memchr), S(qsort), SA("qsort_s", qsort), S(bsearch), SA("_setjmp", setjmp), SA("_setjmpex", setjmp), SA("_setjmp3", setjmp), S(longjmp), S(div), SA("ldiv", div), S(abs), S(labs), SA("_abs64", llabs), S(llabs),
   S(sin), S(cos), S(tan), S(exp), S(log), S(pow), S(atan2), S(asin), S(acos), S(atan), S(sinh), S(cosh), S(tanh), S(log10), S(log2), S(cbrt), S(sqrt), S(floor), S(ceil), S(fabs), S(fmod), S(round), S(trunc), S(ldexp), S(frexp), S(modf), S(hypot), SA("_hypot", hypot), S(sinf), S(cosf), S(tanf), S(expf), S(logf), S(powf), S(atan2f), S(sqrtf), S(floorf), S(ceilf), S(fabsf), S(fmodf), S(roundf), SA("_dclass", dclass), SA("_fdclass", fdclass), SA("_dsign", dsign), SA("_fdsign", dsign), SA("_dtest", dclass), SA("_fdtest", fdclass), SA("_finite", ret1), SA("_isnan", ret0), SA("_copysign", copysign), S(copysign), S(exp2), SA("nearbyint", round), SA("rint", round), S(lround), SA("llround", lround), S(fmin), S(fmax),
   SA("__CxxFrameHandler4", CxxFrameHandler4), SA("__std_exception_copy", ret0), SA("__std_exception_destroy", ret0), SA("__std_type_info_destroy_list", ret0), SA("__current_exception", ret0), SA("__current_exception_context", ret0), SA("_except_handler4_common", ret1), SA("__intrinsic_setjmp", setjmp), SA("__report_gsfailure", abort), SA("_purecall", abort), SA("terminate", abort), SA("__p__mbctype", pctype_func), SA("_ismbblead", ret0), SA("__mb_cur_max", ret1),

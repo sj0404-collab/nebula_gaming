@@ -48,6 +48,8 @@ static int rw_map(const char *guest, char *out, size_t cap) {   /* guest (normal
   return 0;
 }
 static void rw_mkdirs(const char *path) { char t[2048]; snprintf(t, sizeof t, "%s", path); for (char *q = t + 1; *q; q++) if (*q == '/') { *q = 0; mkdir(t, 0755); *q = '/'; } }
+void *vfs_mem_alloc(size_t n) { return calloc(1, n ? n : 1); }
+void vfs_mem_free(void *p, size_t cap) { (void)cap; free(p); }
 int host_fs_op(int op, const char *a, const char *b, u8 **data, u64 *size) {
   char ha[2048], hb[2048];
   if (op == 6) { if (data && *data && size) munmap(*data, (size_t)*size); return 1; }
