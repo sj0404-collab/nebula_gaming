@@ -4,8 +4,9 @@
    on one object, IShellBrowser callbacks for navigation (BrowseObject on folder activation, GetWindow for the parent) and ShellExecute
    for files.  Lives in gdi.c after listview.inc and shellicon.inc. */
 #define SV_MAX 32
-typedef struct { int used; Win32 *w; u64 addr, folder, browser; char path[1040]; int wnd, lv; u32 viewmode, flags; int refs; u64 scratch; int wait_browse; } ShellView;
+typedef struct { int used; Win32 *w; u64 addr, folder, browser; char path[1040]; int wnd, lv; u32 viewmode, flags; int refs; u64 scratch; int wait_browse; int ctx_cm, ctx_menu; } ShellView;
 static ShellView g_sv[SV_MAX];
+static void sv_context_menu(Cpu *c, ShellView *v, int item); static int sv_context_command(Cpu *c, ShellView *v, u32 id);   /* ctxmenu.inc */
 static const char *const vt_IShellView2[] = { "QueryInterface", "AddRef", "Release", "GetWindow", "ContextSensitiveHelp", "TranslateAccelerator", "EnableModeless", "UIActivate", "Refresh", "CreateViewWindow", "DestroyViewWindow", "GetCurrentInfo", "AddPropertySheetPages", "SaveViewState", "SelectItem", "GetItemObject", "GetView", "CreateViewWindow2", "HandleRename", "SelectAndPositionItem" };
 static const char *const vt_IFolderView[] = { "QueryInterface", "AddRef", "Release", "GetCurrentViewMode", "SetCurrentViewMode", "GetFolder", "Item", "ItemCount", "Items", "GetSelectionMarkedItem", "GetFocusedItem", "GetItemPosition", "GetSpacing", "GetDefaultSpacing", "GetAutoArrange", "SelectItem", "SelectAndPositionItems" };
 static u64 g_sv_vt[2]; static Win32 *g_sv_vt_owner;
@@ -16,7 +17,7 @@ static ShellView *sv_of(Cpu *c, u64 a) { u64 P = PSZ_OF(c); for (int i = 0; i < 
 static ShellView *sv_of_wnd(int wi) { for (int i = 0; i < SV_MAX; i++) if (g_sv[i].used && g_sv[i].wnd == wi) return &g_sv[i]; return 0; }
 /* IShellFolder::CreateViewObject(IID_IShellView): one object = [vt IShellView2][vt IFolderView][refs][id] */
 u64 gdi_shell_view_create(Cpu *c, u64 folder_obj, const char *path) { Win32 *w = W; int k; for (k = 0; k < SV_MAX && g_sv[k].used; k++) { } if (k == SV_MAX) return 0; u64 P = PSZ_OF(c); u64 a = w32_heap_alloc(w, 4 * P, 1); if (!a) return 0;
-  ShellView *v = &g_sv[k]; e_memset(v, 0, sizeof *v); v->used = 1; v->w = w; v->addr = a; v->folder = folder_obj; e_snprintf(v->path, sizeof v->path, "%s", path); v->wnd = v->lv = -1; v->viewmode = 4; v->refs = 1; v->scratch = w32_heap_alloc(w, 64, 1);
+  ShellView *v = &g_sv[k]; e_memset(v, 0, sizeof *v); v->ctx_cm = -1; v->used = 1; v->w = w; v->addr = a; v->folder = folder_obj; e_snprintf(v->path, sizeof v->path, "%s", path); v->wnd = v->lv = -1; v->viewmode = 4; v->refs = 1; v->scratch = w32_heap_alloc(w, 64, 1);
   wrp(c, a, sv_vtable(c, 0)); wrp(c, a + P, sv_vtable(c, 1)); wr32(c, a + 2 * P, 1); wr32(c, a + 2 * P + 4, (u32)k); return a; }
 /* ---- filling the list ---- */
 typedef struct { char name[260]; u64 size; int is_dir; } SvEntry;
@@ -48,7 +49,9 @@ static void sv_create_list(Cpu *c, ShellView *v) { Wnd *n = &g_wnd[v->wnd]; u32 
 static void sv_navigate(Cpu *c, ShellView *v, const char *rel, u32 flags) { /* IShellBrowser::BrowseObject(child pidl, SBSP_RELATIVE) on item activation / (NULL, SBSP_PARENT) on Backspace, exactly like the Windows DefView; the browser (Q-Dir, a file-open dialog) then ILCombines the pidl with its current folder and creates a view for it */ u64 P = PSZ_OF(c); if (!v->browser) { RET(0); return; } u64 pidl = rel ? pidl_make(W, rel) : 0; u64 fn = rdp(c, rdp(c, v->browser) + 11 * P); if (!fn) { RET(0); return; } w32_push_cont(c, CONT_SVBROWSE, 0); w32_guest_call(c, fn, v->browser, pidl, flags, 0); }
 static void svbrowse_resume(Cpu *c, u64 rax) { w32_cont_finish(c, rax); }
 static void s_NebulaDefViewProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } u32 msg = (u32)ARG(1); u64 wp = ARG(2), lp = ARG(3); ShellView *v = sv_of_wnd(i); u64 P = PSZ_OF(c);
+  if (modal_reentry(c)) { /* a popup menu / message box started by this window procedure re-executes the call until it ends */ int m = g_nmodal - 1; if (g_modal[m].wnd < 0) track_popup(c, 0, 0, 0, 0, 0); else modal_loop(c, g_modal[m].wnd); return; }
   switch (msg) {
+    case 0x111: { if (v && sv_context_command(c, v, (u32)(wp & 0xFFFF))) return; RET(0); return; }
     case 0x01: { if (v) sv_create_list(c, v); RET(0); return; }
     case 0x02: { if (v) { v->wnd = -1; v->lv = -1; } RET(0); return; }
     case 0x05: { if (v && v->lv >= 0 && wnd_alive(v->lv)) { Wnd *l = &g_wnd[v->lv]; l->x = 0; l->y = 0; l->w = wnd_client_w(i); l->h = wnd_client_h(i); wnd_invalidate(v->lv, 1); } RET(0); return; }
@@ -58,6 +61,7 @@ static void s_NebulaDefViewProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { R
     case 0x4E: { if (!v || !lp) { RET(0); return; } u32 code = rd32(c, lp + 2 * P); int from = wnd_of(rdp(c, lp)); if (from != v->lv) { RET(0); return; }
       if (code == (u32)-114 /* LVN_ITEMACTIVATE (the list raises it for a double click and for Enter; NM_DBLCLK / NM_RETURN alone do not open) */) { ListView *lv = lv_of(v->lv); int k = (int)(s32)rd32(c, lp + 3 * P); if (k < 0 && lv) k = lv->focus; char path[1300]; sv_item_path(v, k, path, sizeof path); if (!path[0]) { RET(0); return; }
         u64 sz; int st = vfs_stat(path, &sz); if (st == 2) { size_t pl = e_strlen(path); while (pl > 3 && path[pl - 1] == 0x5c) path[--pl] = 0; const char *base = path; if (!(pl <= 3 && path[1] == 0x3a)) for (const char *q = path; *q; q++) if (*q == 0x5c) base = q + 1; /* a drive root stays "C:\" (child of the desktop), anything else is its last component */ sv_navigate(c, v, base, 0x1000 /* SBSP_RELATIVE */); return; } w32_shell_open(c, path); RET(0); return; }
+      if (code == (u32)-5 /* NM_RCLICK: the shell context menu of the clicked (now selected) item, or of the folder background */) { int k = (int)(s32)rd32(c, lp + 3 * P); sv_context_menu(c, v, k); return; }
       if (code == (u32)-155 /* LVN_KEYDOWN */) { u32 vk = rd16(c, lp + 3 * P); if (vk == 8 /* Backspace: parent folder */ && v->path[0]) { sv_navigate(c, v, 0, 0x2000 /* SBSP_PARENT */); return; } RET(0); return; }
       RET(0); return; }
     default: def_window_proc(c, i, msg, wp, lp); return; } }
@@ -115,5 +119,5 @@ static void s_IFolderView_GetDefaultSpacing(Cpu *c) { if (ARG(1)) { wr32(c, ARG(
 static void s_IFolderView_GetAutoArrange(Cpu *c) { RET(0); }
 static void s_IFolderView_SelectItem(Cpu *c) { ShellView *v = sv_of(c, ARG(0)); if (!v) { RET(0x80070057u); return; } sv_select(c, v, (int)(s32)ARG(1), (u32)ARG(2)); RET(0); }
 static void s_IFolderView_SelectAndPositionItems(Cpu *c) { RET(0x80004001u); }
-#define DEFVIEW_SHIMS S(NebulaDefViewProc), WM(IShellView, QueryInterface), WM(IShellView, AddRef), WM(IShellView, Release), WM(IShellView, GetWindow), WM(IShellView, ContextSensitiveHelp), WM(IShellView, TranslateAccelerator), WM(IShellView, EnableModeless), WM(IShellView, UIActivate), WM(IShellView, Refresh), WM(IShellView, CreateViewWindow), WM(IShellView, DestroyViewWindow), WM(IShellView, GetCurrentInfo), WM(IShellView, AddPropertySheetPages), WM(IShellView, SaveViewState), WM(IShellView, SelectItem), WM(IShellView, GetItemObject), WM(IShellView, GetView), WM(IShellView, CreateViewWindow2), WM(IShellView, HandleRename), WM(IShellView, SelectAndPositionItem), \
+#define DEFVIEW_SHIMS CTXMENU_SHIMS S(NebulaDefViewProc), WM(IShellView, QueryInterface), WM(IShellView, AddRef), WM(IShellView, Release), WM(IShellView, GetWindow), WM(IShellView, ContextSensitiveHelp), WM(IShellView, TranslateAccelerator), WM(IShellView, EnableModeless), WM(IShellView, UIActivate), WM(IShellView, Refresh), WM(IShellView, CreateViewWindow), WM(IShellView, DestroyViewWindow), WM(IShellView, GetCurrentInfo), WM(IShellView, AddPropertySheetPages), WM(IShellView, SaveViewState), WM(IShellView, SelectItem), WM(IShellView, GetItemObject), WM(IShellView, GetView), WM(IShellView, CreateViewWindow2), WM(IShellView, HandleRename), WM(IShellView, SelectAndPositionItem), \
   WM(IFolderView, QueryInterface), WM(IFolderView, AddRef), WM(IFolderView, Release), WM(IFolderView, GetCurrentViewMode), WM(IFolderView, SetCurrentViewMode), WM(IFolderView, GetFolder), WM(IFolderView, Item), WM(IFolderView, ItemCount), WM(IFolderView, Items), WM(IFolderView, GetSelectionMarkedItem), WM(IFolderView, GetFocusedItem), WM(IFolderView, GetItemPosition), WM(IFolderView, GetSpacing), WM(IFolderView, GetDefaultSpacing), WM(IFolderView, GetAutoArrange), WM(IFolderView, SelectItem), WM(IFolderView, SelectAndPositionItems),

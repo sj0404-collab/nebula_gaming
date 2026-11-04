@@ -2,6 +2,7 @@
 #include "emu.h"
 #include <stdarg.h>
 u64 gdi_shell_view_create(Cpu *c, u64 folder_obj, const char *path);   /* defview.inc (gdi.c) */
+u64 gdi_shell_ctxmenu_create(Cpu *c, const char *folder, const char (*paths)[520], int n);   /* ctxmenu.inc (gdi.c) */
 
 #define ARG(n) w32_arg(c, n)
 #define RET(v) (c->r[RAX] = (u64)(v))

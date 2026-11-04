@@ -430,6 +430,7 @@ static void s_CommandLineToArgvW(Cpu *c) { Win32 *w = W; u64 P = PSZ; char cmd[8
 #include "gdiplus.inc"
 #include "shellicon.inc"
 #include "defview.inc"
+#include "ctxmenu.inc"
 static void s_PeekMessageW(Cpu *c) { s_PeekMessageA(c); }
 static void s_GetMessageW(Cpu *c) { s_GetMessageA(c); }
 static void s_DispatchMessageW(Cpu *c) { s_DispatchMessageA(c); }

@@ -51,7 +51,7 @@ typedef struct { int used; int pid; char name[64]; u64 proc, brush, cursor, icon
 static WndClass g_cls[64];
 static int g_timers_n; static struct { u64 id; int wnd; u32 ms; double next; u64 proc; } g_timers[32];
 /* clipboard (text only, internal to the emulator) */
-static char g_clip[8192]; static int g_clip_open;
+static char g_clip[8192]; static int g_clip_open; static char g_clipf[8192]; static int g_clipf_cut;   /* text clipboard + the file-list clipboard (CF_HDROP 15; ctxmenu.inc cut/copy/paste) */
 static u32 g_sys_colors[31];
 static void edge_rect(Surf *s, int l, int t, int r, int b, u32 tl, u32 br); static void tip_tick(Win32 *w); static void s_NebulaTooltipProc(Cpu *c);
 
@@ -877,13 +877,14 @@ static void s_GrayStringW(Cpu *c) { RET(1); }
 /* ---------- clipboard (text, internal) ---------- */
 static void s_OpenClipboard(Cpu *c) { g_clip_open = 1; RET(1); }
 static void s_CloseClipboard(Cpu *c) { g_clip_open = 0; RET(1); }
-static void s_EmptyClipboard(Cpu *c) { g_clip[0] = 0; RET(1); }
+static void s_EmptyClipboard(Cpu *c) { g_clip[0] = 0; g_clipf[0] = 0; g_clipf_cut = 0; RET(1); }
+static u64 clip_hdrop(Cpu *c) { /* DROPFILES { pFiles = 20, pt, fNC, fWide = 1 } + double-NUL wide list */ u32 n = 0; for (const char *q = g_clipf; *q; q++) n++; u64 m = w32_heap_alloc(W, 20 + (u64)(n + 2) * 2 + 2, 1); if (!m) return 0; wr32(c, m, 20); wr32(c, m + 4, 0); wr32(c, m + 8, 0); wr32(c, m + 12, 0); wr32(c, m + 16, 1); char one[1040]; u64 o = m + 20; const char *s = g_clipf; while (*s) { const char *e = s; while (*e && *e != 0x0a) e++; e_snprintf(one, sizeof one, "%.*s", (int)(e - s), s); o += ((u64)put_w8(c, o, one, 0) + 1) * 2; if (!*e) break; s = e + 1; } wr16(c, o, 0); return m; }
 static void s_SetClipboardData(Cpu *c) { u32 fmt = (u32)ARG(0); u64 h = ARG(1); if (fmt == 13) wstr_to_utf8(c, h, g_clip, sizeof g_clip, -1); else if (fmt == 1 || fmt == 7) { const char *s = rd_str(c, h, sizeof g_clip - 1); e_snprintf(g_clip, sizeof g_clip, "%s", s ? s : ""); } RET(h); }
-static void s_GetClipboardData(Cpu *c) { u32 fmt = (u32)ARG(0); if (!g_clip[0]) { RET(0); return; } if (fmt == 13) { u64 m = w32_heap_alloc(W, (e_strlen(g_clip) + 1) * 2, 1); put_w8(c, m, g_clip, 0); RET(m); return; } if (fmt == 1 || fmt == 7) { RET(w32_guest_strdup(W, g_clip)); return; } RET(0); }
-static void s_IsClipboardFormatAvailable(Cpu *c) { u32 fmt = (u32)ARG(0); RET(g_clip[0] && (fmt == 13 || fmt == 1 || fmt == 7)); }
+static void s_GetClipboardData(Cpu *c) { u32 fmt = (u32)ARG(0); if (fmt == 15) { RET(g_clipf[0] ? clip_hdrop(c) : 0); return; } if (!g_clip[0]) { RET(0); return; } if (fmt == 13) { u64 m = w32_heap_alloc(W, (e_strlen(g_clip) + 1) * 2, 1); put_w8(c, m, g_clip, 0); RET(m); return; } if (fmt == 1 || fmt == 7) { RET(w32_guest_strdup(W, g_clip)); return; } RET(0); }
+static void s_IsClipboardFormatAvailable(Cpu *c) { u32 fmt = (u32)ARG(0); RET(fmt == 15 ? g_clipf[0] != 0 : (g_clip[0] && (fmt == 13 || fmt == 1 || fmt == 7))); }
 static void s_GetClipboardSequenceNumber(Cpu *c) { RET(1); }
-static void s_CountClipboardFormats(Cpu *c) { RET(g_clip[0] ? 2 : 0); }
-static void s_EnumClipboardFormats(Cpu *c) { u32 f = (u32)ARG(0); RET(!g_clip[0] ? 0 : f == 0 ? 13 : f == 13 ? 1 : 0); }
+static void s_CountClipboardFormats(Cpu *c) { RET((g_clip[0] ? 2 : 0) + (g_clipf[0] ? 1 : 0)); }
+static void s_EnumClipboardFormats(Cpu *c) { u32 f = (u32)ARG(0), seq[4]; int n = 0; if (g_clip[0]) { seq[n++] = 13; seq[n++] = 1; } if (g_clipf[0]) seq[n++] = 15; if (f == 0) { RET(n ? seq[0] : 0); return; } for (int k = 0; k < n; k++) if (seq[k] == f) { RET(k + 1 < n ? seq[k + 1] : 0); return; } RET(0); }
 static void s_GetClipboardOwner(Cpu *c) { RET(0); }
 static void s_SetClipboardViewer(Cpu *c) { RET(0); }
 static void s_ChangeClipboardChain(Cpu *c) { RET(1); }

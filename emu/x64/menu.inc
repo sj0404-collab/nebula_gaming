@@ -184,7 +184,9 @@ static void s_LoadMenuA(Cpu *c) { u64 e = rsrc_lookup(c, ARG(0), ARG(1), 4, 0, 0
 /* ---------- the API ---------- */
 static void s_CreateMenu(Cpu *c) { int m = menu_new(W); RET(m < 0 ? 0 : menu_handle(m)); }
 static void s_CreatePopupMenu(Cpu *c) { s_CreateMenu(c); }
-static void s_DestroyMenu(Cpu *c) { int m = menu_of(ARG(0)); if (m < 0) { RET(0); return; } for (int p = 0; p < g_npop; p++) if (g_pop[p].menu == m) { menu_close_to(c, p); break; } for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && g_wnd[k].menu == ARG(0)) { g_wnd[k].menu = 0; menu_apply_bar(W, k); } menu_destroy(m, 0); RET(1); }
+static void s_DestroyMenu(Cpu *c) { int m = menu_of(ARG(0)); if (m < 0) { RET(0); return; } for (int p = 0; p < g_npop; p++) if (g_pop[p].menu == m) { menu_close_to(c, p); break; } for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && g_wnd[k].menu == ARG(0)) { g_wnd[k].menu = 0; menu_apply_bar(W, k); } /* a popup that is still attached to a living parent menu survives (win32k menus are reference counted: Q-Dir's installer destroys the submenu it enumerated and keeps using the language popup inside it; MFC CMenu temporaries do the same) */
+  for (int o = 0; o < MENU_MAX; o++) if (o != m && g_menu[o].used) for (int k = 0; k < g_menu[o].n; k++) if (g_menu[o].it[k].sub && menu_of(g_menu[o].it[k].sub) == m) { RET(1); return; }
+  menu_destroy(m, 0); RET(1); }
 static void s_IsMenu(Cpu *c) { RET(menu_of(ARG(0)) >= 0); }
 static void menu_changed(Win32 *w, int m) { for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && menu_of(g_wnd[k].menu) == m) menu_apply_bar(w, k); for (int p = 0; p < g_npop; p++) if (g_pop[p].menu == m) { wnd_invalidate(g_pop[p].wnd, 0); w->dirty = 1; } }
 static void append_menu(Cpu *c, int wide) { int m = menu_of(ARG(0)); if (m < 0) { RET(0); return; } int pos = menu_insert_at(m, -1); if (pos < 0) { RET(0); return; } menu_item_from_flags(c, &g_menu[m].it[pos], (u32)ARG(1), ARG(2), ARG(3), wide); menu_changed(W, m); RET(1); }

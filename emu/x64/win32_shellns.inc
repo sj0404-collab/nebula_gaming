@@ -45,10 +45,10 @@ static u32 ns_attrs(const char *path) { if (!path[0]) return 0x20000000u | 0x800
   if (st == 2) { a |= 0x20000000u /* FOLDER */ | 0x10000000u /* FILESYSANCESTOR */ | 0x00000100u /* DROPTARGET */ | 0x00000200u /* STORAGE */ ; if (vfs_dir_nonempty(path)) a |= 0x80000000u /* HASSUBFOLDER */; if (ns_is_root(path)) a &= ~(0x20u | 0x10u | 0x2u); } else a |= 0x00400000u /* STREAM */;
   return a; }
 /* IShellFolder */
-static void s_IShellFolder_ParseDisplayName(Cpu *c) { /* (hwnd, bc, name, *eaten, **pidl, *attrs) */ if (!ARG(2) || !ARG(4)) { RET(0x80070057u); return; }
-  char name[1040], full[1040]; wstr_to_utf8(c, ARG(2), name, sizeof name, -1); if (!e_strncmp(name, "::{20D04FE0", 11)) name[0] = 0; ns_join(ns_path(c, ARG(0)), name, full, sizeof full);
-  u64 sz; if (full[0] && !vfs_stat(full, &sz)) { wrp(c, ARG(4), 0); W->last_error = 2; RET(0x80070002u); return; }
-  if (ARG(3)) wr32(c, ARG(3), (u32)e_strlen(name)); wrp(c, ARG(4), pidl_make(W, full)); if (ARG(5)) wr32(c, ARG(5), rd32(c, ARG(5)) & ns_attrs(full)); RET(0); }
+static void s_IShellFolder_ParseDisplayName(Cpu *c) { /* (this, hwnd, bc, name, *eaten, **pidl, *attrs) */ if (!ARG(3) || !ARG(5)) { RET(0x80070057u); return; }
+  char name[1040], full[1040]; wstr_to_utf8(c, ARG(3), name, sizeof name, -1); if (!e_strncmp(name, "::{20D04FE0", 11)) name[0] = 0; ns_join(ns_path(c, ARG(0)), name, full, sizeof full);
+  u64 sz; if (full[0] && !vfs_stat(full, &sz)) { wrp(c, ARG(5), 0); W->last_error = 2; RET(0x80070002u); return; }
+  if (ARG(4)) wr32(c, ARG(4), (u32)e_strlen(name)); wrp(c, ARG(5), pidl_make(W, full)); if (ARG(6)) wr32(c, ARG(6), rd32(c, ARG(6)) & ns_attrs(full)); RET(0); }
 static u64 ns_enum_create(Cpu *c, const char *dir, u32 flags) { /* SHCONTF_FOLDERS 0x20, NONFOLDERS 0x40, INCLUDEHIDDEN 0x80 */
   u64 items[2048]; int n = 0;
   if (!dir[0]) { if (flags & 0x20) items[n++] = pidl_make(W, "C:\\"); }
@@ -65,12 +65,17 @@ static void s_IShellFolder_BindToStorage(Cpu *c) { if (ARG(4)) wrp(c, ARG(4), 0)
 static void s_IShellFolder_CompareIDs(Cpu *c) { /* (lParam, pidl1, pidl2): folders first, then case-insensitive by path; HRESULT with the result in the low word */
   const char *a = pidl_path(c, ARG(2)), *b = pidl_path(c, ARG(3)); u64 sz; int da = a[0] ? vfs_stat(a, &sz) == 2 : 1, db = b[0] ? vfs_stat(b, &sz) == 2 : 1; int r = da != db ? (da ? -1 : 1) : e_stricmp(a, b); r = r < 0 ? -1 : r > 0 ? 1 : 0; RET((u32)(u16)(s16)r); }
 static void s_IShellFolder_CreateViewObject(Cpu *c) { /* (hwndOwner, riid, **ppv): IShellView over the default folder view (defview.inc); other view objects (IContextMenu, IDropTarget, IQueryInfo) are not provided */ if (ARG(3)) wrp(c, ARG(3), 0); if (!ARG(3)) { RET(0x80070057u); return; }
-  u32 d1 = rd32(c, ARG(2)); u16 d2 = rd16(c, ARG(2) + 4); if (!(d1 == 0x000214E3 && d2 == 0) && !(d1 == 0x88E39E80 && d2 == 0x3578)) { e_log("[shell] IShellFolder::CreateViewObject({%08x-%04x-…}) not provided\n", d1, d2); RET(0x80004002u); return; }
+  u32 d1 = rd32(c, ARG(2)); u16 d2 = rd16(c, ARG(2) + 4); if (((d1 == 0x000214E4 || d1 == 0x000214F4) && d2 == 0) || (d1 == 0xBCFCE0A0 && d2 == 0xEC17)) { /* the folder background menu (Refresh / Paste / New folder / Properties) */ u64 o = gdi_shell_ctxmenu_create(c, ns_path(c, ARG(0)), 0, 0); if (!o) { RET(0x8007000Eu); return; } wrp(c, ARG(3), o); RET(0); return; }
+  if (!(d1 == 0x000214E3 && d2 == 0) && !(d1 == 0x88E39E80 && d2 == 0x3578)) { e_log("[shell] IShellFolder::CreateViewObject({%08x-%04x-…}) not provided\n", d1, d2); RET(0x80004002u); return; }
   u64 v = gdi_shell_view_create(c, ARG(0), ns_path(c, ARG(0))); if (!v) { RET(0x8007000Eu); return; } u64 P = PSZ_OF(c); wr32(c, ARG(0) + 2 * P, rd32(c, ARG(0) + 2 * P) + 1); wrp(c, ARG(3), v); RET(0); }
 static void s_IShellFolder_GetAttributesOf(Cpu *c) { /* (cidl, apidl, *inout) */ u32 n = (u32)ARG(1); u64 P = PSZ_OF(c); if (!ARG(3)) { RET(0x80070057u); return; } u32 mask = rd32(c, ARG(3)), acc = 0xFFFFFFFFu;
   if (!n) acc = ns_attrs(ns_path(c, ARG(0))); else for (u32 i = 0; i < n; i++) { char full[1040]; ns_join(ns_path(c, ARG(0)), pidl_path(c, rdp(c, ARG(2) + (u64)i * P)), full, sizeof full); acc &= ns_attrs(full); }
   wr32(c, ARG(3), acc & mask); RET(0); }
-static void s_IShellFolder_GetUIObjectOf(Cpu *c) { /* (hwnd, cidl, apidl, riid, rsv, **ppv): no icon extractors / context menus here — SHGetFileInfo covers icons */ if (ARG(5)) wrp(c, ARG(5), 0); RET(0x80004002u); }
+static void s_IShellFolder_GetUIObjectOf(Cpu *c) { /* (this, hwnd, cidl, apidl, riid, rsv, **ppv): IContextMenu / 2 / 3 over the items (ctxmenu.inc); icon extractors are not provided — SHGetFileInfo covers icons */ u64 ppv = ARG(6); if (ppv) wrp(c, ppv, 0); if (!ppv || !ARG(4)) { RET(0x80070057u); return; }
+  u32 d1 = rd32(c, ARG(4)); u16 d2 = rd16(c, ARG(4) + 4); if (!((d1 == 0x000214E4 || d1 == 0x000214F4) && d2 == 0) && !(d1 == 0xBCFCE0A0 && d2 == 0xEC17)) { e_log("[shell] IShellFolder::GetUIObjectOf({%08x-%04x-...}) not provided\n", d1, d2); RET(0x80004002u); return; }
+  u32 n = (u32)ARG(2); u64 P = PSZ_OF(c); if (n > 64) n = 64; char (*paths)[520] = n ? emu_alloc(sizeof(char[520]) * n) : 0; if (n && !paths) { RET(0x8007000Eu); return; }
+  for (u32 i = 0; i < n; i++) { char full[1040]; ns_join(ns_path(c, ARG(0)), pidl_path(c, rdp(c, ARG(3) + (u64)i * P)), full, sizeof full); e_snprintf(paths[i], 520, "%s", full); }
+  u64 o = gdi_shell_ctxmenu_create(c, ns_path(c, ARG(0)), (const char (*)[520])paths, (int)n); if (paths) emu_free(paths); if (!o) { RET(0x8007000Eu); return; } wrp(c, ppv, o); RET(0); }
 static void s_IShellFolder_GetDisplayNameOf(Cpu *c) { /* (pidl, flags, STRRET*) */ char full[1040], out[1040]; if (!ARG(3)) { RET(0x80070057u); return; } const char *rel = pidl_path(c, ARG(1)); if (!rel[0]) e_snprintf(full, sizeof full, "%s", ns_path(c, ARG(0))); else ns_join(ns_path(c, ARG(0)), rel, full, sizeof full);
   ns_display_name(full, (u32)ARG(2), out, sizeof out); ns_strret(c, ARG(3), out); RET(0); }
 static void s_IShellFolder_SetNameOf(Cpu *c) { /* (hwnd, pidl, newname, flags, **pidlout): a real rename on the disk */ char full[1040], nn[520], to[1040]; ns_join(ns_path(c, ARG(0)), pidl_path(c, ARG(2)), full, sizeof full); wstr_to_utf8(c, ARG(3), nn, sizeof nn, -1);

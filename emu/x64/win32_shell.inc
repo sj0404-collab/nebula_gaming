@@ -326,9 +326,6 @@ static void s_Shell_NotifyIconW(Cpu *c) { RET(1); }
 static void s_Shell_NotifyIconA(Cpu *c) { RET(1); }
 static void s_SHAppBarMessage(Cpu *c) { RET(0); }
 static void s_SHEmptyRecycleBinW(Cpu *c) { RET(0); }
-static void s_DragAcceptFiles(Cpu *c) { (void)c; }
-static void s_DragQueryFileW(Cpu *c) { RET(0); }
-static void s_DragFinish(Cpu *c) { (void)c; }
 /* SHFileOperation: FO_DELETE (3) of one path or a double-NUL list; FO_COPY/FO_MOVE of single files */
 static void s_SHFileOperationW(Cpu *c) { u64 op = ARG(0); u32 func = rd32(c, op + PSZ_OF(c)); u64 from = rdp(c, op + PSZ_OF(c) * 2), to = rdp(c, op + PSZ_OF(c) * 3); int rc = 0;
   for (u64 p = from; p && rd16(c, p);) { char path[520]; int n = wstr_to_utf8(c, p, path, sizeof path, -1); (void)n; u64 l = 0; while (rd16(c, p + l * 2)) l++; p += (l + 1) * 2;
@@ -360,6 +357,17 @@ void w32_shell_open(Cpu *c, const char *path) { u64 a = w32_heap_alloc(W, (e_str
 static void s_ShellExecuteW(Cpu *c) { shell_execute(c, ARG(1), ARG(2), ARG(3), ARG(4), 1, 0); }
 static void s_ShellExecuteA(Cpu *c) { shell_execute(c, ARG(1), ARG(2), ARG(3), ARG(4), 0, 0); }
 /* SHELLEXECUTEINFO: cbSize@0 fMask@4 hwnd@8 verb@P file@P+P params parent dir show@… hInstApp … hProcess (last) */
+/* DROPFILES readers (shell32): { u32 pFiles; POINT pt; BOOL fNC; BOOL fWide; } + double-NUL list at pFiles */
+static u32 drop_file(Cpu *c, u64 hdrop, u32 idx, u64 out, u32 cch, int wide_out) { if (!hdrop) return 0; u32 off = rd32(c, hdrop), fwide = rd32(c, hdrop + 16); u64 p = hdrop + off; u32 count = 0; char one[1040];
+  for (;;) { if (fwide) { if (!rd16(c, p)) break; } else if (!rd8(c, p)) break; if (fwide) wstr_to_utf8(c, p, one, sizeof one, -1); else { const char *s = rd_str(c, p, 1039); e_snprintf(one, sizeof one, "%s", s ? s : ""); }
+    if (idx != 0xFFFFFFFFu && count == idx) { size_t l = e_strlen(one); if (!out || !cch) { if (!wide_out) return (u32)l; u32 u = 0; for (size_t k = 0; k < l; k++) { u8 b = (u8)one[k]; if ((b & 0xC0) != 0x80) u++; if (b >= 0xF0) u++; } return u; } if (wide_out) return put_w8(c, out, one, cch); if (l + 1 > cch) l = cch - 1; for (size_t k = 0; k < l; k++) wr8(c, out + k, (u8)one[k]); wr8(c, out + l, 0); return (u32)l; }
+    count++; if (fwide) { while (rd16(c, p)) p += 2; p += 2; } else { while (rd8(c, p)) p++; p++; } }
+  return idx == 0xFFFFFFFFu ? count : 0; }
+static void s_DragQueryFileW(Cpu *c) { RET(drop_file(c, ARG(0), (u32)ARG(1), ARG(2), (u32)ARG(3), 1)); }
+static void s_DragQueryFileA(Cpu *c) { RET(drop_file(c, ARG(0), (u32)ARG(1), ARG(2), (u32)ARG(3), 0)); }
+static void s_DragQueryPoint(Cpu *c) { if (ARG(1)) { wr32(c, ARG(1), rd32(c, ARG(0) + 4)); wr32(c, ARG(1) + 4, rd32(c, ARG(0) + 8)); } RET(rd32(c, ARG(0) + 12) == 0); }
+static void s_DragFinish(Cpu *c) { RET(0); }
+static void s_DragAcceptFiles(Cpu *c) { RET(0); }
 static void s_ShellExecuteExW(Cpu *c) { u64 e = ARG(0); u64 P = PSZ_OF(c); u64 verb = rdp(c, e + 8 + P), file = rdp(c, e + 8 + 2 * P), params = rdp(c, e + 8 + 3 * P), dir = rdp(c, e + 8 + 4 * P); u64 hp; shell_execute(c, verb, file, params, dir, 1, &hp);
   u64 inst_off = 8 + 5 * P + 4; if (c->mode32) inst_off = 8 + 5 * 4 + 4; u64 r = c->r[RAX]; wrp(c, e + inst_off, r); u32 mask = rd32(c, e + 4); if (mask & 0x40) { u64 hproc_off = c->mode32 ? 60 : 104; wrp(c, e + hproc_off, hp); } RET(r > 32); }
 static void s_ShellExecuteExA(Cpu *c) { u64 e = ARG(0); u64 P = PSZ_OF(c); u64 verb = rdp(c, e + 8 + P), file = rdp(c, e + 8 + 2 * P), params = rdp(c, e + 8 + 3 * P), dir = rdp(c, e + 8 + 4 * P); u64 hp; shell_execute(c, verb, file, params, dir, 0, &hp); u64 r = c->r[RAX]; wrp(c, e + (c->mode32 ? 32 : 52), r); if (rd32(c, e + 4) & 0x40) wrp(c, e + (c->mode32 ? 60 : 104), hp); RET(r > 32); }
@@ -489,5 +497,5 @@ static int shell_cocreate(Cpu *c, u32 clsid_d1, u64 riid, u64 ppv) {
   S(SHGetFolderPathW), S(SHGetFolderPathA), S(SHGetFolderPathAndSubDirW), S(SHGetSpecialFolderPathW), S(SHGetSpecialFolderPathA), S(SHGetKnownFolderPath), S(SHGetPathFromIDListW), S(SHGetPathFromIDListA), S(SHGetPathFromIDListEx), \
   S(SHGetSpecialFolderLocation), S(SHGetFolderLocation), S(SHParseDisplayName), S(ILCreateFromPathW), S(ILFree), S(ILClone), S(ILIsEqual), S(SHGetMalloc), S(CoGetMalloc), SA("IMalloc::QueryInterface", IMalloc_QueryInterface), SA("IMalloc::AddRef", IMalloc_AddRef), SA("IMalloc::Release", IMalloc_Release), SA("IMalloc::Alloc", IMalloc_Alloc), SA("IMalloc::Realloc", IMalloc_Realloc), SA("IMalloc::Free", IMalloc_Free), SA("IMalloc::GetSize", IMalloc_GetSize), SA("IMalloc::DidAlloc", IMalloc_DidAlloc), SA("IMalloc::HeapMinimize", IMalloc_HeapMinimize), S(SHCreateDirectoryExW), S(SHCreateDirectoryExA), S(SHChangeNotify), S(SHAddToRecentDocs), S(IsUserAnAdmin), \
   S(Shell_NotifyIconW), S(Shell_NotifyIconA), S(SHAppBarMessage), S(SHEmptyRecycleBinW), S(DragAcceptFiles), S(DragQueryFileW), S(DragFinish), S(SHFileOperationW), \
-  S(ShellExecuteW), S(ShellExecuteA), S(ShellExecuteExW), S(ShellExecuteExA), S(FindExecutableW), S(ExitWindowsEx), S(InitiateSystemShutdownExW), S(LockWorkStation), \
+  S(ShellExecuteW), S(ShellExecuteA), S(ShellExecuteExW), S(ShellExecuteExA), S(FindExecutableW), S(DragQueryFileA), S(DragQueryPoint), S(ExitWindowsEx), S(InitiateSystemShutdownExW), S(LockWorkStation), \
   S(GetSystemWow64DirectoryW), S(GetSystemWow64DirectoryA), S(Wow64DisableWow64FsRedirection), S(Wow64RevertWow64FsRedirection), S(Wow64EnableWow64FsRedirection),
