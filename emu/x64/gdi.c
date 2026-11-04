@@ -282,6 +282,7 @@ static void blit(Cpu *c, u64 hdst, int dx, int dy, int dw, int dh, u64 hsrc, int
   for (int y = 0; y < dh; y++) { int yy = dy + y; if (yy < d.y0 || yy >= d.h) continue; u32 *drow = srow(&d, yy); int syy = sy + (flipy ? dh - 1 - y : y) * sh / dh; u32 *srw = 0; if (has_src && syy >= 0 && syy < s.h) srw = srow(&s, syy);
     if (dw == sw && !flipx && srw && rop == 0x00CC0020) { int x0 = dx < d.x0 ? d.x0 - dx : 0, x1 = dw; if (dx + x1 > d.w) x1 = d.w - dx; int sx0 = sx + x0; if (sx0 < 0) { x0 += -sx0; sx0 = 0; } int cnt = x1 - x0; if (sx0 + cnt > s.w) cnt = s.w - sx0; if (cnt > 0) e_memcpy(drow + dx + x0, srw + sx0, (size_t)cnt * 4); continue; }
     for (int x = 0; x < dw; x++) { int xx = dx + x; if (xx < d.x0 || xx >= d.w) continue; u32 sv = 0; if (srw) { int sxx = sx + (flipx ? dw - 1 - x : x) * sw / dw; if (sxx >= 0 && sxx < s.w) sv = srw[sxx]; } drow[xx] = rop_apply(rop, drow[xx], sv, pat); } }
+  if (w->api_trace) { u32 sv0 = 0, dv0 = 0; if (has_src && sy >= 0 && sy < s.h && sx >= 0 && sx < s.w) sv0 = srow(&s, sy)[sx]; if (dy >= d.y0 && dy < d.h && dx >= d.x0 && dx < d.w) dv0 = srow(&d, dy)[dx]; e_log("[gdi] blit dst %llx (%dx%d x0=%d y0=%d) src %llx (%dx%d has=%d) sv0=%08x dv0=%08x\n", (unsigned long long)hdst, d.w, d.h, d.x0, d.y0, (unsigned long long)hsrc, has_src ? s.w : 0, has_src ? s.h : 0, has_src, sv0, dv0); }
   mark_screen(w, hdst); RET(1);
 }
 /* msimg32: AlphaBlend (per-pixel alpha when AC_SRC_ALPHA, premultiplied as GDI specifies, times SourceConstantAlpha), TransparentBlt (colour key), GradientFill (H/V rects, triangles as flat fill) */

@@ -351,7 +351,7 @@ static void register_class(Cpu *c, u64 a, int ex, int wide) { Win32 *w = W; int 
   int i = cls_find(W, name); if (i >= 0 && g_cls[i].inst == rdp(c, a + off + (m ? 16 : 24))) { W->last_error = 1410; RET(0); return; }   /* ERROR_CLASS_ALREADY_EXISTS */
   if (i < 0) for (int k = 0; k < 64; k++) if (!g_cls[k].used) { i = k; break; } if (i < 0) { RET(0); return; }
   WndClass *k = &g_cls[i]; k->used = 1; k->pid = w->pid; e_snprintf(k->name, sizeof k->name, "%s", name); k->style = rd32(c, a + off + (ex && !m ? 4 : 0)); k->proc = rdp(c, a + off + (m ? 4 : 8)); k->extra = (int)rd32(c, a + off + (m ? 12 : 20)); k->inst = rdp(c, a + off + (m ? 16 : 24)); k->icon = rdp(c, a + off + (m ? 20 : 32)); k->cursor = rdp(c, a + off + (m ? 24 : 40)); k->brush = rdp(c, a + off + (m ? 28 : 48)); k->menu_name = rdp(c, a + off + (m ? 32 : 56)); k->menu_wide = wide; k->icon_sm = ex ? rdp(c, a + off + (m ? 44 : 72)) : 0;
-  w->wndclass_proc = k->proc; w->wndclass_registered = 1; e_snprintf(w->wndclass_name, sizeof w->wndclass_name, "%s", name); RET(0xC001 + i); }
+  w->wndclass_proc = k->proc; w->wndclass_registered = 1; e_snprintf(w->wndclass_name, sizeof w->wndclass_name, "%s", name); if (w->api_trace) e_log("[user] class \"%s\" proc=%llx style=%x brush=%llx cursor=%llx\n", name, (unsigned long long)k->proc, k->style, (unsigned long long)k->brush, (unsigned long long)k->cursor); RET(0xC001 + i); }
 static void s_RegisterClassA(Cpu *c) { register_class(c, ARG(0), 0, 0); }
 static void s_RegisterClassExA(Cpu *c) { register_class(c, ARG(0), 1, 0); }
 static void s_RegisterClassW(Cpu *c) { register_class(c, ARG(0), 0, 1); }
@@ -502,6 +502,7 @@ static void wnd_frame(Cpu *c, int i);
 static int looks_like_rtf(const char *t); static char *rtf_to_text(const char *r, size_t n);
 static void ilr_resume(Cpu *c, u64 rax); static void wicread_resume(Cpu *c, u64 rax); static int dib_decode(Cpu *c, u64 bmi, u64 bits, u32 *dst, int dw, int dh, int flip_only_rows);
 static void wnd_erase(Cpu *c, int i) { Win32 *w = W; Wnd *n = &g_wnd[i]; u64 hb = n->cls_brush; u32 px = 0xf0f0f0; int skip = 0;
+  if (w->api_trace) e_log("[user] erase #%d \"%s\" brush=%llx vis=%d at %d,%d %dx%d\n", i, n->clsname, (unsigned long long)hb, n->visible, n->x, n->y, n->w, n->h);
   if (n->is_dlg || n->builtin == BI_MSGBOX) px = 0xf0f0f0; else { GdiObj *b = gdi_get(w, hb); if (b) { if (b->kind == K_BRUSH && b->pen_width == -1) skip = 1; px = b->color; } else if (hb >= 1 && hb <= 31) px = g_sys_colors[hb - 1]; else if (!hb) skip = 1; }
   if (!skip) { u64 hdc = wnd_dc(c, i); Surf s; if (hdc && dc_surf(c, hdc, &s)) { fill_rect_px(&s, 0, 0, s.w, s.h, px); mark_screen(w, hdc); } if (hdc) wnd_dc_free(w, hdc); }
   wnd_frame(c, i); }
@@ -524,7 +525,8 @@ static void s_EndPaint(Cpu *c) { Win32 *w = W; u64 hdc = rdp(c, ARG(1)); { int i
 static void s_GetDC(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(ARG(0) == 0 || ARG(0) == HWND_DESKTOP ? wnd_dc(c, -1) : 0); return; } RET(wnd_dc(c, i)); }
 static void s_GetWindowDC(Cpu *c) { Win32 *w = W; int i = wnd_of(ARG(0)); if (i < 0) { RET(wnd_dc(c, -1)); return; } u64 h = wnd_dc(c, i); GdiObj *dc = gdi_get(w, h); if (dc) { int wx, wy; wnd_window_origin(i, &wx, &wy); dc->ox = wx < 0 ? 0 : wx; dc->oy = wy < 0 ? 0 : wy; dc->vw = g_wnd[i].w; dc->vh = g_wnd[i].h; } RET(h); }
 static void s_GetDCEx(Cpu *c) { s_GetDC(c); }
-static void s_ReleaseDC(Cpu *c) { Win32 *w = W; { int i = wnd_of(ARG(0)); if (i >= 0) popups_over(i); } wnd_dc_free(w, ARG(1)); w->dirty = 1; RET(1); }
+static void s_ReleaseDC(Cpu *c) { Win32 *w = W; GdiObj *dc = gdi_get(w, ARG(1)); if (!dc || dc->kind != K_DC || (!dc->wnd && ARG(1) != window_dc)) { RET(0); return; }   /* a memory DC (CreateCompatibleDC) is not released by ReleaseDC: Windows returns 0 and keeps it (Q-Dir calls ReleaseDC on its paint buffer right before blitting from it) */
+  { int i = wnd_of(ARG(0)); if (i >= 0) popups_over(i); } wnd_dc_free(w, ARG(1)); w->dirty = 1; RET(1); }
 static void s_WindowFromDC(Cpu *c) { GdiObj *dc = gdi_get(W, ARG(0)); RET(dc && dc->wnd > 0 ? HWND_OF(dc->wnd - 1) : 0); }
 static void s_GetUpdateRect(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } if (ARG(1)) { wr32(c, ARG(1), 0); wr32(c, ARG(1) + 4, 0); wr32(c, ARG(1) + 8, g_wnd[i].invalid ? (u32)wnd_client_w(i) : 0); wr32(c, ARG(1) + 12, g_wnd[i].invalid ? (u32)wnd_client_h(i) : 0); } if (ARG(2) && g_wnd[i].erase) { wnd_erase(c, i); g_wnd[i].erase = 0; } RET(g_wnd[i].invalid != 0); }
 static void s_GetUpdateRgn(Cpu *c) { int i = wnd_of(ARG(0)); RET(i >= 0 && g_wnd[i].invalid ? 2 : 1); }
@@ -536,7 +538,7 @@ static void def_window_proc(Cpu *c, int i, u32 msg, u64 wp, u64 lp) {
   Win32 *w = W; Wnd *n = &g_wnd[i];
   switch (msg) {
     case 0x81: RET(1); return;                                                                 /* WM_NCCREATE */
-    case 0x0F: { if (n->erase && n->visible) wnd_erase(c, i); n->invalid = 0; n->erase = 0; if (i == 0) sync_main(w); RET(0); return; }      /* WM_PAINT: erase if still pending, validate */
+    case 0x0F: { if (w->api_trace) e_log("[user] defpaint #%d \"%s\" erase=%d vis=%d\n", i, n->clsname, n->erase, n->visible); if (n->erase && n->visible) wnd_erase(c, i); n->invalid = 0; n->erase = 0; if (i == 0) sync_main(w); RET(0); return; }      /* WM_PAINT: erase if still pending, validate */
     case 0x14: { u64 hb = n->cls_brush; u32 px = 0; GdiObj *b = gdi_get(w, hb); if (b) { if (b->kind == K_BRUSH && b->pen_width == -1) { RET(0); return; } px = b->color; } else if (hb >= 1 && hb <= 31) { extern u32 sys_color_px(u32); px = sys_color_px((u32)hb - 1); } else if (!hb) { RET(0); return; }
       Surf s; GdiObj *dc = gdi_get(w, wp); if (dc && dc_surf(c, wp, &s)) { fill_rect_px(&s, 0, 0, s.w, s.h, px); mark_screen(w, wp); } RET(1); return; }   /* WM_ERASEBKGND */
     case 0x10: { destroy_window(c, i); return; }                                                /* WM_CLOSE → DestroyWindow */
