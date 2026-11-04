@@ -28,7 +28,7 @@ enum { SLOT_STARTUP = 0, SLOT_CONT = 1, SLOT_FIRST = 2 };
 
 static u64 g_a32[16]; static int g_a32_n;
 static const char *shim_canonical(const char *dll, const char *name);
-static const char *sig32_lookup(const char *name); static int clean32_of(const char *name, const char *sig);
+static const char *sig32_lookup(const char *name); static int clean32_of(const char *name, const char *sig); static int clean32_lookup(const char *name);
 u64 w32_arg(Cpu *c, int n) {
   if (c->mode32) { if (n < g_a32_n) return g_a32[n]; return rd32(c, c->r[RSP] + 4u * (u32)n); }   /* 32-bit: all arguments on the stack, esp → first argument (the return address was popped by the dispatcher) */
   switch (n) { case 0: return c->r[RCX]; case 1: return c->r[RDX]; case 2: return c->r[R8]; case 3: return c->r[R9]; default: return rd64(c, c->r[RSP] + 0x20 + (u64)(n - 4) * 8); }
@@ -113,7 +113,7 @@ u64 w32_shim_slot(Win32 *w, const char *dll, const char *name) {
   int i = w->nslots++;
   size_t ln = e_strlen(name) + 1, ld = e_strlen(dll) + 1; char *n = emu_alloc(ln + ld); e_memcpy(n, name, ln); e_memcpy(n + ln, dll, ld);
   w->slots[i].name = n; w->slots[i].dll = n + ln; w->slots[i].fn = find_shim(dll, name); w->slots[i].calls = 0;
-  { const char *cn = shim_canonical(dll, name); w->slots[i].sig32 = sig32_lookup(cn); w->slots[i].clean32 = (u16)clean32_of(cn, w->slots[i].sig32); }
+  { const char *cn = shim_canonical(dll, name); w->slots[i].sig32 = sig32_lookup(cn); w->slots[i].clean32 = (u16)clean32_of(cn, w->slots[i].sig32); if (clean32_lookup(cn) >= 0) w->slots[i].warned32 = 1; /* known stdcall (possibly 0 bytes): never report it as unknown */ }
   return SLOT_ADDR(i);
 }
 

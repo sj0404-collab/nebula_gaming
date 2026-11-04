@@ -72,13 +72,13 @@ static const char *sig32_lookup(const char *name) { for (size_t i = 0; i < sizeo
 static int clean32_lookup(const char *name) {   /* sorted table → binary search; cdecl/unknown → 0 (the caller cleans) */
   int lo = 0, hi = (int)(sizeof stdcall32_tab / sizeof stdcall32_tab[0]) - 1;
   while (lo <= hi) { int mid = (lo + hi) / 2; int r = e_strcmp(stdcall32_tab[mid].n, name); if (r == 0) return stdcall32_tab[mid].bytes; if (r < 0) lo = mid + 1; else hi = mid - 1; }
-  return 0;
+  return -1;   /* not in the table */
 }
 /* names that end in "A"/"W" variants, "Ex" … are all in the table; a few families that Wine implements as cdecl/varargs but Windows
    exports as stdcall in 32-bit kernel32 are fixed up here */
 static int clean32_of(const char *name, const char *sig) {
-  int b = clean32_lookup(name);
-  if (!b && sig) {   /* stdcall APIs with a signature but no Wine entry: compute from the signature when the name looks like a Win32 API (capitalised) */
+  int b = clean32_lookup(name); if (b >= 0) return b; b = 0;   /* a table entry with 0 bytes (GetVersion, TlsAlloc …) is a known stdcall with no arguments, not an unknown name */
+  if (sig) {   /* stdcall APIs with a signature but no Wine entry: compute from the signature when the name looks like a Win32 API (capitalised) */
     if ((name[0] >= 'A' && name[0] <= 'Z') || (name[0] == 'g' && name[1] == 'l') || (name[0] == 'w' && name[1] == 'g' && name[2] == 'l')) { for (const char *p = sig + 2; *p; p++) b += (*p == 'q' || *p == 'd') ? 8 : 4; }   /* opengl32: APIENTRY = stdcall */
   }
   return b;
