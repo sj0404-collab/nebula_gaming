@@ -75,4 +75,4 @@ int main(void) {
     if (frame == 0) { int okTri = px[0] + px[1] + px[2] > 60 && bg[0] < 60 && bg[2] > 50, okQuad = qx[0] > 200 && qx[1] > 200 && qx[2] < 60; printf(okTri && okQuad ? "frame 0: triangle + GL_QUADS quad drawn and presented\n" : "frame 0: rendering mismatch (tri=%d quad=%d)\n", okTri, okQuad); }
   }
   Sleep(600);
-  wglMakeCurrent(0, 0); wglDeleteContext(rc); ReleaseDC(h, dc); DestroyWindow(h); printf("gltri ok\n"); return 0; }
+  wglMakeCurrent(0, 0); wglDeleteContext(rc); ReleaseDC(h, dc); printf("gltri ok\n"); return 0; }   /* the window stays until exit so the last frame remains visible */

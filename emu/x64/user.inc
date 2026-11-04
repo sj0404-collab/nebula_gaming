@@ -290,7 +290,7 @@ static void kbdhook_resume(Cpu *c, u64 rax) { Win32 *w = W; int ci = w->ncont - 
 static void dispatch_to_wndproc(Cpu *c, u64 hwnd, u32 msg, u64 wp, u64 lp) {
   Win32 *w = W;
   if (msg == 0x113 && lp && lp > 0x10000) { w32_push_cont(c, CONT_RET_RAX, 0); w32_guest_call(c, lp, hwnd, msg, wp, (u64)(u32)(host_now_ms() - w->start_ms)); return; }
-  int i = wnd_of(hwnd); if (i < 0 || g_wnd[i].destroyed || !g_wnd[i].wndproc) { RET(0); return; }
+  int i = wnd_of(hwnd); if (i < 0 || g_wnd[i].destroyed || !g_wnd[i].wndproc) { if (w->api_trace) e_log("[user] dispatch: no procedure for hwnd %llx msg %x (wnd %d%s)\n", (unsigned long long)hwnd, msg, i, i >= 0 && g_wnd[i].destroyed ? ", destroyed" : ""); RET(0); return; }
   if (g_wnd[i].pid != w->pid) { /* another process's window: its procedure lives in a different address space — queue the message there (SendMessage degrades to PostMessage; the reply is 1) */
     for (int k = 0; ; k++) { Win32 *o = proc_w32_at(k); if (!o) break; if (o == (Win32 *)1) continue; if (o->pid == g_wnd[i].pid) { post_msg_to(o, hwnd, msg, wp, lp); break; } } RET(1); return; }
   send_to(c, i, msg, wp, lp, CONT_RET_RAX, 0);

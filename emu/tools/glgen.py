@@ -6,8 +6,8 @@
 Sources:
   * opengl32.spec (Wine) — every function the real opengl32.dll exports (GL 1.1 + wgl), with argument types;
   * GL_CORE below — GL 1.2 … 3.3 core + the extensions the bridge implements, reachable through wglGetProcAddress.
-Signature letters: v void, i 32-bit (GLint/GLenum/GLuint/GLsizei/GLboolean/GLbitfield), q 64-bit (GLintptr/GLsizeiptr/GLint64/GLsync),
-f float, d double, p pointer. The same ids are used on both sides (gl_funcs.inc / gltable.ts), so the C side marshals arguments
+Signature letters: v void, i 32-bit (GLint/GLenum/GLuint/GLsizei/GLboolean/GLbitfield), q 64-bit on both bitnesses (GLint64/GLuint64),
+z pointer-sized (GLintptr/GLsizeiptr: 4 bytes on x86, 8 on x64), f float, d double, p pointer (incl. GLsync). The same ids are used on both sides (gl_funcs.inc / gltable.ts), so the C side marshals arguments
 generically and the TypeScript side implements each function against WebGL2.
 """
 import sys, os, re
@@ -20,7 +20,7 @@ glBeginTransformFeedback v:i
 glBindAttribLocation v:iip
 glBindBuffer v:ii
 glBindBufferBase v:iii
-glBindBufferRange v:iiiqq
+glBindBufferRange v:iiizz
 glBindFragDataLocation v:iip
 glBindFramebuffer v:ii
 glBindRenderbuffer v:ii
@@ -31,22 +31,22 @@ glBlendEquation v:i
 glBlendEquationSeparate v:ii
 glBlendFuncSeparate v:iiii
 glBlitFramebuffer v:iiiiiiiiii
-glBufferData v:iqpi
-glBufferSubData v:iqqp
+glBufferData v:izpi
+glBufferSubData v:izzp
 glCheckFramebufferStatus i:i
 glClearBufferfi v:iifi
 glClearBufferfv v:iip
 glClearBufferiv v:iip
 glClearBufferuiv v:iip
 glClearDepthf v:f
-glClientWaitSync i:qiq
+glClientWaitSync i:piq
 glColorMaski v:iiiii
 glCompileShader v:i
 glCompressedTexImage2D v:iiiiiiip
 glCompressedTexImage3D v:iiiiiiiip
 glCompressedTexSubImage2D v:iiiiiiiip
 glCompressedTexSubImage3D v:iiiiiiiiiip
-glCopyBufferSubData v:iiqqq
+glCopyBufferSubData v:iizzz
 glCopyTexSubImage3D v:iiiiiiiii
 glCreateProgram i:
 glCreateShader i:i
@@ -57,7 +57,7 @@ glDeleteQueries v:ip
 glDeleteRenderbuffers v:ip
 glDeleteSamplers v:ip
 glDeleteShader v:i
-glDeleteSync v:q
+glDeleteSync v:p
 glDeleteTransformFeedbacks v:ip
 glDeleteVertexArrays v:ip
 glDepthRangef v:ff
@@ -75,8 +75,8 @@ glEnableVertexAttribArray v:i
 glEnablei v:ii
 glEndQuery v:i
 glEndTransformFeedback v:
-glFenceSync q:ii
-glFlushMappedBufferRange v:iqq
+glFenceSync p:ii
+glFlushMappedBufferRange v:izz
 glFramebufferRenderbuffer v:iiii
 glFramebufferTexture v:iiii
 glFramebufferTexture1D v:iiiii
@@ -102,7 +102,7 @@ glGetBooleani_v v:iip
 glGetBufferParameteri64v v:iip
 glGetBufferParameteriv v:iip
 glGetBufferPointerv v:iip
-glGetBufferSubData v:iqqp
+glGetBufferSubData v:izzp
 glGetFragDataLocation i:ip
 glGetFramebufferAttachmentParameteriv v:iiip
 glGetInteger64i_v v:iip
@@ -122,7 +122,7 @@ glGetShaderPrecisionFormat v:iipp
 glGetShaderSource v:iipp
 glGetShaderiv v:iip
 glGetStringi p:ii
-glGetSynciv v:qiipp
+glGetSynciv v:piipp
 glGetTexParameterIiv v:iip
 glGetTexParameterIuiv v:iip
 glGetTransformFeedbackVarying v:iiipppp
@@ -146,12 +146,12 @@ glIsQuery i:i
 glIsRenderbuffer i:i
 glIsSampler i:i
 glIsShader i:i
-glIsSync i:q
+glIsSync i:p
 glIsTransformFeedback i:i
 glIsVertexArray i:i
 glLinkProgram v:i
 glMapBuffer p:ii
-glMapBufferRange p:iqqi
+glMapBufferRange p:izzi
 glMultiDrawArrays v:ippi
 glMultiDrawElements v:ipipi
 glPauseTransformFeedback v:
@@ -291,7 +291,7 @@ glVertexAttribP3uiv v:iiip
 glVertexAttribP4ui v:iiii
 glVertexAttribP4uiv v:iiip
 glVertexAttribPointer v:iiiiip
-glWaitSync v:qiq
+glWaitSync v:piq
 glBindTransformFeedback v:ii
 glBindFragDataLocationIndexed v:iiip
 glGetFragDataIndex i:ip
@@ -331,8 +331,8 @@ glClientActiveTextureARB v:i
 glBindBufferARB v:ii
 glDeleteBuffersARB v:ip
 glGenBuffersARB v:ip
-glBufferDataARB v:iqpi
-glBufferSubDataARB v:iqqp
+glBufferDataARB v:izpi
+glBufferSubDataARB v:izzp
 glMapBufferARB p:ii
 glUnmapBufferARB i:i
 glCreateProgramObjectARB i:
@@ -385,16 +385,16 @@ glTexImage3DEXT v:iiiiiiiiip
 glTexSubImage3DEXT v:iiiiiiiiiip
 glPointParameterfARB v:if
 glPointParameterfvARB v:ip
-glFenceSyncARB q:ii
-glDeleteSyncARB v:q
-glClientWaitSyncARB i:qiq
-glWaitSyncARB v:qiq
-glGetSyncivARB v:qiipp
+glFenceSyncARB p:ii
+glDeleteSyncARB v:p
+glClientWaitSyncARB i:piq
+glWaitSyncARB v:piq
+glGetSyncivARB v:piipp
 glDebugMessageCallbackARB v:pp
 glDebugMessageControlARB v:iiiipi
 glGetStringiEXT p:ii
-glMapBufferRangeEXT p:iqqi
-glFlushMappedBufferRangeEXT v:iqq
+glMapBufferRangeEXT p:izzi
+glFlushMappedBufferRangeEXT v:izz
 glTexStorage2DEXT v:iiiii
 glGenQueriesARB v:ip
 glDeleteQueriesARB v:ip

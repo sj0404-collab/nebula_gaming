@@ -64,6 +64,11 @@ if (st === 'fault' || st === 'exited') {
   await w.locator('[data-x64-tab="console"]').click().catch(() => {}); await sleep(200);
   const con = await w.locator('[data-x64-console]').innerText().catch(() => ''); if (con.trim()) console.log('console:', con.replace(/\s+/g, ' ').slice(-800));
 }
+if (st === 'running') {   // still running: where is it? (console tail + the emulator's own inspector)
+  await w.locator('[data-x64-tab="console"]').click().catch(() => {}); await sleep(200);
+  const con = await w.locator('[data-x64-console]').innerText().catch(() => ''); if (con.trim()) console.log('console:', con.replace(/\s+/g, ' ').slice(-800));
+  const insp = await page.evaluate(() => { const rt = window.__x64; try { return rt?.inspect ? String(rt.inspect()).slice(0, 1500) : '(no inspect)'; } catch (e) { return String(e); } }); console.log('inspect:', insp);
+}
 const mem = await page.evaluate(() => { const rt = window.__x64; return rt ? { guestMB: Math.round(rt.stats?.().memMB ?? 0), wasmMB: Math.round((rt.memoryBytes?.() ?? 0) / 1048576), cacheMB: Math.round((rt.cacheBytes?.() ?? 0) / 1048576), files: rt.vfsList().length } : null; });
 console.log('memory:', JSON.stringify(mem), 'pageerrors:', errors.length);
 await browser.close(); if (server) { try { process.kill(-server.pid); } catch { /* ignore */ } }

@@ -128,10 +128,13 @@ void host_gfx_clear_depth(int tex_id, float depth) { (void)tex_id; (void)depth; 
 void host_gfx_draw(const u32 *cmd) { (void)cmd; }
 void host_gfx_readback(int tex_id, u32 *bgra) { (void)tex_id; (void)bgra; }
 void host_gfx_free(int id) { (void)id; }
-int host_gl_init(int w, int h) { (void)w; (void)h; return 0; }   /* the native runner has no WebGL: wglCreateContext fails honestly */
-int host_gl_probe(int id) { (void)id; return 0; }
-u64 host_gl_call(int id, const u64 *args, int n) { (void)id; (void)args; (void)n; return 0; }
-void host_gl_present(u32 *bgra, int w, int h) { (void)bgra; (void)w; (void)h; }
+/* the native runner has no WebGL: wglCreateContext fails honestly. X64_GL_NULL=1 turns on a null driver (every entry point exists and
+   returns 0, nothing is drawn) so the marshalling / SwapBuffers / context paths can be exercised and traced natively. */
+static int gl_null(void) { static int v = -1; if (v < 0) { const char *e = getenv("X64_GL_NULL"); v = e && *e && *e != '0'; } return v; }
+int host_gl_init(int w, int h) { (void)w; (void)h; return gl_null() ? 1 : 0; }
+int host_gl_probe(int id) { (void)id; return gl_null() ? 1 : 0; }
+u64 host_gl_call(int id, const u64 *args, int n) { (void)args; (void)n; if (gl_null() && getenv("X64_LOG")) fprintf(stderr, "[gl] call #%d n=%d\n", id, n); return 0; }
+void host_gl_present(u32 *bgra, int w, int h) { if (gl_null() && bgra) e_memset(bgra, 0x40, (size_t)w * h * 4); }
 
 /* ---- audio: no device in the test runner; a wall-clock "player" keeps the timing honest; X64_AUDIO_WAV=<file> dumps the mix ---- */
 static double g_aud_t0; static long long g_aud_written_frames; static int g_aud_rate; static FILE *g_aud_wav; static long long g_aud_wav_frames;

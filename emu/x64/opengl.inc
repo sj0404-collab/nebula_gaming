@@ -151,7 +151,8 @@ static void s_gl_dispatch(Cpu *c) {
     if (k == 'f') a[n] = c->mode32 ? (u32)ARG(n) : (n < 4 ? c->x[n].d[0] : (u32)ARG(n));
     else if (k == 'd') a[n] = c->mode32 ? ARG(n) : (n < 4 ? c->x[n].q[0] : ARG(n));
     else if (k == 'i') a[n] = (u32)ARG(n);
-    else a[n] = c->mode32 ? (u32)ARG(n) : ARG(n); }
+    else if (k == 'q') a[n] = ARG(n);   /* GLint64/GLuint64: two stack slots on x86 (marshalled by sig32) */
+    else a[n] = c->mode32 ? (u32)ARG(n) : ARG(n); }   /* p / z: pointer-sized */
   g_gl_cpu = c; u64 r = host_gl_call(id, a, n); g_gl_cpu = 0;
   if (gl_fns[id].sig[0] == 'f') { u32 b = (u32)r; e_memcpy(&c->x[0].d[0], &b, 4); } RET(r); }
 ShimFn gdi_find_shim(const char *name);

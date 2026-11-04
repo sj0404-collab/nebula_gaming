@@ -292,10 +292,12 @@ int pe_inspect(const u8 *bytes, size_t len, char *out, size_t out_sz) {
   else if (h.machine == 0x14c && h.magic != 0x10b) { verdict = "unsupported"; why = "malformed PE32 header"; }
   else if (is_dll) { verdict = "unsupported"; why = "DLL, not an executable"; }
   else {
-    int heavy = 0, d3d11 = 0; for (int i = 0; i < x.ndll; i++) { const char *d = x.dlls[i];
+    int heavy = 0, d3d11 = 0, ogl = 0; for (int i = 0; i < x.ndll; i++) { const char *d = x.dlls[i];
       if (!e_stricmp(d, "d3d11.dll") || !e_stricmp(d, "dxgi.dll")) { d3d11 = 1; continue; }   /* Direct3D 11 has a (partial) WebGL2 translation layer */
-      if (!e_strncmp(d, "d3d", 3) || !e_strncmp(d, "D3D", 3) || !e_stricmp(d, "opengl32.dll") || !e_stricmp(d, "dxgi.dll") || !e_stricmp(d, "vulkan-1.dll") || !e_stricmp(d, "xinput1_4.dll") || !e_stricmp(d, "dsound.dll") || !e_stricmp(d, "xaudio2_9.dll") || !e_stricmp(d, "mono-2.0-bdwgc.dll") || !e_stricmp(d, "UnityPlayer.dll") || !e_stricmp(d, "GameAssembly.dll")) heavy = 1; }
+      if (!e_stricmp(d, "opengl32.dll")) { ogl = 1; continue; }   /* OpenGL goes to the device's WebGL2 through the generic bridge */
+      if (!e_strncmp(d, "d3d", 3) || !e_strncmp(d, "D3D", 3) || !e_stricmp(d, "dxgi.dll") || !e_stricmp(d, "vulkan-1.dll") || !e_stricmp(d, "xinput1_4.dll") || !e_stricmp(d, "dsound.dll") || !e_stricmp(d, "xaudio2_9.dll") || !e_stricmp(d, "mono-2.0-bdwgc.dll") || !e_stricmp(d, "UnityPlayer.dll") || !e_stricmp(d, "GameAssembly.dll")) heavy = 1; }
     if (heavy) { verdict = "unsupported"; why = "needs GPU/audio subsystems (Direct3D 9/12, OpenGL, Vulkan, XAudio, Unity/Mono) that have no wasm64 implementation here"; }
+    else if (ogl) { verdict = "partial"; why = "OpenGL through the WebGL2 bridge (WGL contexts, GL 1.1 + 2.0 … 3.3 core entry points via wglGetProcAddress, GLSL translated to GLSL ES); the fixed-function pipeline (glBegin/glEnd, matrices, display lists), wireframe, 1D/multisample textures and geometry/tessellation shaders are not available"; }
     else if (d3d11) { verdict = "partial"; why = "Direct3D 11 through the WebGL2 translation layer (device, swap chain, buffers, textures, SM4/5 vertex + pixel shaders, Draw/DrawIndexed); compute/geometry/tessellation and many state paths are not implemented and stop with the method name"; }
     else if (x.unknown == 0 && x.pack) { verdict = "partial"; why = x.priv ? "needs DLLs from the DirectX pack (D3DCompiler/D3DX, installed on demand into C:\\Windows\\System32) and its own DLLs next to the exe; the rest of the imports have shims" : "needs DLLs from the DirectX pack (D3DCompiler/D3DX — installed on demand into C:\\Windows\\System32); the rest of the imports have shims"; }
     else if (x.unknown == 0 && x.priv) { verdict = "partial"; why = "all system imports have shims; the program also imports its own DLLs, which are loaded from the virtual disk if you add them next to the exe"; }

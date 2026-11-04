@@ -658,9 +658,10 @@ for (const exe of ['gltri.exe', 'gltri32.exe']) await test(`x64: ${exe} — Open
   const w = await x64Open();
   await w.locator(`[data-x64-exe="${exe}"]`).click();
   await w.locator('[data-x64-run]').click();
-  await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout: 60_000 });
+  const exited = await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout: 60_000 }).then(() => true, () => false);
   await w.locator('[data-x64-tab="console"]').click();
   const con = await w.locator('[data-x64-console]').innerText();
+  if (!exited) { await w.locator('[data-x64-tab="report"]').click(); const rep = await w.locator('[data-x64-report]').innerText().catch(() => ''); expect(false, `${exe} did not exit within 60 s; console: ${con.slice(-1500)} report: ${rep.slice(-2500)}`); }
   expect(/GL_VERSION=3\.3\.0 NebulaGL/.test(con), 'GL_VERSION missing: ' + con.slice(-500));
   expect(/program 330 linked=1/.test(con) && /program 120 linked=1/.test(con), 'shader programs did not link: ' + con.slice(-500));
   expect(/glBegin\/glEnd error=0x502/.test(con), 'legacy glBegin must report GL_INVALID_OPERATION: ' + con.slice(-300));

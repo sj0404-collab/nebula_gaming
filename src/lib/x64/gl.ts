@@ -222,10 +222,11 @@ export class GLBridge {
     const m = /^\s*#version\s+(\d+)(\s+\w+)?/m.exec(src); const ver = m ? parseInt(m[1], 10) : 0;
     const body = src.replace(/^\s*#version[^\n]*\n?/m, '').replace(/^\s*#extension\s+GL_ARB_explicit_attrib_location[^\n]*\n?/mg, '').replace(/^\s*#extension\s+GL_ARB_(?:shading_language_420pack|separate_shader_objects|gpu_shader5)[^\n]*\n?/mg, '');
     const hasPrecision = /precision\s+(lowp|mediump|highp)\s+float/.test(body);
-    const precision = frag ? (hasPrecision ? '' : 'precision highp float;\nprecision highp int;\nprecision highp sampler2DArray;\nprecision highp sampler3D;\nprecision highp samplerCube;\nprecision highp isampler2D;\nprecision highp usampler2D;\n') : (hasPrecision ? '' : 'precision highp float;\nprecision highp int;\n');
+    const precision100 = hasPrecision ? '' : 'precision highp float;\nprecision highp int;\n';
+    const precision = frag ? (hasPrecision ? '' : 'precision highp float;\nprecision highp int;\nprecision highp sampler2DArray;\nprecision highp sampler3D;\nprecision highp samplerCube;\nprecision highp isampler2D;\nprecision highp usampler2D;\n') : precision100;
     if (ver <= 120) {
       // ESSL 1.00: no "layout", no integer bit ops; gl_FragData[n] stays (WebGL2 allows it in 100 shaders? no → rewrite to 300 es when used)
-      if (!/gl_FragData|\blayout\s*\(|\btexture2DLod\b|\btexture2DGradARB\b|\btexelFetch\b|\bshadow2D\b/.test(body) && !(frag && /texture2DLod/.test(body))) return precision + body.replace(/\bshadow2DProj\b/g, 'shadow2DProjEXT');
+      if (!/gl_FragData|\blayout\s*\(|\btexture2DLod\b|\btexture2DGradARB\b|\btexelFetch\b|\bshadow2D\b/.test(body)) return precision100 + body;
     }
     // → 300 es
     let out = body;
