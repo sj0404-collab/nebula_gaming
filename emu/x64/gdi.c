@@ -194,6 +194,7 @@ static void s_ExtCreatePen(Cpu *c) { GdiObj *p = gdi_new(W, K_PEN); if (!p) { RE
 /* LOGFONT: lfHeight@0 lfWidth@4 lfEscapement@8 lfOrientation@12 lfWeight@16 lfItalic@20 lfUnderline@21 lfStrikeOut@22 lfCharSet@23 lfOutPrecision@24 lfClipPrecision@25 lfQuality@26 lfPitchAndFamily@27 lfFaceName@28 */
 static void create_font_indirect(Cpu *c, u64 lf, int wide) { GdiObj *f = gdi_new(W, K_FONT); if (!f) { RET(0); return; } char name[64]; name[0] = 0;
   if (wide) wstr_to_utf8(c, lf + 28, name, sizeof name, 32); else { const char *n = rd_str(c, lf + 28, 32); if (n) { int k = 0; for (; k < 31 && n[k]; k++) name[k] = n[k]; name[k] = 0; } }
+  if (W->api_trace) e_log("[font] indirect h=%d w=%d weight=%d italic=%d ul=%d strike=%d cs=%d q=%d pf=%d \"%s\"\n", (int)(s32)rd32(c, lf), (int)(s32)rd32(c, lf + 4), (int)(s32)rd32(c, lf + 16), rd8(c, lf + 20), rd8(c, lf + 21), rd8(c, lf + 22), rd8(c, lf + 23), rd8(c, lf + 26), rd8(c, lf + 27), name);
   fnt_setup(f, (s32)rd32(c, lf), (s32)rd32(c, lf + 16), rd8(c, lf + 20), rd8(c, lf + 21), rd8(c, lf + 22), rd8(c, lf + 27), name); fnt_set_width(f, (s32)rd32(c, lf + 4)); RET(f->handle); }
 static void s_CreateFontIndirectA(Cpu *c) { create_font_indirect(c, ARG(0), 0); }
 static void s_CreateFontIndirectW(Cpu *c) { create_font_indirect(c, ARG(0), 1); }

@@ -812,15 +812,28 @@ static void s_GetDoubleClickTime(Cpu *c) { RET(500); }
 static void s_SetDoubleClickTime(Cpu *c) { RET(1); }
 static void s_GetSystemMetrics(Cpu *c) { int i = (int)ARG(0); RET(i == 0 ? 1280 : i == 1 ? 720 : i == 2 ? 17 : i == 3 ? 17 : i == 4 ? 23 : i == 5 ? 1 : i == 6 ? 1 : i == 7 ? 1 : i == 8 ? 1 : i == 11 ? 32 : i == 12 ? 32 : i == 13 ? 32 : i == 14 ? 32 : i == 15 ? 20 : i == 16 ? 1280 : i == 17 ? 720 : i == 20 ? 17 : i == 21 ? 17 : i == 28 ? 16 : i == 29 ? 16 : i == 30 ? 16 : i == 31 ? 16 : i == 32 ? 4 : i == 33 ? 4 : i == 36 ? 4 : i == 37 ? 4 : i == 43 ? 2 : i == 45 ? 2 : i == 46 ? 2 : i == 47 ? 1280 : i == 48 ? 720 : i == 49 ? 2 : i == 50 ? 2 : i == 51 ? 18 : i == 52 ? 18 : i == 61 ? 1280 : i == 62 ? 720 : i == 76 ? 0 : i == 77 ? 0 : i == 78 ? 1280 : i == 79 ? 720 : i == 80 ? 1 : i == 92 ? 1 : 0); }
 static void s_GetSystemMetricsForDpi(Cpu *c) { s_GetSystemMetrics(c); }
-static void s_SystemParametersInfoA(Cpu *c) { u32 a = (u32)ARG(0); u64 p = ARG(2);
+static void put_a8(Cpu *c, u64 dst, const char *s, u32 cap); static void spi_rest(Cpu *c, u32 a, u64 p);
+static void spi_logfont(Cpu *c, u64 p, int h, int weight, const char *face, int wide) { u8 *m = mem_ptr(c->mem, p, wide ? 92 : 60, 1); if (m) e_memset(m, 0, wide ? 92 : 60); wr32(c, p, (u32)h); wr32(c, p + 16, (u32)weight); wr8(c, p + 23, 1); wr8(c, p + 26, 5); wr8(c, p + 27, 0x22); if (wide) put_w8(c, p + 28, face, 32); else put_a8(c, p + 28, face, 32); }
+static void spi_common(Cpu *c, int wide) { u32 a = (u32)ARG(0); u64 p = ARG(2);
+  if (a == 0x29 && p) { /* SPI_GETNONCLIENTMETRICS: Windows 10 defaults at 96 dpi; LOGFONTW 92 B / LOGFONTA 60 B at their real offsets (Q-Dir builds its menu / tab fonts from lfMenuFont) */ u32 sz = rd32(c, p); u8 *m = mem_ptr(c->mem, p, sz, 1); if (!m || sz < 24) { RET(0); return; } e_memset(m + 4, 0, sz - 4); int L = wide ? 92 : 60;
+    wr32(c, p + 4, 1); wr32(c, p + 8, 17); wr32(c, p + 12, 17); wr32(c, p + 16, 36); wr32(c, p + 20, 22); u64 o = 24;
+    if (o + L <= sz) spi_logfont(c, p + o, -12, 400, "Segoe UI", wide); o += L; if (o + 8 <= sz) { wr32(c, p + o, 22); wr32(c, p + o + 4, 22); } o += 8;   /* lfCaptionFont, iSmCaptionWidth/Height */
+    if (o + L <= sz) spi_logfont(c, p + o, -12, 400, "Segoe UI", wide); o += L; if (o + 8 <= sz) { wr32(c, p + o, 19); wr32(c, p + o + 4, 19); } o += 8;   /* lfSmCaptionFont, iMenuWidth/Height */
+    if (o + L <= sz) spi_logfont(c, p + o, -12, 400, "Segoe UI", wide); o += L;   /* lfMenuFont */
+    if (o + L <= sz) spi_logfont(c, p + o, -12, 400, "Segoe UI", wide); o += L;   /* lfStatusFont */
+    if (o + L <= sz) spi_logfont(c, p + o, -12, 400, "Segoe UI", wide); o += L;   /* lfMessageFont */
+    if (o + 4 <= sz) wr32(c, p + o, 4);   /* iPaddedBorderWidth */
+    RET(1); return; }
+  if (a == 0x1F && p) { spi_logfont(c, p, -12, 400, "Segoe UI", wide); RET(1); return; }   /* SPI_GETICONTITLELOGFONT */
+  spi_rest(c, a, p); }
+static void spi_rest(Cpu *c, u32 a, u64 p) {
   if (a == 0x30 && p) { wr32(c, p, 0); wr32(c, p + 4, 0); wr32(c, p + 8, 1280); wr32(c, p + 12, 680); RET(1); return; }   /* SPI_GETWORKAREA */
-  if (a == 0x29 && p) { /* SPI_GETNONCLIENTMETRICS: zero + font heights */ u32 sz = rd32(c, p); u8 *m = mem_ptr(c->mem, p, sz, 1); if (m) e_memset(m + 4, 0, sz - 4); for (u64 off = 24; off + 92 <= sz; off += 92 + 4) { wr32(c, p + off, (u32)-12); wr32(c, p + off + 16, 400); put_w8(c, p + off + 28, "Segoe UI", 32); } RET(1); return; }
-  if (a == 0x1F && p) { /* SPI_GETICONTITLELOGFONT */ u8 *m = mem_ptr(c->mem, p, 92, 1); if (m) e_memset(m, 0, 92); wr32(c, p, (u32)-13); wr32(c, p + 16, 400); put_w8(c, p + 28, "MS Shell Dlg", 32); RET(1); return; }
   if ((a == 0x1024 || a == 0x1026 || a == 0x1046 || a == 0x101E || a == 0x1034 || a == 0x1042 || a == 0x1048 || a == 0x1010) && p) { wr32(c, p, 0); RET(1); return; }
   if (a == 0x0F && p) { wr32(c, p, 0); RET(1); return; } if (a == 0x0D && p) { wr32(c, p, 0); RET(1); return; } if (a == 0x10 && p) { wr32(c, p, 0); RET(1); return; } if (a == 0x2002 && p) { wr32(c, p, 0); RET(1); return; } if (a == 0x0068 && p) { wr32(c, p, 3); RET(1); return; } if (a == 0x0062 && p) { wr32(c, p, 100); RET(1); return; } if (a == 0x0073 && p) { wr32(c, p, 1); RET(1); return; }
   RET(0); }
-static void s_SystemParametersInfoW(Cpu *c) { s_SystemParametersInfoA(c); }
-static void s_SystemParametersInfoForDpi(Cpu *c) { s_SystemParametersInfoA(c); }
+static void s_SystemParametersInfoA(Cpu *c) { spi_common(c, 0); }
+static void s_SystemParametersInfoW(Cpu *c) { spi_common(c, 1); }
+static void s_SystemParametersInfoForDpi(Cpu *c) { spi_common(c, 1); }
 /* ---- display enumeration: one adapter (\\.\DISPLAY1) with one monitor, one video mode = the real screen (W->screen_w x screen_h, 32 bpp, 60 Hz) ---- */
 static void put_a8(Cpu *c, u64 dst, const char *s, u32 cap) { u32 i = 0; for (; s[i] && i + 1 < cap; i++) wr8(c, dst + i, (u8)s[i]); wr8(c, dst + i, 0); }
 static void dd_put(Cpu *c, u64 dst, int wide, const char *s, u32 cap) { if (wide) put_w8(c, dst, s, cap); else put_a8(c, dst, s, cap); }
