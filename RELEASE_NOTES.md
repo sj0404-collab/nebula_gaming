@@ -1,3 +1,36 @@
+# v1.36.0 — symbol glyphs, Notepad++ Find Next / Replace work exactly like Windows (Android)
+
+**Symbol glyphs that no bundled font covers.** Windows falls back to Segoe UI Symbol for geometric glyphs; the bundled
+PT Sans / Cousine have none of them, so Notepad++'s tab-bar menu showed `? ? ?` instead of `＋ ▼ ✕`. The font engine now has
+a synthetic symbol face (`emu/x64/ttf.inc`, `g_syms`): 44 code points described as vector paths in a 1000-unit em and
+rasterized through the same coverage rasterizer as TrueType outlines — arrowheads U+2BC5–2BC8 / U+23F4–23F7, triangles
+U+25B4/25B6/25B8/25BE/25C0/25C2, diamonds U+25C6/25C7, ballot boxes U+2610–2612, U+2630 ☰, check marks U+2713/2714,
+crosses U+2715–2718, fullwidth plus U+FF0B, heavy plus/minus U+2795/2796, heavy arrows U+2B05–2B07/2B95/27A1, U+21B5 ↵,
+U+23CE, U+27A4 ➤, stars U+2605/2606, chevrons U+276E/276F, ellipses U+22EE/22EF, U+2318 ⌘. Stroked glyphs thicken for
+bold faces; italic shears them like real glyphs; advances are real so layout and hit-testing agree. `fnt_glyph` only reaches
+the synthetic face after the requested face, the paired mono/sans face and the regular weight all miss (Cousine already
+covers ▲▼►◄■□●○← → ─│┌ etc.). `X64_FONTLOG=1` logs code points that still have no glyph.
+
+**Notepad++ Find dialog (x64 and x86).** Three real Windows behaviours were missing and together made "Find Next" a no-op:
+- a drop-down combo box selects its whole edit text when it receives focus (Windows `CBSetFocus`), so typing replaces the
+  pre-filled word — before, the typed text was appended ("abcabc") and nothing was found. `CB_SETEDITSEL` / `CB_GETEDITSEL`
+  now act on the edit;
+- the status bar supports `WM_PRINT` / `WM_PRINTCLIENT` into a caller's DC (Notepad++ double-buffers its status bars),
+  `SBT_OWNERDRAW` parts (`WM_DRAWITEM` with a comctl32-style `DRAWITEMSTRUCT`: CtlType 0, itemID = part, itemData = the
+  `SB_SETTEXT` lParam) — also when the parent is a dialog with a dialog procedure — and `WM_ERASEBKGND` on a memory DC
+  paints the bar colour (Notepad++'s `getCtrlBgColor` samples it);
+- the WS_CLIPSIBLINGS pixel-snapshot clip protected at most 24 higher siblings per DC; the Find dialog's full-size tab
+  control lies under ~60 controls, so the status bar (the last one) was overpainted by the tab pane. Limit raised to 128.
+Result: Ctrl+F, type, Enter → selection jumps to the first match (Col 4), Enter again → next match (Col 8), the dialog's
+status bar shows the green "Find: Reached document end, first occurrence from the top found." text; the editor's right-click
+menu (Cut/Copy/Paste/…/Hide Lines) is complete; the same flow works in the 32-bit Notepad++ (`reports/npp32_fonts.png`).
+
+**Tests.** `tests/font.c` 28/28 (x64 + x86: +symbol widths and ink); `tests/run.sh` all green; browser e2e 46/46.
+
+**Known limits (unchanged / honest).** Symbol coverage is the 44 glyphs above plus what Cousine ships — emoji, Wingdings,
+Marlett and MDL2 icon fonts still fall back to the 8x8 bitmap or `?`. "Find All in All Opened Documents" is a few pixels
+wider in PT Sans than in MS Sans Serif, so that button caption touches its edges.
+
 # v1.35.0 — real TrueType text: embedded font engine, proportional GDI everywhere, Cyrillic, font enumeration (Android)
 
 **Why.** Until now every program drew text with an 8x8 bitmap font stretched into fixed-width cells, which is why
