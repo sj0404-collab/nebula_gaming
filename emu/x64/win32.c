@@ -1389,7 +1389,25 @@ static void s_dsign(Cpu *c) { RET(c->x[0].f64[0] < 0 ? 1 : 0); }
 /* ---------- table ---------- */
 #define S(n) { "", #n, s_##n }
 #define SA(api, fn) { "", api, s_##fn }
+/* winspool.drv: no printers on the device.  EnumPrinters reports zero printers (TRUE, pcbNeeded = pcReturned = 0 — PuTTY fills its
+   'Printer to send ANSI printer output to' combo from this and must not see a null import); OpenPrinter fails with ERROR_INVALID_PRINTER_NAME */
+static void s_EnumPrintersA(Cpu *c) { if (ARG(5)) wr32(c, ARG(5), 0); if (ARG(6)) wr32(c, ARG(6), 0); RET(1); }
+static void s_EnumPrintersW(Cpu *c) { s_EnumPrintersA(c); }
+static void s_GetDefaultPrinterA(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), 0); W->last_error = 2; RET(0); }   /* ERROR_FILE_NOT_FOUND: no default printer */
+static void s_GetDefaultPrinterW(Cpu *c) { s_GetDefaultPrinterA(c); }
+static void s_OpenPrinterA(Cpu *c) { if (ARG(1)) wrp(c, ARG(1), 0); W->last_error = 1801; RET(0); }
+static void s_OpenPrinterW(Cpu *c) { s_OpenPrinterA(c); }
+static void s_ClosePrinter(Cpu *c) { RET(1); }
+static void s_StartDocPrinterA(Cpu *c) { W->last_error = 6; RET(0); }
+static void s_StartDocPrinterW(Cpu *c) { s_StartDocPrinterA(c); }
+static void s_EndDocPrinter(Cpu *c) { RET(0); }
+static void s_StartPagePrinter(Cpu *c) { RET(0); }
+static void s_EndPagePrinter(Cpu *c) { RET(0); }
+static void s_WritePrinter(Cpu *c) { if (ARG(3)) wr32(c, ARG(3), 0); W->last_error = 6; RET(0); }
+static void s_DocumentPropertiesA(Cpu *c) { RET((u64)-1); }
+static void s_DocumentPropertiesW(Cpu *c) { RET((u64)-1); }
 static const ShimDef shims[] = {
+  S(EnumPrintersA), S(EnumPrintersW), S(GetDefaultPrinterA), S(GetDefaultPrinterW), S(OpenPrinterA), S(OpenPrinterW), S(ClosePrinter), S(StartDocPrinterA), S(StartDocPrinterW), S(EndDocPrinter), S(StartPagePrinter), S(EndPagePrinter), S(WritePrinter), S(DocumentPropertiesA), S(DocumentPropertiesW),
   INI_SHIMS, INI_SHIMS2, INNO_SHIMS,
   SHELL_SHIMS
   COMPAT_SHIMS

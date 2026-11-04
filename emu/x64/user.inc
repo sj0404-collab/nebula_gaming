@@ -713,7 +713,7 @@ static void s_RealChildWindowFromPoint(Cpu *c) { child_from_point(c, 1); }
 static void s_ChildWindowFromPointEx(Cpu *c) { child_from_point(c, (u32)(c->mode32 ? ARG(3) : ARG(2))); }
 static void s_GetWindowThreadProcessId(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), (u32)W->pid); RET((u32)W->th[0].tid); }
 static void s_IsHungAppWindow(Cpu *c) { RET(0); }
-static void s_IsWindowUnicode(Cpu *c) { RET(1); }
+static void s_IsWindowUnicode(Cpu *c) { int i = wnd_of(ARG(0)); RET(i < 0 ? 0 : (g_wnd[i].unicode_wnd ? 1 : 0)); }
 static void s_IsGUIThread(Cpu *c) { RET(1); }
 static void s_FlashWindowEx(Cpu *c) { RET(0); }
 static void s_FlashWindow(Cpu *c) { RET(0); }
@@ -1522,6 +1522,7 @@ static u64 dlg_parse_item(Cpu *c, u64 p, int ex, DlgItem *it) { p = (p + 3) & ~3
   p = tmpl_sz_or_ord(c, p, it->title, sizeof it->title, &ord); it->ordinal = ord; u16 extra = rd16(c, p); p += 2 + extra; return p; }
 /* CONT_DLGINIT chain: data[0] dialog idx, data[1] template items ptr, data[2] remaining count, data[3] ex flag, data[4] param, data[5] modal flag, data[6] slot (for the modal re-entry), idx = step */
 static void dlg_create_next(Cpu *c);
+static int g_dlg_ansi;   /* set by the ...A dialog entry points: the dialog window is an ANSI window (IsWindowUnicode FALSE, common controls send ...A notifications — PuTTY's TVN_SELCHANGEDA) */
 static int dlg_begin(Cpu *c, u64 hinst, u64 tmpl, u64 owner_h, u64 dlgproc, u64 param, int modal) {
   Win32 *w = W; builtin_init_slots(w); int ex; u32 style, exstyle; int cdit, x, y, cx, cy, fontpt; char cls[64], title[512], face[64]; u64 items;
   if (!dlg_parse_header(c, tmpl, &ex, &style, &exstyle, &cdit, &x, &y, &cx, &cy, cls, title, &fontpt, face, &items)) return -1;
@@ -1532,7 +1533,7 @@ static int dlg_begin(Cpu *c, u64 hinst, u64 tmpl, u64 owner_h, u64 dlgproc, u64 
   u32 wstyle = (style & ~0x10000000u) | (owner >= 0 || !(style & 0x40000000u) ? 0 : 0); if (!(wstyle & 0x40000000u)) wstyle |= 0x80000000u;   /* WS_POPUP unless WS_CHILD */
   int fx = 0, fy = 0; if (!g_wnd[0].used && !(wstyle & 0x40000000u) && (style & 0x00C00000u) == 0x00C00000u) { fx = 16; fy = 39; }   /* template cx/cy are CLIENT units; the main-window path takes a full window size */
   int i = wnd_create_obj(c, wcls, title, wstyle | 0x00C00000u * ((style & 0x00C00000u) == 0x00C00000u ? 1 : 0), exstyle, (style & 0x0800) || (style & 0x40000000u) == 0 ? 0x80000000 : x * bx / 4, (style & 0x0800) || (style & 0x40000000u) == 0 ? 0x80000000 : y * by / 8, pw + fx, ph + fy, owner_h, 0, hinst, param, 1, 0);   /* a WS_CHILD dialog sits at the template position in its parent's client (Notepad++ Preferences pages: DIALOGEX 115, 10) */
-  if (i < 0) return -1; Wnd *n = &g_wnd[i]; n->is_dlg = 1; n->dlgproc = dlgproc; n->modal = modal; n->base_x = bx; n->base_y = by; n->cls_brush = 0; n->builtin = n->builtin ? n->builtin : BI_DIALOG; if (!cls[0] || cls[0] == '#') n->wndproc = g_slot_dialog;
+  if (i < 0) return -1; Wnd *n = &g_wnd[i]; n->is_dlg = 1; n->dlgproc = dlgproc; n->modal = modal; if (g_dlg_ansi) n->unicode_wnd = 0; g_dlg_ansi = 0; n->base_x = bx; n->base_y = by; n->cls_brush = 0; n->builtin = n->builtin ? n->builtin : BI_DIALOG; if (!cls[0] || cls[0] == '#') n->wndproc = g_slot_dialog;
   if (dfont) n->font = dfont->handle; else n->font = g_dlg_font;   /* line height = cell height (13 for 8 pt), char width from the em (6) */
   if (modal && owner >= 0) { g_wnd[owner].enabled = 0; wnd_invalidate(owner, 1); }
   n->style = (n->style & ~0x10000000u) | (style & 0x10000000u); n->visible = 0;
@@ -1560,9 +1561,9 @@ static void dlg_create_next(Cpu *c) {
   w32_cont_finish(c, HWND_OF(i)); }
 static void dlginit_resume(Cpu *c, u64 rax) { Win32 *w = W; int ci = w->ncont - 1; if (w->cont[ci].idx == 1) { /* WM_INITDIALOG returned: FALSE means the dialog set focus itself */ int i = (int)w->cont[ci].data[0]; if (!(u32)rax) w->cont[ci].data[7] = 0; (void)i; } dlg_create_next(c); }
 static void s_CreateDialogIndirectParamW(Cpu *c) { int i = dlg_begin(c, ARG(0), ARG(1), ARG(2), ARG(3), ARG(4), 0); if (i < 0) { RET(0); return; } dlg_create_next(c); }
-static void s_CreateDialogIndirectParamA(Cpu *c) { s_CreateDialogIndirectParamW(c); }
+static void s_CreateDialogIndirectParamA(Cpu *c) { g_dlg_ansi = 1; s_CreateDialogIndirectParamW(c); }
 static void s_CreateDialogParamW(Cpu *c) { u64 e = rsrc_lookup(c, ARG(0), ARG(1), 5, 1, 0); if (!e) { char nm[64]; if (ARG(1) >= 0x10000) text_in(c, ARG(1), 1, nm, sizeof nm); else e_snprintf(nm, sizeof nm, "#%u", (u32)ARG(1)); w32_report(W, "CreateDialogParam: dialog resource %s not found", nm); W->last_error = 1814; RET(0); return; } u64 base = ARG(0) ? ARG(0) : W->image_base; int i = dlg_begin(c, ARG(0), base + rd32(c, e), ARG(2), ARG(3), ARG(4), 0); if (i < 0) { RET(0); return; } dlg_create_next(c); }
-static void s_CreateDialogParamA(Cpu *c) { u64 e = rsrc_lookup(c, ARG(0), ARG(1), 5, 0, 0); if (!e) { W->last_error = 1814; RET(0); return; } u64 base = ARG(0) ? ARG(0) : W->image_base; int i = dlg_begin(c, ARG(0), base + rd32(c, e), ARG(2), ARG(3), ARG(4), 0); if (i < 0) { RET(0); return; } dlg_create_next(c); }
+static void s_CreateDialogParamA(Cpu *c) { u64 e = rsrc_lookup(c, ARG(0), ARG(1), 5, 0, 0); if (!e) { W->last_error = 1814; RET(0); return; } u64 base = ARG(0) ? ARG(0) : W->image_base; g_dlg_ansi = 1; int i = dlg_begin(c, ARG(0), base + rd32(c, e), ARG(2), ARG(3), ARG(4), 0); if (i < 0) { RET(0); return; } dlg_create_next(c); }
 /* modal loop: DialogBoxParam / MessageBox / SHBrowseForFolder re-execute their shim after every dispatched message until EndDialog.
    g_modal[].rip/rsp identify the re-entry; phase 1 = running, 2 = ending (window being destroyed) */
 static void fdlg_release(int wnd); static int fdlg_is_com(int wnd);
@@ -1591,9 +1592,9 @@ static void dialog_box(Cpu *c, u64 hinst, u64 tmpl, u64 owner_h, u64 dlgproc, u6
   if (g_nmodal >= 8) { RET((u64)-1); return; } int i = dlg_begin(c, hinst, tmpl, owner_h, dlgproc, param, 1); if (i < 0) { RET((u64)-1); return; }
   m = g_nmodal++; g_modal[m].rip = c->rip; g_modal[m].rsp = c->r[RSP]; g_modal[m].slot = w32_cur_slot(); g_modal[m].wnd = i; g_modal[m].phase = 1; dlg_create_next(c); }
 static void s_DialogBoxIndirectParamW(Cpu *c) { dialog_box(c, ARG(0), ARG(1), ARG(2), ARG(3), ARG(4)); }
-static void s_DialogBoxIndirectParamA(Cpu *c) { dialog_box(c, ARG(0), ARG(1), ARG(2), ARG(3), ARG(4)); }
+static void s_DialogBoxIndirectParamA(Cpu *c) { if (modal_reentry(c)) { modal_loop(c, g_modal[g_nmodal - 1].wnd); return; } g_dlg_ansi = 1; dialog_box(c, ARG(0), ARG(1), ARG(2), ARG(3), ARG(4)); }
 static void s_DialogBoxParamW(Cpu *c) { if (modal_reentry(c)) { modal_loop(c, g_modal[g_nmodal - 1].wnd); return; } u64 e = rsrc_lookup(c, ARG(0), ARG(1), 5, 1, 0); if (!e) { W->last_error = 1814; RET((u64)-1); return; } u64 base = ARG(0) ? ARG(0) : W->image_base; dialog_box(c, ARG(0), base + rd32(c, e), ARG(2), ARG(3), ARG(4)); }
-static void s_DialogBoxParamA(Cpu *c) { if (modal_reentry(c)) { modal_loop(c, g_modal[g_nmodal - 1].wnd); return; } u64 e = rsrc_lookup(c, ARG(0), ARG(1), 5, 0, 0); if (!e) { W->last_error = 1814; RET((u64)-1); return; } u64 base = ARG(0) ? ARG(0) : W->image_base; dialog_box(c, ARG(0), base + rd32(c, e), ARG(2), ARG(3), ARG(4)); }
+static void s_DialogBoxParamA(Cpu *c) { if (modal_reentry(c)) { modal_loop(c, g_modal[g_nmodal - 1].wnd); return; } u64 e = rsrc_lookup(c, ARG(0), ARG(1), 5, 0, 0); if (!e) { W->last_error = 1814; RET((u64)-1); return; } u64 base = ARG(0) ? ARG(0) : W->image_base; g_dlg_ansi = 1; dialog_box(c, ARG(0), base + rd32(c, e), ARG(2), ARG(3), ARG(4)); }
 static void s_EndDialog(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } Wnd *n = &g_wnd[i]; n->ended = 1; n->result = ARG(1); if (!n->modal) { n->visible = 0; wnd_invalidate_all(); } RET(1); }
 /* IsDialogMessage: Tab / Shift+Tab, Enter (default button or the focused button), Esc (IDCANCEL); other messages for the dialog's windows are translated + dispatched */
 /* after a dialog key was consumed: a modal loop re-executes its shim, IsDialogMessage returns TRUE */
