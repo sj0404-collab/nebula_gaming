@@ -57,6 +57,12 @@ check "x64 honest no-GL"   "wglCreateContext failed (2000): no OpenGL on this ho
 out=$(X64_LOG=1 $X --quiet --no-stdin --max-ms 10000 tests/gltri32.exe 2>&1 || true)
 check "x86 pixel format"   "pixel format: color=32 depth=24 stencil=8 double=1" "$out"
 check "x86 honest no-GL"   "wglCreateContext failed (2000): no OpenGL on this host" "$out"
+out=$(X64_GL_NULL=1 X64_LOG=1 $X --quiet --no-stdin --max-ms 20000 tests/gltri.exe 2>&1 || true)
+check "x64 GL null driver: context + GLSL + loop"   "gltri ok" "$out"
+check "x64 GL null driver: program linked"          "program 330 linked=1" "$out"
+out=$(X64_GL_NULL=1 X64_LOG=1 $X --quiet --no-stdin --max-ms 20000 tests/gltri32.exe 2>&1 || true)
+check "x86 GL null driver: context + GLSL + loop (GLsizeiptr marshalling)"   "gltri ok" "$out"
+check "x86 GL null driver: program linked"          "program 330 linked=1" "$out"
 echo "[1g] uvpipe.exe (libuv-style child stdout: named pipe + IOCP zero-read + CreateProcess)"
 out=$($X --quiet --no-stdin --max-ms 20000 tests/uvpipe.exe 2>&1 || true)
 check "zero-read ready" "GQCS -> 1 bytes=0 key=42" "$out"

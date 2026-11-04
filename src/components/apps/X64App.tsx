@@ -837,7 +837,7 @@ function PeReport({ e, stats, log, apiStats }: { e: ExeEntry; stats: RunStats | 
         </div>
       )}
       <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-[10px] leading-relaxed text-slate-600">
-        <b>What this is:</b> a user-mode x86-64 / x86 interpreter (integer ISA + SSE2, PE32+ and PE32 loader, 32-bit processes in IA-32 compatibility mode, kernel32/UCRT/user32/gdi32 shims) compiled to wasm64 and drawing through WebGL. Programs get an in-memory C:\ drive (Files tab), stdin from the console input line, and a real environment block. It is honest about its limits: 32-bit, .NET, Direct3D/OpenGL/Vulkan, audio and networking are not emulated (threads, child processes, pipes and the program's own DLLs are) — such programs stop at the first missing API, and the report above tells you which one.
+        <b>What this is:</b> a user-mode x86-64 / x86 interpreter (integer ISA + SSE2, PE32+ and PE32 loader, 32-bit processes in IA-32 compatibility mode, kernel32/UCRT/user32/gdi32 shims) compiled to wasm64 and drawing through WebGL. Programs get a persistent C:\\ drive (Files tab), stdin from the console input line, and a real environment block. x86 (32-bit) and x86-64 programs, threads, child processes, pipes, the program's own DLLs, .NET (through the installed runtime pack), Direct3D 11 and OpenGL (both translated to this device's WebGL2) and audio work; what is still missing is said honestly: Direct3D 9/12, Vulkan, networking, the OpenGL fixed-function pipeline, geometry/tessellation shaders — such programs stop at the first missing API, and the report above tells you which one.
       </div>
     </div>
   );

@@ -1,3 +1,61 @@
+# v1.30.0 — OpenGL on the device's WebGL2: Shattered Pixel Dungeon (Java/LWJGL) reaches its title screen; NSIS installers really run their plugins (Android)
+
+**Why.** Every OpenGL program (LWJGL/libGDX games, GLFW/SDL programs, Java games) stopped at `ChoosePixelFormat` /
+`wglCreateContext` — opengl32.dll did not exist. Following «всё чего нету бери напрямую через то, с какого устройства
+запущено», opengl32 is now a bridge: GL calls made by the emulated program are executed on the Android device's own WebGL2
+context, the frame is read back into the program's window like any other Windows window.
+
+**OpenGL bridge (emu/x64/opengl.inc, emu/x64/gl_funcs.inc, src/lib/x64/gl.ts, src/lib/x64/gltable.ts, emu/tools/glgen.py).**
+- opengl32.dll + gdi32 pixel formats: `ChoosePixelFormat/SetPixelFormat/DescribePixelFormat/GetPixelFormat`, `SwapBuffers`
+  (paced to the swap interval), `wglCreateContext`, `wglCreateContextAttribsARB` (version/profile/flags honoured up to
+  3.3 core), `wglMakeCurrent` / `wglMakeContextCurrentARB`, `wglShareLists`, `wglGetProcAddress`,
+  `wglGetExtensionsString{ARB,EXT}`, `wglChoosePixelFormatARB` / `wglGetPixelFormatAttrib{iv,fv}ARB`, `wglSwapIntervalEXT`.
+  Multiple contexts and windows per process (GLFW creates a hidden probe window first).
+- 762 GL entry points in one generated table shared by C and TypeScript (ids identical on both sides): GL 1.1 exports of
+  the real opengl32.dll (361 names from Wine's opengl32.spec) + GL 1.2 … 3.3 core + the ARB/EXT extensions WebGL2 can back
+  (VBO, VAO, FBO, shader objects, sync, sampler objects, instancing, transform feedback, uniform buffers …).
+  `glGetString` reports `3.3.0 NebulaGL (WebGL2 bridge)` and the device's real renderer string; `GL_EXTENSIONS` /
+  `glGetStringi` list only what is actually implemented; `wglGetProcAddress` returns NULL for anything else (so LWJGL,
+  GLEW and GLAD mark those extensions unavailable instead of crashing later).
+- GLSL → GLSL ES: `#version 110/120` → ESSL 1.00 (attribute/varying, gl_FragColor, texture2D), `#version 130…330` →
+  `#version 300 es` (in/out renamed, `texture*` → `texture`, `gl_FragColor` → declared out, `layout(location)` kept,
+  precision prelude only where ESSL allows it). `GL_QUADS` draws go through a generated index buffer; client-side vertex
+  arrays through a scratch VBO; `glMapBuffer` is a CPU copy written back on unmap.
+- x86 (32-bit) programs: the same bridge; `GLintptr/GLsizeiptr` are 4 bytes on x86 and 8 on x64 (new signature letter
+  `z`), `GLint64/GLuint64` 8 on both, doubles on the x86 stack, `APIENTRY` = stdcall cleanup computed per signature.
+- Programs importing opengl32.dll are classified *partial* (what works / what does not) instead of *unsupported*.
+
+**Proof.** `gltri.exe` / `gltri32.exe` (emu/tests/gltri.c, also in the Programs samples): pixel format, WGL context 3.3,
+GLSL 330 VAO/VBO triangle + GLSL 120 `GL_QUADS` client-array quad, `glReadPixels` checks the colours, `SwapBuffers`,
+`glBegin` correctly fails with `GL_INVALID_OPERATION` in a core profile. e2e reads the screen back and finds the yellow quad
+and the shaded triangle, x64 and x86. **Shattered Pixel Dungeon v4.0.2 (Windows/GOG build, a real Java 17 + LWJGL 3 +
+libGDX game, 108 MB zip)** installed from the device through “Open .exe / .zip…”: HotSpot starts, GLFW creates its window,
+LWJGL binds GL through `wglGetProcAddress`, the title screen (logo, text, “Enter the Dungeon”) is drawn by the WebGL2
+bridge and the music plays through the audio bridge (e2e/shots/site-spd-2-run.png). It needed on top: `SetThreadExecutionState`
+(the game crashed on it right after window creation).
+
+**NSIS 32-bit installers (Notepad++ x86 setup) now run their real plugins.** `SetWindowLongW(hDlg, DWLP_DLGPROC)` returned 0
+instead of the previous procedure, so nsDialogs.dll chained to NULL and swallowed every button click after the language
+dialog (the installer looked “stuck” on the components page). Fixed in user.inc for x86 and x64 (`DWLP_MSGRESULT/DLGPROC/USER`
+= 0/4/8 on x86, 0/8/16 on x64). The native test drives the whole wizard: LangDLL → license → location → components (nsDialogs)
+→ install → finish, 17 files land in the chosen folder.
+
+**Test runner.** `X64_GL_NULL=1` gives the native runner a null OpenGL driver (version strings, limits, “compiled/linked”,
+generated names; nothing drawn) so GL programs run to their game loop under `run.sh` and `--apitrace` — Shattered Pixel
+Dungeon renders 1 190 frames in 8 minutes natively this way. `X64_GL_TRACE=1` logs every GL call. `e2e/sitecheck.mjs
+<zip|exe>` tries a third-party program through the UI exactly as a user would and keeps screenshots; files over 50 MB are
+passed by path.
+
+**Honest limits.** WebGL2 has no fixed-function pipeline: `glBegin/glEnd`, matrix stack, display lists, `wglUseFontBitmaps`,
+alpha test, `glPolygonMode(GL_LINE)`, `glPointSize` > 1, 1D / rectangle / multisample / buffer textures, geometry and
+tessellation shaders, `BaseVertex` draws, program binaries, `glCopyImageSubData`, `GL_TIME_ELAPSED` queries are not
+available — they return `GL_INVALID_OPERATION` (one log line each) and `wglGetProcAddress` says NULL for the extension
+names, so programs that need GL ≤ 1.5 immediate mode or GL 4.x will not draw. `glClientWaitSync` never blocks. Speed:
+Shattered Pixel Dungeon is a JVM with its JIT output interpreted by the emulator — the title screen appears after
+~7 minutes at 15–20 MIPS in the headless test browser and runs at a few frames per second; a phone will be in the same
+range. The game reserves 2.6 GB of guest address space (HotSpot heap) — devices with little RAM may not get there.
+Q-Dir (GDI+) and the DirectInput8 class (`CoCreateInstance` for SDL/jamepad gamepads) are the next missing pieces.
+
 # v1.29.0 — File Explorer and Notepad on the real C:\ (Android)
 
 **Why.** File Explorer showed a hard-coded demo tree (“118 GB free of 237 GB”, fake exe sizes) and Notepad a canned text —
