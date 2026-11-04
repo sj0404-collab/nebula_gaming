@@ -1446,6 +1446,7 @@ static const struct { const char *n; unsigned short bytes; } stdcall32_tab[] = {
   { "GetClipboardFormatNameWrapW", 12 },
   { "GetClipboardOwner", 0 },
   { "GetClipboardSequenceNumber", 0 },
+  { "GetComboBoxInfo", 8 },
   { "GetCommandLineA", 0 },
   { "GetCommandLineW", 0 },
   { "GetCompressedFileSizeA", 8 },
