@@ -54,7 +54,7 @@ static int tt_layout(Win32 *w, int i, Tooltip *tt, int *lines, int *nl, int *tw,
   if (cnt == 0) { lines[0] = 0; lines[1] = 0; cnt = 1; }
   int titlew = tt->title[0] ? text_width(w, f, tt->title, (int)e_strlen(tt->title)) : 0; if (titlew > wmax) wmax = titlew;
   *nl = cnt; *tw = wmax + tt->ml + tt->mr + 2; *th = cnt * fh + (tt->title[0] ? fh + 2 : 0) + tt->mt + tt->mb + 2; return fh; }
-static void tt_show_now(Cpu *c, int i) { Win32 *w = W; Tooltip *tt = tt_of(i); if (!tt) return; Wnd *n = &g_wnd[i]; int lines[64], nl, tw, th; tt_layout(w, i, tt, lines, &nl, &tw, &th); if (!tt->text[0] && !tt->title[0]) { tt->pending = 0; return; }
+static void tt_show_now(Cpu *c, int i) { Win32 *w = W; Tooltip *tt = tt_of(i); if (!tt) return; Wnd *n = &g_wnd[i]; int lines[64], nl, tw, th; tt_layout(w, i, tt, lines, &nl, &tw, &th); if (!tt->text[0] && !tt->title[0]) { tt->pending = 0; tt->hover_t = host_now_ms() + 3600000.0; /* nothing to show for this tool: do not ask again until the pointer moves to another one */ return; }
   int x, y; if (tt->track) { x = tt->tx - SCREEN_X0; y = tt->ty - SCREEN_Y0; if (!(tt->cur >= 0 && tt->cur < TT_MAX && (tt->t[tt->cur].flags & 0x80))) y -= th; if (tt->cur >= 0 && tt->cur < TT_MAX && (tt->t[tt->cur].flags & 2)) x -= tw / 2; }
   else if (tt->cur >= 0 && tt->cur < TT_MAX && (tt->t[tt->cur].flags & 2 /* TTF_CENTERTIP */) && !(tt->t[tt->cur].flags & 1)) { int wi = wnd_of(tt->t[tt->cur].hwnd); int cx = 0, cy = 0; if (wi >= 0) wnd_client_origin(wi, &cx, &cy); TtTool *t = &tt->t[tt->cur]; x = cx + (t->l + t->r) / 2 - tw / 2; y = cy + t->b + 2; }
   else { x = g_mouse_x; y = g_mouse_y + 21; }

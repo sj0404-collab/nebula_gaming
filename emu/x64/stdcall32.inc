@@ -2658,6 +2658,7 @@ static const struct { const char *n; unsigned short bytes; } stdcall32_tab[] = {
   { "ReadFile", 20 },
   { "ReadFileEx", 20 },
   { "ReadProcessMemory", 20 },
+  { "RealChildWindowFromPoint", 12 },
   { "RealDriveType", 8 },
   { "RealGetWindowClassW", 12 },
   { "RealizePalette", 4 },
