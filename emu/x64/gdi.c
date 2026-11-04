@@ -423,6 +423,7 @@ static void s_CommandLineToArgvW(Cpu *c) { Win32 *w = W; u64 P = PSZ; char cmd[8
 #include "icon.inc"
 #include "comctl.inc"
 #include "tooltip.inc"
+#include "trackbar.inc"
 #include "treeview.inc"
 #include "listview.inc"
 #include "input.inc"
