@@ -1102,7 +1102,7 @@ static void s_NebulaButtonProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RE
     case 0x100: { if (wp == 0x20) { n->pushed = 1; wnd_invalidate(i, 1); } RET(0); return; }
     case 0x101: { if (wp == 0x20 && n->pushed) { n->pushed = 0; wnd_invalidate(i, 1); button_click(c, i); return; } RET(0); return; }
     case 0xF0: RET(n->checked); return;                                                                      /* BM_GETCHECK */
-    case 0xF1: n->checked = (int)wp; wnd_invalidate(i, 1); RET(0); return;                                   /* BM_SETCHECK */
+    case 0xF1: { u32 bt = n->style & 0xF; int mx = (bt == 5 || bt == 6) ? 2 : (bt == 2 || bt == 3 || bt == 4 || bt == 9) ? 1 : 0; int v = (int)wp; if (v > mx) v = mx; if (v < 0) v = 0; n->checked = v; wnd_invalidate(i, 1); RET(0); return; }   /* BM_SETCHECK: clamped to the style's maximum (Notepad++ sends flag values like 2 to 2-state checkboxes) */
     case 0xF2: RET((n->pushed ? 4 : 0) | (n->focus_draw ? 8 : 0) | (n->checked & 3) | (n->hot ? 0x200 : 0)); return;   /* BM_GETSTATE */
     case 0xF3: n->pushed = wp != 0; wnd_invalidate(i, 1); RET(0); return;
     case 0xF4: n->style = (n->style & ~0xFu) | ((u32)wp & 0xF); wnd_invalidate(i, 1); RET(0); return;        /* BM_SETSTYLE */
@@ -1450,6 +1450,7 @@ static void s_MapDialogRect(Cpu *c) { int d = wnd_of(ARG(0)); u64 r = ARG(1); in
 static void s_GetDialogBaseUnits(Cpu *c) { RET(7 | (13 << 16)); }
 /* tab order: children of the dialog in creation order with WS_TABSTOP, visible and enabled */
 static int dlg_next_tab(int d, int from, int back) { int order[MAX_WND]; int n = wnd_siblings_topdown(d, -1, order);
+  while (from >= 0 && g_wnd[from].parent >= 0 && g_wnd[from].parent != d) from = g_wnd[from].parent;   /* focus inside a composite control (the Edit of a CBS_DROPDOWN combo): tab from the control itself */
   int cur = -1; for (int a = 0; a < n; a++) if (order[a] == from) cur = a; for (int step = 1; step <= n; step++) { int a = cur < 0 ? (back ? n - step : step - 1) : ((cur + (back ? n - step : step)) % n); int k = order[a]; if ((g_wnd[k].style & 0x10000) && g_wnd[k].visible && g_wnd[k].enabled && g_wnd[k].builtin != BI_STATIC) return k; } return -1; }
 static void s_GetNextDlgTabItem(Cpu *c) { int d = wnd_of(ARG(0)); if (d < 0) { RET(0); return; } int k = dlg_next_tab(d, wnd_of(ARG(1)), ARG(2) != 0); RET(k >= 0 ? HWND_OF(k) : 0); }
 static void s_GetNextDlgGroupItem(Cpu *c) { int d = wnd_of(ARG(0)); if (d < 0) { RET(0); return; } int from = wnd_of(ARG(1)); int k = dlg_next_tab(d, from, ARG(2) != 0); RET(k >= 0 ? HWND_OF(k) : (from >= 0 ? ARG(1) : 0)); }
