@@ -16,7 +16,7 @@ LargeIcons SmallIcons List Details`, A and W, `GCS_HELPTEXT` too) and `InvokeCom
 `ShellExecute`/navigate, explore = `IShellBrowser::BrowseObject`, cut/copy = CF_HDROP (`DROPFILES`, wide) in the
 clipboard and the «cut» ghosting, paste = copies/moves the clipboard files into the folder (including into a
 sub-folder when one is selected), delete = removes files and directories recursively, new folder = creates
-`New folder (n)` and starts editing it, refresh = re-enumerates the view, properties = the Properties sheet;
+`New folder (n)`, refresh = re-enumerates the view, properties = the Properties sheet;
 `HandleMenuMsg(2)` for owner-draw forwarding. `IShellFolder::GetUIObjectOf(IID_IContextMenu)` and the default view's
 own right-click (on an item and on the background) return the same object, so Explorer-style hosts and the built-in
 view behave identically.
@@ -47,9 +47,9 @@ icons / Small icons / List / Details), Refresh, New folder, Properties, «For th
 or *Small icons* re-lays the active pane; right-click on a drive / folder / background shows the Explorer menus and the
 verbs act on the mounted folders.
 
-**Known gaps (next).** `IFolderView`/`IFolderView2` are still not exposed by the view (Q-Dir asks for them when its
-toolbar view button is pressed); no *Sort by* / *Group by* sub-menus; no Recycle Bin (delete is permanent); rename via
-`LVM_EDITLABEL` from the context menu is wired but the in-place edit box is plain.
+**Known gaps (next).** `IFolderView2` is not exposed by the view yet (Q-Dir asks for it from its toolbar view button); no
+*Sort by* / *Group by* sub-menus; no Recycle Bin (delete is permanent); no in-place rename yet (`LVM_EDITLABEL` is a
+no-op in this version).
 
 Android-only build (APK via GitHub Actions); x86 and x64 paths tested with `emu/tests/run.sh` (native, both bitnesses)
 and the Playwright e2e suite in the APK's WebView engine.
