@@ -446,6 +446,20 @@ print('above' if sc and tb and sc[-1] > tb[-1] else 'below %r %r' % (sc, tb))")"
   # Save As: Notepad++ appends the extension itself (IFileDialogEvents + IOleWindow + WH_KEYBOARD/WH_CALLWNDPROC hooks + FindWindowEx(ComboBox, "Edit")) — typed "hello" must become hello.txt
   rm -f "$ID/npp/hello" "$ID/npp/hello.txt"; X64_MODAL=1 $X --quiet --no-stdin --max-ms 42000 --mount-rw "$ID/npp=C:\\nebula" --type 'abc@20000' --key 17@24000:2000 --key 18@24100:1900 --key 83@24500:100 --type 'hello@31000' --key 13@34000 $ID/npp/notepad++.exe >/dev/null 2>&1 || true
   check "Notepad++ x64: Save As (Ctrl+Alt+S) 'hello' → hello.txt with the typed text (extension added by Notepad++ through hooks + dialog events, as on Windows)"   "hello.txt:abc"   "$(ls "$ID/npp" | grep -a '^hello' | tr '\n' ' ' | sed 's/ $//'):$(cat "$ID/npp/hello.txt" 2>/dev/null)"
+  # Replace tab: Ctrl+H pre-fills Find what with the word at the caret, Tab moves to Replace with (focus inside the combo's Edit), Replace All
+  # rewrites the document; Esc closes the dialog; Save As writes the result
+  rm -f "$ID/npp/rep" "$ID/npp/rep.txt"; X64_MODAL=1 $X --quiet --no-stdin --max-ms 46000 --mount-rw "$ID/npp=C:\\nebula" --click 300,300@15000 --type 'abc abc abc@16500' --key 0x11@18000:600 --key 0x48@18100:100 --type 'abc@20000' --key 9@21000 --type 'xyz@21500' --click 710,304@23000 --key 27@25500 --key 17@28000:2000 --key 18@28100:1900 --key 83@28500:100 --type 'rep@35000' --key 13@38000 $ID/npp/notepad++.exe >/dev/null 2>&1 || true
+  check "Notepad++ x64: Ctrl+H → 'abc' Tab 'xyz' → Replace All → Esc → Save As rep → rep.txt = 'xyz xyz xyz'"   "rep.txt:xyz xyz xyz"   "$(ls "$ID/npp" | grep -a '^rep' | tr '\n' ' ' | sed 's/ $//'):$(cat "$ID/npp/rep.txt" 2>/dev/null)"
+  # Settings → Preferences: 26 child page dialogs (~540 windows), the Dark Mode page with 13 ColourPicker buttons (subclassed Buttons that
+  # paint in WM_ERASEBKGND and go grey through WM_ENABLE), pages at the template position right of the category list
+  out=$(X64_LOG=1 X64_WNDDUMP=1 X64_MODAL=1 $X --no-stdin --max-ms 25000 --click 265,10@16000 --click 300,34@17500 --click 110,276@20000 --mount-rw "$ID/npp=C:\\nebula" $ID/npp/notepad++.exe 2>&1 3>&1 | grep -a "^\\[wnd\\]\\|FAULT\\|MessageBox" || true)
+  check "Notepad++ x64: Settings → Preferences opens (dialog + 24-entry category list + pages), Dark Mode page shows 13 ColourPickers, no fault"   "prefs=1 pickers=13 lightmode=1 errors=0"   "prefs=$(printf '%s\n' "$out" | grep -a -c '"Preferences"') pickers=$(printf '%s\n' "$out" | grep -a -c '"Button" "F" ') lightmode=$(printf '%s\n' "$out" | grep -a -c '"Light mode"') errors=$(printf '%s\n' "$out" | grep -a -c 'FAULT\\|MessageBox')"
+  check "Notepad++ x64: a Preferences page sits right of the category list (x >= 160) inside the dialog client"   "page_ok"   "$(printf '%s\n' "$out" | python3 -c "
+import re,sys
+t=sys.stdin.read(); m=re.search(r'\[wnd\] #(\d+) hwnd=\w+ pid=\d+ \"#32770\\\" \\\"Preferences\"', t)
+if not m: print('no dialog'); sys.exit()
+d=m.group(1); pages=re.findall(r'\[wnd\] #\d+ hwnd=\w+ pid=\d+ \"#32770\" \"\" parent=%s at (\d+),(\d+) ' % d, t)
+print('page_ok' if pages and all(int(x) >= 160 and int(y) < 40 for x, y in pages) else 'pages %r' % pages[:3])")"
   rm -rf $ID; ID=$(mktemp -d)
   # the real LangDLL.dll plugin now loads (lazy VFS) and shows the "Installer Language" dialog first (OK at 149,106), as on Windows
   out=$($X --no-stdin --max-ms 150000 --mount-rw "$ID=C:\\inst" --click 149,106@4000 --click 149,106@7000 --click 357,337@10000 --click 357,337@13000 --click 357,337@16000 --click 357,337@19000 --click 357,337@70000 --click 357,337@80000 --click 357,337@90000 --click 357,337@110000 tests/inst/npp32.exe '/D=C:\inst\npp' 2>&1 | grep -v "last blocks" || true)
@@ -510,5 +524,8 @@ if [ -f $PT ]; then
   check "putty.exe: no control class is reported as unimplemented (SysTreeView32 is real now)"   "unimplemented_controls=0"   "unimplemented_controls=$(printf '%s' "$out" | grep -c 'not implemented yet')"
   out=$(X64_LOG=1 X64_WNDDUMP=1 $X --no-stdin --max-ms 4000 $PT 2>&1 3>&1 | grep -a "^\[wnd\]" || true)
   check "putty.exe: the Session panel controls exist (Host Name edit, Saved Sessions list, Telnet combo)"   "Host &Name"   "$out"
+  out=$(X64_LOG=1 X64_WNDDUMP=1 X64_MODAL=1 $X --no-stdin --max-ms 9000 --click 60,88@4000 --click 60,173@6500 $PT 2>&1 3>&1 | grep -a "^\\[wnd\\]\\|FAULT" || true)
+  check "putty.exe: clicking Terminal then Appearance in the category tree switches the panel (TVN_SELCHANGEDA to the ANSI dialog; winspool EnumPrinters for the Terminal panel; no fault)"   "Cursor appearance:"   "$out"
+  check "putty.exe: the Session panel controls were destroyed by the switch"   "session_controls=0"   "session_controls=$(printf '%s' "$out" | grep -c 'Sav&ed Sessions')"
 else echo "  skip putty.exe (no network)"; fi
 [ $fail = 0 ] && echo "ALL OK" || { echo "FAILURES"; exit 1; }
