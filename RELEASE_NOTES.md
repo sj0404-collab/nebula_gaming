@@ -1,3 +1,51 @@
+# v1.34.0 — in-place rename (F2 / context menu / `LVM_EDITLABEL`), `IFolderView2`, DefView re-entry fix: Q-Dir x86/x64 (Android)
+
+**Why.** Renaming a file is the one thing every file manager does from the list itself: F2 or *Rename* in the right-click
+menu opens an edit box over the label, Enter commits and the shell renames the file on disk. In v1.33.0 `LVM_EDITLABEL`
+was a no-op, and the second half of the problem was hidden behind it: after a right-click menu in the shell view, the
+view's window procedure swallowed the *next* notification that arrived at the same stack depth (the modal re-entry
+check matched on address only), so even a correct edit box never got its `LVN_BEGINLABELEDIT`. Everything below is real
+behaviour, no stub.
+
+**List-view label editing (emu/x64/listview.inc).** With `LVS_EDITLABELS`, `LVM_EDITLABELA/W` (`-1` cancels), F2 on the
+focused item and `IFolderView2::DoRename` start an edit: the parent gets `LVN_BEGINLABELEDITA/W` (`NMLVDISPINFO`, a
+`FALSE` return refuses), an `Edit` child (`ES_AUTOHSCROLL`, text selected, focused) is created over the label rectangle
+of the current layout (report / icon / small icon / list), `LVM_GETEDITCONTROL` returns it; Enter commits and Escape
+cancels (`LVN_ENDLABELEDITA/W` with the new text or `pszText = NULL`; a non-zero return applies the text to the item),
+the box is also closed when the edit loses focus, when the item is deleted or the list is destroyed; the edit box is
+destroyed from the list's own message (private `0x10FF`) after the notification chain — never from inside a
+continuation. Keyboard: Home/End/←/→/Shift-selection, Delete/Backspace are the regular `Edit` control.
+
+**Shell default view (emu/x64/defview.inc, ctxmenu.inc).** `LVN_BEGINLABELEDIT` is accepted for file-system items;
+`LVN_ENDLABELEDIT` renames on disk through the VFS (`MoveFileW` semantics: the hidden Explorer extension is re-attached
+when the label was shown without it, a name that already exists or an empty/`\ / : * ? " < > |` name is refused and the
+old label stays), then the view re-enumerates and keeps the renamed item selected. The Explorer item context menu gained
+*Rename* (`rename` verb, `GetCommandString` A/W) — it posts `LVM_EDITLABELW` for the clicked item, so the menu's own
+modal finishes first. `IFolderView2` is now exposed by the view (`QueryInterface`): `Get/SetCurrentFolderFlags`,
+`GetSortColumnCount/GetSortColumns/SetSortColumns` (name column, direction), `GetItem/GetVisibleItem/GetSelectedItem`,
+`GetSelection` (`IShellItemArray` of the selected items), `GetSelectionState`, `Set/GetViewModeAndIconSize`,
+`SetRedraw`, `IsMoveInSameFolder`, `DoRename`; grouping is reported as none (one flat list). x86 signatures added.
+
+**Modal re-entry fix (defview.inc, user.inc).** The default view remembers the originating `NM_RCLICK` message
+(`msg/wParam/lParam`) when it opens a context menu; a re-execution at the same `rip/rsp` is treated as the menu's
+re-entry only if the arguments match, so other notifications that arrive at that depth (label editing, selection
+changes) are handled normally and the menu's modal is finished when the real re-execution comes. This was the reason
+the first rename attempt produced no edit box in Q-Dir.
+
+**Verified on Q-Dir 12.82 (x64 and x86 installs inside the emulator):** right-click a file → *Rename* → edit box over
+the name → type → Enter → the file is renamed in the mounted host folder (`oldname.txt` → `newname.txt`), the list shows
+the new name selected; Escape leaves the file untouched. Test `tests/lvedit.c` (20 checks: begin/end notifications,
+refuse, cancel, commit, edit control, focus loss; x86 and x64) is part of `run.sh` (235 checks, ALL OK), Playwright e2e
+46/46 in the WebView engine.
+
+**Known gaps (next).** No OLE drag & drop yet (`DoDragDrop/RegisterDragDrop` are not implemented — Q-Dir's drag between
+panes does nothing); no *Sort by* / *Group by* sub-menus; no Recycle Bin (delete is permanent); `IShellView::GetItemObject`
+does not serve `IID_IDataObject`; `SHAutoComplete`, `uxtheme #49/#106` and the dark-mode ordinals are reported as missing
+by Q-Dir (it falls back); `CLSID_NamespaceTreeControl` is not provided (Q-Dir uses its classic tree instead).
+
+Android-only build (APK via GitHub Actions); x86 and x64 paths tested with `emu/tests/run.sh` (native, both bitnesses)
+and the Playwright e2e suite in the APK's WebView engine.
+
 # v1.33.0 — Explorer context menus, real list-view modes and the shell View menu: Q-Dir x86/x64 (Android)
 
 **Why.** A file manager hosting the shell's default folder view (`SHCreateShellFolderView` / `IShellView`) gets its
