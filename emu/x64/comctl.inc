@@ -4,7 +4,8 @@
 #define CC_MAX 64
 typedef struct { int n; int right[CC_MAX]; u32 style[CC_MAX]; char text[CC_MAX][128]; int simple; char stext[256]; int minh; } StatusBar;
 typedef struct { int image; u32 id; u8 state, style; u64 data; int istr; char text[64]; int x, w, cx; } TbBtn;
-typedef struct { int n; TbBtn b[CC_MAX]; u64 himl, himl_hot, himl_dis; int bw, bh, imgw, imgh; int structsize; int textrows; int nstr; char strs[CC_MAX][64]; u32 exstyle; int padx, pady; int hot, pressed; u64 nmbuf; int indent; } Toolbar;
+typedef struct { int n; TbBtn b[CC_MAX]; u64 himl, himl_hot, himl_dis; int bw, bh, imgw, imgh; int structsize; int textrows; int nstr; char strs[CC_MAX][64]; u32 exstyle; int padx, pady; int hot, pressed; u64 nmbuf; int indent; int tipwnd; } Toolbar;
+static void tb_tip_notify(Cpu *c, int i, u64 wp, u64 lp); static u64 tb_tooltip_wnd(Cpu *c, int i); static void tb_adopt_tip(int ti, int i);
 typedef struct { int n; struct { char text[64]; int image; u64 lparam; u32 state; int x, w; } t[CC_MAX]; int cur; int padx, pady; u64 himl; int fixw, fixh; u64 nmbuf; int extra; int pending; } TabCtl;
 static u64 cc_P(Cpu *c) { return PSZ_OF(c); }
 static void nm_hdr(Cpu *c, u64 buf, int i, u32 code) { u64 P = cc_P(c); wrp(c, buf, HWND_OF(i)); wrp(c, buf + P, g_wnd[i].id); wr32(c, buf + 2 * P, code); }
@@ -152,7 +153,10 @@ static void s_NebulaToolbarProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { R
     case 0x466: RET(0); return;                                                                              /* TB_SETMETRICS */
     case 0x467: { int k = (int)wp; if (k < 0 || k >= tb->n || !lp) { RET(0); return; } tb_layout(w, i); wr32(c, lp, (u32)(tb->b[k].x + tb->b[k].w - 12)); wr32(c, lp + 4, (u32)tb->pady); wr32(c, lp + 8, (u32)(tb->b[k].x + tb->b[k].w)); wr32(c, lp + 12, (u32)(tb->pady + tb->bh)); RET(1); return; }   /* TB_GETITEMDROPDOWNRECT */
     case 0x428: RET(1); return; case 0x427: RET(0); return;                                                  /* rows */
-    case 0x423: case 0x424: case 0x425: case 0x429: case 0x43E: case 0x446: case 0x449: case 0x44A: case 0x44F: case 0x450: case 0x451: case 0x45A: case 0x2005: case 0x2007: case 0x200B: case 0x2001: RET(0); return;   /* tooltips, parent, bitmap flags, LOADIMAGES, insert marks, unicode, version, theme */
+    case 0x423: { RET((n->style & 0x100) || tb->tipwnd > 0 ? tb_tooltip_wnd(c, i) : 0); return; }   /* TB_GETTOOLTIPS */
+    case 0x424: { int ti = wnd_of(wp); tb->tipwnd = ti; if (ti >= 0) tb_adopt_tip(ti, i); RET(0); return; }   /* TB_SETTOOLTIPS */
+    case 0x4E: { u64 P = cc_P(c); u32 code = lp ? rd32(c, lp + 2 * P) : 0; if (code == (u32)-520 || code == (u32)-530) { tb_tip_notify(c, i, wp, lp); return; } notify_parent_wm(c, i, msg, wp, lp, 0); return; }
+    case 0x425: case 0x429: case 0x43E: case 0x446: case 0x449: case 0x44A: case 0x44F: case 0x450: case 0x451: case 0x45A: case 0x2005: case 0x2007: case 0x200B: case 0x2001: RET(0); return;   /* tooltips, parent, bitmap flags, LOADIMAGES, insert marks, unicode, version, theme */
     default: if (ctl_common(c, i, msg, wp, lp)) return; def_window_proc(c, i, msg, wp, lp); return; } }
 
 /* ===== tab control ===== */
