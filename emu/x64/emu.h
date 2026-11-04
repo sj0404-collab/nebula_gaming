@@ -68,7 +68,9 @@ int    host_gl_probe(int id);                                              /* 1 
 u64    host_gl_call(int id, const u64 *args, int n);                       /* one GL call: raw 64-bit argument words (float/double bit patterns, guest pointers) */
 void   host_gl_present(u32 *bgra, int w, int h);                           /* SwapBuffers: drawing surface → BGRA rows, top row first */
 extern struct Cpu *g_gl_cpu;                                               /* CPU whose guest memory the host reads during host_gl_call (api.c: x64_gl_ptr) */
-const char *gl_sig_of(const char *name);                                  /* "ret:args" of a GL entry point (x86 marshalling) or NULL */
+const char *gl_sig_of(const char *name);
+const char *gl_name_of(int id);                                           /* entry-point name of a GL id or NULL */
+u64 x64_gl_alloc(u64 len); void *x64_gl_ptr(u64 addr, u64 len, int write);   /* api.c: guest heap / memory for host GL drivers */                                  /* "ret:args" of a GL entry point (x86 marshalling) or NULL */
 
 /* ---------- guest memory ---------- */
 #define MAX_REGIONS 4096   /* V8 reserves hundreds of 1 MB chunks; each large reservation is its own region (lazy host pages) */
@@ -265,7 +267,7 @@ int  proc_enum(int idx, int *pid, int *ppid, const char **name);   /* 1 if idx v
 /* ---- per-thread Win32 state: lives in Win32 as the *current* thread's copy and is swapped on thread switch ---- */
 #define THREAD_MAX 64
 #define THREAD_CTX_FIELDS \
-  u64 last_error; \
+  u64 last_error; u32 exec_state; \
   struct { int kind; u64 ret_addr, rsp, data[16]; int idx; u32 clean32; u32 seq; u8 chain; } cont[64]; int ncont; u32 cont_seq;   /* seq: guest-entry generation when pushed; chain: result goes to the continuation below (pushed by the same shim step) */   /* continuation stack for guest callbacks (clean32: 32-bit stdcall bytes popped when the shim finally returns) */ \
   int sleeping; double sleep_until_ms; \
   int block; int block_pids[8]; int nblock_pids; int block_pipe; \

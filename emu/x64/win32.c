@@ -732,6 +732,8 @@ static void format_message(Cpu *c, int wide) {
 static void s_FormatMessageA(Cpu *c) { format_message(c, 0); }
 static void s_FormatMessageW(Cpu *c) { format_message(c, 1); }
 static void s_SetErrorMode(Cpu *c) { RET(0); }
+/* SetThreadExecutionState: games keep the display awake (ES_DISPLAY_REQUIRED) — the previous state is returned, ES_CONTINUOUS is the default */
+static void s_SetThreadExecutionState(Cpu *c) { Win32 *w = W; u32 prev = w->exec_state ? w->exec_state : 0x80000000u; u32 f = (u32)ARG(0); if (f & 0x80000000u) w->exec_state = f; RET(prev); }
 static void s_GetErrorMode(Cpu *c) { RET(0); }
 static void s_SetThreadErrorMode(Cpu *c) { RET(1); }
 static void s_GetProcessAffinityMask(Cpu *c) { wrp(c, ARG(1), 1); wrp(c, ARG(2), 1); RET(1); }
@@ -1379,7 +1381,7 @@ static const ShimDef shims[] = {
   S(GetVersion), S(GetVersionExA), S(GetVersionExW), S(GetProductInfo), S(GetApplicationRestartSettings), S(RegisterApplicationRestart), S(UnregisterApplicationRestart), S(IsProcessorFeaturePresent), S(IsDebuggerPresent), S(IsDBCSLeadByte), S(IsDBCSLeadByteEx), S(GetACP), S(GetOEMCP), S(GetCPInfo), S(GetSystemInfo), S(GetNativeSystemInfo), S(GlobalMemoryStatusEx),
   NODE_SHIMS,
   S(RtlInstallFunctionTableCallback), S(EncodePointer), S(DecodePointer),
-  S(OutputDebugStringA), S(OutputDebugStringW), S(FormatMessageA), S(FormatMessageW), S(SetErrorMode), S(GetErrorMode), S(SetThreadErrorMode), S(GetLogicalProcessorInformation), S(GetProcessAffinityMask), S(SetThreadAffinityMask), S(SetProcessAffinityMask), S(GetSystemTimeAdjustment), S(SetSystemTime), S(GetThreadPriority), S(SetThreadPriority), S(SetPriorityClass), S(GetPriorityClass), S(GetThreadTimes),
+  S(OutputDebugStringA), S(OutputDebugStringW), S(FormatMessageA), S(FormatMessageW), S(SetErrorMode), S(SetThreadExecutionState), S(GetErrorMode), S(SetThreadErrorMode), S(GetLogicalProcessorInformation), S(GetProcessAffinityMask), S(SetThreadAffinityMask), S(SetProcessAffinityMask), S(GetSystemTimeAdjustment), S(SetSystemTime), S(GetThreadPriority), S(SetThreadPriority), S(SetPriorityClass), S(GetPriorityClass), S(GetThreadTimes),
   S(GetProcessHeap), S(HeapCreate), S(HeapDestroy), S(HeapAlloc), S(HeapFree), S(HeapReAlloc), S(HeapSize), S(HeapValidate), S(HeapSetInformation), S(HeapQueryInformation), S(HeapCompact), S(HeapLock), S(HeapUnlock), S(HeapWalk), S(GlobalAlloc), S(GlobalFree), S(GlobalLock), S(GlobalUnlock), S(LocalAlloc), S(LocalFree),
   S(VirtualAlloc), S(VirtualAllocEx), S(VirtualFree), S(VirtualProtect), S(VirtualLock), S(VirtualUnlock), S(VirtualQuery), S(FlushInstructionCache),
   S(CreateTimerQueue),

@@ -3245,6 +3245,7 @@ static const struct { const char *n; unsigned short bytes; } stdcall32_tab[] = {
   { "SetThreadDescription", 8 },
   { "SetThreadDpiAwarenessContext", 4 },
   { "SetThreadErrorMode", 8 },
+  { "SetThreadExecutionState", 4 },
   { "SetThreadGroupAffinity", 12 },
   { "SetThreadIdealProcessorEx", 12 },
   { "SetThreadLocale", 4 },

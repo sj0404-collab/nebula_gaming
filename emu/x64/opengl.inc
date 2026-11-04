@@ -13,7 +13,8 @@ static int gl_find(const char *name) {   /* id of a GL entry point (binary searc
   int lo = 0, hi = GL_FN_COUNT - 1;
   while (lo <= hi) { int mid = (lo + hi) / 2; int r = e_strcmp(gl_fns[mid].name, name); if (r == 0) return mid; if (r < 0) lo = mid + 1; else hi = mid - 1; }
   return -1; }
-const char *gl_sig_of(const char *name) { int i = gl_find(name); return i >= 0 ? gl_fns[i].sig : 0; }   /* x86 marshalling (win32_x86.inc) */
+const char *gl_sig_of(const char *name) { int i = gl_find(name); return i >= 0 ? gl_fns[i].sig : 0; }
+const char *gl_name_of(int id) { return id >= 0 && id < (int)(sizeof gl_fns / sizeof gl_fns[0]) ? gl_fns[id].name : 0; }   /* host-side diagnostics (null driver) */   /* x86 marshalling (win32_x86.inc) */
 
 /* ---- pixel formats: 1 = RGBA8 + depth 24 + stencil 8, double-buffered; 2 = the same single-buffered ---- */
 #define GL_NFORMATS 2

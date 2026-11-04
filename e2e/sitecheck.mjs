@@ -5,7 +5,7 @@
 // Output: e2e/shots/site-<tag>-*.png and a one-line verdict with the emulator's own status (running / exited / fault + report).
 import { chromium } from 'playwright';
 import { spawn } from 'node:child_process';
-import { readFileSync, mkdirSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { resolve, basename } from 'node:path';
 
 const argv = process.argv.slice(2); const file = argv[0]; if (!file) { console.error('usage: node e2e/sitecheck.mjs <file> [--tile Name] [--args A] [--wait ms] [--tag t]'); process.exit(2); }
@@ -28,9 +28,9 @@ const w = page.locator('[data-window][aria-label*="Programs"]');
 await w.locator('[data-x64-disk]').waitFor({ timeout: 60000 });
 const status = () => page.evaluate(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status'));
 const bar = async () => (await w.locator('[data-x64-status]').innerText()).replace(/\s+/g, ' ').slice(0, 300);
-const buf = readFileSync(file); const isZip = /\.zip$/i.test(file);
+const isZip = /\.zip$/i.test(file);
 const t0 = Date.now();
-await w.locator('[data-x64-open]').setInputFiles({ name: basename(file), mimeType: 'application/octet-stream', buffer: buf });
+await w.locator('[data-x64-open]').setInputFiles(resolve(file));   /* by path: Playwright refuses in-memory buffers above 50 MB */
 if (isZip) {
   // install → tile appears
   const sel = tile ? `[data-x64-item="${tile}"]` : '[data-x64-item]';
@@ -48,7 +48,7 @@ if (isZip) {
 const tRun = Date.now();
 await page.waitForFunction(() => { const s = document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status'); const fr = Number(document.querySelector('[data-x64-screen]')?.getAttribute('data-frames')) || 0; return fr > 0 || s === 'exited' || s === 'fault' || s === 'stopped'; }, null, { timeout: 300000 }).catch(() => {});
 const firstFrameMs = Date.now() - tRun;
-await sleep(Math.min(wait, 120000));
+await sleep(Math.min(wait, 900000));
 const st = await status();
 const frames = await page.evaluate(() => Number(document.querySelector('[data-x64-screen]')?.getAttribute('data-frames')) || 0);
 if (frames > 0) await w.locator('[data-x64-tab="screen"]').click().catch(() => {});
@@ -67,7 +67,7 @@ if (st === 'fault' || st === 'exited') {
 if (st === 'running') {   // still running: where is it? (console tail + the emulator's own inspector)
   await w.locator('[data-x64-tab="console"]').click().catch(() => {}); await sleep(200);
   const con = await w.locator('[data-x64-console]').innerText().catch(() => ''); if (con.trim()) console.log('console:', con.replace(/\s+/g, ' ').slice(-800));
-  const insp = await page.evaluate(() => { const rt = window.__x64; try { return rt?.inspect ? String(rt.inspect()).slice(0, 1500) : '(no inspect)'; } catch (e) { return String(e); } }); console.log('inspect:', insp);
+  const insp = await page.evaluate(() => { const rt = window.__x64; try { return JSON.stringify(rt?.stats?.() ?? null).slice(0, 1500); } catch (e) { return String(e); } }); console.log('stats:', insp);
 }
 const mem = await page.evaluate(() => { const rt = window.__x64; return rt ? { guestMB: Math.round(rt.stats?.().memMB ?? 0), wasmMB: Math.round((rt.memoryBytes?.() ?? 0) / 1048576), cacheMB: Math.round((rt.cacheBytes?.() ?? 0) / 1048576), files: rt.vfsList().length } : null; });
 console.log('memory:', JSON.stringify(mem), 'pageerrors:', errors.length);

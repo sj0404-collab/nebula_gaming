@@ -133,7 +133,33 @@ void host_gfx_free(int id) { (void)id; }
 static int gl_null(void) { static int v = -1; if (v < 0) { const char *e = getenv("X64_GL_NULL"); v = e && *e && *e != '0'; } return v; }
 int host_gl_init(int w, int h) { (void)w; (void)h; return gl_null() ? 1 : 0; }
 int host_gl_probe(int id) { (void)id; return gl_null() ? 1 : 0; }
-u64 host_gl_call(int id, const u64 *args, int n) { (void)args; (void)n; if (gl_null() && getenv("X64_LOG")) fprintf(stderr, "[gl] call #%d n=%d\n", id, n); return 0; }
+/* null driver: answers the queries a program needs to get past initialisation (version strings, limits, "compiled"/"linked",
+   generated object names) and accepts everything else silently. Nothing is rendered; the output is a mid-grey frame. */
+static u64 gl_null_str(const char *s) { size_t n = strlen(s) + 1; u64 a = x64_gl_alloc(n); u8 *p = a ? (u8 *)x64_gl_ptr(a, n, 1) : 0; if (p) memcpy(p, s, n); return p ? a : 0; }
+static void gl_null_wr32(u64 addr, u32 v) { u8 *p = addr ? (u8 *)x64_gl_ptr(addr, 4, 1) : 0; if (p) memcpy(p, &v, 4); }
+static void gl_null_wrf(u64 addr, float v) { u8 *p = addr ? (u8 *)x64_gl_ptr(addr, 4, 1) : 0; if (p) memcpy(p, &v, 4); }
+u64 host_gl_call(int id, const u64 *args, int n) {
+  if (!gl_null()) return 0; const char *nm = gl_name_of(id); if (!nm) return 0; static u32 next_name = 1; static int verbose = -1; if (verbose < 0) verbose = getenv("X64_GL_TRACE") != 0;
+  if (verbose) { fprintf(stderr, "[gl] %s(", nm); for (int i = 0; i < n; i++) fprintf(stderr, "%s%llx", i ? ", " : "", (unsigned long long)args[i]); fprintf(stderr, ")\n"); }
+  #define IS(x) (!strcmp(nm, x))
+  if (IS("glGetString")) { switch ((u32)args[0]) { case 0x1F00: return gl_null_str("Nebula OS"); case 0x1F01: return gl_null_str("NebulaGL null driver (native test runner)"); case 0x1F02: return gl_null_str("3.3.0 NebulaGL (null driver)"); case 0x1F03: return gl_null_str("GL_ARB_vertex_buffer_object GL_ARB_framebuffer_object GL_ARB_vertex_array_object GL_ARB_shader_objects GL_ARB_texture_non_power_of_two"); case 0x8B8C: return gl_null_str("3.30 NebulaGL (null driver)"); } return 0; }
+  if (IS("glGetStringi")) { static const char *ext[] = { "GL_ARB_vertex_buffer_object", "GL_ARB_framebuffer_object", "GL_ARB_vertex_array_object", "GL_ARB_shader_objects", "GL_ARB_texture_non_power_of_two" }; return (u32)args[0] == 0x1F03 && args[1] < 5 ? gl_null_str(ext[args[1]]) : 0; }
+  if (IS("glGetIntegerv") || IS("glGetInteger64v")) { u32 v = 0; switch ((u32)args[0]) { case 0x821B: v = 3; break; case 0x821C: v = 3; break; case 0x821D: v = 5; break; case 0x0D33: case 0x851C: case 0x84E8: case 0x84F8: v = 4096; break; case 0x8872: case 0x8B4D: case 0x8B4C: v = 16; break; case 0x8869: v = 16; break; case 0x8DFB: case 0x8B4A: case 0x8B49: v = 1024; break; case 0x0D3A: v = 2048; break; case 0x8824: v = 8; break; case 0x0BA2: { gl_null_wr32(args[1], 0); gl_null_wr32(args[1] + 4, 0); gl_null_wr32(args[1] + 8, 814); gl_null_wr32(args[1] + 12, 614); return 0; } default: v = 0; } gl_null_wr32(args[1], v); if (IS("glGetInteger64v")) gl_null_wr32(args[1] + 4, 0); return 0; }
+  if (IS("glGetFloatv")) { float v = 0; switch ((u32)args[0]) { case 0x846E: gl_null_wrf(args[1], 1); gl_null_wrf(args[1] + 4, 64); return 0; case 0x84FF: v = 16; break; case 0x0B12: v = 1; break; case 0x0D3A: v = 2048; break; } gl_null_wrf(args[1], v); return 0; }
+  if (IS("glGetBooleanv")) { u8 *p = args[1] ? (u8 *)x64_gl_ptr(args[1], 1, 1) : 0; if (p) *p = 0; return 0; }
+  if (IS("glGetError")) return 0;
+  if (IS("glCreateShader") || IS("glCreateProgram") || IS("glCreateShaderObjectARB") || IS("glCreateProgramObjectARB") || IS("glFenceSync")) return next_name++;
+  if (!strncmp(nm, "glGen", 5) && n == 2) { u32 cnt = (u32)args[0]; for (u32 i = 0; i < cnt && i < 4096; i++) gl_null_wr32(args[1] + 4ull * i, next_name++); return 0; }
+  if (IS("glGetShaderiv") || IS("glGetProgramiv") || IS("glGetObjectParameterivARB")) { u32 v = 0; switch ((u32)args[1]) { case 0x8B81: case 0x8B82: case 0x8B83: v = 1; break; case 0x8B84: case 0x8B85: case 0x8B86: case 0x8B87: case 0x8B88: case 0x8B89: case 0x8B8A: case 0x8B8B: v = 0; break; case 0x8B4F: v = 0x8B31; break; } gl_null_wr32(args[2], v); return 0; }
+  if (IS("glGetAttribLocation") || IS("glGetUniformLocation") || IS("glGetAttribLocationARB") || IS("glGetUniformLocationARB")) return 0;
+  if (IS("glGetFragDataLocation") || IS("glGetUniformBlockIndex")) return 0;
+  if (IS("glCheckFramebufferStatus") || IS("glCheckFramebufferStatusEXT")) return 0x8CD5;
+  if (IS("glClientWaitSync")) return 0x911A;
+  if (IS("glIsEnabled") || IS("glIsTexture") || IS("glIsBuffer") || IS("glIsProgram") || IS("glIsShader")) return 0;
+  if (IS("glMapBuffer") || IS("glMapBufferRange") || IS("glMapBufferARB")) return 0;
+  if (IS("glGetUniformBlockIndex")) return 0xFFFFFFFFu;
+  #undef IS
+  return 0; }
 void host_gl_present(u32 *bgra, int w, int h) { if (gl_null() && bgra) e_memset(bgra, 0x40, (size_t)w * h * 4); }
 
 /* ---- audio: no device in the test runner; a wall-clock "player" keeps the timing honest; X64_AUDIO_WAV=<file> dumps the mix ---- */
