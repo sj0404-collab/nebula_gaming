@@ -1,3 +1,67 @@
+# v1.31.0 — GDI+, shell icon services and the real shell folder view: Q-Dir (x64 and x86) browses the virtual disk (Android)
+
+**Why.** Q-Dir 12.8x (a real quad-pane file manager, ATL/WTL, ~2 MB) was the next «works like on Windows» target after
+Notepad++, 7-Zip, PuTTY and Inno. It needed three Windows subsystems that did not exist at all: GDI+ (its toolbars are
+PNG resources drawn through `GdipDrawImage`), the shell icon services (`SHGetFileInfo`, system image lists) and the
+shell's default folder view — Q-Dir does not list folders itself, it asks `IShellFolder::CreateViewObject(IID_IShellView)`
+for the Explorer view object and embeds its window (`SHELLDLL_DefView` + `SysListView32`), exactly like the common
+file-open dialog and every Explorer-hosting program.
+
+**GDI+ flat API (emu/x64/gdiplus.inc, ~330 `Gdip*` entry points).** `GdiplusStartup/Shutdown`; images as 32-bpp GDI
+bitmaps (`GdipCreateBitmapFromScan0/FromHBITMAP/FromHICON/FromFile/FromStream/FromResource`, PNG/BMP/ICO decoding through
+the WIC code already used for icons, PNG/BMP save, `GdipBitmapLockBits/UnlockBits`, `GdipCreateHBITMAPFromBitmap`,
+`GdipCreateHICONFromBitmap`, `GdipCloneBitmapArea`, `GdipGetImagePixelFormat/Width/Height/Bounds`); Graphics on an HDC,
+an HWND or an image with world transform (translate/scale), clipping, compositing and interpolation modes; `GdipDrawImage*`
+(alpha blending, scaling with box/bilinear filters, negative widths = mirrored, `ImageAttributes` colour matrix / colour key
+/ gamma), solid / linear-gradient / texture brushes, pens (width, dash style, caps), lines, rectangles, ellipses, polygons, paths
+(`GdipCreatePath`, `AddPathLine/Arc/Rectangle/Ellipse/Polygon`, fill / draw / `GdipDrawPath`), `GdipDrawString/MeasureString`
+with GDI fonts (`GdipCreateFontFromDC/FromLogfontW`, families, string formats), `GdipGraphicsClear`, `GdipSetClipRect`,
+`GdipGetDC/ReleaseDC`. Plus the pieces Q-Dir needed around it: IStream `CopyTo/Clone`, `CreateStreamOnHGlobal`,
+`GetHGlobalFromStream`, `SHCreateMemStream`, `wvsprintfA/W`, `CopyRect/IsRectEmpty/EqualRect`, `GlobalReAlloc/Handle/Flags`,
+`SHChangeNotifyRegister`.
+
+**Shell icon services (emu/x64/shellicon.inc).** System image lists SHIL 0–4 (16/32/48/256 px and the “extra large”)
+seeded with the shell32 icon set; per-file icons by type, including the icon embedded in `.exe/.dll/.ico` files read from
+their PE resources on the virtual disk; `SHGetFileInfoA/W` complete (icon, system icon index, display name, type name,
+attributes, exe type, PIDL input, `SHGFI_USEFILEATTRIBUTES`, link overlay, selected state; NULL pidl = Desktop);
+`ExtractIcon/ExtractIconEx/ExtractAssociatedIcon/PrivateExtractIcons/SHDefExtractIcon`, `SHGetStockIconInfo`,
+`SHGetImageList` + the `IImageList`/`IImageList2` COM object, `Shell_GetImageLists`, `Shell_GetCachedImageIndex`. System
+DLL pseudo-modules are now backed by a real empty PE image (MZ/PE headers, export directory, empty `.rsrc`), so programs
+that walk `GetModuleHandle` results as PE headers (Q-Dir, many ATL programs) no longer fault.
+
+**Shell default folder view (emu/x64/defview.inc).** `IShellFolder::CreateViewObject(IID_IShellView)` returns a real view
+object (`IShellView`, `IShellView2`, `IFolderView`): `CreateViewWindow` makes a `SHELLDLL_DefView` child of the host's
+`IShellBrowser::GetWindow` with a `SysListView32` filled from the virtual disk (system image list icons, Name/Size/Type/Date
+columns, folders first), `UIActivate`, `Refresh`, `GetCurrentInfo`, `SelectItem`, `GetItemObject`, `IFolderView::ItemCount
+/ Item / GetFocusedItem / GetSelectionMarkedItem / SelectItem`; the host subclassing the view and the list (Q-Dir does both)
+works because the windows are created with `WM_CREATE` and shown like Windows does. Activation of a folder calls the
+host's `IShellBrowser::BrowseObject(child pidl, SBSP_RELATIVE)`, Backspace `BrowseObject(NULL, SBSP_PARENT)` — the real
+DefView protocol, so the host (Q-Dir, a file-open dialog) stays in control of navigation; activating a file goes through
+`ShellExecute`. Only `LVN_ITEMACTIVATE` opens an item (a double click or Enter), as on Windows.
+
+**Windows-fidelity fixes found with Q-Dir.** `ReleaseDC` on a memory DC is a no-op that returns 0 (Q-Dir calls it on its
+double-buffer right before blitting from it — the address bars were black rectangles); toolbar button text strips `&`
+mnemonics (`&File` → `File`) and measures the stripped label; `lstrcpy/lstrcpyn/lstrcat/lstrlen` are SEH-protected like on
+Windows (bad pointer → NULL/0 instead of a crash — Q-Dir passes NULL once at start-up); 32-bit zero-argument stdcall APIs
+(`GetVersion`, `TlsAlloc`, `GetCurrentThreadId`) are no longer reported as “unknown cleanup size”.
+
+**Proof (native runner, both bitnesses).** Q-Dir 12.82 x64 and Q-Dir 12.83 x86 (Unicode), portable zips from softwareok.com,
+mounted as `C:\Program Files\Q-Dir`: licence dialog → main window with four panes, each with address bar (GDI+ toolbar +
+`ComboBoxEx32` showing the folder), tab (`SysTabControl32` with icon and name), the embedded Explorer view listing
+“Local Disk (C:)” of the Desktop; a double click on the drive navigates the pane through Q-Dir's own `BrowseObject` →
+address bar `C:\`, tab “Local Disk (C:)”, list of the virtual disk's folders (nebula, Program Files, tmp, Users, Windows),
+status bar “5 Objects … Free: 1.99 GB of 4.00 GB”. 30 s runs, no faults, no unsupported-API reports.
+
+**Honest limits.** The folder view is details-only (no icon/tile/thumbnail modes yet), no in-place rename, no drag & drop,
+no context menus from `IContextMenu` (`GetItemObject` returns `E_NOINTERFACE` for them), `IFolderView2`
+(`{1af3a467-…}`) and `IShellFolderViewDual` are not implemented — Q-Dir asks for them and falls back. GDI+ has no
+anti-aliased path rasteriser (shapes are drawn with GDI quality), no metafiles, no arcs/Béziers/curves as direct draw calls (only inside
+paths), image decoding is PNG/BMP/ICO only (JPEG/GIF/TIFF files are rejected with `UnknownImageFormat`), encoding PNG/BMP
+only, `GdipDrawDriverString` draws glyph indices as plain characters, no regions beyond rectangles. Q-Dir's
+tooltips (`tooltips_class32`) are still empty boxes; its `SHAutoComplete`, `uxtheme` dark-mode and `Magnification.dll`
+imports are reported missing and skipped. Speed: Q-Dir runs at ~5–6 MIPS in the native runner (ATL message loops poll a
+lot), a phone will feel slow but usable.
+
 # v1.30.0 — OpenGL on the device's WebGL2: Shattered Pixel Dungeon (Java/LWJGL) reaches its title screen; NSIS installers really run their plugins (Android)
 
 **Why.** Every OpenGL program (LWJGL/libGDX games, GLFW/SDL programs, Java games) stopped at `ChoosePixelFormat` /
