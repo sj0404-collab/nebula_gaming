@@ -50,6 +50,13 @@ out=$(X64_LOG=1 $X --no-stdin --max-ms 10000 tests/d3d11tri.exe 2>&1 || true)
 check "vs translated"  "vertex shader .*: 1432 bytes of DXBC → .* bytes of GLSL ES 3.00" "$out"
 check "ps translated"  "pixel shader .*: 576 bytes of DXBC → .* bytes of GLSL ES 3.00" "$out"
 check "honest draw"    "D3D11 Draw: this host has no GPU back end" "$out"
+echo "[1f3] gltri.exe / gltri32.exe (OpenGL/WGL: pixel formats work natively, context creation must fail honestly without WebGL2)"
+out=$(X64_LOG=1 $X --quiet --no-stdin --max-ms 10000 tests/gltri.exe 2>&1 || true)
+check "x64 pixel format"   "pixel format: color=32 depth=24 stencil=8 double=1" "$out"
+check "x64 honest no-GL"   "wglCreateContext failed (2000): no OpenGL on this host" "$out"
+out=$(X64_LOG=1 $X --quiet --no-stdin --max-ms 10000 tests/gltri32.exe 2>&1 || true)
+check "x86 pixel format"   "pixel format: color=32 depth=24 stencil=8 double=1" "$out"
+check "x86 honest no-GL"   "wglCreateContext failed (2000): no OpenGL on this host" "$out"
 echo "[1g] uvpipe.exe (libuv-style child stdout: named pipe + IOCP zero-read + CreateProcess)"
 out=$($X --quiet --no-stdin --max-ms 20000 tests/uvpipe.exe 2>&1 || true)
 check "zero-read ready" "GQCS -> 1 bytes=0 key=42" "$out"
@@ -420,7 +427,8 @@ print('above' if sc and tb and sc[-1] > tb[-1] else 'below %r %r' % (sc, tb))")"
   rm -f "$ID/npp/hello" "$ID/npp/hello.txt"; X64_MODAL=1 $X --quiet --no-stdin --max-ms 42000 --mount-rw "$ID/npp=C:\\nebula" --type 'abc@20000' --key 17@24000:2000 --key 18@24100:1900 --key 83@24500:100 --type 'hello@31000' --key 13@34000 $ID/npp/notepad++.exe >/dev/null 2>&1 || true
   check "Notepad++ x64: Save As (Ctrl+Alt+S) 'hello' → hello.txt with the typed text (extension added by Notepad++ through hooks + dialog events, as on Windows)"   "hello.txt:abc"   "$(ls "$ID/npp" | grep -a '^hello' | tr '\n' ' ' | sed 's/ $//'):$(cat "$ID/npp/hello.txt" 2>/dev/null)"
   rm -rf $ID; ID=$(mktemp -d)
-  out=$($X --no-stdin --max-ms 150000 --mount-rw "$ID=C:\\inst" --click 357,337@3000 --click 357,337@6000 --click 357,337@9000 --click 357,337@12000 --click 357,337@70000 --click 357,337@80000 --click 357,337@90000 --click 357,337@110000 tests/inst/npp32.exe '/D=C:\inst\npp' 2>&1 | grep -v "last blocks" || true)
+  # the real LangDLL.dll plugin now loads (lazy VFS) and shows the "Installer Language" dialog first (OK at 149,106), as on Windows
+  out=$($X --no-stdin --max-ms 150000 --mount-rw "$ID=C:\\inst" --click 149,106@4000 --click 149,106@7000 --click 357,337@10000 --click 357,337@13000 --click 357,337@16000 --click 357,337@19000 --click 357,337@70000 --click 357,337@80000 --click 357,337@90000 --click 357,337@110000 tests/inst/npp32.exe '/D=C:\inst\npp' 2>&1 | grep -v "last blocks" || true)
   check "NSIS x86 setup: GUI wizard (license → components → directory → install → finish) exit 0"   "exit code 0"   "$out"
   check "NSIS x86 setup: frames presented"   "[1-9][0-9]* frames"   "$out"
   check "NSIS x86 setup: 32-bit notepad++.exe written through the wizard"   "PE32 "   "$(python3 -c "import struct;d=open('$ID/npp/notepad++.exe','rb').read();pe=struct.unpack_from('<I',d,0x3c)[0];print('PE32+' if struct.unpack_from('<H',d,pe+24)[0]==0x20b else 'PE32 ')" 2>/dev/null)"

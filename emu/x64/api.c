@@ -192,6 +192,12 @@ EXPORT(x64_vfs_add) int x64_vfs_add(const char *path, const u8 *data, size_t n) 
 EXPORT(x64_chdir) int x64_chdir(const char *path) { return vfs_chdir(path); }   /* working directory of the loaded process (a shortcut's "Start in"); call after x64_load */
 EXPORT(x64_vfs_add_lazy) int x64_vfs_add_lazy(const char *path, size_t n) { return vfs_add_lazy(path, n) >= 0; }   /* bytes stay in JS until a program opens the file (host_fs_size / host_fs_read) */
 EXPORT(x64_vfs_sync) void x64_vfs_sync(void) { vfs_sync_all(); }   /* flush written files (open or never closed) to the persistent disk */
+/* OpenGL bridge: guest memory access for the host during host_gl_call (pointer arguments are guest addresses) */
+EXPORT(x64_gl_ptr) void *x64_gl_ptr(u64 addr, u64 len, int write) { return g_gl_cpu && addr ? mem_ptr(g_gl_cpu->mem, addr, len ? len : 1, write) : 0; }
+EXPORT(x64_gl_strlen) u64 x64_gl_strlen(u64 addr) { if (!g_gl_cpu || !addr) return 0; u64 n = 0; for (;;) { u8 *p = mem_ptr(g_gl_cpu->mem, addr + n, 1, 0); if (!p || !*p) return n; n++; if (n > (1u << 24)) return n; } }
+EXPORT(x64_gl_alloc) u64 x64_gl_alloc(u64 len) { return g_gl_cpu ? w32_heap_alloc(g_gl_cpu->w, len ? len : 1, 0) : 0; }   /* process-heap block for glMapBuffer / GL strings handed to the program */
+EXPORT(x64_gl_free) void x64_gl_free(u64 addr) { if (g_gl_cpu && addr) w32_heap_free(g_gl_cpu->w, addr); }
+EXPORT(x64_gl_psize) int x64_gl_psize(void) { return g_gl_cpu && g_gl_cpu->mode32 ? 4 : 8; }
 EXPORT(x64_vfs_mkdir) int x64_vfs_mkdir(const char *path) { return vfs_mkdir(path); }
 EXPORT(x64_vfs_remove) int x64_vfs_remove(const char *path) { return vfs_remove(path); }
 EXPORT(x64_vfs_size) s64 x64_vfs_size(const char *path) { u64 sz; int k = vfs_stat(path, &sz); return k == 1 ? (s64)sz : -1; }

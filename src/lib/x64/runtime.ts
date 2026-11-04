@@ -1,4 +1,5 @@
 import { WebGLGfx } from './gfx';
+import { GLBridge } from './gl';
 import { HostAudio } from './audio';
 import { registerLiveVfs } from './diskbus';
 import { Disk, diskKey, isScratch } from './disk';
@@ -34,7 +35,8 @@ type Exports = {
   x64_icount(): bigint; x64_exit_code(): number; x64_error(): bigint; x64_error_rip(): bigint; x64_rip(): bigint; x64_report(): bigint; x64_console(): bigint;
   x64_screen_w(): number; x64_screen_h(): number; x64_screen(): bigint; x64_title(): bigint; x64_subsystem(): number; x64_sleep_ms(): number; x64_mem_used(): bigint; x64_has_window(): number; x64_proc_count(): number; x64_thread_count(): number; x64_audio_frames(): bigint;
   x64_api_stats(): bigint; x64_error_bytes(): bigint;
-  x64_vfs_add(path: bigint, data: bigint, n: bigint): number; x64_vfs_mkdir(path: bigint): number; x64_vfs_remove(path: bigint): number;
+  x64_vfs_add(path: bigint, data: bigint, n: bigint): number; x64_vfs_mkdir(path: bigint): number;
+  x64_gl_ptr(addr: bigint, len: bigint, write: number): bigint; x64_gl_strlen(addr: bigint): bigint; x64_gl_alloc(len: bigint): bigint; x64_gl_free(addr: bigint): void; x64_gl_psize(): number; x64_vfs_remove(path: bigint): number;
   x64_vfs_size(path: bigint): bigint; x64_vfs_data(path: bigint): bigint; x64_vfs_list(): bigint; x64_vfs_add_lazy?(path: bigint, n: bigint): number; x64_vfs_written?(path: bigint): number;
   x64_stdin_write(data: bigint, n: bigint): void; x64_stdin_eof(): void; x64_wants_stdin(): number;
   x64_vfs_sync(): void; x64_chdir(path: bigint): number;
@@ -66,6 +68,8 @@ export class X64Runtime {
   onStdinWait: ((waiting: boolean) => void) | null = null;
   private waitingStdin = false;
   readonly gfx = new WebGLGfx();
+  /** OpenGL (opengl32.dll) → the device's WebGL2 context (src/lib/x64/gl.ts) */
+  readonly glb = new GLBridge();
   /** persistent C:\ (IndexedDB): installed programs, saved documents, the registry hive and Start Menu shortcuts survive restarts */
   readonly disk = new Disk();
   diskFiles = 0;   // entries restored from the persistent disk at init
@@ -100,6 +104,11 @@ export class X64Runtime {
         host_gfx_draw: (cmd: bigint) => this.gfx.draw(new Uint32Array(this.ex!.memory.buffer, Number(cmd), 160)),
         host_gfx_readback: (id: number, out: bigint) => { const t = this.gfx.size(id); if (t) this.gfx.readback(id, this.bytesAt(out, t.w * t.h * 4)); },
         host_gfx_free: (id: number) => this.gfx.free(id),
+        // OpenGL layer → WebGL2 (src/lib/x64/gl.ts): generic entry-point bridge, arguments as raw 64-bit words in wasm memory
+        host_gl_init: (w: number, h: number) => { this.glb.log = (t) => this.onLog?.(t); this.glb.mem = this.glMem(); return this.glb.init(w, h); },
+        host_gl_probe: (id: number) => this.glb.probe(id),
+        host_gl_call: (id: number, args: bigint, n: number) => this.glb.call(id, new BigUint64Array(this.ex!.memory.buffer, Number(args), n)),
+        host_gl_present: (p: bigint, w: number, h: number) => this.glb.present(new Uint32Array(this.ex!.memory.buffer, Number(p), w * h), w, h),
         // sound → the device's audio output (src/lib/x64/audio.ts)
         host_audio_open: (rate: number) => { this.audio.log = (t) => this.onLog?.(t); return this.audio.open(rate); },
         host_audio_write: (lr: bigint, frames: number) => this.audio.write(new Float32Array(this.ex!.memory.buffer, Number(lr), frames * 2)),
@@ -147,6 +156,7 @@ export class X64Runtime {
   /** flush files a program still has open (or never closed) to the persistent disk and wait until they are durable */
   async syncDisk() { if (this.ex?.x64_vfs_sync) this.ex.x64_vfs_sync(); await this.disk.flush(); }
 
+  private glMem() { const ex = this.ex!; return { ptr: (addr: bigint, len: number, write: boolean) => Number(ex.x64_gl_ptr(addr, BigInt(len), write ? 1 : 0)), strlen: (addr: bigint) => Number(ex.x64_gl_strlen(addr)), alloc: (len: number) => ex.x64_gl_alloc(BigInt(len)), free: (addr: bigint) => ex.x64_gl_free(addr), psize: () => ex.x64_gl_psize(), buffer: () => ex.memory.buffer }; }
   private bytesAt(p: bigint, n: number): Uint8Array { return new Uint8Array(this.ex!.memory.buffer, Number(p), n); }
   private cstr(p: bigint): string {
     if (!p) return '';

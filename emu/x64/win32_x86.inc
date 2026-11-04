@@ -64,7 +64,9 @@ static const struct { const char *n; const char *sig; } sig32_tab[] = {
   { "__stdio_common_vsprintf", "i:qiiiii" }, { "__stdio_common_vsprintf_s", "i:qiiiii" }, { "__stdio_common_vsprintf_p", "i:qiiiii" }, { "__stdio_common_vswprintf", "i:qiiiii" }, { "__stdio_common_vswprintf_s", "i:qiiiii" }, { "__stdio_common_vswprintf_p", "i:qiiiii" }, { "__stdio_common_vsscanf", "i:qiiiii" }, { "__stdio_common_vswscanf", "i:qiiiii" },
   { "__stdio_common_vsnprintf_s", "i:qiiiiii" }, { "__stdio_common_vsnwprintf_s", "i:qiiiiii" }, { "__conio_common_vcprintf", "i:qiii" }, { "__conio_common_vcwprintf", "i:qiii" }, { "__conio_common_vcprintf_s", "i:qiii" }, { "__conio_common_vcwprintf_s", "i:qiii" }, { "__conio_common_vcprintf_p", "i:qiii" }, { "__conio_common_vcwprintf_p", "i:qiii" }, { "_localtime64_s", "i:ii" }, { "_gmtime64_s", "i:ii" }, { "_ctime64_s", "i:iii" }, { "_wctime64_s", "i:iii" }, { "_wctime64", "i:i" }, { "_findfirst64", "i:ii" }, { "_findnext64", "i:ii" }, { "_wfindfirst64", "i:ii" }, { "_wfindnext64", "i:ii" }, { "_findclose", "i:i" }, { "_wfseeki64", "i:iqi" }, { "_fseeki64_nolock", "i:iqi" }, { "_ftelli64_nolock", "q:i" }, { "_lseeki64_nolock", "q:iqi" }, { "_set_abort_behavior", "i:ii" }, { "_wtime64", "q:i" }, { "_rotl64", "q:qi" },
 };
-static const char *sig32_lookup(const char *name) { for (size_t i = 0; i < sizeof sig32_tab / sizeof sig32_tab[0]; i++) if (!e_strcmp(sig32_tab[i].n, name)) return sig32_tab[i].sig; return 0; }
+static const char *sig32_lookup(const char *name) { for (size_t i = 0; i < sizeof sig32_tab / sizeof sig32_tab[0]; i++) if (!e_strcmp(sig32_tab[i].n, name)) return sig32_tab[i].sig;
+  if ((name[0] == 'g' && name[1] == 'l') || (name[0] == 'w' && name[1] == 'g' && name[2] == 'l')) return gl_sig_of(name);   /* OpenGL: generated table (floats/doubles on the x86 stack) */
+  return 0; }
 static int clean32_lookup(const char *name) {   /* sorted table → binary search; cdecl/unknown → 0 (the caller cleans) */
   int lo = 0, hi = (int)(sizeof stdcall32_tab / sizeof stdcall32_tab[0]) - 1;
   while (lo <= hi) { int mid = (lo + hi) / 2; int r = e_strcmp(stdcall32_tab[mid].n, name); if (r == 0) return stdcall32_tab[mid].bytes; if (r < 0) lo = mid + 1; else hi = mid - 1; }
@@ -75,7 +77,7 @@ static int clean32_lookup(const char *name) {   /* sorted table → binary searc
 static int clean32_of(const char *name, const char *sig) {
   int b = clean32_lookup(name);
   if (!b && sig) {   /* stdcall APIs with a signature but no Wine entry: compute from the signature when the name looks like a Win32 API (capitalised) */
-    if (name[0] >= 'A' && name[0] <= 'Z') { for (const char *p = sig + 2; *p; p++) b += (*p == 'q' || *p == 'd') ? 8 : 4; }
+    if ((name[0] >= 'A' && name[0] <= 'Z') || (name[0] == 'g' && name[1] == 'l') || (name[0] == 'w' && name[1] == 'g' && name[2] == 'l')) { for (const char *p = sig + 2; *p; p++) b += (*p == 'q' || *p == 'd') ? 8 : 4; }   /* opengl32: APIENTRY = stdcall */
   }
   return b;
 }

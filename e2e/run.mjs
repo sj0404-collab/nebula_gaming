@@ -654,6 +654,35 @@ await test('x64: d3d11tri.exe — Direct3D 11 draw calls rendered by WebGL2 (DXB
   await closeAll();
 });
 
+for (const exe of ['gltri.exe', 'gltri32.exe']) await test(`x64: ${exe} — OpenGL (opengl32.dll) on the device WebGL2: WGL context, GLSL 330 triangle + GLSL 120 GL_QUADS quad, glReadPixels, SwapBuffers`, async () => {
+  const w = await x64Open();
+  await w.locator(`[data-x64-exe="${exe}"]`).click();
+  await w.locator('[data-x64-run]').click();
+  await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout: 60_000 });
+  await w.locator('[data-x64-tab="console"]').click();
+  const con = await w.locator('[data-x64-console]').innerText();
+  expect(/GL_VERSION=3\.3\.0 NebulaGL/.test(con), 'GL_VERSION missing: ' + con.slice(-500));
+  expect(/program 330 linked=1/.test(con) && /program 120 linked=1/.test(con), 'shader programs did not link: ' + con.slice(-500));
+  expect(/glBegin\/glEnd error=0x502/.test(con), 'legacy glBegin must report GL_INVALID_OPERATION: ' + con.slice(-300));
+  expect(/frame 0: triangle \+ GL_QUADS quad drawn and presented/.test(con) && /gltri ok/.test(con), `${exe} did not finish: ` + con.slice(-500));
+  await w.locator('[data-x64-tab="screen"]').click(); await sleep(500);
+  const hist = await w.locator('[data-x64-screen]').evaluate((c) => {
+    const gl = c.getContext('webgl2') || c.getContext('webgl'); const px = new Uint8Array(c.width * c.height * 4); gl.readPixels(0, 0, c.width, c.height, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    const h = { yellow: 0, red: 0, green: 0, blue: 0, clear: 0, total: 0 };
+    for (let i = 0; i < px.length; i += 4) {
+      const r = px[i], g = px[i + 1], b = px[i + 2]; h.total++;
+      if (r > 200 && g > 200 && b < 80) h.yellow++; else if (r > 150 && g < 100 && b < 100) h.red++; else if (g > 150 && r < 100 && b < 100) h.green++;
+      else if (b > 150 && r < 100 && g < 100) h.blue++; else if (Math.abs(r - 26) < 12 && Math.abs(g - 26) < 12 && Math.abs(b - 77) < 14) h.clear++;
+    }
+    return h;
+  });
+  expect(hist.yellow > 50, 'GL_QUADS yellow quad missing: ' + JSON.stringify(hist));
+  expect(hist.red > 50 && hist.green > 50 && hist.blue > 50, 'triangle corners (red/green/blue) missing: ' + JSON.stringify(hist));
+  expect(hist.clear > hist.total * 0.2, 'clear colour (0.1,0.1,0.3) missing: ' + JSON.stringify(hist));
+  await page.screenshot({ path: resolve(SHOTS, `x64-${exe.replace('.exe', '')}.png`) });
+  await closeAll();
+});
+
 await test('x64: real third-party binaries — busybox-w32 awk/sha256sum and PuTTY plink -V run with correct output', async () => {
   const w = await x64Open();
   await w.locator('[data-x64-exe="busybox64.exe"]').waitFor({ timeout: 30_000 });

@@ -62,6 +62,13 @@ void   host_gfx_clear_depth(int tex_id, float depth);                  /* clear 
 void   host_gfx_draw(const u32 *cmd);                                  /* one draw: GFX_CMD_WORDS words, layout in gfx_cmd.h */
 void   host_gfx_readback(int tex_id, u32 *bgra);                       /* GPU target → BGRA rows, top row first */
 void   host_gfx_free(int id);
+/* OpenGL bridge (src/lib/x64/gl.ts): opengl32 entry points executed on the device's WebGL2 context; ids/signatures from gl_funcs.inc (tools/glgen.py) */
+int    host_gl_init(int w, int h);                                         /* (re)size the drawing surface; 1 = WebGL2 available, 0 = none on this host */
+int    host_gl_probe(int id);                                              /* 1 if the host implements entry point id (wglGetProcAddress is honest) */
+u64    host_gl_call(int id, const u64 *args, int n);                       /* one GL call: raw 64-bit argument words (float/double bit patterns, guest pointers) */
+void   host_gl_present(u32 *bgra, int w, int h);                           /* SwapBuffers: drawing surface → BGRA rows, top row first */
+extern struct Cpu *g_gl_cpu;                                               /* CPU whose guest memory the host reads during host_gl_call (api.c: x64_gl_ptr) */
+const char *gl_sig_of(const char *name);                                  /* "ret:args" of a GL entry point (x86 marshalling) or NULL */
 
 /* ---------- guest memory ---------- */
 #define MAX_REGIONS 4096   /* V8 reserves hundreds of 1 MB chunks; each large reservation is its own region (lazy host pages) */
