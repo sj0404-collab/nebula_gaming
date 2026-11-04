@@ -5,7 +5,8 @@
 #define IML_BASE 0x7D001
 typedef struct { int used; u32 pid; int cx, cy, n, cap; u32 flags; u32 bk; u32 *px; } ImgList;   /* px: n images, each cx*cy pixels, 0xAARRGGBB in the surface's byte order (B,G,R,A) */
 static ImgList g_iml[MAX_IML];
-static ImgList *iml_of(u64 h) { if (h < IML_BASE || h >= IML_BASE + MAX_IML) return 0; ImgList *il = &g_iml[h - IML_BASE]; return il->used ? il : 0; }
+static u64 shiml_resolve(u64 h);
+static ImgList *iml_of(u64 h) { if (h < IML_BASE || h >= IML_BASE + MAX_IML) { h = shiml_resolve(h); if (!h) return 0; } ImgList *il = &g_iml[h - IML_BASE]; return il->used ? il : 0; }
 static u64 iml_handle(ImgList *il) { return IML_BASE + (u64)(il - g_iml); }
 static void iml_reserve(ImgList *il, int n) { if (n <= il->cap) return; int nc = il->cap ? il->cap : 8; while (nc < n) nc *= 2; size_t one = (size_t)il->cx * il->cy * 4; u32 *np = emu_alloc(one * nc); e_memset(np, 0, one * nc); if (il->px) { e_memcpy(np, il->px, one * il->n); emu_free(il->px); } il->px = np; il->cap = nc; }
 static ImgList *iml_new(Win32 *w, int cx, int cy, u32 flags, int init) { if (cx <= 0 || cx > 256 || cy <= 0 || cy > 256) return 0; for (int k = 0; k < MAX_IML; k++) if (!g_iml[k].used) { ImgList *il = &g_iml[k]; e_memset(il, 0, sizeof *il); il->used = 1; il->pid = w->pid; il->cx = cx; il->cy = cy; il->flags = flags; il->bk = 0xffffffffu; if (init > 0 && init < 4096) iml_reserve(il, init); return il; } return 0; }

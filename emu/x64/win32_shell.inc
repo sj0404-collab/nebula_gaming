@@ -315,16 +315,14 @@ static void s_SHChangeNotification_Lock(Cpu *c) { RET(0); }
 static void s_SHChangeNotification_Unlock(Cpu *c) { RET(1); }
 static void s_SHAddToRecentDocs(Cpu *c) { (void)c; }
 static void s_IsUserAnAdmin(Cpu *c) { RET(1); }
-static void s_SHGetFileInfoW(Cpu *c) { /* (path, attrs, SHFILEINFO*, cb, flags): type name + display name only */ u64 fi = ARG(2); u32 flags = (u32)ARG(4); if (!fi) { RET(0); return; } char path[520]; if ((flags & 0x10) == 0 && ARG(0) >= 0x10000) wstr_to_utf8(c, ARG(0), path, sizeof path, -1); else path[0] = 0;
-  u64 attr_off = c->mode32 ? 8 : 12, disp_off = c->mode32 ? 12 : 16, type_off = disp_off + 520; wrp(c, fi, 0); wr32(c, fi + (c->mode32 ? 4 : 8), 0); int is_dir = 0; u32 attrs = 0x80; int n = vfs_find_node(path); if (n >= 0) { VNodeInfo vi; if (vfs_node_info(n, &vi)) { is_dir = vi.is_dir; attrs = is_dir ? 0x10 : 0x20; } }
-  wr32(c, fi + attr_off, attrs); const char *bn = path; for (const char *p = path; *p; p++) if (*p == '\\') bn = p + 1; put_w8(c, fi + disp_off, bn, 260); put_w8(c, fi + type_off, is_dir ? "File folder" : "File", 80); RET(1); }
-static void s_SHGetStockIconInfo(Cpu *c) { RET(0x80004001u); }
+/* id of the idx-th entry (directory order) of resource type `type` in a mapped module, and the entry count; -1 when absent or named */
+s64 w32_rsrc_nth(Cpu *c, u64 hmod, u32 type, int idx, int *count) { u64 root; u32 size; if (count) *count = 0; if (!rsrc_dir(c, hmod, &root, &size)) return -1; u32 t = rsrc_find(c, root, root, type, 0); if (!(t & 0x80000000u)) return -1; u64 dir = root + (t & 0x7fffffff);
+  u16 nn = rd16(c, dir + 12), ni = rd16(c, dir + 14); if (count) *count = nn + ni; if (idx < 0 || idx >= nn + ni) return -1; u32 nm = rd32(c, dir + 16 + (u64)idx * 8); return (nm & 0x80000000u) ? -1 : (s64)nm; }
+
 static void s_Shell_NotifyIconW(Cpu *c) { RET(1); }
 static void s_Shell_NotifyIconA(Cpu *c) { RET(1); }
 static void s_SHAppBarMessage(Cpu *c) { RET(0); }
 static void s_SHEmptyRecycleBinW(Cpu *c) { RET(0); }
-static void s_ExtractIconW(Cpu *c) { RET(0); }
-static void s_ExtractIconExW(Cpu *c) { if (ARG(2)) wrp(c, ARG(2), 0); if (ARG(3)) wrp(c, ARG(3), 0); RET(0); }
 static void s_DragAcceptFiles(Cpu *c) { (void)c; }
 static void s_DragQueryFileW(Cpu *c) { RET(0); }
 static void s_DragFinish(Cpu *c) { (void)c; }
@@ -486,6 +484,6 @@ static int shell_cocreate(Cpu *c, u32 clsid_d1, u64 riid, u64 ppv) {
   S(RegEnumKeyExW), S(RegEnumKeyExA), S(RegEnumKeyW), S(RegEnumValueW), S(RegEnumValueA), S(RegQueryInfoKeyW), S(RegQueryInfoKeyA), S(RegNotifyChangeKeyValue), S(RegOverridePredefKey), S(RegLoadMUIStringW), S(RegConnectRegistryW), \
   S(SHGetFolderPathW), S(SHGetFolderPathA), S(SHGetFolderPathAndSubDirW), S(SHGetSpecialFolderPathW), S(SHGetSpecialFolderPathA), S(SHGetKnownFolderPath), S(SHGetPathFromIDListW), S(SHGetPathFromIDListA), S(SHGetPathFromIDListEx), \
   S(SHGetSpecialFolderLocation), S(SHGetFolderLocation), S(SHParseDisplayName), S(ILCreateFromPathW), S(ILFree), S(ILClone), S(ILIsEqual), S(SHGetMalloc), S(CoGetMalloc), SA("IMalloc::QueryInterface", IMalloc_QueryInterface), SA("IMalloc::AddRef", IMalloc_AddRef), SA("IMalloc::Release", IMalloc_Release), SA("IMalloc::Alloc", IMalloc_Alloc), SA("IMalloc::Realloc", IMalloc_Realloc), SA("IMalloc::Free", IMalloc_Free), SA("IMalloc::GetSize", IMalloc_GetSize), SA("IMalloc::DidAlloc", IMalloc_DidAlloc), SA("IMalloc::HeapMinimize", IMalloc_HeapMinimize), S(SHCreateDirectoryExW), S(SHCreateDirectoryExA), S(SHChangeNotify), S(SHAddToRecentDocs), S(IsUserAnAdmin), \
-  S(SHGetFileInfoW), S(SHGetStockIconInfo), S(Shell_NotifyIconW), S(Shell_NotifyIconA), S(SHAppBarMessage), S(SHEmptyRecycleBinW), S(ExtractIconW), S(ExtractIconExW), S(DragAcceptFiles), S(DragQueryFileW), S(DragFinish), S(SHFileOperationW), \
+  S(Shell_NotifyIconW), S(Shell_NotifyIconA), S(SHAppBarMessage), S(SHEmptyRecycleBinW), S(DragAcceptFiles), S(DragQueryFileW), S(DragFinish), S(SHFileOperationW), \
   S(ShellExecuteW), S(ShellExecuteA), S(ShellExecuteExW), S(ShellExecuteExA), S(FindExecutableW), S(ExitWindowsEx), S(InitiateSystemShutdownExW), S(LockWorkStation), \
   S(GetSystemWow64DirectoryW), S(GetSystemWow64DirectoryA), S(Wow64DisableWow64FsRedirection), S(Wow64RevertWow64FsRedirection), S(Wow64EnableWow64FsRedirection),

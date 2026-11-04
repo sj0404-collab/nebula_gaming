@@ -595,12 +595,41 @@ static int attach_next_module(Cpu *c) {
 /* pseudo handles for system DLLs served by shims: 0x7ff00000000 + slot<<12; the name is kept so GetProcAddress can resolve ordinals */
 static char g_fake_names[64][40]; static int g_nfake;
 static void fake_key(const char *n, char *out, size_t cap) { const char *b = n; for (const char *p = n; *p; p++) if (*p == '\\' || *p == '/') b = p + 1; size_t o = 0; for (; b[o] && o + 1 < cap; o++) out[o] = (b[o] >= 'A' && b[o] <= 'Z') ? (char)(b[o] + 32) : b[o]; out[o] = 0; if (o > 4 && !e_stricmp(out + o - 4, ".dll")) out[o - 4] = 0; }
+/* every pseudo module is backed by one page holding a real (empty) PE image: MZ/PE headers, an export directory with the DLL name and no
+   functions, an empty resource directory and one .rsrc section.  Programs that walk a module's headers themselves (icon extractors, delay-load
+   helpers, anti-debug checks, manual GetProcAddress) read sane data instead of faulting on hmod+0x3c. */
+static void fake_module_image(Win32 *w, u64 base, u64 h, const char *k) {
+  if (!w || !w->mem) return; Region *r = mem_region(w->mem, h); u8 *pg;
+  if (!r) { u8 *all = mem_map(w->mem, base + 0x1000, 64 * 0x1000, "sysdll"); if (!all) return; e_memset(all, 0, 64 * 0x1000); r = mem_region(w->mem, h); if (!r) return; }
+  pg = r->host + (h - r->base); if (pg[0] == 'M') return;
+  int m32 = w->mode32; u32 optsz = m32 ? 0xe0 : 0xf0;
+  #define P16(o, v) do { pg[(o)] = (u8)(v); pg[(o) + 1] = (u8)((v) >> 8); } while (0)
+  #define P32(o, v) do { P16((o), (u32)(v)); P16((o) + 2, (u32)(v) >> 16); } while (0)
+  #define P64(o, v) do { P32((o), (u64)(v)); P32((o) + 4, (u64)(v) >> 32); } while (0)
+  pg[0] = 'M'; pg[1] = 'Z'; P32(0x3c, 0x80); pg[0x80] = 'P'; pg[0x81] = 'E';
+  P16(0x84, m32 ? 0x14c : 0x8664); P16(0x86, 1); P32(0x88, 0x5f000000); P16(0x94, optsz); P16(0x96, m32 ? 0x2122 : 0x2022);
+  u32 oh = 0x98; P16(oh, m32 ? 0x10b : 0x20b); pg[oh + 2] = 14; P32(oh + 16, 0); P32(oh + 20, 0x1000);
+  if (m32) P32(oh + 28, (u32)h); else P64(oh + 24, h);
+  P32(oh + 32, 0x1000); P32(oh + 36, 0x200); P16(oh + 40, 10); P16(oh + 48, 10); P32(oh + 56, 0x1000); P32(oh + 60, 0x400); P16(oh + 68, 2); P16(oh + 70, 0x160);
+  if (m32) { P32(oh + 72, 0x100000); P32(oh + 76, 0x1000); P32(oh + 80, 0x100000); P32(oh + 84, 0x1000); P32(oh + 92, 16); P32(oh + 96, 0x800); P32(oh + 100, 0x40); P32(oh + 96 + 16, 0x900); P32(oh + 100 + 16, 0x10); }
+  else { P64(oh + 72, 0x100000); P64(oh + 80, 0x1000); P64(oh + 88, 0x100000); P64(oh + 96, 0x1000); P32(oh + 108, 16); P32(oh + 112, 0x800); P32(oh + 116, 0x40); P32(oh + 112 + 16, 0x900); P32(oh + 116 + 16, 0x10); }
+  u32 sh = oh + optsz; e_memcpy(pg + sh, ".rsrc\0\0\0", 8); P32(sh + 8, 0x200); P32(sh + 12, 0x800); P32(sh + 16, 0x200); P32(sh + 20, 0x800); P32(sh + 36, 0x40000040);
+  P32(0x800 + 12, 0x830); P32(0x800 + 16, 1); P32(0x800 + 28, 0x850); P32(0x800 + 32, 0x850); P32(0x800 + 36, 0x850);
+  e_snprintf((char *)pg + 0x830, 32, "%s.dll", k);
+  #undef P16
+  #undef P32
+  #undef P64
+}
 static u64 fake_module(const char *n) { char k[40]; fake_key(n && n[0] ? n : "?", k, sizeof k);
   u64 base = (g_fs_w && g_fs_w->mode32) ? 0x7f000000ull : 0x7ff00000000ull;   /* a 32-bit process needs handles below 4 GB */
-  for (int i = 0; i < g_nfake; i++) if (!e_stricmp(g_fake_names[i], k)) return base + ((u64)(i + 1) << 12);
-  if (g_nfake < 64) { e_snprintf(g_fake_names[g_nfake], sizeof g_fake_names[0], "%s", k); g_nfake++; return base + ((u64)g_nfake << 12); }
-  return base + (1ull << 12); }
+  u64 h = 0;
+  for (int i = 0; i < g_nfake && !h; i++) if (!e_stricmp(g_fake_names[i], k)) h = base + ((u64)(i + 1) << 12);
+  if (!h && g_nfake < 64) { e_snprintf(g_fake_names[g_nfake], sizeof g_fake_names[0], "%s", k); g_nfake++; h = base + ((u64)g_nfake << 12); }
+  if (!h) h = base + (1ull << 12);
+  fake_module_image(g_fs_w, base, h, k); return h; }
 static const char *fake_module_name(u64 h) { if (((h >> 32) != 0x7ff && (h >> 20) != 0x7f0) || (h & 0xfff)) return 0; u64 i = (h >> 12) & 0xff; return i >= 1 && i <= (u64)g_nfake ? g_fake_names[i - 1] : 0; }
+const char *w32_sysdll_name(u64 h) { return fake_module_name(h); }
+u64 w32_module_handle_of(Win32 *w, const char *path) { int m = mod_find(w, path); return m >= 0 ? w->mods[m].base : 0; }   /* gdi.c: shell32/imageres icon set for LoadIcon(GetModuleHandle("shell32"), id) */
 /* export ordinals of the DLLs that are still imported by number (delay-loaded WSOCK32 in Bun, OLEAUT32 everywhere) */
 #include "ordinals.inc"
 /* numbered export of a system DLL (generated table from the Wine .spec files); dll may carry a path/extension */
