@@ -127,7 +127,7 @@ static void dc_bind_window(Win32 *w, GdiObj *dc, int i) {
    (CLIPSIBLINGS). The surfaces are single rectangles, so instead of region clipping the covered pixels are saved when the DC is obtained and put
    back when it is released — unless that window painted itself in between (its dc_gen moved on), in which case its fresh pixels win.
    Notepad++'s tab control (full-size, double-buffered) would otherwise blank the Scintilla editor that lies on top of it. */
-#define DCSNAP_MAX 24
+#define DCSNAP_MAX 128   /* Notepad++ Find dialog: a full-size tab control lies under ~60 visible controls */
 typedef struct { u64 hdc; int n; struct { int x, y, w, h; int wnd; int gen; u32 *px; } r[DCSNAP_MAX]; } DcSnap;
 static DcSnap g_dcsnap[16]; static int g_dc_gen;
 static void dcsnap_add(Win32 *w, DcSnap *s, int k, int x0, int y0, int x1, int y1) { if (s->n >= DCSNAP_MAX) return; int wx, wy; wnd_window_origin(k, &wx, &wy); int ax = wx > x0 ? wx : x0, ay = wy > y0 ? wy : y0, bx = wx + g_wnd[k].w < x1 ? wx + g_wnd[k].w : x1, by = wy + g_wnd[k].h < y1 ? wy + g_wnd[k].h : y1;
@@ -1058,15 +1058,15 @@ static void listbox_paint(Cpu *c, int i, u64 hdc, u64 hbr);
 static void progress_paint(Cpu *c, int i, u64 hdc);
 static void ctl_paint_with(Cpu *c, int i, u64 hdc, u64 hbr) { switch (g_wnd[i].builtin) { case BI_BUTTON: button_paint(c, i, hdc, hbr); break; case BI_STATIC: case BI_LINK: static_paint(c, i, hdc, hbr); break; case BI_EDIT: edit_paint(c, i, hdc, hbr); break; case BI_COMBO: combo_paint(c, i, hdc, hbr); break; case BI_LISTBOX: case BI_COMBOLIST: listbox_paint(c, i, hdc, hbr); break; case BI_PROGRESS: progress_paint(c, i, hdc); break; default: break; } }
 static void ctlpaint_resume(Cpu *c, u64 rax) { Win32 *w = W; int ci = w->ncont - 1; int i = (int)w->cont[ci].data[0]; u64 hdc = w->cont[ci].data[1];
-  if (w->cont[ci].data[2] == 0x2B) { /* owner-draw: the parent painted it in WM_DRAWITEM */ w32_heap_free(w, w->cont[ci].data[3]); if (wnd_alive(i)) ctl_paint_end(c, i, hdc); else wnd_dc_free(w, hdc); w32_cont_finish(c, 0); return; }
+  if (w->cont[ci].data[2] == 0x2B) { /* owner-draw: the parent painted it in WM_DRAWITEM */ w32_heap_free(w, w->cont[ci].data[3]); if (w->cont[ci].data[4]) { w32_cont_finish(c, 0); return; } /* caller's DC (WM_PRINT) */ if (wnd_alive(i)) ctl_paint_end(c, i, hdc); else wnd_dc_free(w, hdc); w32_cont_finish(c, 0); return; }
   if (wnd_alive(i)) ctl_paint_with(c, i, hdc, rax); if (wnd_alive(i)) ctl_paint_end(c, i, hdc); else wnd_dc_free(w, hdc); w32_cont_finish(c, 0); }
 static void ctl_do_paint(Cpu *c, int i) { Wnd *n = &g_wnd[i]; u64 hdc = ctl_paint_begin(c, i); if (!hdc) { RET(0); return; }
   if ((n->builtin == BI_BUTTON && (n->style & 0xF) == 0xB) || (n->builtin == BI_STATIC && (n->style & 0x1F) == 0xD)) { /* BS_OWNERDRAW / SS_OWNERDRAW: WM_DRAWITEM(DRAWITEMSTRUCT) to the parent, which paints the control itself (Notepad++ About logo, image buttons) */
-    int p = n->parent; Win32 *w = W; if (p >= 0 && wnd_alive(p) && (!g_wnd[p].builtin || g_wnd[p].superclassed)) { u64 ds = w32_heap_alloc(w, 64, 1); if (ds) { int cw = wnd_client_w(i), ch = wnd_client_h(i); u32 st = (n->pushed ? 1 : 0) | (!wnd_enabled_chain(i) ? 4 : 0) | (n->focus_draw ? 0x10 : 0) | (n->checked ? 8 : 0);
+    int p = n->parent; Win32 *w = W; if (p >= 0 && wnd_alive(p) && (!g_wnd[p].builtin || g_wnd[p].superclassed || (g_wnd[p].is_dlg && g_wnd[p].dlgproc))) { u64 ds = w32_heap_alloc(w, 64, 1); if (ds) { int cw = wnd_client_w(i), ch = wnd_client_h(i); u32 st = (n->pushed ? 1 : 0) | (!wnd_enabled_chain(i) ? 4 : 0) | (n->focus_draw ? 0x10 : 0) | (n->checked ? 8 : 0);
         wr32(c, ds, n->builtin == BI_BUTTON ? 4 : 5); wr32(c, ds + 4, (u32)n->id); wr32(c, ds + 8, 0); wr32(c, ds + 12, 1 /* ODA_DRAWENTIRE */); wr32(c, ds + 16, st);
         if (c->mode32) { wr32(c, ds + 20, (u32)HWND_OF(i)); wr32(c, ds + 24, (u32)hdc); wr32(c, ds + 28, 0); wr32(c, ds + 32, 0); wr32(c, ds + 36, (u32)cw); wr32(c, ds + 40, (u32)ch); wr32(c, ds + 44, 0); }
         else { wr64(c, ds + 24, HWND_OF(i)); wr64(c, ds + 32, hdc); wr32(c, ds + 40, 0); wr32(c, ds + 44, 0); wr32(c, ds + 48, (u32)cw); wr32(c, ds + 52, (u32)ch); wr64(c, ds + 56, 0); }
-        w32_push_cont(c, CONT_CTLPAINT, (u64)i); w->cont[w->ncont - 1].data[1] = hdc; w->cont[w->ncont - 1].data[2] = 0x2B; w->cont[w->ncont - 1].data[3] = ds; w32_guest_call(c, g_wnd[p].wndproc, HWND_OF(p), 0x2B, n->id, ds); return; } }
+        w32_push_cont(c, CONT_CTLPAINT, (u64)i); w->cont[w->ncont - 1].data[1] = hdc; w->cont[w->ncont - 1].data[2] = 0x2B; w->cont[w->ncont - 1].data[3] = ds; w->cont[w->ncont - 1].data[4] = 0; w32_guest_call(c, g_wnd[p].wndproc, HWND_OF(p), 0x2B, n->id, ds); return; } }
     if (n->builtin == BI_STATIC) { ctl_paint_end(c, i, hdc); RET(0); return; } }
   u32 q = 0; switch (n->builtin) { case BI_STATIC: case BI_LINK: q = 0x138; break; case BI_EDIT: q = (n->style & 0x800) || !n->enabled ? 0x138 : 0x133; break; case BI_BUTTON: { u32 bs = n->style & 0xF; if (bs >= 2 && bs <= 9 && bs != 8) q = 0x135; break; } case BI_LISTBOX: q = 0x134; break; default: break; }
   if (q && ctl_color_query(c, i, q, hdc)) return; ctl_paint_with(c, i, hdc, 0); ctl_paint_end(c, i, hdc); RET(0); }
@@ -1363,7 +1363,7 @@ static void s_NebulaComboProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET
       RET(0); return; }
     case 0x05: { int fcw, fh; font_dims(w, n->font ? n->font : g_dlg_font, &fcw, &fh); int std = fh + 8; if (n->himl) { int ic = combo_icon_cx(n->himl); if (ic && ic + 2 > std) std = ic + 2; } if ((n->style & 3) != 1 && n->h != std) n->h = std; combo_layout_edit(c, i); RET(0); return; }   /* a drop-down combo keeps its own height whatever MoveWindow asks for (cy is the dropped height) */
     case 0x30: { n->font = wp; if (n->edit_wnd > 0 && wnd_alive(n->edit_wnd)) g_wnd[n->edit_wnd].font = wp; int fcw, fh; font_dims(w, wp ? wp : g_dlg_font, &fcw, &fh); if ((n->style & 3) != 1 && n->h < fh + 8) n->h = fh + 8; combo_layout_edit(c, i); wnd_invalidate(i, 1); RET(0); return; }
-    case 0x07: { n->focus_draw = 1; wnd_invalidate(i, 1); if (n->edit_wnd > 0 && wnd_alive(n->edit_wnd) && g_focus == i) { int nc0 = w->ncont; set_focus(c, n->edit_wnd); if (w->ncont > nc0 || c->status != RUN_OK) return; } RET(0); return; }
+    case 0x07: { n->focus_draw = 1; wnd_invalidate(i, 1); if (n->edit_wnd > 0 && wnd_alive(n->edit_wnd) && g_focus == i) { Wnd *e = &g_wnd[n->edit_wnd]; e->sel0 = 0; e->sel1 = (int)e_strlen(e->text); /* a drop-down combo selects its whole edit text on focus (typing replaces it: Notepad++ Find what) */ int nc0 = w->ncont; set_focus(c, n->edit_wnd); if (w->ncont > nc0 || c->status != RUN_OK) return; } RET(0); return; }
     case 0x0F: ctl_do_paint(c, i); return;
     case 0x87: RET(0x0001 | 0x0002); return;
     case 0x201: { if (!wnd_enabled_chain(i)) { RET(0); return; } { int nc0 = w->ncont; set_focus(c, i); if (w->ncont > nc0 || c->status != RUN_OK) return; } combo_drop(c, i); notify_parent(c, i, n->dropped ? 7 /* CBN_DROPDOWN */ : 8, 0); return; }
@@ -1394,7 +1394,9 @@ static void s_NebulaComboProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET
     case 0x157: RET(n->dropped); return;   /* CB_GETDROPPEDSTATE */
     case 0x152: { int fcw, fh; font_dims(w, n->font ? n->font : g_dlg_font, &fcw, &fh); u64 r = lp; int ox, oy; wnd_window_origin(i, &ox, &oy); wr32(c, r, (u32)(ox + SCREEN_X0)); wr32(c, r + 4, (u32)(oy + n->h + SCREEN_Y0)); wr32(c, r + 8, (u32)(ox + n->w + SCREEN_X0)); wr32(c, r + 12, (u32)(oy + n->h + 8 * (fh + 2) + SCREEN_Y0)); RET(1); return; }   /* CB_GETDROPPEDCONTROLRECT */
     case 0x153: RET(list_item_h(w, n)); return; case 0x154: RET(0); return; case 0x155: RET(1); return; case 0x15F: RET(1); return; case 0x160: RET(0); return; case 0x161: RET(1); return; case 0x162: RET(8); return; case 0x15B: RET(0); return; case 0x15D: RET(1); return;
-    case 0x140: { if (wp) wr32(c, wp, 0); if (lp) wr32(c, lp, (u32)e_strlen(n->text)); RET(0); return; } case 0x141: RET(0); return; case 0x142: RET(0); return; case 0x145: RET(0); return; case 0x156: RET(1); return;   /* CB_GETEDITSEL / LIMITTEXT / SETEDITSEL / DIR / SETEXTENDEDUI */
+    case 0x140: { int a = 0, b = (int)e_strlen(n->text); if (n->edit_wnd > 0 && wnd_alive(n->edit_wnd)) { Wnd *e = &g_wnd[n->edit_wnd]; a = e->sel0 < e->sel1 ? e->sel0 : e->sel1; b = e->sel0 < e->sel1 ? e->sel1 : e->sel0; } if (wp) wr32(c, wp, (u32)a); if (lp) wr32(c, lp, (u32)b); RET((u64)(u32)a | ((u64)(u32)b << 16)); return; }   /* CB_GETEDITSEL */
+    case 0x141: RET(0); return;
+    case 0x142: { if (n->edit_wnd > 0 && wnd_alive(n->edit_wnd)) { Wnd *e = &g_wnd[n->edit_wnd]; int len = (int)e_strlen(e->text), a = (s16)(lp & 0xffff), b = (s16)((lp >> 16) & 0xffff); if (a == -1) e->sel0 = e->sel1 = e->sel1; else { if (b == -1 || b > len) b = len; if (a > len) a = len; e->sel0 = a; e->sel1 = b; } wnd_invalidate(n->edit_wnd, 1); } RET(1); return; }   /* CB_SETEDITSEL */ case 0x145: RET(0); return; case 0x156: RET(1); return;   /* CB_GETEDITSEL / LIMITTEXT / SETEDITSEL / DIR / SETEXTENDEDUI */
     case 0x164: { /* CB_GETCOMBOBOXINFO */ RET(combo_fill_info(c, i, lp)); return; }
     default: if (ctl_common(c, i, msg, wp, lp)) return; def_window_proc(c, i, msg, wp, lp); return; } }
 

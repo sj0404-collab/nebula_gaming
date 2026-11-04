@@ -2,7 +2,7 @@
    Per-control state hangs off Wnd.cc; the procedures are shim slots like the other built-in classes (VCL superclasses them and
    routes messages through CallWindowProc). Notifications go to the parent through WM_COMMAND / WM_NOTIFY with continuations. */
 #define CC_MAX 64
-typedef struct { int n; int right[CC_MAX]; u32 style[CC_MAX]; char text[CC_MAX][128]; int simple; char stext[256]; int minh; } StatusBar;
+typedef struct { int n; int right[CC_MAX]; u32 style[CC_MAX]; char text[CC_MAX][128]; int simple; char stext[256]; int minh; u64 data[CC_MAX]; } StatusBar;   /* data: SB_SETTEXT lParam of an SBT_OWNERDRAW part (DRAWITEMSTRUCT.itemData) */
 typedef struct { int image; u32 id; u8 state, style; u64 data; int istr; char text[64]; int x, w, cx; } TbBtn;
 typedef struct { int n; TbBtn b[CC_MAX]; u64 himl, himl_hot, himl_dis; int bw, bh, imgw, imgh; int structsize; int textrows; int nstr; char strs[CC_MAX][64]; u32 exstyle; int padx, pady; int hot, pressed; u64 nmbuf; int indent; int tipwnd; } Toolbar;
 static void tb_tip_notify(Cpu *c, int i, u64 wp, u64 lp); static u64 tb_tooltip_wnd(Cpu *c, int i); static void tb_adopt_tip(int ti, int i);
@@ -14,19 +14,28 @@ static GdiObj *cc_dc(Win32 *w, u64 hdc, Wnd *n) { GdiObj *d = gdi_get(w, hdc); i
 static void cc_text(Surf *s, GdiObj *d, Win32 *w, int x, int y, const char *t, u32 col) { d->text_color = px2cr(col); draw_text(s, d, w, x, y, t, (int)e_strlen(t)); }
 
 /* ===== status bar ===== */
-static void status_paint(Cpu *c, int i) { Win32 *w = W; Wnd *n = &g_wnd[i]; StatusBar *sb = n->cc; u64 hdc = ctl_paint_begin(c, i); if (!hdc) { RET(0); return; } Surf s; if (dc_surf(c, hdc, &s) && sb) { GdiObj *d = cc_dc(w, hdc, n); int cw = wnd_client_w(i), ch = wnd_client_h(i); int fh = cc_font_h(w, n); fill_rect_px(&s, 0, 0, cw, ch, 0xf0f0f0); hline(&s, 0, cw - 1, 0, 0xd5d5d5);
-    if (d) { if (sb->simple) cc_text(&s, d, w, 4, (ch - fh) / 2, sb->stext, 0x000000); else { int x = 0; for (int k = 0; k < sb->n; k++) { int r = sb->right[k] < 0 || k == sb->n - 1 ? cw : sb->right[k]; if (r > cw) r = cw; if (k > 0) { line_px(&s, x, 2, x, ch - 2, 0xa0a0a0); line_px(&s, x + 1, 2, x + 1, ch - 2, 0xffffff); } if (!(sb->style[k] & 0x1000)) { Surf part = s; int lim = r - 2; if (lim < part.w) part.w = lim; cc_text(&part, d, w, x + 4, (ch - fh) / 2, sb->text[k], 0x000000); } x = r; } } } }
-  ctl_paint_end(c, i, hdc); RET(0); }
+/* paints the bar into hdc; ext = 1 when hdc belongs to the caller (WM_PRINT / WM_PRINTCLIENT: Notepad++ double-buffers its status bars through a memory DC) */
+static void status_paint_into(Cpu *c, int i, u64 hdc, int ext) { Win32 *w = W; Wnd *n = &g_wnd[i]; StatusBar *sb = n->cc; Surf s; int od = -1, odx = 0, odr = 0; if (dc_surf(c, hdc, &s) && sb) { GdiObj *d = cc_dc(w, hdc, n); int cw = wnd_client_w(i), ch = wnd_client_h(i); int fh = cc_font_h(w, n); fill_rect_px(&s, 0, 0, cw, ch, 0xf0f0f0); hline(&s, 0, cw - 1, 0, 0xd5d5d5);
+    if (d) { if (sb->simple) cc_text(&s, d, w, 4, (ch - fh) / 2, sb->stext, 0x000000); else { int x = 0; for (int k = 0; k < sb->n; k++) { int r = sb->right[k] < 0 || k == sb->n - 1 ? cw : sb->right[k]; if (r > cw) r = cw; if (k > 0) { line_px(&s, x, 2, x, ch - 2, 0xa0a0a0); line_px(&s, x + 1, 2, x + 1, ch - 2, 0xffffff); } if (!(sb->style[k] & 0x1000)) { Surf part = s; int lim = r - 2; if (lim < part.w) part.w = lim; cc_text(&part, d, w, x + 4, (ch - fh) / 2, sb->text[k], 0x000000); } else if (od < 0) { od = k; odx = x; odr = r; } x = r; } } } }
+  if (od >= 0) { /* SBT_OWNERDRAW part: the parent paints it in WM_DRAWITEM (Notepad++ colours its Find status text); DRAWITEMSTRUCT like comctl32: CtlType 0, itemID = part, itemData = the SB_SETTEXT lParam */
+    int p = n->parent; if (p >= 0 && wnd_alive(p) && (!g_wnd[p].builtin || g_wnd[p].superclassed || (g_wnd[p].is_dlg && g_wnd[p].dlgproc))) { u64 ds = w32_heap_alloc(w, 64, 1); if (ds) { int ch = wnd_client_h(i);
+        wr32(c, ds, 0); wr32(c, ds + 4, (u32)n->id); wr32(c, ds + 8, (u32)od); wr32(c, ds + 12, 1); wr32(c, ds + 16, 0);
+        if (c->mode32) { wr32(c, ds + 20, (u32)HWND_OF(i)); wr32(c, ds + 24, (u32)hdc); wr32(c, ds + 28, (u32)odx); wr32(c, ds + 32, 0); wr32(c, ds + 36, (u32)odr); wr32(c, ds + 40, (u32)ch); wr32(c, ds + 44, (u32)sb->data[od]); }
+        else { wr64(c, ds + 24, HWND_OF(i)); wr64(c, ds + 32, hdc); wr32(c, ds + 40, (u32)odx); wr32(c, ds + 44, 0); wr32(c, ds + 48, (u32)odr); wr32(c, ds + 52, (u32)ch); wr64(c, ds + 56, sb->data[od]); }
+        w32_push_cont(c, CONT_CTLPAINT, (u64)i); w->cont[w->ncont - 1].data[1] = hdc; w->cont[w->ncont - 1].data[2] = 0x2B; w->cont[w->ncont - 1].data[3] = ds; w->cont[w->ncont - 1].data[4] = (u64)ext; w32_guest_call(c, g_wnd[p].wndproc, HWND_OF(p), 0x2B, n->id, ds); return; } } }
+  if (!ext) ctl_paint_end(c, i, hdc); RET(0); }
+static void status_paint(Cpu *c, int i) { u64 hdc = ctl_paint_begin(c, i); if (!hdc) { RET(0); return; } status_paint_into(c, i, hdc, 0); }
 static void s_NebulaStatusProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } SUPER_ADOPT(i, BI_STATUS); u32 msg = (u32)ARG(1); u64 wp = ARG(2), lp = ARG(3); Wnd *n = &g_wnd[i]; Win32 *w = W; StatusBar *sb = n->cc;
   if (!sb && msg != 0x02 && msg != 0x82) { sb = n->cc = emu_alloc(sizeof(StatusBar)); if (!sb) { RET(0); return; } e_memset(sb, 0, sizeof *sb); sb->n = 1; sb->right[0] = -1; }
   switch (msg) {
     case 0x01: { /* the bar sizes itself along the bottom of the parent (CCS_BOTTOM default) */ int p = n->parent; int h = cc_font_h(w, n) + 8; if (p >= 0) { n->w = wnd_client_w(p); n->h = h; n->x = 0; n->y = wnd_client_h(p) - h; } RET(0); return; }
     case 0x0F: status_paint(c, i); return;
-    case 0x14: RET(1); return;
+    case 0x317: case 0x318: { if (!wp) { RET(0); return; } status_paint_into(c, i, wp, 1); return; }   /* WM_PRINT / WM_PRINTCLIENT into the caller's DC */
+    case 0x14: { Surf s; if (wp && dc_surf(c, wp, &s)) fill_rect_px(&s, 0, 0, wnd_client_w(i), wnd_client_h(i), 0xf0f0f0); RET(1); return; }   /* WM_ERASEBKGND on a caller DC: paints the bar colour (Notepad++ getCtrlBgColor samples it from a memory DC) */
     case 0x05: { /* WM_SIZE from the parent: follow its width */ int p = n->parent; if (p >= 0 && !(n->style & 0xB /* CCS_TOP/NOMOVEY/NOPARENTALIGN */)) { int h = n->h; n->w = wnd_client_w(p); n->y = wnd_client_h(p) - h; wnd_invalidate(i, 1); } RET(0); return; }
     case 0x404: { /* SB_SETPARTS */ int cnt = (int)wp; if (cnt < 1) cnt = 1; if (cnt > CC_MAX) cnt = CC_MAX; sb->n = cnt; for (int k = 0; k < cnt; k++) sb->right[k] = lp ? (int)(s32)rd32(c, lp + 4 * k) : -1; wnd_invalidate(i, 0); RET(1); return; }
     case 0x406: { /* SB_GETPARTS */ int cnt = (int)wp; if (cnt > sb->n) cnt = sb->n; for (int k = 0; k < cnt && lp; k++) wr32(c, lp + 4 * k, (u32)sb->right[k]); RET((u32)sb->n); return; }
-    case 0x401: case 0x40B: { /* SB_SETTEXT A/W: wParam = part | SBT_* */ int part = (int)(wp & 0xff); u32 st = ((u32)wp & 0xff00) | ((u32)wp & 0x1000); if (part == 255) { text_in(c, lp, msg == 0x40B, sb->stext, sizeof sb->stext); } else { if (part >= CC_MAX) { RET(0); return; } sb->style[part] = st; if (st & 0x1000) sb->text[part][0] = 0; else text_in(c, lp, msg == 0x40B, sb->text[part], sizeof sb->text[part]); } wnd_invalidate(i, 0); RET(1); return; }
+    case 0x401: case 0x40B: { /* SB_SETTEXT A/W: wParam = part | SBT_* */ int part = (int)(wp & 0xff); u32 st = ((u32)wp & 0xff00) | ((u32)wp & 0x1000); if (part == 255) { text_in(c, lp, msg == 0x40B, sb->stext, sizeof sb->stext); } else { if (part >= CC_MAX) { RET(0); return; } sb->style[part] = st; sb->data[part] = lp; if (st & 0x1000) sb->text[part][0] = 0; else text_in(c, lp, msg == 0x40B, sb->text[part], sizeof sb->text[part]); } wnd_invalidate(i, 0); RET(1); return; }
     case 0x402: case 0x40D: { /* SB_GETTEXT */ int part = (int)(wp & 0xff); const char *t = part == 255 ? sb->stext : part < CC_MAX ? sb->text[part] : ""; u32 len = msg == 0x40D ? utf8_u16len(t) : (u32)e_strlen(t); if (lp) text_out_cap(c, lp, t, 512, msg == 0x40D); RET(len | ((u64)(part < CC_MAX ? sb->style[part] : 0) << 16)); return; }
     case 0x403: case 0x40C: { int part = (int)(wp & 0xff); const char *t = part == 255 ? sb->stext : part < CC_MAX ? sb->text[part] : ""; RET((msg == 0x40C ? utf8_u16len(t) : (u32)e_strlen(t)) | ((u64)(part < CC_MAX ? sb->style[part] : 0) << 16)); return; }
     case 0x408: { sb->minh = (int)wp; int want = (int)wp + 4; if (want > n->h) { n->h = want; if (n->parent >= 0) n->y = wnd_client_h(n->parent) - n->h; } RET(0); return; }   /* SB_SETMINHEIGHT */
