@@ -91,7 +91,16 @@ static void enum_res_step(Cpu *c) { Win32 *w = W; int ci = w->ncont - 1; u64 *d 
 static void s_EnumResourceNamesW(Cpu *c) { u64 root; u32 size; u64 hmod = ARG(0) ? ARG(0) : W->image_base; if (!rsrc_dir(c, hmod, &root, &size)) { W->last_error = 1812; RET(0); return; }
   u32 tid; char tname[128]; rsrc_key(c, ARG(1), 1, &tid, tname, sizeof tname); u32 t = rsrc_find(c, root, root, tid, tname[0] ? tname : 0); if (!(t & 0x80000000u)) { W->last_error = 1813; RET(0); return; }
   Win32 *w = W; w32_push_cont(c, CONT_ENUMRES, 0); u64 *d = w->cont[w->ncont - 1].data; d[0] = root; d[1] = root + (t & 0x7fffffff); d[2] = 0; d[3] = ARG(2); d[4] = hmod; d[5] = ARG(1); d[6] = ARG(3); enum_res_step(c); }
-static int shell_cont_resume(Cpu *c, int kind, u64 rax) { if (kind != CONT_ENUMRES) return 0; if (!(u32)rax) { w32_cont_finish(c, 1); return 1; } enum_res_step(c); return 1; }
+#define CONT_SETSITE 331
+/* shlwapi IUnknown_SetSite(punk, site): QueryInterface(IID_IObjectWithSite) → SetSite(site) → Release, all guest COM calls (phases 0/1/2) */
+static void s_IUnknown_SetSite(Cpu *c) { u64 punk = ARG(0), site = ARG(1); if (!punk) { RET(0x80004003u); return; } Win32 *w = W; u64 P = PSZ_OF(c); u64 scratch = w32_heap_alloc(w, 32, 1); if (!scratch) { RET(0x8007000Eu); return; }
+  static const u8 iid_ows[16] = { 0xA3, 0x01, 0x48, 0xFC, 0xA9, 0x2B, 0xCF, 0x11, 0xA2, 0x29, 0x00, 0xAA, 0x00, 0x3D, 0x73, 0x52 }; for (int k = 0; k < 16; k++) wr8(c, scratch + k, iid_ows[k]); wrp(c, scratch + 16, 0);
+  w32_push_cont(c, CONT_SETSITE, 0); u64 *d = w->cont[w->ncont - 1].data; d[0] = site; d[1] = scratch; d[2] = 0; d[3] = 0; u64 vt = rdp(c, punk); w32_guest_call(c, rdp(c, vt + 0 * P), punk, scratch, scratch + 16, 0); }
+static void setsite_step(Cpu *c, u64 rax) { Win32 *w = W; int ci = w->ncont - 1; u64 *d = w->cont[ci].data; u64 P = PSZ_OF(c); u64 scratch = d[1]; u64 pows = rdp(c, scratch + 16);
+  if (d[2] == 0) { if ((u32)rax & 0x80000000u || !pows) { w32_heap_free(w, scratch); w32_cont_finish(c, (u32)rax ? (u64)(u32)rax : 0x80004002u); return; } d[2] = 1; u64 vt = rdp(c, pows); w32_guest_call(c, rdp(c, vt + 3 * P), pows, d[0], 0, 0); return; }
+  if (d[2] == 1) { d[3] = (u32)rax; d[2] = 2; u64 vt = rdp(c, pows); w32_guest_call(c, rdp(c, vt + 2 * P), pows, 0, 0, 0); return; }
+  w32_heap_free(w, scratch); w32_cont_finish(c, d[3]); }
+static int shell_cont_resume(Cpu *c, int kind, u64 rax) { if (kind == CONT_SETSITE) { setsite_step(c, rax); return 1; } if (kind != CONT_ENUMRES) return 0; if (!(u32)rax) { w32_cont_finish(c, 1); return 1; } enum_res_step(c); return 1; }
 
 /* ---------- registry ---------- */
 /* keys are full paths ("HKEY_LOCAL_MACHINE\SOFTWARE\7-Zip"), values live in a flat table; both persist as a text hive at
@@ -497,5 +506,5 @@ static int shell_cocreate(Cpu *c, u32 clsid_d1, u64 riid, u64 ppv) {
   S(SHGetFolderPathW), S(SHGetFolderPathA), S(SHGetFolderPathAndSubDirW), S(SHGetSpecialFolderPathW), S(SHGetSpecialFolderPathA), S(SHGetKnownFolderPath), S(SHGetPathFromIDListW), S(SHGetPathFromIDListA), S(SHGetPathFromIDListEx), \
   S(SHGetSpecialFolderLocation), S(SHGetFolderLocation), S(SHParseDisplayName), S(ILCreateFromPathW), S(ILFree), S(ILClone), S(ILIsEqual), S(SHGetMalloc), S(CoGetMalloc), SA("IMalloc::QueryInterface", IMalloc_QueryInterface), SA("IMalloc::AddRef", IMalloc_AddRef), SA("IMalloc::Release", IMalloc_Release), SA("IMalloc::Alloc", IMalloc_Alloc), SA("IMalloc::Realloc", IMalloc_Realloc), SA("IMalloc::Free", IMalloc_Free), SA("IMalloc::GetSize", IMalloc_GetSize), SA("IMalloc::DidAlloc", IMalloc_DidAlloc), SA("IMalloc::HeapMinimize", IMalloc_HeapMinimize), S(SHCreateDirectoryExW), S(SHCreateDirectoryExA), S(SHChangeNotify), S(SHAddToRecentDocs), S(IsUserAnAdmin), \
   S(Shell_NotifyIconW), S(Shell_NotifyIconA), S(SHAppBarMessage), S(SHEmptyRecycleBinW), S(DragAcceptFiles), S(DragQueryFileW), S(DragFinish), S(SHFileOperationW), \
-  S(ShellExecuteW), S(ShellExecuteA), S(ShellExecuteExW), S(ShellExecuteExA), S(FindExecutableW), S(DragQueryFileA), S(DragQueryPoint), S(ExitWindowsEx), S(InitiateSystemShutdownExW), S(LockWorkStation), \
+  S(ShellExecuteW), S(ShellExecuteA), S(ShellExecuteExW), S(ShellExecuteExA), S(FindExecutableW), S(DragQueryFileA), S(DragQueryPoint), S(IUnknown_SetSite), S(ExitWindowsEx), S(InitiateSystemShutdownExW), S(LockWorkStation), \
   S(GetSystemWow64DirectoryW), S(GetSystemWow64DirectoryA), S(Wow64DisableWow64FsRedirection), S(Wow64RevertWow64FsRedirection), S(Wow64EnableWow64FsRedirection),

@@ -1719,6 +1719,7 @@ static const struct { const char *dll; unsigned short ord; const char *name; } g
   { "shlwapi", 314, "RegisterClassExWrapW" },
   { "shlwapi", 315, "GetClassInfoExWrapW" },
   { "shlwapi", 318, "DragQueryFileWrapW" },
+  { "shlwapi", 174, "IUnknown_SetSite" },
   { "shlwapi", 319, "FindWindowExWrapW" },
   { "shlwapi", 320, "RegisterMIMETypeForExtensionA" },
   { "shlwapi", 321, "RegisterMIMETypeForExtensionW" },

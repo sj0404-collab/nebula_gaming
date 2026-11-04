@@ -7,11 +7,11 @@
    visible to programs as CF_HDROP.  Lives in gdi.c after defview.inc. */
 #define CM_MAX 16
 #define CM_ITEMS 64
-enum { CMV_OPEN = 0, CMV_EXPLORE, CMV_CUT, CMV_COPY, CMV_PASTE, CMV_DELETE, CMV_PROPERTIES, CMV_REFRESH, CMV_NEWFOLDER, CMV_COUNT };
-static const char *const cm_verb_name[CMV_COUNT] = { "open", "explore", "cut", "copy", "paste", "delete", "properties", "refresh", "NewFolder" };
-static const char *const cm_verb_text[CMV_COUNT] = { "&Open", "E&xplore", "Cu&t", "&Copy", "&Paste", "&Delete", "P&roperties", "R&efresh", "New &folder" };
-static const char *const cm_verb_help[CMV_COUNT] = { "Opens the selected items.", "Opens the selected folder in a new window.", "Removes the selected items and copies them onto the Clipboard.", "Copies the selected items to the Clipboard.", "Inserts the items you have copied or cut into the selected location.", "Deletes the selected items.", "Displays the properties of the selected items.", "Refreshes the contents of the window.", "Creates a new, empty folder." };
-typedef struct { int used; Win32 *w; u64 addr; int refs; char folder[1040]; int n; char (*paths)[520]; int all_dirs; int bg; u32 first; int map[CMV_COUNT]; int nmap; } CtxMenu;
+enum { CMV_OPEN = 0, CMV_EXPLORE, CMV_CUT, CMV_COPY, CMV_PASTE, CMV_DELETE, CMV_PROPERTIES, CMV_REFRESH, CMV_NEWFOLDER, CMV_VLARGE, CMV_VSMALL, CMV_VLIST, CMV_VDETAILS, CMV_COUNT };
+static const char *const cm_verb_name[CMV_COUNT] = { "open", "explore", "cut", "copy", "paste", "delete", "properties", "refresh", "NewFolder", "LargeIcons", "SmallIcons", "List", "Details" };
+static const char *const cm_verb_text[CMV_COUNT] = { "&Open", "E&xplore", "Cu&t", "&Copy", "&Paste", "&Delete", "P&roperties", "R&efresh", "New &folder", "Lar&ge icons", "S&mall icons", "&List", "&Details" };
+static const char *const cm_verb_help[CMV_COUNT] = { "Opens the selected items.", "Opens the selected folder in a new window.", "Removes the selected items and copies them onto the Clipboard.", "Copies the selected items to the Clipboard.", "Inserts the items you have copied or cut into the selected location.", "Deletes the selected items.", "Displays the properties of the selected items.", "Refreshes the contents of the window.", "Creates a new, empty folder.", "Displays items by using large icons.", "Displays items by using small icons.", "Displays items in a list.", "Displays information about each item in the window." };
+typedef struct { int used; Win32 *w; u64 addr; int refs; char folder[1040]; int n; char (*paths)[520]; int all_dirs; int bg; int sv; u32 first; int map[CMV_COUNT]; int nmap; } CtxMenu;
 static CtxMenu g_cm[CM_MAX];
 static const char *const vt_IContextMenu3[] = { "QueryInterface", "AddRef", "Release", "QueryContextMenu", "InvokeCommand", "GetCommandString", "HandleMenuMsg", "HandleMenuMsg2" };
 static u64 g_cm_vt; static Win32 *g_cm_vt_owner;
@@ -23,18 +23,22 @@ static void cm_join(const char *folder, const char *name, char *out, size_t cap)
 static const char *cm_base(const char *path) { const char *b = path; for (const char *p = path; *p; p++) if (*p == '\\' && p[1]) b = p + 1; return b; }
 /* the object: [vt IContextMenu3][refs u32][idx u32]; paths = full paths of the items (n == 0: the folder itself / background) */
 static CtxMenu *cm_create(Cpu *c, const char *folder, int bg) { Win32 *w = W; int k; for (k = 0; k < CM_MAX && g_cm[k].used; k++) { } if (k == CM_MAX) return 0; u64 P = PSZ_OF(c); u64 a = w32_heap_alloc(w, 2 * P, 1); if (!a) return 0;
-  CtxMenu *m = &g_cm[k]; e_memset(m, 0, sizeof *m); m->used = 1; m->w = w; m->addr = a; m->refs = 1; m->bg = bg; m->all_dirs = 1; e_snprintf(m->folder, sizeof m->folder, "%s", folder); m->paths = emu_alloc(sizeof(char[520]) * CM_ITEMS); if (!m->paths) { m->used = 0; return 0; }
+  CtxMenu *m = &g_cm[k]; e_memset(m, 0, sizeof *m); m->used = 1; m->w = w; m->addr = a; m->refs = 1; m->bg = bg; m->sv = -1; m->all_dirs = 1; e_snprintf(m->folder, sizeof m->folder, "%s", folder); m->paths = emu_alloc(sizeof(char[520]) * CM_ITEMS); if (!m->paths) { m->used = 0; return 0; }
   wrp(c, a, cm_vtable(c)); wr32(c, a + P, 1); wr32(c, a + P + 4, (u32)k); return m; }
 static void cm_add_path(CtxMenu *m, const char *path) { if (m->n >= CM_ITEMS) return; e_snprintf(m->paths[m->n], 520, "%s", path); u64 sz; if (vfs_stat(path, &sz) != 2) m->all_dirs = 0; m->n++; }
 /* merge the verbs into guest menu m at position pos with ids first + k; returns the number of ids used */
 static u32 cm_fill(Cpu *c, CtxMenu *cm, int mi, int pos, u32 first, u32 flags) { Menu *mm = &g_menu[mi]; int order[16]; int no = 0; int defonly = (flags & 1) != 0; cm->first = first; cm->nmap = 0; (void)c;
   int drives = cm->n > 0; for (int k = 0; k < cm->n; k++) { size_t l = e_strlen(cm->paths[k]); if (!(l <= 3 && cm->paths[k][1] == 0x3a)) drives = 0; }   /* drive roots: no Cut / Delete, like the Windows shell */
-  if (cm->bg || cm->n == 0) { if (!defonly) { order[no++] = CMV_REFRESH; order[no++] = -1; if (g_clipf[0]) { order[no++] = CMV_PASTE; order[no++] = -1; } order[no++] = CMV_NEWFOLDER; order[no++] = -1; } order[no++] = CMV_PROPERTIES; }
+  if (cm->bg || cm->n == 0) { if (!defonly) { if (cm->sv >= 0 && g_sv[cm->sv].used) order[no++] = -2; order[no++] = CMV_REFRESH; order[no++] = -1; if (g_clipf[0]) { order[no++] = CMV_PASTE; order[no++] = -1; } order[no++] = CMV_NEWFOLDER; order[no++] = -1; } order[no++] = CMV_PROPERTIES; }
   else { order[no++] = CMV_OPEN; if (!defonly) { if (cm->all_dirs) order[no++] = CMV_EXPLORE; order[no++] = -1; if (!drives) order[no++] = CMV_CUT; order[no++] = CMV_COPY; if (cm->all_dirs && cm->n == 1 && g_clipf[0]) order[no++] = CMV_PASTE; order[no++] = -1; if (!drives) { order[no++] = CMV_DELETE; order[no++] = -1; } order[no++] = CMV_PROPERTIES; } }
   u32 used = 0; for (int q = 0; q < no; q++) { int p = menu_insert_at(mi, pos < 0 ? -1 : pos + q); if (p < 0) break; MItem *it = &mm->it[p]; e_memset(it, 0, sizeof *it);
+    if (order[q] == -2) { /* View submenu: the four modes, the current one radio-checked (needs an id for hosts that walk the menu by command) */ int sm = menu_new(W); if (sm < 0) { it->ftype = 0x800; continue; } u32 cur = g_sv[cm->sv].viewmode; static const int vm[4] = { CMV_VLARGE, CMV_VSMALL, CMV_VLIST, CMV_VDETAILS }; static const u32 fvm[4] = { 1, 2, 3, 4 };
+      for (int z = 0; z < 4; z++) { int pz = menu_insert_at(sm, -1); if (pz < 0) break; MItem *si = &g_menu[sm].it[pz]; e_memset(si, 0, sizeof *si); si->id = first + (u32)cm->nmap; si->ftype = 0x200; si->state = (cur == fvm[z] || (cur >= 5 && z == 0)) ? 0x8 : 0; e_snprintf(si->text, sizeof si->text, "%s", cm_verb_text[vm[z]]); cm->map[cm->nmap++] = vm[z]; } used = (u32)cm->nmap;
+      it->id = first + (u32)cm->nmap; it->sub = menu_handle(sm); it->ftype = 0; e_snprintf(it->text, sizeof it->text, "&View"); cm->map[cm->nmap++] = -1; used = (u32)cm->nmap; menu_changed(W, sm); continue; }
     if (order[q] < 0) { it->ftype = 0x800; continue; } int v = order[q]; it->id = first + (u32)cm->nmap; it->ftype = 0; it->state = (q == 0 && !cm->bg) ? 0x1000 /* MFS_DEFAULT */ : 0; e_snprintf(it->text, sizeof it->text, "%s", cm_verb_text[v]); cm->map[cm->nmap++] = v; used = (u32)cm->nmap; }
   menu_changed(W, mi); return used; }
 static int cm_verb_of_id(CtxMenu *cm, u32 id) { if (id < cm->first || id >= cm->first + (u32)cm->nmap) return -1; return cm->map[id - cm->first]; }
+static void sv_set_viewmode(Cpu *c, ShellView *v, u32 fvm) { v->viewmode = fvm; if (v->lv >= 0 && wnd_alive(v->lv)) { call_shim(c, s_NebulaListViewProc, HWND_OF(v->lv), 0x108E, (u64)(u32)sv_lv_style(fvm), 0); wnd_invalidate(v->lv, 1); } }
 static int cm_verb_of_name(const char *s) { for (int v = 0; v < CMV_COUNT; v++) if (!e_stricmp(s, cm_verb_name[v])) return v; if (!e_stricmp(s, "cut")) return CMV_CUT; return -1; }
 static void cm_refresh_folder(Cpu *c, const char *folder) { for (int i = 0; i < SV_MAX; i++) if (g_sv[i].used && g_sv[i].w == W && g_sv[i].lv >= 0 && wnd_alive(g_sv[i].lv) && !e_stricmp(g_sv[i].path, folder)) sv_fill(c, &g_sv[i]); }
 static void cm_copy_tree(const char *src, const char *dst, int depth) { u64 sz; int st = vfs_stat(src, &sz); if (st == 2) { vfs_mkdir(dst); if (depth > 16) return; char pat[1060]; cm_join(src, "*", pat, sizeof pat); int h = vfs_find_first(pat); char nm[260]; u64 s2; int isd;
@@ -58,6 +62,7 @@ static int cm_invoke(Cpu *c, CtxMenu *cm, int verb, u64 owner_h) {
       if (g_clipf_cut) { g_clipf[0] = 0; g_clipf_cut = 0; } cm_refresh_folder(c, dst_folder); cm_refresh_folder(c, cm->folder); return 0; }
     case CMV_DELETE: { for (int k = 0; k < cm->n; k++) { vfs_remove(cm->paths[k]); w32_report(W, "Deleted %s", cm->paths[k]); } cm_refresh_folder(c, cm->folder); return 0; }
     case CMV_REFRESH: cm_refresh_folder(c, cm->folder); return 0;
+    case CMV_VLARGE: case CMV_VSMALL: case CMV_VLIST: case CMV_VDETAILS: { if (cm->sv >= 0 && cm->sv < SV_MAX && g_sv[cm->sv].used) sv_set_viewmode(c, &g_sv[cm->sv], (u32)(verb - CMV_VLARGE + 1)); return 0; }
     case CMV_NEWFOLDER: { char dst[1300]; cm_join(cm->folder, "New folder", dst, sizeof dst); u64 sz; for (int k = 2; vfs_stat(dst, &sz) && k < 1000; k++) { char nm[64]; e_snprintf(nm, sizeof nm, "New folder (%d)", k); cm_join(cm->folder, nm, dst, sizeof dst); } vfs_mkdir(dst); cm_refresh_folder(c, cm->folder); return 0; }
     case CMV_PROPERTIES: { char text[2048], cap[300]; const char *p = cm->n ? cm->paths[0] : cm->folder; cm_props_text(p, cm->n == 0, text, sizeof text); if (cm->n > 1) { char more[64]; e_snprintf(more, sizeof more, "\n\n(%d items selected)", cm->n); size_t tl = e_strlen(text); e_snprintf(text + tl, sizeof text - tl, "%s", more); } e_snprintf(cap, sizeof cap, "%s Properties", p[0] ? cm_base(p) : "Desktop"); message_box(c, owner_h, text, cap, 0x40); return 1; }
     default: return 0; } }
@@ -79,10 +84,14 @@ static void s_IContextMenu_HandleMenuMsg(Cpu *c) { RET(0); }
 static void s_IContextMenu_HandleMenuMsg2(Cpu *c) { if (ARG(3)) wrp(c, ARG(3), 0); RET(0); }
 /* IShellFolder::GetUIObjectOf(IID_IContextMenu*) — called from win32_shellns.inc with the folder path and the item paths */
 u64 gdi_shell_ctxmenu_create(Cpu *c, const char *folder, const char (*paths)[520], int n) { CtxMenu *m = cm_create(c, folder, n == 0); if (!m) return 0; for (int k = 0; k < n; k++) cm_add_path(m, paths[k]); return m->addr; }
+/* IShellView::GetItemObject(SVGIO_BACKGROUND 0 / SELECTION 1 / ALLVIEW 2, IID_IContextMenu*) */
+static u64 sv_ctxmenu_obj(Cpu *c, ShellView *v, u32 which) { ListView *lv = v->lv >= 0 ? lv_of(v->lv) : 0; CtxMenu *cm = cm_create(c, v->path, which == 0); if (!cm) return 0; cm->sv = (int)(v - g_sv);
+  if (which != 0 && lv) for (int k = 0; k < lv->n; k++) if (which == 2 || (lv->it[k].state & 2)) { char p[1300]; sv_item_path(v, k, p, sizeof p); if (p[0]) cm_add_path(cm, p); }
+  if (which != 0 && !cm->n) { cm_free(cm); return 0; } return cm->addr; }
 /* ---- the default folder view's own right-click menu ---- */
 static void sv_context_menu(Cpu *c, ShellView *v, int item) { Win32 *w = W; ListView *lv = v->lv >= 0 ? lv_of(v->lv) : 0; if (!lv) { RET(0); return; }
   if (v->ctx_cm >= 0 && v->ctx_cm < CM_MAX && g_cm[v->ctx_cm].used) cm_free(&g_cm[v->ctx_cm]); v->ctx_cm = -1; if (v->ctx_menu > 0 && g_menu[v->ctx_menu].used) menu_destroy(v->ctx_menu, 0); v->ctx_menu = 0;
-  CtxMenu *cm = cm_create(c, v->path, item < 0); if (!cm) { RET(0); return; }
+  CtxMenu *cm = cm_create(c, v->path, item < 0); if (!cm) { RET(0); return; } cm->sv = (int)(v - g_sv);
   if (item >= 0) { for (int k = 0; k < lv->n; k++) if ((lv->it[k].state & 2) || k == item) { char p[1300]; sv_item_path(v, k, p, sizeof p); if (p[0]) cm_add_path(cm, p); } if (!cm->n) { cm_free(cm); RET(0); return; } }
   int mi = menu_new(w); if (mi < 0) { cm_free(cm); RET(0); return; } cm_fill(c, cm, mi, -1, 0x7000, 0); v->ctx_cm = (int)(cm - g_cm); v->ctx_menu = mi;
   track_popup(c, menu_handle(mi), 0x2 /* TPM_RIGHTBUTTON */, g_mouse_x + SCREEN_X0, g_mouse_y + SCREEN_Y0, HWND_OF(v->wnd)); }

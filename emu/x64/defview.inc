@@ -6,7 +6,7 @@
 #define SV_MAX 32
 typedef struct { int used; Win32 *w; u64 addr, folder, browser; char path[1040]; int wnd, lv; u32 viewmode, flags; int refs; u64 scratch; int wait_browse; int ctx_cm, ctx_menu; } ShellView;
 static ShellView g_sv[SV_MAX];
-static void sv_context_menu(Cpu *c, ShellView *v, int item); static int sv_context_command(Cpu *c, ShellView *v, u32 id);   /* ctxmenu.inc */
+static void sv_context_menu(Cpu *c, ShellView *v, int item); static int sv_context_command(Cpu *c, ShellView *v, u32 id); static u64 sv_ctxmenu_obj(Cpu *c, ShellView *v, u32 which);   /* ctxmenu.inc */
 static const char *const vt_IShellView2[] = { "QueryInterface", "AddRef", "Release", "GetWindow", "ContextSensitiveHelp", "TranslateAccelerator", "EnableModeless", "UIActivate", "Refresh", "CreateViewWindow", "DestroyViewWindow", "GetCurrentInfo", "AddPropertySheetPages", "SaveViewState", "SelectItem", "GetItemObject", "GetView", "CreateViewWindow2", "HandleRename", "SelectAndPositionItem" };
 static const char *const vt_IFolderView[] = { "QueryInterface", "AddRef", "Release", "GetCurrentViewMode", "SetCurrentViewMode", "GetFolder", "Item", "ItemCount", "Items", "GetSelectionMarkedItem", "GetFocusedItem", "GetItemPosition", "GetSpacing", "GetDefaultSpacing", "GetAutoArrange", "SelectItem", "SelectAndPositionItems" };
 static u64 g_sv_vt[2]; static Win32 *g_sv_vt_owner;
@@ -96,7 +96,9 @@ static void s_IShellView_SaveViewState(Cpu *c) { RET(0); }
 static int sv_find_item(Cpu *c, ShellView *v, const char *path) { ListView *lv = v->lv >= 0 ? lv_of(v->lv) : 0; if (!lv) return -1; const char *b = path; for (const char *p = path; *p; p++) if (*p == '\\') b = p + 1; for (int k = 0; k < lv->n; k++) { const char *d = lv_sub(lv, k, 0); size_t dl = e_strlen(d); if (!e_strnicmp(d, b, dl) && (b[dl] == 0 || b[dl] == '.')) return k; } return -1; }
 static void sv_select(Cpu *c, ShellView *v, int k, u32 flags) { ListView *lv = v->lv >= 0 ? lv_of(v->lv) : 0; Wnd *n = v->lv >= 0 ? &g_wnd[v->lv] : 0; if (!lv || !n) return; if (flags == 0 /* SVSI_DESELECT */) { if (k >= 0 && k < lv->n) lv->it[k].state &= ~2u; } else { if (flags & 4 /* DESELECTOTHERS */) lv_select_only(n, lv, k); if (k >= 0 && k < lv->n) { lv->it[k].state |= 2; if (flags & 0x10 /* FOCUSED */ || flags & 1) lv->focus = k; } } wnd_invalidate(v->lv, 1); }
 static void s_IShellView_SelectItem(Cpu *c) { ShellView *v = sv_of(c, ARG(0)); if (!v) { RET(0x80070057u); return; } u32 flags = (u32)ARG(2); if (!ARG(1)) { ListView *lv = v->lv >= 0 ? lv_of(v->lv) : 0; if (lv) { for (int k = 0; k < lv->n; k++) lv->it[k].state &= ~2u; wnd_invalidate(v->lv, 1); } RET(0); return; } int k = sv_find_item(c, v, pidl_path(c, ARG(1))); if (k < 0) { RET(0x80004005u); return; } sv_select(c, v, k, flags); RET(0); }
-static void s_IShellView_GetItemObject(Cpu *c) { if (ARG(3)) wrp(c, ARG(3), 0); RET(0x80004002u); }
+static void s_IShellView_GetItemObject(Cpu *c) { /* (uItem, riid, **ppv): the background / selection context menu (ctxmenu.inc); IDataObject and IDispatch are not provided */ ShellView *v = sv_of(c, ARG(0)); if (ARG(3)) wrp(c, ARG(3), 0); if (!v || !ARG(2) || !ARG(3)) { RET(0x80070057u); return; }
+  u32 d1 = rd32(c, ARG(2)); u16 d2 = rd16(c, ARG(2) + 4); if (!(((d1 == 0x000214E4 || d1 == 0x000214F4) && d2 == 0) || (d1 == 0xBCFCE0A0 && d2 == 0xEC17))) { e_log("[shell] IShellView::GetItemObject(%u, {%08x-%04x-...}) not provided\n", (u32)ARG(1), d1, d2); RET(0x80004002u); return; }
+  u64 o = sv_ctxmenu_obj(c, v, (u32)ARG(1)); if (!o) { RET(0x80004005u); return; } wrp(c, ARG(3), o); RET(0); }
 static void s_IShellView_GetView(Cpu *c) { RET(0x80004001u); }
 static void s_IShellView_CreateViewWindow2(Cpu *c) { ShellView *v = sv_of(c, ARG(0)); u64 p = ARG(1), P = PSZ_OF(c); if (!v || !p) { RET(0x80070057u); return; } sv_create_view(c, v, rdp(c, p + 2 * P), rdp(c, p + 3 * P), rdp(c, p + 4 * P), p + 6 * P); }
 static void s_IShellView_HandleRename(Cpu *c) { RET(0x80004001u); }

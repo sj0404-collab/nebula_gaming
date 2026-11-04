@@ -155,6 +155,7 @@ static void s_NebulaToolbarProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { R
     case 0x428: RET(1); return; case 0x427: RET(0); return;                                                  /* rows */
     case 0x423: { RET((n->style & 0x100) || tb->tipwnd > 0 ? tb_tooltip_wnd(c, i) : 0); return; }   /* TB_GETTOOLTIPS */
     case 0x424: { int ti = wnd_of(wp); tb->tipwnd = ti; if (ti >= 0) tb_adopt_tip(ti, i); RET(0); return; }   /* TB_SETTOOLTIPS */
+    case 0x111: { /* WM_COMMAND addressed to the toolbar (hosted combo boxes, popup menus tracked with the toolbar as owner) goes up to the parent, like comctl32 */ notify_parent_wm(c, i, msg, wp, lp, 0); return; }
     case 0x4E: { u64 P = cc_P(c); u32 code = lp ? rd32(c, lp + 2 * P) : 0; if (code == (u32)-520 || code == (u32)-530) { tb_tip_notify(c, i, wp, lp); return; } notify_parent_wm(c, i, msg, wp, lp, 0); return; }
     case 0x425: case 0x429: case 0x43E: case 0x446: case 0x449: case 0x44A: case 0x44F: case 0x450: case 0x451: case 0x45A: case 0x2005: case 0x2007: case 0x200B: case 0x2001: RET(0); return;   /* tooltips, parent, bitmap flags, LOADIMAGES, insert marks, unicode, version, theme */
     default: if (ctl_common(c, i, msg, wp, lp)) return; def_window_proc(c, i, msg, wp, lp); return; } }

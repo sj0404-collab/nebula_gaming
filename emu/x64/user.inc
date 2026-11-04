@@ -82,7 +82,7 @@ void user_dump_windows(void) { for (int k = 0; k < MAX_WND; k++) { Wnd *n = &g_w
 /* a window painted underneath an open popup menu / dropped combo list: the popup repaints on top afterwards (window DCs are
    clipped to ancestors, not to overlapping top-level windows) */
 static void popups_over(int i) { if (!wnd_alive(i)) return; int ax, ay; wnd_window_origin(i, &ax, &ay); int aw = g_wnd[i].w, ah = g_wnd[i].h; int r = wnd_root(i); int rz = r >= 0 ? g_wnd[r].zseq : 0;
-  for (int k = 1; k < MAX_WND; k++) { Wnd *n = &g_wnd[k]; if (!n->used || n->destroyed || !n->visible || n->parent >= 0 || k == r || n->invalid) continue; int popup = n->builtin == BI_MENU || n->builtin == BI_COMBOLIST; if (!popup && n->zseq <= rz) continue;
+  for (int k = 1; k < MAX_WND; k++) { Wnd *n = &g_wnd[k]; if (!n->used || n->destroyed || !n->visible || n->parent >= 0 || k == r || n->invalid) continue; int popup = n->builtin == BI_MENU || n->builtin == BI_COMBOLIST; if (!popup && n->zseq <= rz) continue; if (popup && (g_wnd[i].builtin == BI_MENU || g_wnd[i].builtin == BI_COMBOLIST) && n->zseq <= g_wnd[i].zseq) continue;   /* a popup repaint only re-raises popups opened after it (a submenu overlaps its parent by a few pixels: never ping-pong) */
     if (ax < n->x + n->w && ax + aw > n->x && ay < n->y + n->h && ay + ah > n->y) { if (popup) n->invalid = 1; else wnd_invalidate(k, 1); } } }
 static void wnd_invalidate_all(void) { for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed) { g_wnd[k].invalid = 1; g_wnd[k].erase = 1; } }
 /* the main window (index 0) is mirrored into w->win for the parts win32.c / d3d11 read */

@@ -83,6 +83,7 @@ int main(int argc, char **argv) {
   }
   host_set_dump(dump_every, prefix);
   for (int mi = 0; mi < nmounts; mi++) { int n = mount_dir(mounts[mi][0], mounts[mi][1], 0); if (!quiet) fprintf(stderr, "[x64run] mounted %s -> %s (%d files)\n", mounts[mi][0], mounts[mi][1], n); }   /* before load: DLLs next to the exe */
+  { extern int w32_menudump; if (getenv("X64_MENUDUMP")) w32_menudump = 1; }   /* X64_MENUDUMP=1 (+X64_LOG=1): log every popup menu item when a menu opens */
   if (getenv("X64_MODAL")) gdi_set_msgbox_auto(0);   /* X64_MODAL=1: MessageBox / file dialogs are real modal dialogs driven by --click/--type instead of auto-answered */
   if (getenv("X64_TAP")) { extern const char *g_vfs_tap; g_vfs_tap = getenv("X64_TAP"); }
   if (getenv("X64_GUEST_ENV")) { extern void w32_add_env(const char *); char *ge = strdup(getenv("X64_GUEST_ENV")); for (char *t = strtok(ge, ";"); t; t = strtok(0, ";")) w32_add_env(t); }
