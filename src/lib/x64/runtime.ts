@@ -125,9 +125,19 @@ export class X64Runtime {
     };
     const { instance } = await WebAssembly.instantiate(bytes, imports);
     this.ex = instance.exports as unknown as Exports;
+    await this.loadFonts(url.replace(/[^/]*$/, 'fonts/'));
     this.disk.onActivity = () => this.onDisk?.();
     await this.restoreDisk();
     if (!this.disposed) this.unregister = registerLiveVfs(this);   // File Explorer / Notepad write through to this live disk copy
+  }
+  /** the bundled TrueType faces become C:\Windows\Fonts (the emulator's GDI text engine reads them from the VFS; without them it falls back to bitmap glyphs) */
+  private async loadFonts(base: string): Promise<void> {
+    const files = ['ptsans.ttf', 'ptsansb.ttf', 'cousine.ttf', 'cousineb.ttf'];
+    const ex = this.ex!; ex.x64_vfs_mkdir(this.putStr('C:\\Windows\\Fonts'));
+    await Promise.all(files.map(async (f) => {
+      try { const r = await fetch(base + f); if (!r.ok) return; const b = new Uint8Array(await r.arrayBuffer()); if (this.disposed) return; ex.x64_vfs_add(this.putStr('C:\\Windows\\Fonts\\' + f), this.put(b), BigInt(b.length)); }
+      catch (e) { this.onLog?.(`font ${f}: ${String(e)}`); }
+    }));
   }
   private unregister: (() => void) | null = null;
   private disposed = false;

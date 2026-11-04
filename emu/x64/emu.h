@@ -203,6 +203,7 @@ typedef struct {
   int dib_bpp, dib_stride, dib_section; u64 dib_native; u32 *dib_pal; int dib_ncol; u8 *dib_native_prev; u32 *dib_shadow_prev; /* non-32-bpp DIB section: guest-visible native bits + 32-bpp shadow at `bits`, synced in dib_sync() */
   /* BRUSH/PEN */ u32 color; int pen_width;
   /* FONT */ int font_h; int font_bold; int font_em;   /* font_h = cell (line) height; font_em = em height the character width is derived from (0 = same as font_h) */
+  int font_face; int font_px; int font_flags; char font_name[32];   /* TrueType face index (ttf.inc; -1 = bitmap fallback), em pixels, 1 italic / 2 underline / 4 strikeout, LOGFONT face name */
   /* RGN */ int rx, ry, rw, rh; int npts; s32 pts[64];
 } GdiObj;
 

@@ -102,15 +102,8 @@ static void fill_ellipse(Surf *s, int l, int t, int r, int b, u32 px, int fill, 
   for (int y = t; y < b; y++) { float dy = (y + 0.5f - cy) / ry; float v = 1 - dy * dy; if (v < 0) continue; float hw = rx * e_sqrt(v); int xa = (int)(cx - hw + 0.5f), xb = (int)(cx + hw - 0.5f);
     if (fill) hline(s, xa, xb, y, px); if (outline) { put_px(s, xa, y, pen); put_px(s, xb, y, pen); if (y == t || y == b - 1) hline(s, xa, xb, y, pen); } }
 }
-static void draw_text(Surf *s, GdiObj *dc, Win32 *w, int x, int y, const char *str, int len) {
-  GdiObj *f = gdi_get(w, dc->font); int fh = f && f->kind == K_FONT ? f->font_h : 16; int bold = f && f->kind == K_FONT ? f->font_bold : 0;
-  if (fh < 4) fh = 4; int cw = font_cw(f, fh); int gh = f && f->kind == K_FONT && f->font_em && f->font_em < fh ? f->font_em : fh;   /* glyphs fill the em; the internal leading (fh - gh) stays above them like a real TrueType cell */
-  u32 fg = cr2px(dc->text_color), bg = cr2px(dc->bk_color); int opaque = dc->bk_mode != 1;
-  if (opaque) fill_rect_px(s, x, y, x + cw * utf8_cols(str, len), y + fh, bg);
-  for (int i = 0, col = 0; i < len; col++) { unsigned cp = utf8_next(str, len, &i); const unsigned char *g = glyph_of(cp); int gx0 = x + col * cw;
-    for (int py = 0; py < gh; py++) { int gy = py * 8 / gh; int yy = y + (fh - gh) + py; if (yy < s->y0 || yy >= s->h) continue; u32 *row = srow(s, yy);
-      for (int px = 0; px < cw; px++) { int gx = px * 8 / cw; int on = (g[gy] >> gx) & 1; if (!on && bold && gx > 0) on = (g[gy] >> (gx - 1)) & 1; if (on) { int xx = gx0 + px; if (xx >= s->x0 && xx < s->w) row[xx] = fg; } } } }
-}
+#include "ttf.inc"
+static void draw_text(Surf *s, GdiObj *dc, Win32 *w, int x, int y, const char *str, int len) { fnt_draw(s, dc, w, x, y, str, len); }
 
 /* UTF-8 → UTF-16 into guest memory (returns the number of UTF-16 units written, excluding the terminator) */
 static int put_w_utf8(Cpu *c, u64 dst, const char *s, int cap) { int i = 0, o = 0, n = (int)e_strlen(s);
@@ -198,8 +191,17 @@ static void s_CreatePatternBrush(Cpu *c) { GdiObj *b = gdi_new(W, K_BRUSH); if (
 static void s_CreateBrushIndirect(Cpu *c) { GdiObj *b = gdi_new(W, K_BRUSH); if (!b) { RET(0); return; } b->color = cr2px(rd32(c, ARG(0) + 4)); if (rd32(c, ARG(0)) == 1) b->pen_width = -1; RET(b->handle); }
 static void s_CreatePen(Cpu *c) { GdiObj *p = gdi_new(W, K_PEN); if (!p) { RET(0); return; } p->color = cr2px((u32)ARG(2)); p->pen_width = (u32)ARG(0) == 5 ? -1 : ((int)ARG(1) > 0 ? (int)ARG(1) : 1); RET(p->handle); }
 static void s_ExtCreatePen(Cpu *c) { GdiObj *p = gdi_new(W, K_PEN); if (!p) { RET(0); return; } p->color = cr2px(rd32(c, ARG(2) + 4)); p->pen_width = (int)ARG(1) > 0 ? (int)ARG(1) : 1; RET(p->handle); }
-static void s_CreateFontA(Cpu *c) { GdiObj *f = gdi_new(W, K_FONT); if (!f) { RET(0); return; } int h = (int)(s32)ARG(0); int em = 0; if (h < 0) { em = -h; h = (em * 6 + 2) / 5; } /* negative lfHeight = em height without internal leading: the cell (line) height is ~1.2x, like tmHeight of an 8 pt Tahoma = 13 */ if (!h) h = 16; f->font_h = h; f->font_em = em; f->font_bold = (int)ARG(4) >= 600; RET(f->handle); }
-static void s_CreateFontIndirectA(Cpu *c) { GdiObj *f = gdi_new(W, K_FONT); if (!f) { RET(0); return; } int h = (s32)rd32(c, ARG(0)); int em = 0; if (h < 0) { em = -h; h = (em * 6 + 2) / 5; } /* negative lfHeight = em height without internal leading: the cell (line) height is ~1.2x, like tmHeight of an 8 pt Tahoma = 13 */ if (!h) h = 16; f->font_h = h; f->font_em = em; f->font_bold = (s32)rd32(c, ARG(0) + 16) >= 600; RET(f->handle); }
+/* LOGFONT: lfHeight@0 lfWidth@4 lfEscapement@8 lfOrientation@12 lfWeight@16 lfItalic@20 lfUnderline@21 lfStrikeOut@22 lfCharSet@23 lfOutPrecision@24 lfClipPrecision@25 lfQuality@26 lfPitchAndFamily@27 lfFaceName@28 */
+static void create_font_indirect(Cpu *c, u64 lf, int wide) { GdiObj *f = gdi_new(W, K_FONT); if (!f) { RET(0); return; } char name[64]; name[0] = 0;
+  if (wide) wstr_to_utf8(c, lf + 28, name, sizeof name, 32); else { const char *n = rd_str(c, lf + 28, 32); if (n) { int k = 0; for (; k < 31 && n[k]; k++) name[k] = n[k]; name[k] = 0; } }
+  fnt_setup(f, (s32)rd32(c, lf), (s32)rd32(c, lf + 16), rd8(c, lf + 20), rd8(c, lf + 21), rd8(c, lf + 22), rd8(c, lf + 27), name); fnt_set_width(f, (s32)rd32(c, lf + 4)); RET(f->handle); }
+static void s_CreateFontIndirectA(Cpu *c) { create_font_indirect(c, ARG(0), 0); }
+static void s_CreateFontIndirectW(Cpu *c) { create_font_indirect(c, ARG(0), 1); }
+static void create_font(Cpu *c, int wide) { GdiObj *f = gdi_new(W, K_FONT); if (!f) { RET(0); return; } char name[64]; name[0] = 0; u64 fa = ARG(13);
+  if (fa) { if (wide) wstr_to_utf8(c, fa, name, sizeof name, 32); else { const char *n = rd_str(c, fa, 32); if (n) { int k = 0; for (; k < 31 && n[k]; k++) name[k] = n[k]; name[k] = 0; } } }
+  fnt_setup(f, (int)(s32)ARG(0), (int)(s32)ARG(4), (int)(ARG(5) & 0xff), (int)(ARG(6) & 0xff), (int)(ARG(7) & 0xff), (int)(ARG(12) & 0xff), name); fnt_set_width(f, (int)(s32)ARG(1)); RET(f->handle); }
+static void s_CreateFontA(Cpu *c) { create_font(c, 0); }
+static void s_CreateFontW(Cpu *c) { create_font(c, 1); }
 static void s_SetTextColor(Cpu *c) { GdiObj *dc = gdi_get(W, ARG(0)); if (!dc) { RET(0xffffffffu); return; } u32 old = dc->text_color; dc->text_color = (u32)ARG(1); RET(old); }
 static void s_SetBkColor(Cpu *c) { GdiObj *dc = gdi_get(W, ARG(0)); if (!dc) { RET(0xffffffffu); return; } u32 old = dc->bk_color; dc->bk_color = (u32)ARG(1); RET(old); }
 static void s_SetBkMode(Cpu *c) { GdiObj *dc = gdi_get(W, ARG(0)); if (!dc) { RET(0); return; } int old = dc->bk_mode; dc->bk_mode = (int)ARG(1); RET(old); }
@@ -243,6 +245,7 @@ static void s_PtVisible(Cpu *c) { Surf s; if (!dc_surf(c, ARG(0), &s)) { RET(0);
 
 static void s_SetMapMode(Cpu *c) { RET(1); }
 static void s_GetDeviceCaps(Cpu *c) { int i = (int)ARG(1); RET(i == 8 ? W->screen_w : i == 10 ? W->screen_h : i == 12 ? 32 : i == 14 ? 1 : i == 88 ? 96 : i == 90 ? 96 : i == 116 ? 60 : i == 4 ? 1 : i == 24 ? 0x4000000 : i == 2 ? 0x4000 : 0); }
+static int g_getobj_wide;
 static void s_GetObjectA(Cpu *c) { GdiObj *o = gdi_get(W, ARG(0)); if (!o) { RET(0); return; } u64 a = ARG(2);
   if (o->kind == K_BITMAP) { int bsz = c->mode32 ? 24 : 32, dsz = c->mode32 ? 84 : 104; int bpp = o->dib_section ? o->dib_bpp : 32; u32 stride = o->dib_section ? (u32)o->dib_stride : (u32)o->bw * 4; u64 bits = o->dib_section ? o->dib_native : o->bits; u32 cb = (u32)ARG(1);
     if (!a) { RET(o->dib_section ? dsz : bsz); return; } if (cb < (u32)bsz) { RET(0); return; } wr32(c, a, 0); wr32(c, a + 4, (u32)o->bw); wr32(c, a + 8, (u32)o->bh); wr32(c, a + 12, stride); wr16(c, a + 16, 1); wr16(c, a + 18, (u16)bpp); if (c->mode32) wr32(c, a + 20, (u32)bits); else wr64(c, a + 24, bits);
@@ -250,19 +253,35 @@ static void s_GetObjectA(Cpu *c) { GdiObj *o = gdi_get(W, ARG(0)); if (!o) { RET
     u64 bf = ih + 40; wr32(c, bf, 0xff0000); wr32(c, bf + 4, 0xff00); wr32(c, bf + 8, 0xff); if (c->mode32) { wr32(c, bf + 12, 0); wr32(c, bf + 16, 0); } else { wr64(c, bf + 16, 0); wr32(c, bf + 24, 0); } RET(dsz); return; }
   if (o->kind == K_BRUSH) { if (a) { wr32(c, a, 0); wr32(c, a + 4, px2cr(o->color)); wrp(c, a + 8, 0); } RET(c->mode32 ? 12 : 16); return; }
   if (o->kind == K_PEN) { if (a) { wr32(c, a, 0); wr32(c, a + 4, (u32)o->pen_width); wr32(c, a + 12, px2cr(o->color)); } RET(16); return; }
-  if (o->kind == K_FONT) { if (a) { u8 *p = mem_ptr(c->mem, a, 92, 1); if (p) e_memset(p, 0, 92); wr32(c, a, (u32)-(o->font_em ? o->font_em : o->font_h)); wr32(c, a + 16, o->font_bold ? 700 : 400); } RET(92); return; }
+  if (o->kind == K_FONT) { int wide = g_getobj_wide; int sz = wide ? 92 : 60; if (a) { u8 *p = mem_ptr(c->mem, a, (u64)sz, 1); if (p) e_memset(p, 0, (size_t)sz); wr32(c, a, (u32)-(o->font_em ? o->font_em : o->font_h)); wr32(c, a + 16, o->font_bold ? 700 : 400); wr8(c, a + 20, (u8)(o->font_flags & 1)); wr8(c, a + 21, (u8)((o->font_flags >> 1) & 1)); wr8(c, a + 22, (u8)((o->font_flags >> 2) & 1)); wr8(c, a + 23, 1); wr8(c, a + 27, (u8)(o->font_face >= TF_MONO ? 0x31 : 0x22));
+      const char *nm = fnt_face_name(o); if (wide) put_w_utf8(c, a + 28, nm, 32); else { u8 *q = mem_ptr(c->mem, a + 28, 32, 1); if (q) { int k = 0; for (; k < 31 && nm[k]; k++) q[k] = (u8)nm[k]; q[k] = 0; } } } RET((u64)sz); return; }
   RET(0); }
-static void s_GetTextExtentPoint32A(Cpu *c) { GdiObj *dc = gdi_get(W, ARG(0)); GdiObj *f = dc ? gdi_get(W, dc->font) : 0; int fh = f ? f->font_h : 16; int cw = font_cw(f, fh); wr32(c, ARG(3), (u32)(cw * (int)ARG(2))); wr32(c, ARG(3) + 4, (u32)fh); RET(1); }
-static void s_GetTextMetricsA(Cpu *c) { GdiObj *dc = gdi_get(W, ARG(0)); GdiObj *f = dc ? gdi_get(W, dc->font) : 0; int fh = f ? f->font_h : 16; int cw = font_cw(f, fh); u64 a = ARG(1); u8 *p = mem_ptr(c->mem, a, 56, 1); if (p) e_memset(p, 0, 56); wr32(c, a, (u32)fh); wr32(c, a + 4, (u32)(fh - 3)); wr32(c, a + 8, 3); wr32(c, a + 20, (u32)cw); wr32(c, a + 24, (u32)cw); wr32(c, a + 28, f && f->font_bold ? 700 : 400); RET(1); }
+/* guest string (A = Latin-1 bytes, W = UTF-16 with surrogates) → UTF-8 in buf; returns bytes */
+static int text_in_n(Cpu *c, u64 str, int len, int wide, char *buf, int cap) { int n = 0; if (len < 0) len = 0; if (len > 4000) len = 4000;
+  for (int i = 0; i < len && n + 4 < cap; i++) { u32 ch = wide ? rd16(c, str + i * 2) : rd8(c, str + i); if (c->status) return n; if (wide && ch >= 0xD800 && ch < 0xDC00 && i + 1 < len) { u32 lo = rd16(c, str + (i + 1) * 2); if (lo >= 0xDC00 && lo < 0xE000) { ch = 0x10000 + ((ch - 0xD800) << 10) + (lo - 0xDC00); i++; } }
+    if (ch < 0x80) buf[n++] = (char)ch; else if (ch < 0x800) { buf[n++] = (char)(0xC0 | ch >> 6); buf[n++] = (char)(0x80 | (ch & 0x3f)); } else if (ch < 0x10000) { buf[n++] = (char)(0xE0 | ch >> 12); buf[n++] = (char)(0x80 | ((ch >> 6) & 0x3f)); buf[n++] = (char)(0x80 | (ch & 0x3f)); } else { buf[n++] = (char)(0xF0 | ch >> 18); buf[n++] = (char)(0x80 | ((ch >> 12) & 0x3f)); buf[n++] = (char)(0x80 | ((ch >> 6) & 0x3f)); buf[n++] = (char)(0x80 | (ch & 0x3f)); } }
+  buf[n] = 0; return n; }
+static GdiObj *dc_font(Cpu *c, u64 hdc) { GdiObj *dc = gdi_get(W, hdc); GdiObj *f = dc ? gdi_get(W, dc->font) : 0; return f && f->kind == K_FONT ? f : gdi_get(W, stock[13]); }
+static void text_extent(Cpu *c, int wide) { GdiObj *f = dc_font(c, ARG(0)); char buf[4100]; int n = text_in_n(c, ARG(1), (int)(s32)ARG(2), wide, buf, sizeof buf); if (c->status) return; int tw = fnt_width(f, buf, n); int fh = fnt_metrics(f, 0, 0, 0, 0); if (ARG(3)) { wr32(c, ARG(3), (u32)tw); wr32(c, ARG(3) + 4, (u32)fh); } RET(1); }
+static void s_GetTextExtentPoint32A(Cpu *c) { text_extent(c, 0); }
+static void s_GetTextExtentPoint32W(Cpu *c) { text_extent(c, 1); }
+/* TEXTMETRIC: Height Ascent Descent IntLeading ExtLeading AveCharWidth MaxCharWidth Weight Overhang DigAspectX DigAspectY (11 LONGs) then First/Last/Default/Break chars, Italic, Underlined, StruckOut, PitchAndFamily, CharSet */
+static void text_metrics(Cpu *c, int wide) { GdiObj *f = dc_font(c, ARG(0)); int asc, desc, avg, maxw; int fh = fnt_metrics(f, &asc, &desc, &avg, &maxw); int px; int face = fnt_face_px(f, &px); u64 a = ARG(1); int sz = wide ? 60 : 56; u8 *p = mem_ptr(c->mem, a, (u64)sz, 1); if (!p) { RET(0); return; } e_memset(p, 0, (size_t)sz);
+  wr32(c, a, (u32)fh); wr32(c, a + 4, (u32)asc); wr32(c, a + 8, (u32)desc); wr32(c, a + 12, (u32)(fh > px ? fh - px : 0)); wr32(c, a + 20, (u32)avg); wr32(c, a + 24, (u32)maxw); wr32(c, a + 28, f && f->font_bold ? 700 : 400); wr32(c, a + 36, 96); wr32(c, a + 40, 96);
+  if (wide) { wr16(c, a + 44, 0x20); wr16(c, a + 46, 0xffff); wr16(c, a + 48, 0x1f); wr16(c, a + 50, 0x20); wr8(c, a + 52, (u8)(f ? f->font_flags & 1 : 0)); wr8(c, a + 53, (u8)(f ? (f->font_flags >> 1) & 1 : 0)); wr8(c, a + 54, (u8)(f ? (f->font_flags >> 2) & 1 : 0)); wr8(c, a + 55, (u8)((face >= TF_MONO ? 0x30 : 0x22) | 4)); wr8(c, a + 56, 1); }
+  else { wr8(c, a + 44, 0x20); wr8(c, a + 45, 0xff); wr8(c, a + 46, 0x1f); wr8(c, a + 47, 0x20); wr8(c, a + 48, (u8)(f ? f->font_flags & 1 : 0)); wr8(c, a + 49, (u8)(f ? (f->font_flags >> 1) & 1 : 0)); wr8(c, a + 50, (u8)(f ? (f->font_flags >> 2) & 1 : 0)); wr8(c, a + 51, (u8)((face >= TF_MONO ? 0x30 : 0x22) | 4)); wr8(c, a + 52, 1); }
+  RET(1); }
+static void s_GetTextMetricsA(Cpu *c) { text_metrics(c, 0); }
+static void s_GetTextMetricsW(Cpu *c) { text_metrics(c, 1); }
 static int cur_x, cur_y;   /* current position (MoveToEx / LineTo / TA_UPDATECP) */
 static void text_out(Cpu *c, u64 hdc, int x, int y, u64 str, int len, int wide) { Win32 *w = W; Surf s; GdiObj *dc = gdi_get(w, hdc); if (!dc || !dc_surf(c, hdc, &s)) { RET(0); return; } char buf[4100]; int n = 0;
   if (len < 0) len = 0; if (len > 1000) len = 1000;
   for (int i = 0; i < len && n < 1000; i++) { u32 ch = wide ? rd16(c, str + i * 2) : rd8(c, str + i); if (c->status) return; if (wide && ch >= 0xD800 && ch < 0xDC00 && i + 1 < len) { u32 lo = rd16(c, str + (i + 1) * 2); if (lo >= 0xDC00 && lo < 0xE000) { ch = 0x10000 + ((ch - 0xD800) << 10) + (lo - 0xDC00); i++; } }
     if (ch < 0x80) buf[n++] = (char)ch; else if (ch < 0x800) { buf[n++] = (char)(0xC0 | ch >> 6); buf[n++] = (char)(0x80 | (ch & 0x3f)); } else if (ch < 0x10000) { buf[n++] = (char)(0xE0 | ch >> 12); buf[n++] = (char)(0x80 | ((ch >> 6) & 0x3f)); buf[n++] = (char)(0x80 | (ch & 0x3f)); } else { buf[n++] = (char)(0xF0 | ch >> 18); buf[n++] = (char)(0x80 | ((ch >> 12) & 0x3f)); buf[n++] = (char)(0x80 | ((ch >> 6) & 0x3f)); buf[n++] = (char)(0x80 | (ch & 0x3f)); } }   /* ANSI bytes ≥ 0x80 are taken as Latin-1 */
-  { u32 ta = dc->text_align; GdiObj *f = gdi_get(w, dc->font); int fh = f && f->kind == K_FONT ? f->font_h : 16; if (fh < 4) fh = 4; int tw = font_cw(f, fh) * utf8_cols(buf, n);
+  { u32 ta = dc->text_align; GdiObj *f = gdi_get(w, dc->font); if (!f || f->kind != K_FONT) f = gdi_get(w, stock[13]); int asc; int fh = fnt_metrics(f, &asc, 0, 0, 0); int tw = fnt_width(f, buf, n);
     if (ta & 1) { x = cur_x; y = cur_y; }                                     /* TA_UPDATECP: start at the current position */
     if ((ta & 6) == 2) x -= tw; else if ((ta & 6) == 6) x -= tw / 2;          /* TA_RIGHT / TA_CENTER */
-    if ((ta & 0x18) == 0x18) y -= fh - 3; else if ((ta & 0x18) == 8) y -= fh; /* TA_BASELINE (ascent = fh - 3, as GetTextMetrics reports) / TA_BOTTOM */
+    if ((ta & 0x18) == 0x18) y -= asc; else if ((ta & 0x18) == 8) y -= fh;    /* TA_BASELINE / TA_BOTTOM */
     if (ta & 1) cur_x = x + tw; }
   draw_text(&s, dc, w, x, y, buf, n); mark_screen(w, hdc); RET(1); }
 static void s_TextOutA(Cpu *c) { text_out(c, ARG(0), (int)(s32)ARG(1), (int)(s32)ARG(2), ARG(3), (int)(s32)ARG(4), 0); }
@@ -364,17 +383,29 @@ static void s_OffsetRgn(Cpu *c) { GdiObj *r = gdi_get(W, ARG(0)); if (!r) { RET(
 static void s_PtInRegion(Cpu *c) { GdiObj *r = gdi_get(W, ARG(0)); if (!r) { RET(0); return; } int x = (s32)ARG(1), y = (s32)ARG(2); if (r->npts <= 0) { RET(x >= r->rx && x < r->rx + r->rw && y >= r->ry && y < r->ry + r->rh); return; } int in = 0; for (int i = 0, j = r->npts - 1; i < r->npts; j = i++) { int xi = r->pts[i * 2], yi = r->pts[i * 2 + 1], xj = r->pts[j * 2], yj = r->pts[j * 2 + 1]; if (((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi + (yj == yi)) + xi)) in = !in; } RET(in); }
 static void s_GetRgnBox(Cpu *c) { GdiObj *r = gdi_get(W, ARG(0)); if (!r) { RET(0); return; } u64 a = ARG(1); if (r->npts > 0) { int x0 = r->pts[0], y0 = r->pts[1], x1 = x0, y1 = y0; for (int i = 1; i < r->npts; i++) { if (r->pts[i * 2] < x0) x0 = r->pts[i * 2]; if (r->pts[i * 2] > x1) x1 = r->pts[i * 2]; if (r->pts[i * 2 + 1] < y0) y0 = r->pts[i * 2 + 1]; if (r->pts[i * 2 + 1] > y1) y1 = r->pts[i * 2 + 1]; } wr32(c, a, (u32)x0); wr32(c, a + 4, (u32)y0); wr32(c, a + 8, (u32)x1); wr32(c, a + 12, (u32)y1); } else { wr32(c, a, (u32)r->rx); wr32(c, a + 4, (u32)r->ry); wr32(c, a + 8, (u32)(r->rx + r->rw)); wr32(c, a + 12, (u32)(r->ry + r->rh)); } RET(2); }
 static void s_GetNearestColor(Cpu *c) { RET(ARG(1)); }
-static void s_GetTextFaceA(Cpu *c) { const char *n = "Nebula Mono"; size_t l = e_strlen(n) + 1; if ((u32)ARG(1) >= l && ARG(2)) { u8 *p = mem_ptr(c->mem, ARG(2), l, 1); if (p) e_memcpy(p, n, l); } RET(l); }
-static void s_GetCharWidth32A(Cpu *c) { GdiObj *dc = gdi_get(W, ARG(0)); GdiObj *f = dc ? gdi_get(W, dc->font) : 0; int fh = f ? f->font_h : 16; int cw = font_cw(f, fh); for (u64 i = ARG(1); i <= ARG(2) && i - ARG(1) < 256; i++) wr32(c, ARG(3) + (i - ARG(1)) * 4, (u32)cw); RET(1); }
-static void s_CreateFontW(Cpu *c) { s_CreateFontA(c); }
-static void s_CreateFontIndirectW(Cpu *c) { s_CreateFontIndirectA(c); }
-static void s_GetTextMetricsW(Cpu *c) { s_GetTextMetricsA(c); }
-static void s_GetTextExtentPoint32W(Cpu *c) { s_GetTextExtentPoint32A(c); }
+static void text_face(Cpu *c, int wide) { GdiObj *f = dc_font(c, ARG(0)); const char *n = fnt_face_name(f); int l = (int)e_strlen(n) + 1; int cap = (int)(s32)ARG(1); if (!ARG(2)) { RET((u64)l); return; } if (cap < 1) { RET(0); return; }
+  if (wide) { char tmp[64]; int k = 0; for (; k < l - 1 && k < cap - 1 && k < 63; k++) tmp[k] = n[k]; tmp[k] = 0; put_w_utf8(c, ARG(2), tmp, cap); RET((u64)(k + 1)); } else { u8 *p = mem_ptr(c->mem, ARG(2), (u64)cap, 1); if (!p) { RET(0); return; } int k = 0; for (; k < l - 1 && k < cap - 1; k++) p[k] = (u8)n[k]; p[k] = 0; RET((u64)(k + 1)); } }
+static void s_GetTextFaceA(Cpu *c) { text_face(c, 0); }
+static void s_GetTextFaceW(Cpu *c) { text_face(c, 1); }
+static void char_widths(Cpu *c, int abc, int flt) { GdiObj *f = dc_font(c, ARG(0)); u64 first = ARG(1) & 0xffffffffu, last = ARG(2) & 0xffffffffu; if (last < first || !ARG(3)) { RET(0); return; }
+  for (u64 i = first; i <= last && i - first < 4096; i++) { int a = fnt_cp_adv(f, (u32)i); u64 o = ARG(3) + (i - first) * (abc ? 12 : 4); if (abc) { wr32(c, o, 0); wr32(c, o + 4, (u32)a); wr32(c, o + 8, 0); } else if (flt) { union { float fv; u32 u; } u; u.fv = (float)a; wr32(c, o, u.u); } else wr32(c, o, (u32)a); } RET(1); }
+static void s_GetCharWidth32A(Cpu *c) { char_widths(c, 0, 0); }
+static void s_GetCharWidth32W(Cpu *c) { char_widths(c, 0, 0); }
+static void s_GetCharWidthA(Cpu *c) { char_widths(c, 0, 0); }
+static void s_GetCharWidthW(Cpu *c) { char_widths(c, 0, 0); }
+static void s_GetCharWidthFloatA(Cpu *c) { char_widths(c, 0, 1); }
+static void s_GetCharWidthFloatW(Cpu *c) { char_widths(c, 0, 1); }
+static void s_GetCharABCWidthsA(Cpu *c) { char_widths(c, 1, 0); }
+static void s_GetCharABCWidthsW(Cpu *c) { char_widths(c, 1, 0); }
 /* GetTextExtentExPoint(hdc, str, n, maxExtent, *fit, *dx, *size): fixed-pitch cells */
-static void s_GetTextExtentExPointW(Cpu *c) { GdiObj *dc = gdi_get(W, ARG(0)); GdiObj *f = dc ? gdi_get(W, dc->font) : 0; int fh = f ? f->font_h : 16; int cw = font_cw(f, fh); int n = (int)(s32)ARG(2); if (n < 0) n = 0; int maxx = (int)(s32)ARG(3); int fit = n; if (ARG(4) && maxx >= 0) { fit = cw ? maxx / cw : n; if (fit > n) fit = n; wr32(c, ARG(4), (u32)fit); }
-  if (ARG(5)) for (int k = 0; k < n; k++) wr32(c, ARG(5) + 4 * k, (u32)(cw * (k + 1))); if (ARG(6)) { wr32(c, ARG(6), (u32)(cw * n)); wr32(c, ARG(6) + 4, (u32)fh); } RET(1); }
-static void s_GetTextExtentExPointA(Cpu *c) { s_GetTextExtentExPointW(c); }
-static void s_GetObjectW(Cpu *c) { s_GetObjectA(c); }
+/* GetTextExtentExPoint(hdc, str, n, maxExtent, &fit, dx[], &size): per-unit cumulative widths (a surrogate pair's low half repeats the width) */
+static void text_extent_ex(Cpu *c, int wide) { GdiObj *f = dc_font(c, ARG(0)); int n = (int)(s32)ARG(2); if (n < 0) n = 0; if (n > 8000) n = 8000; int maxx = (int)(s32)ARG(3); int w = 0, fit = 0, fit_set = 0; u64 str = ARG(1), dxs = ARG(5);
+  for (int i = 0; i < n; i++) { u32 ch = wide ? rd16(c, str + i * 2) : rd8(c, str + i); if (c->status) return; int units = 1; if (wide && ch >= 0xD800 && ch < 0xDC00 && i + 1 < n) { u32 lo = rd16(c, str + (i + 1) * 2); if (lo >= 0xDC00 && lo < 0xE000) { ch = 0x10000 + ((ch - 0xD800) << 10) + (lo - 0xDC00); units = 2; } }
+    int a = fnt_cp_adv(f, ch); if (ARG(4) && maxx >= 0 && !fit_set && w + a > maxx) { fit = i; fit_set = 1; } w += a; if (dxs) for (int k = 0; k < units; k++) wr32(c, dxs + 4 * (u64)(i + k), (u32)w); i += units - 1; }
+  if (ARG(4)) wr32(c, ARG(4), (u32)(fit_set ? fit : n)); if (ARG(6)) { wr32(c, ARG(6), (u32)w); wr32(c, ARG(6) + 4, (u32)fnt_metrics(f, 0, 0, 0, 0)); } RET(1); }
+static void s_GetTextExtentExPointW(Cpu *c) { text_extent_ex(c, 1); }
+static void s_GetTextExtentExPointA(Cpu *c) { text_extent_ex(c, 0); }
+static void s_GetObjectW(Cpu *c) { g_getobj_wide = 1; s_GetObjectA(c); g_getobj_wide = 0; }
 static void s_timeGetTime(Cpu *c) { RET((u32)(host_now_ms() - W->start_ms + 100000.0)); }
 static void s_timeBeginPeriod(Cpu *c) { RET(0); }
 static void s_timeEndPeriod(Cpu *c) { RET(0); }
@@ -446,7 +477,7 @@ static const ShimDef gdi_shims[] = {
   S(GetCursorPos), S(SetCursorPos), S(ShowCursor), S(SetCursor), S(ClipCursor), S(GetAsyncKeyState), S(GetKeyState), S(GetKeyboardState), S(MapVirtualKeyA), S(GetSystemMetrics), S(SystemParametersInfoA), S(MessageBoxA), S(MessageBoxW), S(wsprintfA), S(wsprintfW), S(wvsprintfA), S(wvsprintfW), S(SetProcessDPIAware), S(SetProcessDpiAwarenessContext), S(GetDpiForWindow), S(GetDpiForSystem), S(RegisterClipboardFormatA), S(GetDlgItem), S(SetRect), S(PtInRect), S(FillRect), S(DrawTextA), S(DrawTextW), S(GetClassNameA), S(GetUpdateRect), S(GetSysColor), S(GetSysColorBrush),
   OPENGL_SHIMS GDIPLUS_SHIMS SHELLICON_SHIMS DEFVIEW_SHIMS TOOLTIP_SHIMS, S(CreateCompatibleDC), S(CreateDCA), S(CreateDCW), S(DeleteDC), S(CreateDIBSection), S(CreateCompatibleBitmap), S(CreateBitmap), S(DeleteObject), S(SelectObject), S(GetStockObject), VCL_SHIMS, MENU_SHIMS, COMCTL_SHIMS, TREEVIEW_SHIMS, LISTVIEW_SHIMS, INPUT_SHIMS, IMAGELIST_SHIMS, WIC_SHIMS, ICON_SHIMS, THEME_SHIMS, DPI_SHIMS, IMM_SHIMS, S(CreatePalette), S(GetPaletteEntries), S(SetPaletteEntries), S(SelectPalette), S(RealizePalette), S(GetSystemPaletteEntries), S(GetNearestPaletteIndex), S(ResizePalette), S(GetSystemPaletteUse), S(SetSystemPaletteUse), S(UpdateColors), S(AnimatePalette), S(UnrealizeObject), S(GetCurrentObject), S(CreateSolidBrush), S(CreateHatchBrush), S(CreatePatternBrush), S(CreateBrushIndirect), S(CreatePen), S(ExtCreatePen), S(CreateFontA), S(CreateFontW), S(CreateFontIndirectA), S(CreateFontIndirectW), S(SetTextColor), S(SetBkColor), S(SetBkMode), S(GetTextColor), S(GetBkColor), S(SetTextAlign), S(GetTextAlign), S(SetROP2), S(SetStretchBltMode), S(SetBrushOrgEx), S(GdiFlush), S(SaveDC), S(RestoreDC), S(SelectClipRgn), S(IntersectClipRect), S(SetMapMode), S(SetViewportOrgEx), S(SetWindowOrgEx), S(GetDeviceCaps), S(GetObjectA), S(GetObjectW),
   S(GetTextExtentPoint32A), S(GetTextExtentPoint32W), S(GetTextExtentExPointA), S(GetTextExtentExPointW), S(GetTextMetricsA), S(GetTextMetricsW), S(TextOutA), S(TextOutW), S(ExtTextOutA), S(ExtTextOutW), S(BitBlt), S(StretchBlt), S(ExtSelectClipRgn), S(GetViewportOrgEx), S(OffsetWindowOrgEx), S(OffsetViewportOrgEx), S(DPtoLP), S(LPtoDP), S(ExcludeClipRect), S(RectVisible), S(PtVisible), S(GetClipBox), S(GetClipRgn), S(GetWindowOrgEx), S(AlphaBlend), SA("GdiAlphaBlend", AlphaBlend), S(TransparentBlt), SA("GdiTransparentBlt", TransparentBlt), S(GradientFill), SA("GdiGradientFill", GradientFill), S(PatBlt), S(StretchDIBits), S(SetDIBitsToDevice), S(Rectangle), S(RoundRect), S(Ellipse), S(MoveToEx), S(LineTo), S(Polyline), S(Polygon), S(SetPixel), S(SetPixelV), S(GetPixel),
-  S(CreatePolygonRgn), S(CreateRectRgn), S(CreateRectRgnIndirect), S(CreateEllipticRgn), S(CombineRgn), S(FillRgn), S(PaintRgn), S(OffsetRgn), S(PtInRegion), S(GetRgnBox), S(GetNearestColor), S(GetTextFaceA), S(GetCharWidth32A),
+  S(CreatePolygonRgn), S(CreateRectRgn), S(CreateRectRgnIndirect), S(CreateEllipticRgn), S(CombineRgn), S(FillRgn), S(PaintRgn), S(OffsetRgn), S(PtInRegion), S(GetRgnBox), S(GetNearestColor), S(GetTextFaceA), S(GetTextFaceW), S(GetCharWidth32W), S(GetCharWidthA), S(GetCharWidthW), S(GetCharWidthFloatA), S(GetCharWidthFloatW), S(GetCharABCWidthsA), S(GetCharABCWidthsW), S(GetCharWidth32A),
   S(timeGetTime), S(timeBeginPeriod), S(timeEndPeriod), S(PlaySoundA), S(waveOutGetNumDevs), S(CoInitialize), S(CoInitializeEx), S(CoUninitialize), S(OleInitialize), S(OleUninitialize), S(RegisterDragDrop), S(RevokeDragDrop), S(OleSetClipboard), S(OleGetClipboard), S(OleFlushClipboard), S(OleIsCurrentClipboard), S(DoDragDrop), S(CoCreateInstance), S(CommandLineToArgvW),
   USER_SHIMS
 };
@@ -462,7 +493,9 @@ void gdi_init(Win32 *w) {
   { GdiObj *p = gdi_new(w, K_PEN); p->color = 0xffffff; p->pen_width = 1; stock[6] = p->handle; }
   { GdiObj *p = gdi_new(w, K_PEN); p->color = 0; p->pen_width = 1; stock[7] = p->handle; }
   { GdiObj *p = gdi_new(w, K_PEN); p->pen_width = -1; stock[8] = p->handle; }
-  for (int i = 10; i <= 17; i++) { GdiObj *f = gdi_new(w, K_FONT); f->font_h = 16; stock[i] = f->handle; }
+  for (int i = 10; i <= 17; i++) { GdiObj *f = gdi_new(w, K_FONT); stock[i] = f->handle;   /* OEM_FIXED Terminal / ANSI_FIXED Courier / ANSI_VAR MS Sans Serif / SYSTEM System / DEVICE_DEFAULT / (palette) / SYSTEM_FIXED Fixedsys / DEFAULT_GUI MS Shell Dlg 8 pt */
+    switch (i) { case 10: fnt_setup(f, -12, 400, 0, 0, 0, 1, "Terminal"); break; case 11: fnt_setup(f, -12, 400, 0, 0, 0, 1, "Courier"); break; case 16: fnt_setup(f, -12, 400, 0, 0, 0, 1, "Fixedsys"); break;
+      case 13: fnt_setup(f, -12, 700, 0, 0, 0, 0x22, "System"); break; case 17: fnt_setup(f, -11, 400, 0, 0, 0, 0x22, "MS Shell Dlg"); break; default: fnt_setup(f, -12, 400, 0, 0, 0, 0x22, "MS Sans Serif"); break; } }
   { GdiObj *pl = gdi_get(w, stock[15]); pl->kind = K_PALETTE; pl->font_h = 20; pl->bits = w32_heap_alloc(w, 1024, 0); static const u32 sys20[20] = { 0x000000, 0x000080, 0x008000, 0x008080, 0x800000, 0x800080, 0x808000, 0xc0c0c0, 0xc0dcc0, 0xf0caa6, 0xf0fbff, 0xa4a0a0, 0x808080, 0x0000ff, 0x00ff00, 0x00ffff, 0xff0000, 0xff00ff, 0xffff00, 0xffffff }; u8 *p = mem_ptr(w->mem, pl->bits, 80, 1); if (p) for (int i = 0; i < 20; i++) { u32 v = sys20[i]; p[i * 4] = (u8)(v >> 16); p[i * 4 + 1] = (u8)(v >> 8); p[i * 4 + 2] = (u8)v; p[i * 4 + 3] = 0; } }   /* DEFAULT_PALETTE: the 20 system colours */
   { GdiObj *b = gdi_new(w, K_BRUSH); b->color = 0xffffff; stock[18] = b->handle; }
   { GdiObj *b = gdi_new(w, K_BITMAP); b->bw = b->bh = 1; b->bits = 0; stock[19] = b->handle; }   /* default 1x1 bitmap handle */

@@ -45,7 +45,7 @@ static Wnd g_wnd[MAX_WND]; static int g_zseq, g_cseq;
 static int g_focus = -1, g_capture = -1, g_active = -1;
 static int g_mouse_x, g_mouse_y, g_mouse_btn;
 static u64 g_slot_trackbar, g_slot_updown, g_slot_comboex, g_slot_defview, g_slot_tooltip, g_slot_button, g_slot_static, g_slot_edit, g_slot_combo, g_slot_listbox, g_slot_dialog, g_slot_progress, g_slot_unsupported, g_slot_scrollbar, g_slot_msgbox, g_slot_combolist, g_slot_link, g_slot_menu, g_slot_status, g_slot_toolbar, g_slot_tab, g_slot_subclass;
-static u64 g_dlg_font; static int g_msgbox_auto = 1;
+static u64 g_dlg_font, g_ui_font; static int g_msgbox_auto = 1;
 /* registered window classes */
 typedef struct { int used; int pid; char name[64]; u64 proc, brush, cursor, icon, icon_sm, menu_name; int menu_wide; u32 style; int extra; u64 inst; } WndClass;   /* pid: classes are per process (the procedure address only means something in its own address space) */
 static WndClass g_cls[64];
@@ -107,11 +107,11 @@ static void wnd_set_text(Wnd *n, const char *s) { size_t l = e_strlen(s); wnd_te
 static void wnd_text_from_guest(Cpu *c, Wnd *n, u64 a, int wide) { if (!a || a < 0x10000) { n->text[0] = 0; return; } size_t chars = 0; if (wide) { while (chars < (1u << 20) && rd16(c, a + chars * 2)) chars++; } else { while (chars < (1u << 20) && rd8(c, a + chars)) chars++; }
   wnd_text_reserve(n, chars * 3); if (wide) wstr_to_utf8(c, a, n->text, (size_t)n->textcap, -1); else { u8 *p = mem_ptr(c->mem, a, chars + 1, 0); if (p) { e_memcpy(n->text, p, chars); n->text[chars] = 0; } else n->text[0] = 0; } }
 static u32 text_out_cap(Cpu *c, u64 dst, const char *s, u32 cap, int wide) { if (!cap) return 0; if (wide) return put_w8(c, dst, s, cap); size_t l = e_strlen(s); if (l + 1 > cap) l = cap - 1; u8 *p = mem_ptr(c->mem, dst, l + 1, 1); if (p) { e_memcpy(p, s, l); p[l] = 0; } return (u32)l; }
-static int font_dims(Win32 *w, u64 hfont, int *cw, int *fh) { GdiObj *f = gdi_get(w, hfont); int h = f && f->kind == K_FONT ? f->font_h : 16; if (h < 4) h = 4; *fh = h; int em = f && f->kind == K_FONT && f->font_em ? f->font_em : h; *cw = (em * 11 + 10) / 20; if (*cw < 3) *cw = 3; return f && f->kind == K_FONT ? f->font_bold : 0; }
-static int utf8_prev(const char *s, int pos) { if (pos <= 0) return 0; pos--; while (pos > 0 && ((u8)s[pos] & 0xC0) == 0x80) pos--; return pos; }   /* byte offset of the previous code point */
+static GdiObj *fnt_of(Win32 *w, u64 hfont) { GdiObj *f = gdi_get(w, hfont); if (!f || f->kind != K_FONT) f = gdi_get(w, stock[17]); return f; }   /* a window's font object (DEFAULT_GUI_FONT when the handle is not a font) */
+static int font_dims(Win32 *w, u64 hfont, int *cw, int *fh) { GdiObj *f = fnt_of(w, hfont); int avg; int h = fnt_metrics(f, 0, 0, &avg, 0); if (h < 4) h = 4; *fh = h; *cw = avg < 3 ? 3 : avg; return f ? f->font_bold : 0; }   /* cell height + average character width */
 static int utf8_nextb(const char *s, int pos, int len) { if (pos >= len) return len; pos++; while (pos < len && ((u8)s[pos] & 0xC0) == 0x80) pos++; return pos; }
 static int utf8_off(const char *s, int cols) { int i = 0; while (cols > 0 && s[i]) { i = utf8_nextb(s, i, 1 << 30); cols--; } return i; }   /* byte offset of column `cols` */
-static int text_width(Win32 *w, u64 hfont, const char *s, int n) { int cw, fh; font_dims(w, hfont, &cw, &fh); return cw * utf8_cols(s, n); }
+static int text_width(Win32 *w, u64 hfont, const char *s, int n) { return fnt_width(fnt_of(w, hfont), s, n); }
 static int utf8_len_chars(const char *s, int n) { int k = 0; for (int i = 0; i < n && s[i]; i++) if (((u8)s[i] & 0xC0) != 0x80) k++; return k; }
 
 /* ---------- window DCs: a view into the framebuffer at the client origin, clipped to the visible part ---------- */
@@ -372,7 +372,7 @@ static void builtin_init_slots(Win32 *w) { if (g_slot_button && g_slot_w == w) r
   g_slot_button = w32_shim_slot(w, "user32", "NebulaButtonProc"); g_slot_static = w32_shim_slot(w, "user32", "NebulaStaticProc"); g_slot_edit = w32_shim_slot(w, "user32", "NebulaEditProc"); g_slot_combo = w32_shim_slot(w, "user32", "NebulaComboProc"); g_slot_comboex = w32_shim_slot(w, "user32", "NebulaComboExProc"); g_slot_defview = w32_shim_slot(w, "shell32", "NebulaDefViewProc"); g_slot_tooltip = w32_shim_slot(w, "user32", "NebulaTooltipProc");
   g_slot_listbox = w32_shim_slot(w, "user32", "NebulaListBoxProc"); g_slot_dialog = w32_shim_slot(w, "user32", "DefDlgProcW"); g_slot_progress = w32_shim_slot(w, "user32", "NebulaProgressProc"); g_slot_unsupported = w32_shim_slot(w, "user32", "NebulaUnsupportedProc"); g_slot_status = w32_shim_slot(w, "user32", "NebulaStatusProc"); g_slot_toolbar = w32_shim_slot(w, "user32", "NebulaToolbarProc"); g_slot_tab = w32_shim_slot(w, "user32", "NebulaTabProc"); g_slot_tree = w32_shim_slot(w, "user32", "NebulaTreeProc"); g_slot_list = w32_shim_slot(w, "user32", "NebulaListViewProc"); g_slot_rebar = w32_shim_slot(w, "user32", "NebulaRebarProc"); g_slot_subclass = w32_shim_slot(w, "user32", "NebulaSubclassProc");
   g_slot_scrollbar = w32_shim_slot(w, "user32", "NebulaScrollBarProc"); g_slot_msgbox = w32_shim_slot(w, "user32", "NebulaMsgBoxProc"); g_slot_combolist = w32_shim_slot(w, "user32", "NebulaComboListProc"); g_slot_menu = w32_shim_slot(w, "user32", "NebulaMenuProc"); g_slot_link = w32_shim_slot(w, "user32", "NebulaLinkProc"); g_slot_trackbar = w32_shim_slot(w, "user32", "NebulaTrackbarProc"); g_slot_updown = w32_shim_slot(w, "user32", "NebulaUpDownProc");
-  { GdiObj *f = gdi_new(w, K_FONT); f->font_h = 13; f->font_em = 11; g_dlg_font = f->handle; } }
+  { GdiObj *f = gdi_new(w, K_FONT); fnt_setup(f, -11, 400, 0, 0, 0, 0x22, "MS Shell Dlg"); g_dlg_font = f->handle; } { GdiObj *f = gdi_new(w, K_FONT); fnt_setup(f, -12, 400, 0, 0, 0, 0x22, "Segoe UI"); g_ui_font = f->handle; } }   /* g_ui_font: the 9 pt message/status/tooltip font of NONCLIENTMETRICS */
 static void get_class_info_ex(Cpu *c, int wide) { char name[64]; cls_name_in(c, ARG(1), wide, name, sizeof name); int i = cls_find(W, name); int bi = builtin_of_class(name); u64 a = ARG(2); int m = c->mode32; u64 off = m ? 4 : 0, so = m ? 4 : 4; /* WNDCLASSEX layout: see register_class */
   if (i < 0 && !bi) { W->last_error = 1411; RET(0); return; } u8 *p = mem_ptr(c->mem, a, m ? 48 : 80, 1); if (p) e_memset(p, 0, m ? 48 : 80); wr32(c, a, m ? 48 : 80);
   if (i >= 0) { wr32(c, a + so, g_cls[i].style); wrp(c, a + off + (m ? 4 : 8), g_cls[i].proc); wr32(c, a + off + (m ? 12 : 20), (u32)g_cls[i].extra); wrp(c, a + off + (m ? 16 : 24), g_cls[i].inst); wrp(c, a + off + (m ? 28 : 48), g_cls[i].brush); }
@@ -773,7 +773,7 @@ static void s_GetSystemMetrics(Cpu *c) { int i = (int)ARG(0); RET(i == 0 ? 1280 
 static void s_GetSystemMetricsForDpi(Cpu *c) { s_GetSystemMetrics(c); }
 static void s_SystemParametersInfoA(Cpu *c) { u32 a = (u32)ARG(0); u64 p = ARG(2);
   if (a == 0x30 && p) { wr32(c, p, 0); wr32(c, p + 4, 0); wr32(c, p + 8, 1280); wr32(c, p + 12, 680); RET(1); return; }   /* SPI_GETWORKAREA */
-  if (a == 0x29 && p) { /* SPI_GETNONCLIENTMETRICS: zero + font heights */ u32 sz = rd32(c, p); u8 *m = mem_ptr(c->mem, p, sz, 1); if (m) e_memset(m + 4, 0, sz - 4); for (u64 off = 24; off + 92 <= sz; off += 92 + 4) { wr32(c, p + off, (u32)-13); wr32(c, p + off + 16, 400); put_w8(c, p + off + 28, "MS Shell Dlg", 32); } RET(1); return; }
+  if (a == 0x29 && p) { /* SPI_GETNONCLIENTMETRICS: zero + font heights */ u32 sz = rd32(c, p); u8 *m = mem_ptr(c->mem, p, sz, 1); if (m) e_memset(m + 4, 0, sz - 4); for (u64 off = 24; off + 92 <= sz; off += 92 + 4) { wr32(c, p + off, (u32)-12); wr32(c, p + off + 16, 400); put_w8(c, p + off + 28, "Segoe UI", 32); } RET(1); return; }
   if (a == 0x1F && p) { /* SPI_GETICONTITLELOGFONT */ u8 *m = mem_ptr(c->mem, p, 92, 1); if (m) e_memset(m, 0, 92); wr32(c, p, (u32)-13); wr32(c, p + 16, 400); put_w8(c, p + 28, "MS Shell Dlg", 32); RET(1); return; }
   if ((a == 0x1024 || a == 0x1026 || a == 0x1046 || a == 0x101E || a == 0x1034 || a == 0x1042 || a == 0x1048 || a == 0x1010) && p) { wr32(c, p, 0); RET(1); return; }
   if (a == 0x0F && p) { wr32(c, p, 0); RET(1); return; } if (a == 0x0D && p) { wr32(c, p, 0); RET(1); return; } if (a == 0x10 && p) { wr32(c, p, 0); RET(1); return; } if (a == 0x2002 && p) { wr32(c, p, 0); RET(1); return; } if (a == 0x0068 && p) { wr32(c, p, 3); RET(1); return; } if (a == 0x0062 && p) { wr32(c, p, 100); RET(1); return; } if (a == 0x0073 && p) { wr32(c, p, 1); RET(1); return; }
@@ -836,20 +836,21 @@ static void s_GetDpiForMonitor(Cpu *c) { if (ARG(2)) wr32(c, ARG(2), 96); if (AR
 /* ---------- DrawText ---------- */
 /* DT_: TOP 0 LEFT 0 CENTER 1 RIGHT 2 VCENTER 4 BOTTOM 8 WORDBREAK 0x10 SINGLELINE 0x20 EXPANDTABS 0x40 NOCLIP 0x100 CALCRECT 0x400 NOPREFIX 0x800 END_ELLIPSIS 0x8000 */
 static int draw_text_rect(Cpu *c, u64 hdc, const char *text, int len, int *l, int *t, int *r, int *b, u32 fmt) {
-  Win32 *w = W; GdiObj *dc = gdi_get(w, hdc); if (!dc) return 0; int cw, fh; font_dims(w, dc->font, &cw, &fh); int rw = *r - *l; if (rw < cw) rw = cw;
-  /* strip '&' prefixes unless DT_NOPREFIX; split into lines (\n, and word wrap when DT_WORDBREAK and not SINGLELINE) */
+  Win32 *w = W; GdiObj *dc = gdi_get(w, hdc); if (!dc) return 0; GdiObj *fo = fnt_of(w, dc->font); int cw, fh; font_dims(w, dc->font, &cw, &fh); int rw = *r - *l; if (rw < cw) rw = cw;
+  /* strip '&' prefixes unless DT_NOPREFIX; split into lines (\n, and word wrap by pixel width when DT_WORDBREAK and not SINGLELINE) */
   char buf[2048]; int n = 0; int amp_pos = -1; for (int i = 0; i < len && n < 2040; i++) { char ch = text[i]; if (ch == '\r') continue; if (ch == '&' && !(fmt & 0x800)) { if (i + 1 < len && text[i + 1] == '&') { buf[n++] = '&'; i++; } else amp_pos = n; continue; } if (ch == '\t' && (fmt & 0x40)) { buf[n++] = ' '; continue; } buf[n++] = ch; } buf[n] = 0; (void)amp_pos;
-  int starts[128], lens[128], nl = 0; int maxcols = rw / cw; if (maxcols < 1) maxcols = 1;
+  int starts[128], lens[128], nl = 0; int wrap = (fmt & 0x10) && !(fmt & 0x20);
   int i = 0; while (i <= n && nl < 128) { int e = i; while (e < n && buf[e] != '\n') e++; if (fmt & 0x20) e = n;
-    int seg = i; while (seg < e && nl < 128) { int cols = utf8_len_chars(buf + seg, e - seg); if (!(fmt & 0x10) || (fmt & 0x20) || cols <= maxcols) { starts[nl] = seg; lens[nl] = e - seg; nl++; seg = e; break; }
-      int cut = seg, bytes = 0, chars = 0, last_space = -1; while (cut < e && chars < maxcols) { if (buf[cut] == ' ') last_space = cut; int cl = ((u8)buf[cut] >= 0xF0) ? 4 : ((u8)buf[cut] >= 0xE0) ? 3 : ((u8)buf[cut] >= 0xC0) ? 2 : 1; cut += cl; bytes += cl; chars++; }
-      int endl = last_space > seg ? last_space : cut; starts[nl] = seg; lens[nl] = endl - seg; nl++; seg = endl; while (seg < e && buf[seg] == ' ') seg++; }
+    int seg = i; while (seg < e && nl < 128) { if (!wrap) { starts[nl] = seg; lens[nl] = e - seg; nl++; seg = e; break; }
+      int cut = seg, wacc = 0, last_space = -1; while (cut < e) { if (buf[cut] == ' ') last_space = cut; int j = cut; u32 cp = utf8_next(buf, e, &j); int a = fnt_cp_adv(fo, cp); if (wacc + a > rw && cut > seg) break; wacc += a; cut = j; }
+      int endl = cut < e && last_space > seg ? last_space : cut; starts[nl] = seg; lens[nl] = endl - seg; nl++; seg = endl; while (seg < e && buf[seg] == ' ') seg++; }
     if (seg == e && e == i) { starts[nl] = i; lens[nl] = 0; nl++; } i = e + 1; if (fmt & 0x20) break; }
   if (nl == 0) { starts[0] = 0; lens[0] = 0; nl = 1; }
-  int maxw = 0; for (int k = 0; k < nl; k++) { int ww = utf8_len_chars(buf + starts[k], lens[k]) * cw; if (ww > maxw) maxw = ww; } int th = nl * fh;
+  char ell[2048]; if ((fmt & 0xC000) && nl == 1 && !(fmt & 0x400) && fnt_width(fo, buf + starts[0], lens[0]) > rw) { /* DT_END_ELLIPSIS / DT_PATH_ELLIPSIS: trim and append "..." so the line fits */ int dots = fnt_width(fo, "...", 3); int keep = fnt_fit(fo, buf + starts[0], lens[0], rw - dots > 0 ? rw - dots : 0, 0); e_memcpy(ell, buf + starts[0], (size_t)keep); e_memcpy(ell + keep, "...", 3); lens[0] = keep + 3; starts[0] = 0; e_memcpy(buf, ell, (size_t)lens[0]); buf[lens[0]] = 0; }
+  int maxw = 0; for (int k = 0; k < nl; k++) { int ww = fnt_width(fo, buf + starts[k], lens[k]); if (ww > maxw) maxw = ww; } int th = nl * fh;
   if (fmt & 0x400) { if (fmt & 0x20 || !(fmt & 0x10)) *r = *l + maxw; else if (maxw > rw) *r = *l + maxw; else *r = *l + rw; *b = *t + th; return th; }
   Surf s; if (!dc_surf(c, hdc, &s)) return th; int y0 = *t; int rh = *b - *t; if (fmt & 4) y0 = *t + (rh - th) / 2; else if (fmt & 8) y0 = *b - th;
-  for (int k = 0; k < nl; k++) { int lw = utf8_len_chars(buf + starts[k], lens[k]) * cw; int x0 = *l; if (fmt & 1) x0 = *l + (rw - lw) / 2; else if (fmt & 2) x0 = *r - lw; int yy = y0 + k * fh; if (!(fmt & 0x100) && (yy + fh > *b + fh)) break;
+  for (int k = 0; k < nl; k++) { int lw = fnt_width(fo, buf + starts[k], lens[k]); int x0 = *l; if (fmt & 1) x0 = *l + (rw - lw) / 2; else if (fmt & 2) x0 = *r - lw; int yy = y0 + k * fh; if (!(fmt & 0x100) && (yy + fh > *b + fh)) break;
     draw_text(&s, dc, w, x0, yy, buf + starts[k], lens[k]); }
   mark_screen(w, hdc); return th;
 }
@@ -1052,7 +1053,7 @@ static void button_paint(Cpu *c, int i, u64 hdc, u64 hbr) { Win32 *w = W; Wnd *n
     fill_rect_px(&s, 0, 0, cw, ch, pressed ? 0xcce4f7 : n->hot && en ? 0xe5f1fb : 0xe1e1e1); u32 bc = !en ? 0xcccccc : pressed ? 0x005499 : (def || n->focus_draw) ? 0x0078d7 : 0xadadad; edge_rect(&s, 0, 0, cw, ch, bc, bc); if (def && en && !pressed) edge_rect(&s, 1, 1, cw - 1, ch - 1, 0x0078d7, 0x0078d7);
     ctl_text(c, hdc, i, 0, 0, cw, ch, 1 | 4 | 0x20, en ? 0x000000 : 0x6d6d6d, n->text); if (n->focus_draw && en) { for (int x = 3; x < cw - 3; x += 2) { put_px(&s, x, 3, 0x202020); put_px(&s, x, ch - 4, 0x202020); } for (int y = 3; y < ch - 3; y += 2) { put_px(&s, 3, y, 0x202020); put_px(&s, cw - 4, y, 0x202020); } } return; }
   if (bs != 7) fill_rect_px(&s, 0, 0, cw, ch, face);   /* a group box is transparent: siblings created before it (PuTTY's panels) stay visible inside its frame */
-  if (bs == 7) { /* group box: etched frame with the caption on the top line */ int ty = fh / 2; edge_rect(&s, 0, ty, cw, ch, 0xdcdcdc, 0xdcdcdc); edge_rect(&s, 1, ty + 1, cw - 1, ch - 1, 0xffffff, 0xffffff); if (n->text[0]) { int tw = utf8_len_chars(n->text, (int)e_strlen(n->text)) * fcw; fill_rect_px(&s, 6, 0, 6 + tw + 4, fh, face); ctl_text(c, hdc, i, 8, 0, 8 + tw + 2, fh, 0x20, en ? 0 : 0x6d6d6d, n->text); } return; }
+  if (bs == 7) { /* group box: etched frame with the caption on the top line */ int ty = fh / 2; edge_rect(&s, 0, ty, cw, ch, 0xdcdcdc, 0xdcdcdc); edge_rect(&s, 1, ty + 1, cw - 1, ch - 1, 0xffffff, 0xffffff); if (n->text[0]) { int tw = text_width(w, n->font ? n->font : g_dlg_font, n->text, (int)e_strlen(n->text)); fill_rect_px(&s, 6, 0, 6 + tw + 4, fh, face); ctl_text(c, hdc, i, 8, 0, 8 + tw + 2, fh, 0x20, en ? 0 : 0x6d6d6d, n->text); } return; }
   int by = (ch - 13) / 2; if (by < 0) by = 0; int radio = bs == 4 || bs == 9; int right = (n->style & 0x20) != 0; int bx = right ? cw - 13 : 0;
   if (radio) draw_radio(&s, bx, by, n->checked != 0, en); else { fill_rect_px(&s, bx, by, bx + 13, by + 13, en ? 0xffffff : 0xf0f0f0); u32 bc = en ? (n->focus_draw ? 0x0078d7 : 0x333333) : 0xbcbcbc; edge_rect(&s, bx, by, bx + 13, by + 13, bc, bc); if (n->checked == 1) draw_check_mark(&s, bx + 2, by + 1, en ? 0 : 0xa0a0a0); else if (n->checked == 2) fill_rect_px(&s, bx + 3, by + 3, bx + 10, by + 10, 0x0078d7); }
   if (n->pushed) edge_rect(&s, bx, by, bx + 13, by + 13, 0x005499, 0x005499);
@@ -1096,7 +1097,7 @@ static void static_paint(Cpu *c, int i, u64 hdc, u64 hbr) { Win32 *w = W; Wnd *n
   u32 fmt = (ss == 1 ? 1 : ss == 2 ? 2 : 0) | (ss == 0xC || ss == 0xB ? 0x20 : 0x10) | (n->style & 0x80 ? 0x800 : 0) | (n->style & 0x200 ? 4 | 0x20 : 0) | (n->style & 0x4000 ? 0x8000 : 0);
   u32 col = en ? (n->builtin == BI_LINK ? 0x0066cc : 0x000000) : 0x6d6d6d; char plain[1024]; const char *txt = n->text;
   if (n->builtin == BI_LINK) { /* strip <a ...> tags */ int o = 0; for (const char *p = n->text; *p && o < 1000; p++) { if (*p == '<') { while (*p && *p != '>') p++; continue; } plain[o++] = *p; } plain[o] = 0; txt = plain; }
-  ctl_text(c, hdc, i, 0, 0, cw, ch, fmt, col, txt); if (n->builtin == BI_LINK) { int fcw, fh; font_dims(w, n->font ? n->font : g_dlg_font, &fcw, &fh); hline(&s, 0, utf8_len_chars(txt, (int)e_strlen(txt)) * fcw - 1, fh - 1, col); } }
+  ctl_text(c, hdc, i, 0, 0, cw, ch, fmt, col, txt); if (n->builtin == BI_LINK) { int fcw, fh; font_dims(w, n->font ? n->font : g_dlg_font, &fcw, &fh); hline(&s, 0, text_width(w, n->font ? n->font : g_dlg_font, txt, (int)e_strlen(txt)) - 1, fh - 1, col); } }
 static void s_NebulaStaticProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } SUPER_ADOPT(i, BI_STATIC); u32 msg = (u32)ARG(1); u64 wp = ARG(2), lp = ARG(3); Wnd *n = &g_wnd[i];
   switch (msg) {
     case 0x0F: ctl_do_paint(c, i); return;
@@ -1118,27 +1119,27 @@ static void s_NebulaLinkProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i >= 0) SUPER
 /* ---- multi-line edit: rows are laid out on demand (word wrap unless ES_AUTOHSCROLL), top_index = first visible row, vertical scrollbar when needed ---- */
 #define EDIT_SB_W 16
 static int edit_is_multi(Wnd *n) { return (n->style & 4) != 0; }
-static int edit_layout(Wnd *n, int maxcols, int **starts, int **lens) { const char *t = n->text; int len = (int)e_strlen(t); int cap = 256, nl = 0; int *st = emu_alloc(sizeof(int) * cap), *ln = emu_alloc(sizeof(int) * cap);
-  if (maxcols < 1) maxcols = 1; int wrap = !(n->style & 0x80);
+static int edit_layout(GdiObj *fo, Wnd *n, int maxw, int **starts, int **lens) { const char *t = n->text; int len = (int)e_strlen(t); int cap = 256, nl = 0; int *st = emu_alloc(sizeof(int) * cap), *ln = emu_alloc(sizeof(int) * cap);
+  if (maxw < 1) maxw = 1; int wrap = !(n->style & 0x80);
 #define ROW(a, b) do { if (nl == cap) { cap *= 2; int *s2 = emu_alloc(sizeof(int) * cap), *l2 = emu_alloc(sizeof(int) * cap); e_memcpy(s2, st, sizeof(int) * nl); e_memcpy(l2, ln, sizeof(int) * nl); emu_free(st); emu_free(ln); st = s2; ln = l2; } st[nl] = (a); ln[nl] = (b); nl++; } while (0)
   int i = 0; while (i <= len) { int e = i; while (e < len && t[e] != '\n') e++; int seg = i;
     if (seg == e) ROW(seg, 0);
-    while (seg < e) { int cut = seg, chars = 0, last_space = -1; while (cut < e && chars < maxcols) { if (t[cut] == ' ') last_space = cut; if (t[cut] == '\r') { cut++; continue; } int cl = ((u8)t[cut] >= 0xF0) ? 4 : ((u8)t[cut] >= 0xE0) ? 3 : ((u8)t[cut] >= 0xC0) ? 2 : 1; cut += cl; chars++; }
-      int endl = cut; if (wrap && cut < e && last_space > seg) endl = last_space; if (!wrap) endl = e; ROW(seg, endl - seg); seg = endl; if (wrap) while (seg < e && t[seg] == ' ') seg++; }
+    while (seg < e) { if (!wrap) { ROW(seg, e - seg); seg = e; break; } int cut = seg, wacc = 0, last_space = -1; while (cut < e) { if (t[cut] == ' ') last_space = cut; if (t[cut] == '\r') { cut++; continue; } int j = cut; u32 cp = utf8_next(t, e, &j); int a = fnt_cp_adv(fo, cp); if (wacc + a > maxw && cut > seg) break; wacc += a; cut = j; }
+      int endl = cut; if (cut < e && last_space > seg) endl = last_space; ROW(seg, endl - seg); seg = endl; while (seg < e && t[seg] == ' ') seg++; }
     i = e + 1; }
 #undef ROW
   *starts = st; *lens = ln; return nl; }
 static int edit_vis_rows(Win32 *w, Wnd *n, int i, int *fh_out) { int fcw, fh; font_dims(w, n->font ? n->font : g_dlg_font, &fcw, &fh); int ch = wnd_client_h(i) - 6; int vis = ch / (fh ? fh : 1); if (vis < 1) vis = 1; if (fh_out) *fh_out = fh; return vis; }
-static int edit_nrows(Win32 *w, Wnd *n, int i, int sb) { int fcw, fh; font_dims(w, n->font ? n->font : g_dlg_font, &fcw, &fh); int cw = wnd_client_w(i) - 6 - (sb ? EDIT_SB_W : 0); int *st, *ln; int nl = edit_layout(n, cw / (fcw ? fcw : 1), &st, &ln); emu_free(st); emu_free(ln); return nl; }
+static int edit_nrows(Win32 *w, Wnd *n, int i, int sb) { GdiObj *fo = fnt_of(w, n->font ? n->font : g_dlg_font); int cw = wnd_client_w(i) - 6 - (sb ? EDIT_SB_W : 0); int *st, *ln; int nl = edit_layout(fo, n, cw, &st, &ln); emu_free(st); emu_free(ln); return nl; }
 static void edit_scroll_to(Win32 *w, Wnd *n, int i, int top) { int nl = edit_nrows(w, n, i, 1); int vis = edit_vis_rows(w, n, i, 0); int max = nl - vis; if (max < 0) max = 0; if (top > max) top = max; if (top < 0) top = 0; if (top != n->top_index) { n->top_index = top; wnd_invalidate(i, 1); } }
-static void edit_paint_multi(Cpu *c, int i, u64 hdc, Surf *s, int pad, int en) { Win32 *w = W; Wnd *n = &g_wnd[i]; int cw = wnd_client_w(i), ch = wnd_client_h(i); int fcw, fh; font_dims(w, n->font ? n->font : g_dlg_font, &fcw, &fh); if (fcw < 1) fcw = 1;
-  int *st, *ln; int nl = edit_layout(n, (cw - 2 * pad) / fcw, &st, &ln); int vis = (ch - 2 * pad) / (fh ? fh : 1); if (vis < 1) vis = 1; int sb = nl > vis || (n->style & 0x200000);
-  if (sb) { emu_free(st); emu_free(ln); nl = edit_layout(n, (cw - 2 * pad - EDIT_SB_W) / fcw, &st, &ln); }
+static void edit_paint_multi(Cpu *c, int i, u64 hdc, Surf *s, int pad, int en) { Win32 *w = W; Wnd *n = &g_wnd[i]; int cw = wnd_client_w(i), ch = wnd_client_h(i); int fcw, fh; font_dims(w, n->font ? n->font : g_dlg_font, &fcw, &fh); GdiObj *fo = fnt_of(w, n->font ? n->font : g_dlg_font);
+  int *st, *ln; int nl = edit_layout(fo, n, cw - 2 * pad, &st, &ln); int vis = (ch - 2 * pad) / (fh ? fh : 1); if (vis < 1) vis = 1; int sb = nl > vis || (n->style & 0x200000);
+  if (sb) { emu_free(st); emu_free(ln); nl = edit_layout(fo, n, cw - 2 * pad - EDIT_SB_W, &st, &ln); }
   int max = nl - vis; if (max < 0) max = 0; if (n->top_index > max) n->top_index = max; if (n->top_index < 0) n->top_index = 0;
   GdiObj *dc = gdi_get(w, hdc); u32 col = en ? 0x000000 : 0x6d6d6d; if (dc) { dc->text_color = px2cr(col); dc->bk_mode = 1; }
   int a = n->sel0 < n->sel1 ? n->sel0 : n->sel1, b = n->sel0 < n->sel1 ? n->sel1 : n->sel0;
   for (int r = 0; r < vis && n->top_index + r < nl; r++) { int k = n->top_index + r; int y = pad + r * fh; if (y + fh > ch - pad + fh) break;
-    if (a != b && n->focus_draw) { /* selection highlight on this row */ int rs = st[k], re = st[k] + ln[k]; int ha = a > rs ? a : rs, hb = b < re ? b : re; if (ha < hb) { int x0 = pad + utf8_len_chars(n->text + rs, ha - rs) * fcw, x1 = x0 + utf8_len_chars(n->text + ha, hb - ha) * fcw; fill_rect_px(s, x0, y, x1, y + fh, 0x0078d7); } }
+    if (a != b && n->focus_draw) { /* selection highlight on this row */ int rs = st[k], re = st[k] + ln[k]; int ha = a > rs ? a : rs, hb = b < re ? b : re; if (ha < hb) { int x0 = pad + fnt_width(fo, n->text + rs, ha - rs), x1 = x0 + fnt_width(fo, n->text + ha, hb - ha); fill_rect_px(s, x0, y, x1, y + fh, 0x0078d7); } }
     if (dc) draw_text(s, dc, w, pad, y, n->text + st[k], ln[k]); }
   if (sb) { /* vertical scrollbar: track, arrows, proportional thumb */ int x0 = cw - EDIT_SB_W, y0 = 0; fill_rect_px(s, x0, y0, cw, ch, 0xf0f0f0); edge_rect(s, x0, y0, cw, EDIT_SB_W, 0xffffff, 0xa0a0a0); edge_rect(s, x0, ch - EDIT_SB_W, cw, ch, 0xffffff, 0xa0a0a0);
     int tx = x0 + EDIT_SB_W / 2; for (int d = 0; d < 4; d++) { hline(s, tx - d, tx + d, 5 + d, 0x606060); hline(s, tx - d, tx + d, ch - 6 - d, 0x606060); }
@@ -1186,21 +1187,30 @@ static void streamin_resume(Cpu *c, u64 rax) { Win32 *w = W; int ci = w->ncont -
   if ((u32)rax != 0 || got == 0 || got > 4096 || n->stream_len > (1 << 24)) { streamin_finish(c, i, es); return; }
   if (n->stream_len + (int)got + 1 > n->stream_cap) { int nc = n->stream_cap ? n->stream_cap * 2 : 65536; while (nc < n->stream_len + (int)got + 1) nc *= 2; char *nb = emu_alloc((size_t)nc); if (n->stream) { e_memcpy(nb, n->stream, (size_t)n->stream_len); emu_free(n->stream); } n->stream = nb; n->stream_cap = nc; }
   const u8 *p = mem_ptr(c->mem, n->stream_buf, got, 0); if (p) e_memcpy(n->stream + n->stream_len, p, got); n->stream_len += (int)got; streamin_step(c, i); }
+/* first visible byte of a single-line edit: keeps the caret inside `avail` pixels, scrolls back when text was deleted */
+static int edit_scroll_from(GdiObj *fo, const char *t, int len, int from, int caret, int avail) { if (from > len) from = len; if (from < 0) from = 0; if (caret < from) from = caret;
+  while (from < caret && fnt_width(fo, t + from, caret - from) > avail - 1) from = utf8_nextb(t, from, len);
+  while (from > 0) { int pv = from - 1; while (pv > 0 && ((u8)t[pv] & 0xC0) == 0x80) pv--; if (fnt_width(fo, t + pv, len - pv) <= avail - 1) from = pv; else break; } return from; }
+static int edit_text_x(Win32 *w, Wnd *n, int i, GdiObj *fo, const char *t, int len, int from, int pad) { int cw = wnd_client_w(i); int tw; fnt_fit(fo, t + from, len - from, cw - 2 * pad, &tw); if ((n->style & 3) == 1) return (cw - tw) / 2; if ((n->style & 3) == 2) return cw - pad - tw; return pad; }
 static void edit_paint(Cpu *c, int i, u64 hdc, u64 hbr) { Win32 *w = W; Wnd *n = &g_wnd[i]; Surf s; if (!dc_surf(c, hdc, &s)) return; int cw = wnd_client_w(i), ch = wnd_client_h(i); int en = wnd_enabled_chain(i); int ro = (n->style & 0x800) != 0; int fcw, fh; font_dims(w, n->font ? n->font : g_dlg_font, &fcw, &fh);
   u32 bg = n->bgcol_set ? n->bgcol : brush_px(w, hbr, en && !ro ? 0xffffff : 0xf0f0f0); fill_rect_px(&s, 0, 0, cw, ch, bg); int border = !(n->style & 0x40000000u && n->parent >= 0 && !(n->exstyle & 0x200) && !(n->style & 0x800000)); if (n->exstyle & 0x200 || n->style & 0x800000) border = 1;
   if (border) { u32 bc = !en ? 0xcccccc : n->focus_draw ? 0x0078d7 : 0x7a7a7a; edge_rect(&s, 0, 0, cw, ch, bc, bc); }
   int pad = border ? 3 : 1; char shown[1024]; const char *t = n->text; if (n->style & 0x20) { int l = (int)e_strlen(t); for (int k = 0; k < l && k < 1000; k++) shown[k] = '*'; shown[l < 1000 ? l : 1000] = 0; t = shown; }
   int len = (int)e_strlen(t); u32 col = en ? 0x000000 : 0x6d6d6d; GdiObj *dc = gdi_get(w, hdc); if (!dc) return; dc->text_color = px2cr(col); dc->bk_mode = 1;
   if (n->style & 4) { edit_paint_multi(c, i, hdc, &s, pad, en); return; }
-  /* positions below are in columns (code points); sel0/sel1/scroll_x are byte offsets into the UTF-8 text */
-  int vis = (cw - 2 * pad) / fcw; if (vis < 1) vis = 1; int caret = n->sel1; if (caret > len) caret = len; int lencols = utf8_len_chars(t, len), caretc = utf8_len_chars(t, caret), fromc = utf8_len_chars(t, n->scroll_x < len ? n->scroll_x : len);
-  if (caretc < fromc) fromc = caretc; if (caretc - fromc >= vis) fromc = caretc - vis + 1; if (fromc < 0) fromc = 0; if (!(n->style & 0x80)) fromc = 0; n->scroll_x = utf8_off(t, fromc);
-  int from = fromc; int cnt = lencols - from; if (cnt > vis) cnt = vis; if (cnt < 0) cnt = 0; int ty = (ch - fh) / 2; if (ty < pad) ty = pad; int tx = pad; if ((n->style & 3) == 1) tx = (cw - cnt * fcw) / 2; else if ((n->style & 3) == 2) tx = cw - pad - cnt * fcw;
-  int a = n->sel0 < n->sel1 ? n->sel0 : n->sel1, b = n->sel0 < n->sel1 ? n->sel1 : n->sel0; int ac = utf8_len_chars(t, a < len ? a : len), bc = utf8_len_chars(t, b < len ? b : len);
-  if (n->focus_draw && a != b) { int sa = ac - from, sb = bc - from; if (sa < 0) sa = 0; if (sb > cnt) sb = cnt; if (sb > sa) { fill_rect_px(&s, tx + sa * fcw, ty, tx + sb * fcw, ty + fh, 0x0078d7); } }
-  int fb = utf8_off(t, from), eb = utf8_off(t, from + cnt); draw_text(&s, dc, w, tx, ty, t + fb, eb - fb);
-  if (n->focus_draw && a != b) { /* selected text in white */ int sa = ac - from, sb = bc - from; if (sa < 0) sa = 0; if (sb > cnt) sb = cnt; if (sb > sa) { dc->text_color = px2cr(0xffffff); int s0 = utf8_off(t, from + sa), s1 = utf8_off(t, from + sb); draw_text(&s, dc, w, tx + sa * fcw, ty, t + s0, s1 - s0); } }
-  if (n->focus_draw && en && !ro) { int cx = tx + (caretc - from) * fcw; line_px(&s, cx, ty, cx, ty + fh - 1, 0); } }
+  /* sel0/sel1/scroll_x are byte offsets into the UTF-8 text; horizontal positions come from the font's advances */
+  GdiObj *fo = fnt_of(w, n->font ? n->font : g_dlg_font); int avail = cw - 2 * pad; if (avail < 1) avail = 1; int caret = n->sel1; if (caret > len) caret = len; if (caret < 0) caret = 0;
+  int from = edit_scroll_from(fo, t, len, n->style & 0x80 ? n->scroll_x : 0, caret, avail); if (n->style & 0x80) n->scroll_x = from;
+  int tw; int cnt = fnt_fit(fo, t + from, len - from, avail, &tw); int ty = (ch - fh) / 2; if (ty < pad) ty = pad; int tx = pad; if ((n->style & 3) == 1) tx = (cw - tw) / 2; else if ((n->style & 3) == 2) tx = cw - pad - tw;
+  int a = n->sel0 < n->sel1 ? n->sel0 : n->sel1, b = n->sel0 < n->sel1 ? n->sel1 : n->sel0; if (a < from) a = from; if (b > from + cnt) b = from + cnt;
+  if (n->focus_draw && a < b) { int x0 = tx + fnt_width(fo, t + from, a - from), x1 = x0 + fnt_width(fo, t + a, b - a); fill_rect_px(&s, x0, ty, x1, ty + fh, 0x0078d7); }
+  draw_text(&s, dc, w, tx, ty, t + from, cnt);
+  if (n->focus_draw && a < b) { /* selected text in white */ dc->text_color = px2cr(0xffffff); draw_text(&s, dc, w, tx + fnt_width(fo, t + from, a - from), ty, t + a, b - a); }
+  if (n->focus_draw && en && !ro && caret >= from && caret <= from + cnt) { int cx = tx + fnt_width(fo, t + from, caret - from); line_px(&s, cx, ty, cx, ty + fh - 1, 0); } }
+/* byte offset under client x in a single-line edit (same scroll origin / alignment as edit_paint) */
+static int edit_hit_pos(Win32 *w, Wnd *n, int i, int lx) { const char *t = n->text; int len = (int)e_strlen(t); GdiObj *fo = fnt_of(w, n->font ? n->font : g_dlg_font); int border = !(n->style & 0x40000000u && n->parent >= 0 && !(n->exstyle & 0x200) && !(n->style & 0x800000)); if (n->exstyle & 0x200 || n->style & 0x800000) border = 1; int pad = border ? 3 : 1;
+  int from = n->style & 0x80 ? n->scroll_x : 0; if (from > len) from = len; if (from < 0) from = 0; int tx = edit_text_x(w, n, i, fo, t, len, from, pad); int pos = from + fnt_hit(fo, t + from, len - from, lx - tx); if (pos < 0) pos = 0; if (pos > len) pos = len; return pos; }
+static int utf8_prev(const char *s, int pos) { if (pos <= 0) return 0; pos--; while (pos > 0 && ((u8)s[pos] & 0xC0) == 0x80) pos--; return pos; }   /* byte offset of the previous code point */
 static void edit_replace_sel(Cpu *c, int i, const char *ins) { Wnd *n = &g_wnd[i]; int len = (int)e_strlen(n->text); int a = n->sel0 < n->sel1 ? n->sel0 : n->sel1, b = n->sel0 < n->sel1 ? n->sel1 : n->sel0; if (a < 0) a = 0; if (b > len) b = len; if (a > b) a = b;
   int il = (int)e_strlen(ins); int room = n->limit > 0 ? n->limit : 0x7fffffff; if (room > (1 << 22)) room = 1 << 22; int newlen = len - (b - a) + il; if (newlen > room) { il -= newlen - room; if (il < 0) il = 0; }
   wnd_text_reserve(n, (size_t)(a + il + len - b)); e_memmove(n->text + a + il, n->text + b, (size_t)(len - b) + 1); e_memcpy(n->text + a, ins, (size_t)il); n->sel0 = n->sel1 = a + il; n->modified = 1; wnd_invalidate(i, 1); (void)c; }
@@ -1211,8 +1221,8 @@ static void s_NebulaEditProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(
     case 0x0F: ctl_do_paint(c, i); return;
     case 0x87: RET(0x0001 | 0x0002 | 0x0080 | ((n->style & 4) ? 0x0004 : 0) /* DLGC_WANTARROWS|WANTTAB? no: WANTARROWS|WANTCHARS|HASSETSEL */); return;
     case 0x0C: { wnd_text_from_guest(c, n, lp, 1); if (looks_like_rtf(n->text)) { char *pl = rtf_to_text(n->text, e_strlen(n->text)); wnd_set_text(n, pl); emu_free(pl); } n->sel0 = n->sel1 = (int)e_strlen(n->text); n->scroll_x = 0; n->top_index = 0; wnd_invalidate(i, 1); edit_notify_change(c, i); c->r[RAX] = 1; return; }
-    case 0x201: { if (!wnd_enabled_chain(i)) { RET(0); return; } set_focus(c, i); if (edit_is_multi(n)) { if (edit_sb_click(W, n, i, (s16)(u16)lp, (s16)(u16)(lp >> 16))) { RET(0); return; } RET(0); return; } int fcw, fh; font_dims(W, n->font ? n->font : g_dlg_font, &fcw, &fh); int lx = (s16)(u16)lp; int pos = n->scroll_x + (lx - 3 + fcw / 2) / fcw; if (pos < 0) pos = 0; if (pos > len) pos = len; if (W->key_state[0x10]) n->sel1 = pos; else n->sel0 = n->sel1 = pos; g_capture = i; wnd_invalidate(i, 1); RET(0); return; }
-    case 0x200: { if (g_capture == i && (wp & 1)) { int fcw, fh; font_dims(W, n->font ? n->font : g_dlg_font, &fcw, &fh); int lx = (s16)(u16)lp; int pos = n->scroll_x + (lx - 3 + fcw / 2) / fcw; if (pos < 0) pos = 0; if (pos > len) pos = len; if (pos != n->sel1) { n->sel1 = pos; wnd_invalidate(i, 1); } } RET(0); return; }
+    case 0x201: { if (!wnd_enabled_chain(i)) { RET(0); return; } set_focus(c, i); if (edit_is_multi(n)) { if (edit_sb_click(W, n, i, (s16)(u16)lp, (s16)(u16)(lp >> 16))) { RET(0); return; } RET(0); return; } int pos = edit_hit_pos(W, n, i, (s16)(u16)lp); if (W->key_state[0x10]) n->sel1 = pos; else n->sel0 = n->sel1 = pos; g_capture = i; wnd_invalidate(i, 1); RET(0); return; }
+    case 0x200: { if (g_capture == i && (wp & 1)) { int pos = edit_hit_pos(W, n, i, (s16)(u16)lp); if (pos != n->sel1) { n->sel1 = pos; wnd_invalidate(i, 1); } } RET(0); return; }
     case 0x202: g_capture = -1; RET(0); return;
     case 0x203: n->sel0 = 0; n->sel1 = len; wnd_invalidate(i, 1); RET(0); return;
     case 0x20A: { if (!edit_is_multi(n)) { RET(0); return; } int d = (s16)(u16)(wp >> 16); edit_scroll_to(W, n, i, n->top_index + (d < 0 ? 3 : -3)); RET(0); return; }
@@ -1315,7 +1325,7 @@ static void s_NebulaComboListProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i >= 0) 
 static void combo_paint(Cpu *c, int i, u64 hdc, u64 hbr) { Win32 *w = W; Wnd *n = &g_wnd[i]; Surf s; if (!dc_surf(c, hdc, &s)) return; int cw = wnd_client_w(i), ch = wnd_client_h(i); int en = wnd_enabled_chain(i); int fcw, fh; font_dims(w, n->font ? n->font : g_dlg_font, &fcw, &fh);
   u32 bg = brush_px(w, hbr, en ? 0xffffff : 0xf0f0f0); fill_rect_px(&s, 0, 0, cw, ch, bg); u32 bc = !en ? 0xcccccc : n->focus_draw || n->dropped ? 0x0078d7 : 0x7a7a7a; edge_rect(&s, 0, 0, cw, ch, bc, bc);
   int bw = 17; fill_rect_px(&s, cw - bw - 1, 1, cw - 1, ch - 1, n->dropped ? 0xcce4f7 : 0xe1e1e1); int ax = cw - bw / 2 - 1, ay = ch / 2 - 1; for (int k = 0; k < 4; k++) hline(&s, ax - 3 + k, ax + 3 - k, ay - 1 + k, en ? 0x404040 : 0xa0a0a0);
-  int sel = n->focus_draw && (n->style & 3) == 3 && !n->dropped; if (sel) fill_rect_px(&s, 2, 2, cw - bw - 2, ch - 2, 0x0078d7); int tx0 = 4; if (n->himl && n->cursel >= 0 && n->cursel < n->nitems && n->itemimg) { tx0 += (int)(n->itemimg[n->cursel] >> 16) * 10; combo_icon_draw(c, n->himl, n->itemimg[n->cursel] & 0xffff, hdc, tx0 - 1, 1, ch - 2); tx0 += combo_icon_cx(n->himl); } if (n->edit_wnd > 0 && wnd_alive(n->edit_wnd)) return;   /* the Edit child shows the text */ GdiObj *dc = gdi_get(w, hdc); if (dc) { dc->text_color = px2cr(sel ? 0xffffff : en ? 0 : 0x6d6d6d); dc->bk_mode = 1; int maxc = (cw - bw - 6 - tx0 + 4) / fcw; int ln = utf8_len_chars(n->text, (int)e_strlen(n->text)); if (ln > maxc) ln = maxc; if (ln < 0) ln = 0; int lb = utf8_off(n->text, ln); draw_text(&s, dc, w, tx0, (ch - fh) / 2, n->text, lb); if (n->focus_draw && (n->style & 3) == 2 && en) { int cx = tx0 + ln * fcw; line_px(&s, cx, (ch - fh) / 2, cx, (ch + fh) / 2 - 1, 0); } } }
+  int sel = n->focus_draw && (n->style & 3) == 3 && !n->dropped; if (sel) fill_rect_px(&s, 2, 2, cw - bw - 2, ch - 2, 0x0078d7); int tx0 = 4; if (n->himl && n->cursel >= 0 && n->cursel < n->nitems && n->itemimg) { tx0 += (int)(n->itemimg[n->cursel] >> 16) * 10; combo_icon_draw(c, n->himl, n->itemimg[n->cursel] & 0xffff, hdc, tx0 - 1, 1, ch - 2); tx0 += combo_icon_cx(n->himl); } if (n->edit_wnd > 0 && wnd_alive(n->edit_wnd)) return;   /* the Edit child shows the text */ GdiObj *dc = gdi_get(w, hdc); if (dc) { dc->text_color = px2cr(sel ? 0xffffff : en ? 0 : 0x6d6d6d); dc->bk_mode = 1; GdiObj *fo = fnt_of(w, n->font ? n->font : g_dlg_font); int tw; int lb = fnt_fit(fo, n->text, (int)e_strlen(n->text), cw - bw - 6 - tx0 + 4, &tw); draw_text(&s, dc, w, tx0, (ch - fh) / 2, n->text, lb); if (n->focus_draw && (n->style & 3) == 2 && en) { int cx = tx0 + tw; line_px(&s, cx, (ch - fh) / 2, cx, (ch + fh) / 2 - 1, 0); } } }
 static void combo_drop(Cpu *c, int i) { Win32 *w = W; Wnd *n = &g_wnd[i]; if (n->dropped) { if (n->drop_wnd >= 0 && wnd_alive(n->drop_wnd)) { g_wnd[n->drop_wnd].visible = 0; wnd_free(n->drop_wnd); } n->dropped = 0; n->drop_wnd = -1; g_capture = -1; wnd_invalidate_all(); return; }
   int ox, oy; wnd_window_origin(i, &ox, &oy); int ih = list_item_h(w, n); int rows = n->nitems < 8 ? n->nitems : 8; if (rows < 1) rows = 1; int lh = rows * ih + 2; int li = wnd_create_obj(c, "ComboLBox", "", 0x80000000u | 0x10000000u, 0, ox + SCREEN_X0, oy + n->h + SCREEN_Y0, n->w, lh, HWND_OF(i), 0, n->inst, 0, 1, 0); if (li < 0) return;
   Wnd *l = &g_wnd[li]; l->owner = i; l->font = n->font ? n->font : g_dlg_font; l->zseq = ++g_zseq; if (l->y + l->h > w->screen_h) l->y = oy - lh; if (l->y < 0) l->y = 0;
@@ -1459,13 +1469,14 @@ static int dlg_begin(Cpu *c, u64 hinst, u64 tmpl, u64 owner_h, u64 dlgproc, u64 
   Win32 *w = W; builtin_init_slots(w); int ex; u32 style, exstyle; int cdit, x, y, cx, cy, fontpt; char cls[64], title[512], face[64]; u64 items;
   if (!dlg_parse_header(c, tmpl, &ex, &style, &exstyle, &cdit, &x, &y, &cx, &cy, cls, title, &fontpt, face, &items)) return -1;
   if (w->api_trace) { char msg[400]; e_snprintf(msg, sizeof msg, "[user] dialog%s style=%08x ex=%08x items=%d at %d,%d %dx%d DLU font %dpt \"%s\" \"%.40s\"\n", ex ? "ex" : "", style, exstyle, cdit, x, y, cx, cy, fontpt, face, title); host_write(3, msg, e_strlen(msg)); }
-  int fh = fontpt ? (fontpt * 96 + 36) / 72 : 13; if (fh < 8) fh = 8; if (fh > 40) fh = 40; int fcw = (fh * 11 + 10) / 20; if (fcw < 3) fcw = 3; int bx = fcw, by = (fh * 6 + 2) / 5;   /* dialog base units: average char width × cell height (tmHeight ≈ 1.2 em: 8 pt → 6×13 like Windows) */
+  int fh = fontpt ? (fontpt * 96 + 36) / 72 : 11; if (fh < 6) fh = 6; if (fh > 60) fh = 60; GdiObj *dfont = gdi_new(w, K_FONT); if (dfont) fnt_setup(dfont, -fh, 400, 0, 0, 0, 0x22, face[0] ? face : "MS Shell Dlg"); int bx = dfont ? fnt_dlg_avg(dfont) : (fh * 11 + 10) / 20, by = dfont ? dfont->font_h : (fh * 6 + 2) / 5; if (bx < 3) bx = 3;
+  if (dfont && dfont->font_face >= 0 && dfont->font_face < TF_MONO) { if (fontpt == 8) { bx = 6; by = 13; } else if (fontpt == 9) { bx = 7; by = 15; } }   /* the base units Windows derives for its own 8 pt (MS Shell Dlg 6x13) and 9 pt (Segoe UI 7x15) dialog fonts: layouts were designed against these */   /* dialog base units: average char width × cell height (tmHeight ≈ 1.2 em: 8 pt → 6×13 like Windows) */
   int pw = cx * bx / 4, ph = cy * by / 8; const char *wcls = cls[0] && cls[0] != '#' ? cls : "#32770"; int owner = wnd_of(owner_h);
   u32 wstyle = (style & ~0x10000000u) | (owner >= 0 || !(style & 0x40000000u) ? 0 : 0); if (!(wstyle & 0x40000000u)) wstyle |= 0x80000000u;   /* WS_POPUP unless WS_CHILD */
   int fx = 0, fy = 0; if (!g_wnd[0].used && !(wstyle & 0x40000000u) && (style & 0x00C00000u) == 0x00C00000u) { fx = 16; fy = 39; }   /* template cx/cy are CLIENT units; the main-window path takes a full window size */
   int i = wnd_create_obj(c, wcls, title, wstyle | 0x00C00000u * ((style & 0x00C00000u) == 0x00C00000u ? 1 : 0), exstyle, (style & 0x0800) || (style & 0x40000000u) == 0 ? 0x80000000 : x * bx / 4 + SCREEN_X0, (style & 0x0800) || (style & 0x40000000u) == 0 ? 0x80000000 : y * by / 8 + SCREEN_Y0, pw + fx, ph + fy, owner_h, 0, hinst, param, 1, 0);
   if (i < 0) return -1; Wnd *n = &g_wnd[i]; n->is_dlg = 1; n->dlgproc = dlgproc; n->modal = modal; n->base_x = bx; n->base_y = by; n->cls_brush = 0; n->builtin = n->builtin ? n->builtin : BI_DIALOG; if (!cls[0] || cls[0] == '#') n->wndproc = g_slot_dialog;
-  GdiObj *f = gdi_new(w, K_FONT); if (f) { f->font_h = by; f->font_em = fh; n->font = f->handle; } else n->font = g_dlg_font;   /* line height = cell height (13 for 8 pt), char width from the em (6) */
+  if (dfont) n->font = dfont->handle; else n->font = g_dlg_font;   /* line height = cell height (13 for 8 pt), char width from the em (6) */
   if (modal && owner >= 0) { g_wnd[owner].enabled = 0; wnd_invalidate(owner, 1); }
   n->style = (n->style & ~0x10000000u) | (style & 0x10000000u); n->visible = 0;
   w32_push_cont(c, CONT_DLGINIT, (u64)i); u64 *d = w->cont[w->ncont - 1].data; d[1] = items; d[2] = (u64)cdit; d[3] = (u64)ex; d[4] = param; d[5] = (u64)modal; d[6] = w32_cur_slot(); d[7] = 0; return i; }

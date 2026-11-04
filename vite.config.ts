@@ -28,7 +28,7 @@ export default defineConfig(async ({ mode }) => {
         ],
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,svg,png,jpg,wasm,woff2}'],
+        globPatterns: ['**/*.{js,css,html,svg,png,jpg,wasm,woff2,ttf}'],
         globIgnores: ['downloads/**'],
         maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
         navigateFallbackDenylist: [/^\/api\//, /^\/downloads\//],
