@@ -98,10 +98,87 @@ static void ttf_outline(const TtfFace *f, int gid, const Xf *xf, Ras *r, int dep
     s0 = e + 1; }
   emu_free(flags); emu_free(xs); emu_free(ys); }
 
+/* ---- synthetic symbols: geometric glyphs that no bundled face covers (Windows would fall back to Segoe UI Symbol); 1000-unit em, baseline y = 0, y up.
+   path grammar: M x y | L x y | Q cx cy x y | Z | S width x0 y0 x1 y1 ... (stroked polyline, until the next command) | C cx cy r (filled circle) */
+typedef struct { u32 cp; u16 adv; const char *path; } SymGlyph;
+static const SymGlyph g_syms[] = {
+  { 0x21B5, 800, "S 70 680 600 680 240 160 240 S 70 320 400 160 240 320 80" },
+  { 0x22EE, 500, "C 250 560 70 C 250 300 70 C 250 40 70" },
+  { 0x22EF, 1000, "C 180 300 70 C 500 300 70 C 820 300 70" },
+  { 0x2318, 800, "S 60 260 100 260 500 540 500 540 100 260 100 S 60 260 500 200 560 120 560 60 500 60 420 120 360 200 360 260 360 S 60 540 500 600 560 680 560 740 500 740 420 680 360 600 360 540 360 S 60 260 100 200 40 120 40 60 100 60 180 120 240 200 240 260 240 S 60 540 100 600 40 680 40 740 100 740 180 680 240 600 240 540 240" },
+  { 0x23CE, 800, "S 70 680 600 680 240 160 240 S 70 320 400 160 240 320 80" },
+  { 0x23F4, 800, "M 550 50 L 550 550 L 200 300 Z" },
+  { 0x23F5, 800, "M 250 50 L 600 300 L 250 550 Z" },
+  { 0x23F6, 800, "M 150 150 L 400 550 L 650 150 Z" },
+  { 0x23F7, 800, "M 150 500 L 650 500 L 400 100 Z" },
+  { 0x25B4, 600, "M 150 150 L 300 400 L 450 150 Z" },
+  { 0x25B6, 800, "M 100 0 L 700 300 L 100 600 Z" },
+  { 0x25B8, 600, "M 150 100 L 450 275 L 150 450 Z" },
+  { 0x25BE, 600, "M 150 400 L 450 400 L 300 150 Z" },
+  { 0x25C0, 800, "M 700 0 L 700 600 L 100 300 Z" },
+  { 0x25C2, 600, "M 450 100 L 450 450 L 150 275 Z" },
+  { 0x25C6, 800, "M 400 650 L 720 320 L 400 -10 L 80 320 Z" },
+  { 0x25C7, 800, "S 70 400 650 720 320 400 -10 80 320 400 650 720 320" },
+  { 0x2605, 800, "M 400 680 L 312 441 L 58 431 L 257 274 L 188 29 L 400 170 L 612 29 L 543 274 L 742 431 L 488 441 Z" },
+  { 0x2606, 800, "S 50 400 680 312 441 58 431 257 274 188 29 400 170 612 29 543 274 742 431 488 441 400 680 312 441" },
+  { 0x2610, 860, "S 55 100 -40 100 700 760 700 760 -40 100 -40 100 700" },
+  { 0x2611, 860, "S 55 100 -40 100 700 760 700 760 -40 100 -40 100 700 S 90 230 330 390 170 720 560" },
+  { 0x2612, 860, "S 55 100 -40 100 700 760 700 760 -40 100 -40 100 700 S 80 230 80 630 580 S 80 230 580 630 80" },
+  { 0x2630, 800, "M 80 560 L 720 560 L 720 480 L 80 480 Z M 80 340 L 720 340 L 720 260 L 80 260 Z M 80 120 L 720 120 L 720 40 L 80 40 Z" },
+  { 0x2713, 800, "S 80 100 330 300 130 720 640" },
+  { 0x2714, 800, "S 150 110 330 320 110 720 640" },
+  { 0x2715, 800, "S 70 130 30 670 570 S 70 130 570 670 30" },
+  { 0x2716, 800, "S 150 130 30 670 570 S 150 130 570 670 30" },
+  { 0x2717, 800, "S 80 120 40 680 560 S 80 140 580 660 20" },
+  { 0x2718, 800, "S 150 120 40 680 560 S 150 140 580 660 20" },
+  { 0x276E, 700, "S 110 520 620 180 300 520 -20" },
+  { 0x276F, 700, "S 110 180 620 520 300 180 -20" },
+  { 0x2795, 800, "M 320 620 L 480 620 L 480 380 L 720 380 L 720 220 L 480 220 L 480 -20 L 320 -20 L 320 220 L 80 220 L 80 380 L 320 380 Z" },
+  { 0x2796, 800, "M 80 380 L 720 380 L 720 220 L 80 220 Z" },
+  { 0x27A1, 820, "M 60 410 L 440 410 L 440 620 L 760 300 L 440 -20 L 440 190 L 60 190 Z" },
+  { 0x27A4, 820, "M 60 560 L 760 300 L 60 40 L 200 300 Z" },
+  { 0x2B05, 820, "M 760 410 L 380 410 L 380 620 L 60 300 L 380 -20 L 380 190 L 760 190 Z" },
+  { 0x2B06, 800, "M 290 -20 L 290 360 L 80 360 L 400 680 L 720 360 L 510 360 L 510 -20 Z" },
+  { 0x2B07, 800, "M 290 680 L 290 300 L 80 300 L 400 -20 L 720 300 L 510 300 L 510 680 Z" },
+  { 0x2B95, 820, "M 60 410 L 440 410 L 440 620 L 760 300 L 440 -20 L 440 190 L 60 190 Z" },
+  { 0x2BC5, 800, "M 150 150 L 400 550 L 650 150 Z" },
+  { 0x2BC6, 800, "M 150 500 L 650 500 L 400 100 Z" },
+  { 0x2BC7, 800, "M 550 50 L 550 550 L 200 300 Z" },
+  { 0x2BC8, 800, "M 250 50 L 600 300 L 250 550 Z" },
+  { 0xFF0B, 1000, "M 440 600 L 560 600 L 560 360 L 800 360 L 800 240 L 560 240 L 560 0 L 440 0 L 440 240 L 200 240 L 200 360 L 440 360 Z" },
+};
+
+static const SymGlyph *sym_find(u32 cp) { int n = (int)(sizeof g_syms / sizeof g_syms[0]), lo = 0, hi = n; while (lo < hi) { int mid = (lo + hi) / 2; if (g_syms[mid].cp < cp) lo = mid + 1; else hi = mid; } return lo < n && g_syms[lo].cp == cp ? &g_syms[lo] : 0; }
+typedef struct { const Xf *xf; Ras *r; float bb[4]; int n; } SymSink;   /* r == 0: measure only (bb = xmin ymin xmax ymax in glyph units) */
+static void sym_pt(SymSink *S, float x, float y) { if (!S->n || x < S->bb[0]) S->bb[0] = x; if (!S->n || y < S->bb[1]) S->bb[1] = y; if (!S->n || x > S->bb[2]) S->bb[2] = x; if (!S->n || y > S->bb[3]) S->bb[3] = y; S->n++; }
+static void sym_line(SymSink *S, float x0, float y0, float x1, float y1) { if (!S->r) { sym_pt(S, x0, y0); sym_pt(S, x1, y1); return; } float ax, ay, bx, by; xf_apply(S->xf, x0, y0, &ax, &ay); xf_apply(S->xf, x1, y1, &bx, &by); ras_line(S->r, ax, ay, bx, by); }
+static void sym_quad(SymSink *S, float x0, float y0, float qx, float qy, float x1, float y1) { if (!S->r) { sym_pt(S, x0, y0); sym_pt(S, qx, qy); sym_pt(S, x1, y1); return; } float ax, ay, cx, cy, bx, by; xf_apply(S->xf, x0, y0, &ax, &ay); xf_apply(S->xf, qx, qy, &cx, &cy); xf_apply(S->xf, x1, y1, &bx, &by); ras_quad(S->r, ax, ay, cx, cy, bx, by); }
+static int sym_num(const char **p, float *v) { const char *q = *p; while (*q == ' ') q++; int neg = 0; if (*q == '-') { neg = 1; q++; } if (*q < '0' || *q > '9') return 0; int n = 0; while (*q >= '0' && *q <= '9') n = n * 10 + (*q++ - '0'); *v = neg ? -(float)n : (float)n; *p = q; return 1; }
+static void sym_square(SymSink *S, float x, float y, float h) { sym_line(S, x - h, y + h, x + h, y + h); sym_line(S, x + h, y + h, x + h, y - h); sym_line(S, x + h, y - h, x - h, y - h); sym_line(S, x - h, y - h, x - h, y + h); }
+static void sym_emit(const SymGlyph *g, SymSink *S, float wmul) {
+  const char *p = g->path; float cx = 0, cy = 0, sx = 0, sy = 0; int open = 0;
+  while (*p) { while (*p == ' ') p++; char c = *p; if (!c) break; p++; float x, y;
+    if (c == 'M') { if (open && (cx != sx || cy != sy)) sym_line(S, cx, cy, sx, sy); if (!sym_num(&p, &x) || !sym_num(&p, &y)) break; sx = cx = x; sy = cy = y; open = 1; }
+    else if (c == 'L') { if (!sym_num(&p, &x) || !sym_num(&p, &y)) break; sym_line(S, cx, cy, x, y); cx = x; cy = y; }
+    else if (c == 'Q') { float qx, qy; if (!sym_num(&p, &qx) || !sym_num(&p, &qy) || !sym_num(&p, &x) || !sym_num(&p, &y)) break; sym_quad(S, cx, cy, qx, qy, x, y); cx = x; cy = y; }
+    else if (c == 'Z') { if (open && (cx != sx || cy != sy)) sym_line(S, cx, cy, sx, sy); cx = sx; cy = sy; open = 0; }
+    else if (c == 'C') { float ox, oy, rr; if (!sym_num(&p, &ox) || !sym_num(&p, &oy) || !sym_num(&p, &rr)) break; const float k = 1.0823922f;   /* 1 / cos(22.5 deg): control point radius of an 8-segment quadratic circle */
+      static const float cs[9] = { 1, 0.70710678f, 0, -0.70710678f, -1, -0.70710678f, 0, 0.70710678f, 1 }, sn[9] = { 0, 0.70710678f, 1, 0.70710678f, 0, -0.70710678f, -1, -0.70710678f, 0 };
+      static const float mc[8] = { 0.92387953f, 0.38268343f, -0.38268343f, -0.92387953f, -0.92387953f, -0.38268343f, 0.38268343f, 0.92387953f }, ms[8] = { 0.38268343f, 0.92387953f, 0.92387953f, 0.38268343f, -0.38268343f, -0.92387953f, -0.92387953f, -0.38268343f };
+      for (int i = 0; i < 8; i++) sym_quad(S, ox + rr * cs[i], oy + rr * sn[i], ox + rr * k * mc[i], oy + rr * k * ms[i], ox + rr * cs[i + 1], oy + rr * sn[i + 1]); }
+    else if (c == 'S') { float w; if (!sym_num(&p, &w)) break; float h = w * wmul * 0.5f, px = 0, py = 0; int have = 0;
+      for (;;) { const char *q = p; if (!sym_num(&q, &x) || !sym_num(&q, &y)) break; p = q;
+        if (have) { float dx = x - px, dy = y - py; float len = dx * dx + dy * dy; if (len > 0) { len = 1.0f / (float)__builtin_sqrtf(len); float nx = -dy * len * h, ny = dx * len * h;
+            sym_line(S, px + nx, py + ny, x + nx, y + ny); sym_line(S, x + nx, y + ny, x - nx, y - ny); sym_line(S, x - nx, y - ny, px - nx, py - ny); sym_line(S, px - nx, py - ny, px + nx, py + ny); } sym_square(S, x, y, h); }
+        else sym_square(S, x, y, h);
+        px = x; py = y; have = 1; } }
+    else break; }
+  if (open && (cx != sx || cy != sy)) sym_line(S, cx, cy, sx, sy); }
+
 /* ---- glyph cache ---- */
 typedef struct { u32 cp; s16 face, px; s16 italic; s16 w, h, left, top, adv; u8 *cov; int used; } Glyph;
 #define GLYPH_CACHE 4096
-static Glyph g_glyphs[GLYPH_CACHE];
+static Glyph g_glyphs[GLYPH_CACHE]; int g_glyph_log;   /* X64_FONTLOG=1: log code points no bundled face covers */
 static u8 g_cov_lut[256]; static int g_cov_lut_ok;
 static u32 glyph_hash(int face, int px, int italic, u32 cp) { u32 h = cp * 2654435761u; h ^= (u32)(face * 97 + px * 131 + italic * 7919); h ^= h >> 15; return h % GLYPH_CACHE; }
 
@@ -109,7 +186,7 @@ static u32 glyph_hash(int face, int px, int italic, u32 cp) { u32 h = cp * 26544
 static Glyph *ttf_glyph(int face, int px, int italic, u32 cp) {
   TtfFace *f = ttf_face(face); if (!f || px < 1 || px > 512) return 0; Glyph *g = &g_glyphs[glyph_hash(face, px, italic, cp)];
   if (g->used && g->cp == cp && g->face == face && g->px == px && g->italic == italic) return g->adv < 0 ? 0 : g;
-  int gid = ttf_gid(f, cp); if (!gid && cp != 0) { if (g->used) { emu_free(g->cov); g->cov = 0; } g->used = 1; g->cp = cp; g->face = (s16)face; g->px = (s16)px; g->italic = (s16)italic; g->adv = -1; g->w = g->h = 0; return 0; }
+  int gid = ttf_gid(f, cp); if (!gid && cp != 0) { if (g_glyph_log && cp > 0x7f && !sym_find(cp)) e_log("[font] no glyph for U+%04x in face %d\n", cp, face); if (g->used) { emu_free(g->cov); g->cov = 0; } g->used = 1; g->cp = cp; g->face = (s16)face; g->px = (s16)px; g->italic = (s16)italic; g->adv = -1; g->w = g->h = 0; return 0; }
   float s = (float)px / (float)f->upem; float shear = (italic & 1) ? 0.21f : 0.0f; int xpct = italic >> 1; float xs = xpct ? (float)xpct / 100.0f : 1.0f; int adv = (int)(ttf_adv_units(f, gid) * s * xs + 0.5f);
   u32 off, ln; int w = 0, h = 0, left = 0, top = 0; u8 *cov = 0;
   if (ttf_glyph_loc(f, gid, &off, &ln) && ln >= 10) { float xmin = tts16(f, off + 2) * s * xs, ymin = tts16(f, off + 4) * s, xmax = tts16(f, off + 6) * s * xs, ymax = tts16(f, off + 8) * s;
@@ -120,6 +197,20 @@ static Glyph *ttf_glyph(int face, int px, int italic, u32 cp) {
         float acc = 0; for (int i = 0; i < w * h; i++) { acc += r.a[i]; float v = acc < 0 ? -acc : acc; if (v > 1) v = 1; cov[i] = g_cov_lut[(int)(v * 255.0f + 0.5f)]; } }
       else { emu_free(cov); cov = 0; w = h = 0; } emu_free(r.a); } else { w = h = 0; } }
   if (g->used) { emu_free(g->cov); g->cov = 0; } g->used = 1; g->cp = cp; g->face = (s16)face; g->px = (s16)px; g->italic = (s16)italic; g->adv = (s16)adv; g->w = (s16)w; g->h = (s16)h; g->left = (s16)left; g->top = (s16)top; g->cov = cov; return g; }
+
+/* rasterizes (or fetches) a synthetic symbol glyph for a code point none of the bundled faces covers; px scale uses the 1000-unit symbol em */
+static Glyph *sym_glyph(int face, int px, int italic, u32 cp) {
+  const SymGlyph *sg = sym_find(cp); if (!sg || px < 1 || px > 512) return 0; int key = face + 8; Glyph *g = &g_glyphs[glyph_hash(key, px, italic, cp)];
+  if (g->used && g->cp == cp && g->face == key && g->px == px && g->italic == italic) return g;
+  float s = (float)px / 1000.0f; float shear = (italic & 1) ? 0.21f : 0.0f; int xpct = italic >> 1; float xs = xpct ? (float)xpct / 100.0f : 1.0f; float wmul = (face & 1) ? 1.35f : 1.0f;
+  int adv = (int)(sg->adv * s * xs + 0.5f); SymSink M = { 0, 0, { 0, 0, 0, 0 }, 0 }; sym_emit(sg, &M, wmul); int w = 0, h = 0, left = 0, top = 0; u8 *cov = 0;
+  if (M.n) { float xmin = M.bb[0] * s * xs, ymin = M.bb[1] * s, xmax = M.bb[2] * s * xs, ymax = M.bb[3] * s;
+    float x0 = xmin + (shear > 0 && ymin < 0 ? shear * ymin : 0), x1 = xmax + (shear > 0 && ymax > 0 ? shear * ymax : 0); int ix0 = (int)ffloor(x0) - 1, ix1 = (int)fceil(x1) + 1, iy0 = (int)ffloor(-ymax) - 1, iy1 = (int)fceil(-ymin) + 1;
+    w = ix1 - ix0 + 1; h = iy1 - iy0; left = ix0; top = iy0; if (w > 0 && h > 0 && w < 2048 && h < 2048) { Ras r; r.w = w; r.h = h; r.a = emu_alloc(sizeof(float) * (size_t)(w * h)); cov = emu_alloc((size_t)(w * h));
+      if (r.a && cov) { for (int i = 0; i < w * h; i++) r.a[i] = 0; Xf xf = { s * xs, 0, shear * s, -s, -(float)ix0, -(float)iy0 }; SymSink S = { &xf, &r, { 0, 0, 0, 0 }, 0 }; sym_emit(sg, &S, wmul);
+        float acc = 0; for (int i = 0; i < w * h; i++) { acc += r.a[i]; float v = acc < 0 ? -acc : acc; if (v > 1) v = 1; cov[i] = (u8)(v * 255.0f + 0.5f); } }
+      else { emu_free(cov); cov = 0; w = h = 0; } emu_free(r.a); } else { w = h = 0; } }
+  if (g->used) { emu_free(g->cov); g->cov = 0; } g->used = 1; g->cp = cp; g->face = (s16)key; g->px = (s16)px; g->italic = (s16)italic; g->adv = (s16)adv; g->w = (s16)w; g->h = (s16)h; g->left = (s16)left; g->top = (s16)top; g->cov = cov; return g; }
 
 /* ---- font objects ---- */
 static int fnt_is_mono_name(const char *n) { static const char *const mono[] = { "courier", "consolas", "mono", "lucida console", "fixedsys", "terminal", "cascadia", "fira code", "source code", "menlo", "monaco", "ubuntu mono", "dejavu sans mono", "liberation mono", "cousine", "ocr", "simplified arabic fixed", "ms gothic", "ms mincho", "nsimsun", "simsun", 0 }; char l[64]; int i = 0; for (; n[i] && i < 63; i++) l[i] = n[i] >= 'A' && n[i] <= 'Z' ? n[i] + 32 : n[i]; l[i] = 0;
@@ -146,7 +237,7 @@ static int fnt_metrics(GdiObj *f, int *asc, int *desc, int *avg, int *maxw) {
 /* average width the way dialog base units are derived on Windows: the 52-letter alphabet, (width / 26 + 1) / 2 */
 static int fnt_dlg_avg(GdiObj *f) { int px; int face = fnt_face_px(f, &px); if (face < 0) return font_cw(f, f && f->kind == K_FONT ? f->font_h : 16); int tot = 0; for (int k = 0; k < 52; k++) { Glyph *g = ttf_glyph(face, px, fnt_style(f) & ~1, (u32)(k < 26 ? 'A' + k : 'a' + k - 26)); tot += g ? g->adv : px / 2; } return (tot / 26 + 1) / 2; }
 /* glyph for a code point with family fallback: the matching face first, then the other family, else 0 (bitmap fallback) */
-static Glyph *fnt_glyph(int face, int px, int italic, u32 cp) { Glyph *g = ttf_glyph(face, px, italic, cp); if (g) return g; int alt = face ^ 2; g = ttf_glyph(alt, px, italic, cp); if (g) return g; if (face & 1) { g = ttf_glyph(face & ~1, px, italic, cp); if (g) return g; } return 0; }
+static Glyph *fnt_glyph(int face, int px, int italic, u32 cp) { Glyph *g = ttf_glyph(face, px, italic, cp); if (g) return g; int alt = face ^ 2; g = ttf_glyph(alt, px, italic, cp); if (g) return g; if (face & 1) { g = ttf_glyph(face & ~1, px, italic, cp); if (g) return g; } return sym_glyph(face, px, italic, cp); }
 static int fnt_cp_adv(GdiObj *f, u32 cp) { int px; int face = fnt_face_px(f, &px); if (cp == '\r' || cp == '\n') return 0; int fh = f && f->kind == K_FONT ? f->font_h : 16; if (face < 0) return font_cw(f, fh);
   if (cp == '\t') { Glyph *sp = fnt_glyph(face, px, 0, ' '); return sp ? sp->adv * 8 : px * 4; } Glyph *g = fnt_glyph(face, px, fnt_style(f), cp); if (g) return g->adv; return (px * 3 + 2) / 5; }
 static int fnt_width(GdiObj *f, const char *s, int n) { int i = 0, w = 0; while (i < n) { u32 cp = utf8_next(s, n, &i); w += fnt_cp_adv(f, cp); } return w; }

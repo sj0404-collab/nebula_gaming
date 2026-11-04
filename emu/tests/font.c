@@ -35,6 +35,12 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show) { (void)hp; 
   { LOGFONTW lf; memset(&lf, 0, sizeof lf); lf.lfCharSet = DEFAULT_CHARSET; g_fam = 0; g_first[0] = 0; int r = EnumFontFamiliesExW(dc, &lf, famproc, 1, 0); chk(r == 1 && g_fam >= 8 && g_first[0] && g_last_type == TRUETYPE_FONTTYPE, "EnumFontFamiliesExW enumerates 8+ families, TRUETYPE_FONTTYPE"); g_fam = 0; EnumFontFamiliesExW(dc, &lf, famproc, 5, 0); chk(g_fam == 1, "callback returning 0 stops the enumeration");
     lstrcpyW(lf.lfFaceName, L"Courier New"); g_fam = 0; g_cour = 0; EnumFontFamiliesExW(dc, &lf, famproc, 77, 0); chk(g_fam == 1 && g_cour == 1, "face filter enumerates only Courier New"); chk(EnumFontFamiliesA(dc, NULL, famproc_a, 0) == 1, "EnumFontFamiliesA"); }
   { HGDIOBJ o = SelectObject(dc, mono); TEXTMETRICW tm; GetTextMetricsW(dc, &tm); chk(tm.tmAveCharWidth == 8 && tm.tmHeight >= 14 && tm.tmHeight <= 17 && !(tm.tmPitchAndFamily & TMPF_FIXED_PITCH), "Courier New 10 pt: tmAveCharWidth 8, height 14..17, fixed pitch"); SelectObject(dc, o); }
+  { /* symbols no bundled face has (tab-bar glyphs of Notepad++: fullwidth plus, multiplication X, arrowheads) come from the synthetic fallback, with real widths and ink */
+    HDC mdc = CreateCompatibleDC(dc); HBITMAP bm = CreateCompatibleBitmap(dc, 64, 32); HGDIOBJ ob = SelectObject(mdc, bm); RECT r = { 0, 0, 64, 32 }; FillRect(mdc, &r, (HBRUSH)GetStockObject(WHITE_BRUSH)); HGDIOBJ o = SelectObject(mdc, ui);
+    SIZE a, b, c; GetTextExtentPoint32W(mdc, L"\u2715", 1, &a); GetTextExtentPoint32W(mdc, L"\uFF0B", 1, &b); GetTextExtentPoint32W(mdc, L"\u2BC6", 1, &c);
+    chk(a.cx >= 6 && b.cx > a.cx && c.cx >= 6, "symbol fallback: U+2715 / U+FF0B / U+2BC6 have widths (fullwidth plus is the widest)");
+    TextOutW(mdc, 2, 2, L"\u2715\u2BC6", 2); int dark = 0; for (int y = 0; y < 20; y++) for (int x = 0; x < 40; x++) { COLORREF px = GetPixel(mdc, x, y); if (GetRValue(px) < 128) dark++; } chk(dark >= 20, "symbol fallback draws ink (no '?')");
+    SelectObject(mdc, o); SelectObject(mdc, ob); DeleteObject(bm); DeleteDC(mdc); }
   ReleaseDC(NULL, dc);
   WNDCLASSW wc; memset(&wc, 0, sizeof wc); wc.lpfnWndProc = wndproc; wc.hInstance = hi; wc.lpszClassName = L"FontTest"; wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); RegisterClassW(&wc);
   HWND h = CreateWindowExW(0, L"FontTest", L"Font engine", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 10, 10, 640, 300, NULL, NULL, hi, NULL); UpdateWindow(h);
