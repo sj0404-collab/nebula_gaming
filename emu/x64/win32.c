@@ -382,6 +382,7 @@ static int g_format(Cpu *c, char *out, size_t n, u64 fmt_addr, int fmt_wide, Arg
 }
 static char g_fmt_out[1 << 16];
 int w32_format_args(Cpu *c, char *out, size_t n, u64 fmt, int wide, int first_arg) { ArgSrc src = { c, 0, first_arg, 0 }; return g_format(c, out, n, fmt, wide, &src); }
+int w32_format_va(Cpu *c, char *out, size_t n, u64 fmt, int wide, u64 va) { ArgSrc src = { c, 1, 0, va }; return g_format(c, out, n, fmt, wide, &src); }   /* va_list form (wvsprintf) */
 Win32 *g_root_w32;   /* the console belongs to the first process */
 static void con_out(Win32 *w, int fd, const char *s, size_t n) {
   if (g_root_w32) w = g_root_w32;
@@ -763,6 +764,9 @@ static void s_HeapWalk(Cpu *c) { RET(0); }
 static void s_GlobalAlloc(Cpu *c) { RET(w32_heap_alloc(W, ARG(1), !!(ARG(0) & 0x40))); }
 static void s_GlobalFree(Cpu *c) { w32_heap_free(W, ARG(0)); RET(0); }
 static void s_GlobalLock(Cpu *c) { RET(ARG(0)); }
+static void s_GlobalReAlloc(Cpu *c) { u64 h = ARG(0), n = ARG(1), fl = ARG(2); if (fl & 0x80 /* GMEM_MODIFY */) { RET(h); return; } RET(heap_realloc(W, h, n, !!(fl & 0x40))); }
+static void s_GlobalHandle(Cpu *c) { RET(ARG(0)); }
+static void s_GlobalFlags(Cpu *c) { RET(w32_heap_size(W, ARG(0)) ? 0 : 0x8000 /* GMEM_INVALID_HANDLE */); }
 static void s_GlobalUnlock(Cpu *c) { RET(1); }
 static void s_LocalAlloc(Cpu *c) { RET(w32_heap_alloc(W, ARG(1), !!(ARG(0) & 0x40))); }
 static void s_LocalFree(Cpu *c) { w32_heap_free(W, ARG(0)); RET(0); }
@@ -1382,7 +1386,7 @@ static const ShimDef shims[] = {
   NODE_SHIMS,
   S(RtlInstallFunctionTableCallback), S(EncodePointer), S(DecodePointer),
   S(OutputDebugStringA), S(OutputDebugStringW), S(FormatMessageA), S(FormatMessageW), S(SetErrorMode), S(SetThreadExecutionState), S(GetErrorMode), S(SetThreadErrorMode), S(GetLogicalProcessorInformation), S(GetProcessAffinityMask), S(SetThreadAffinityMask), S(SetProcessAffinityMask), S(GetSystemTimeAdjustment), S(SetSystemTime), S(GetThreadPriority), S(SetThreadPriority), S(SetPriorityClass), S(GetPriorityClass), S(GetThreadTimes),
-  S(GetProcessHeap), S(HeapCreate), S(HeapDestroy), S(HeapAlloc), S(HeapFree), S(HeapReAlloc), S(HeapSize), S(HeapValidate), S(HeapSetInformation), S(HeapQueryInformation), S(HeapCompact), S(HeapLock), S(HeapUnlock), S(HeapWalk), S(GlobalAlloc), S(GlobalFree), S(GlobalLock), S(GlobalUnlock), S(LocalAlloc), S(LocalFree),
+  S(GetProcessHeap), S(HeapCreate), S(HeapDestroy), S(HeapAlloc), S(HeapFree), S(HeapReAlloc), S(HeapSize), S(HeapValidate), S(HeapSetInformation), S(HeapQueryInformation), S(HeapCompact), S(HeapLock), S(HeapUnlock), S(HeapWalk), S(GlobalAlloc), S(GlobalFree), S(GlobalLock), S(GlobalReAlloc), S(GlobalHandle), S(GlobalFlags), S(GlobalUnlock), S(LocalAlloc), S(LocalFree),
   S(VirtualAlloc), S(VirtualAllocEx), S(VirtualFree), S(VirtualProtect), S(VirtualLock), S(VirtualUnlock), S(VirtualQuery), S(FlushInstructionCache),
   S(CreateTimerQueue),
   S(EventRegister), SA("EventUnregister", ret0), SA("EventSetInformation", ret0), SA("EventWriteTransfer", ret0), SA("EventWrite", ret0), SA("EventEnabled", ret0), SA("EventActivityIdControl", ret0),

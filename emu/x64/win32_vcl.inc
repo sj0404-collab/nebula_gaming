@@ -201,7 +201,10 @@ static void s_RegisterTypeLib(Cpu *c) { RET(0x80029C4A); }
 static void s_GetErrorInfo(Cpu *c) { if (ARG(1)) wrp(c, ARG(1), 0); RET(1); }   /* S_FALSE: no error object */
 static void s_SetErrorInfo(Cpu *c) { RET(0); }
 static void s_GetActiveObject(Cpu *c) { RET(0x800401E3); }   /* MK_E_UNAVAILABLE */
-#define VCL_SHIMS S(SetRectEmpty), S(OffsetRect), S(InflateRect), S(IntersectRect), S(UnionRect), S(SubtractRect), \
+static void s_CopyRect(Cpu *c) { u64 d = ARG(0), s = ARG(1); if (!d || !s) { RET(0); return; } for (int k = 0; k < 16; k += 4) wr32(c, d + k, rd32(c, s + k)); RET(1); }
+static void s_IsRectEmpty(Cpu *c) { u64 r = ARG(0); if (!r) { RET(1); return; } RET((s32)rd32(c, r + 8) <= (s32)rd32(c, r) || (s32)rd32(c, r + 12) <= (s32)rd32(c, r + 4)); }
+static void s_EqualRect(Cpu *c) { u64 a = ARG(0), b = ARG(1); if (!a || !b) { RET(0); return; } RET(rd32(c, a) == rd32(c, b) && rd32(c, a + 4) == rd32(c, b + 4) && rd32(c, a + 8) == rd32(c, b + 8) && rd32(c, a + 12) == rd32(c, b + 12)); }
+#define VCL_SHIMS S(SetRectEmpty), S(CopyRect), S(IsRectEmpty), S(EqualRect), S(OffsetRect), S(InflateRect), S(IntersectRect), S(UnionRect), S(SubtractRect), \
   S(GlobalAddAtomW), S(GlobalAddAtomA), S(GlobalFindAtomW), S(GlobalFindAtomA), S(GlobalDeleteAtom), S(GlobalGetAtomNameW), S(GlobalGetAtomNameA), S(AddAtomW), S(AddAtomA), S(FindAtomW), S(FindAtomA), S(DeleteAtom), S(GetAtomNameW), S(GetAtomNameA), \
   S(SetWindowsHookExW), S(SetWindowsHookExA), S(UnhookWindowsHookEx), S(CallNextHookEx), S(GetKeyboardLayoutNameW), S(GetKeyboardLayoutNameA), S(LoadKeyboardLayoutW), S(LoadKeyboardLayoutA), \
   S(OemToCharBuffA), S(CharToOemBuffA), S(OemToCharBuffW), S(CharToOemBuffW), S(DefFrameProcW), S(DefFrameProcA), S(DefMDIChildProcW), S(DefMDIChildProcA), S(TranslateMDISysAccel), S(ShowOwnedPopups), S(GetScrollBarInfo), \

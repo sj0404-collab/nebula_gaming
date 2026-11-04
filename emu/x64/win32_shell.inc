@@ -308,6 +308,11 @@ static void s_CoGetMalloc(Cpu *c) { wrp(c, ARG(1), shell_imalloc(c)); RET(0); }
 static void s_SHCreateDirectoryExW(Cpu *c) { char path[520]; wstr_to_utf8(c, ARG(1), path, sizeof path, -1); u64 sz; if (vfs_stat(path, &sz)) { RET(183); return; } shell_mkdirs(path); RET(vfs_stat(path, &sz) ? 0 : 3); }
 static void s_SHCreateDirectoryExA(Cpu *c) { const char *s = rd_str(c, ARG(1), 519); char path[520]; e_snprintf(path, sizeof path, "%s", s ? s : ""); u64 sz; if (vfs_stat(path, &sz)) { RET(183); return; } shell_mkdirs(path); RET(vfs_stat(path, &sz) ? 0 : 3); }
 static void s_SHChangeNotify(Cpu *c) { (void)c; }
+static u32 g_shcn_next = 1;
+static void s_SHChangeNotifyRegister(Cpu *c) { RET(g_shcn_next++); }   /* (hwnd, sources, events, msg, cEntries, entries): no shell change notifications are generated, the registration id is real so Deregister succeeds */
+static void s_SHChangeNotifyDeregister(Cpu *c) { RET((u32)ARG(0) != 0 && (u32)ARG(0) < g_shcn_next); }
+static void s_SHChangeNotification_Lock(Cpu *c) { RET(0); }
+static void s_SHChangeNotification_Unlock(Cpu *c) { RET(1); }
 static void s_SHAddToRecentDocs(Cpu *c) { (void)c; }
 static void s_IsUserAnAdmin(Cpu *c) { RET(1); }
 static void s_SHGetFileInfoW(Cpu *c) { /* (path, attrs, SHFILEINFO*, cb, flags): type name + display name only */ u64 fi = ARG(2); u32 flags = (u32)ARG(4); if (!fi) { RET(0); return; } char path[520]; if ((flags & 0x10) == 0 && ARG(0) >= 0x10000) wstr_to_utf8(c, ARG(0), path, sizeof path, -1); else path[0] = 0;
@@ -471,6 +476,7 @@ static int shell_cocreate(Cpu *c, u32 clsid_d1, u64 riid, u64 ppv) {
 
 #include "win32_shellns.inc"
 #define SHELL_SHIMS \
+  S(SHChangeNotifyRegister), S(SHChangeNotifyDeregister), S(SHChangeNotification_Lock), S(SHChangeNotification_Unlock), \
   SHELLLINK_SHIMS \
   SHELLNS_SHIMS \
   S(lstrcpyW), S(lstrcatW), S(lstrcatA), S(lstrcpynW), S(lstrcpynA), S(lstrcmpiW), \
