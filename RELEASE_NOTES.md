@@ -1,3 +1,59 @@
+# v1.33.0 — Explorer context menus, real list-view modes and the shell View menu: Q-Dir x86/x64 (Android)
+
+**Why.** A file manager hosting the shell's default folder view (`SHCreateShellFolderView` / `IShellView`) gets its
+right-click menus, its «View ▸ Large icons / Small icons / List / Details» commands and the view-mode switching from
+the shell itself. Q-Dir 12.82 builds its own *View* menu that way: in `WM_INITMENUPOPUP` it throws away its static
+items and merges the background context menu of the active pane (`IShellView::GetItemObject(SVGIO_BACKGROUND,
+IID_IContextMenu)` → `QueryContextMenu`). We returned `E_NOINTERFACE` there, so the menu had three items and nothing in
+it changed the view. Everything below is real behaviour, not a stub.
+
+**Explorer context menus (emu/x64/ctxmenu.inc).** A `CtxMenu` COM object (`IContextMenu`, `IContextMenu2`,
+`IContextMenu3`) over a folder and a set of items: `QueryContextMenu` inserts the Explorer item set at the requested
+position with ids from `idCmdFirst` (items: *Open, Explore, Cut, Copy, Paste, Delete, Properties*; background: *View ▸,
+Refresh, Paste, New folder, Properties*; drive roots hide Cut/Delete; `CMF_DEFAULTONLY` honoured; the default verb is
+bold), `GetCommandString` returns the verbs (`open explore cut copy paste delete properties refresh NewFolder
+LargeIcons SmallIcons List Details`, A and W, `GCS_HELPTEXT` too) and `InvokeCommand` executes them for real: open =
+`ShellExecute`/navigate, explore = `IShellBrowser::BrowseObject`, cut/copy = CF_HDROP (`DROPFILES`, wide) in the
+clipboard and the «cut» ghosting, paste = copies/moves the clipboard files into the folder (including into a
+sub-folder when one is selected), delete = removes files and directories recursively, new folder = creates
+`New folder (n)` and starts editing it, refresh = re-enumerates the view, properties = the Properties sheet;
+`HandleMenuMsg(2)` for owner-draw forwarding. `IShellFolder::GetUIObjectOf(IID_IContextMenu)` and the default view's
+own right-click (on an item and on the background) return the same object, so Explorer-style hosts and the built-in
+view behave identically.
+
+**View modes.** `IShellView::GetItemObject` now serves `SVGIO_BACKGROUND` (0), `SVGIO_SELECTION` (1) and `SVGIO_ALLVIEW`
+(2) for `IID_IContextMenu/2/3`. The background menu carries the *View* sub-menu with the four modes, the current one
+radio-checked; choosing one switches the view through the real list-view (`LVM_SETVIEW`) and is remembered in the
+`IShellView` (`FOLDERSETTINGS.ViewMode`). The list-view control itself (emu/x64/listview.inc) gained the real
+`LVS_ICON`, `LVS_SMALLICON` and `LVS_LIST` layouts next to `LVS_REPORT`: icon grid with wrapped two-line labels,
+small-icon and list (column-major, horizontal scrolling) layouts, `LVM_SETVIEW/GETVIEW` (`LV_VIEW_*`), `LVM_ARRANGE`,
+`LVM_GETITEMPOSITION/SETITEMPOSITION`, `LVM_GETITEMSPACING`, `LVM_GETORIGIN`, hit-testing and keyboard navigation per
+layout (←→ moves between columns in list mode, PgUp/PgDn by page), `LVM_GETITEMRECT` for `LVIR_BOUNDS/ICON/LABEL`,
+`LVM_SCROLL` and `EnsureVisible` for all four; scroll bars follow the layout (vertical for icon/report, horizontal for
+list). Test `tests/lvview.c` (25 checks, x86 and x64) is part of `run.sh`.
+
+**shlwapi `IUnknown_SetSite` (ordinal 174)** — host sites the menu object: a guest `QueryInterface(IID_IObjectWithSite)`
+→ `SetSite(site)` → `Release` chain executed as a continuation (three guest COM calls), so it works for the program's own
+objects as well as ours, x86 and x64.
+
+**Fixed on the way.** `ToolbarWindow32` forwards `WM_COMMAND` to its parent like comctl32 — Q-Dir tracks its menus with
+the toolbar as the owner window and handles the command in the main window's subclass; a sub-menu that overlaps its
+parent menu by its 3 px shadow no longer repaints it in a loop (82 000 `WM_PAINT` per second, the sub-menu never showed);
+`DestroyMenu` of a menu that is still attached as a sub-menu leaves the parent intact (Q-Dir's installer
+`InitLangCombo-ERR`). Debug aid: `X64_MENUDUMP=1` logs the items of every popup as it is sized.
+
+**Seen on Q-Dir 12.82 (x64 and x86 installs inside the emulator):** *View* menu = Status Bar, Full Screen, View ▸ (Large
+icons / Small icons / List / Details), Refresh, New folder, Properties, «For the Active Q-View 1»; picking *Large icons*
+or *Small icons* re-lays the active pane; right-click on a drive / folder / background shows the Explorer menus and the
+verbs act on the mounted folders.
+
+**Known gaps (next).** `IFolderView`/`IFolderView2` are still not exposed by the view (Q-Dir asks for them when its
+toolbar view button is pressed); no *Sort by* / *Group by* sub-menus; no Recycle Bin (delete is permanent); rename via
+`LVM_EDITLABEL` from the context menu is wired but the in-place edit box is plain.
+
+Android-only build (APK via GitHub Actions); x86 and x64 paths tested with `emu/tests/run.sh` (native, both bitnesses)
+and the Playwright e2e suite in the APK's WebView engine.
+
 # v1.32.0 — real tooltips (tooltips_class32): toolbar hints in Notepad++ and Q-Dir, x86 and x64 (Android)
 
 **Why.** `tooltips_class32` was the last common control that was still a placeholder («not implemented yet — shown as an
