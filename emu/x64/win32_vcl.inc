@@ -134,7 +134,12 @@ static void s_FlatSB_SetScrollProp(Cpu *c) { RET(1); }
 static void s_FlatSB_SetScrollRange(Cpu *c) { RET(1); }
 static void s_FlatSB_ShowScrollBar(Cpu *c) { RET(1); }
 static void s_FlatSB_EnableScrollBar(Cpu *c) { RET(1); }
-static void s_TrackMouseEvent_(Cpu *c) { RET(1); }   /* WM_MOUSELEAVE/hover are not generated */
+static void s_TrackMouseEvent_(Cpu *c) { u64 a = ARG(0); u32 flags = rd32(c, a + 4); int i = wnd_of(rdp(c, a + 8)); u32 ht = rd32(c, a + (c->mode32 ? 12 : 16)); if (i < 0) { RET(0); return; } Wnd *n = &g_wnd[i];
+  if (flags & 0x40000000u) { /* TME_QUERY: report what is being tracked */ wr32(c, a + 4, n->tme_flags); wr32(c, a + (c->mode32 ? 12 : 16), (u32)n->tme_hover_ms); RET(1); return; }
+  if (flags & 0x80000000u) { n->tme_flags &= ~(flags & 0x13u); RET(1); return; }   /* TME_CANCEL */
+  n->tme_flags |= flags & 0x13u; if (flags & 0x01) { n->tme_hover_ms = (ht == 0 || ht == 0xFFFFFFFFu) ? 400 : (int)ht; n->tme_hover_at = host_now_ms() + n->tme_hover_ms; }
+  { int under = wnd_alive(g_capture) ? g_capture : hit_test(g_mouse_x, g_mouse_y); if (under != i && (flags & 0x02)) { /* the pointer is already elsewhere: WM_MOUSELEAVE right away, like Windows */ n->tme_flags &= ~0x02u; post_msg_to(W, HWND_OF(i), (flags & 0x10) ? 0x2A2 : 0x2A3, 0, 0); } }
+  RET(1); }
 /* ---- kernel32 / advapi32 / mpr / wtsapi32 / winhttp / comdlg32 ---- */
 static void s_TransactNamedPipe(Cpu *c) { W->last_error = 50; RET(0); }
 static void s_WNetOpenEnumW(Cpu *c) { RET(1222); }   /* ERROR_NO_NETWORK */

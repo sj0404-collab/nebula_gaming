@@ -40,6 +40,7 @@ typedef struct {
   /* controls */ int checked, pushed, hot, focus_draw; int sel0, sel1, scroll_x, modified, limit; int nitems; char (*items)[128]; u64 *itemdata; int cursel, top_index, dropped, drop_wnd; int pmin, pmax, ppos, pstep; int zseq;
   /* combo box: the real Edit child of a CBS_DROPDOWN combo (as on Windows: GetComboBoxInfo.hwndItem, ComboBoxEx CBEM_GETEDITCONTROL), the inner ComboBox of a ComboBoxEx32, its image list, per-item image+1 | indent << 16, extended style, WM_NOTIFY buffer */
   int edit_wnd, combo_wnd; u64 himl; u32 *itemimg; u32 cbex_exstyle; u64 cbex_nm; int cseq;   /* creation sequence (up-down auto buddy = the sibling created just before) */
+  u32 tme_flags; int tme_hover_ms; double tme_hover_at;   /* TrackMouseEvent: TME_HOVER 1 / TME_LEAVE 2 / TME_NONCLIENT 0x10 pending, hover deadline */
 } Wnd;
 static Wnd g_wnd[MAX_WND]; static int g_zseq, g_cseq;
 static int g_focus = -1, g_capture = -1, g_active = -1;
@@ -167,6 +168,17 @@ static int hit_in(int i, int fx, int fy) {
   return best >= 0 ? best : i;
 }
 static int hit_test(int fx, int fy) { int best = -1, bestz = -1; for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].parent < 0 && g_wnd[k].builtin != BI_TOOLTIP /* tooltips are transparent to the mouse */ && g_wnd[k].zseq > bestz) { int r = hit_in(k, fx, fy); if (r >= 0) { best = r; bestz = g_wnd[k].zseq; } } return best; }
+/* TrackMouseEvent: WM_MOUSELEAVE when the pointer (or the capture) moves to another window, WM_MOUSEHOVER after the pointer rested for dwHoverTime
+   (toolbars / tab bars / Q-Dir hot tracking, tooltips of custom controls) */
+static int g_tme_last = -1;
+static void tme_mouse(Win32 *w, int x, int y, int t) { int under = hit_test(x, y); if (wnd_alive(g_capture)) under = g_capture; double now = host_now_ms();
+  for (int k = 0; k < MAX_WND; k++) { Wnd *n = &g_wnd[k]; if (!n->used || n->destroyed) continue;
+    if (k != under && k != t) { int sent = 0; if (n->tme_flags & 0x02) { n->tme_flags &= ~0x02u; post_msg_to(w, HWND_OF(k), (n->tme_flags & 0x10) ? 0x2A2 : 0x2A3, 0, 0); sent = 1; } if (n->tme_flags & 0x01) n->tme_flags &= ~0x01u;
+      if (!sent && n->builtin && !n->superclassed && n->hot && k == g_tme_last) post_msg_to(w, HWND_OF(k), 0x2A3, 0, 0); }   /* built-in hot tracking (push buttons) ends like a real TME_LEAVE */
+    else if (n->tme_flags & 0x01) n->tme_hover_at = now + n->tme_hover_ms; }
+  g_tme_last = t; }
+static void tme_tick(Win32 *w, double now) { for (int k = 0; k < MAX_WND; k++) { Wnd *n = &g_wnd[k]; if (!n->used || n->destroyed || !(n->tme_flags & 0x01) || now < n->tme_hover_at) continue; n->tme_flags &= ~0x01u;
+    int cx, cy; wnd_client_origin(k, &cx, &cy); u64 lp = (u64)(u16)(g_mouse_x - cx) | ((u64)(u16)(g_mouse_y - cy) << 16); post_msg_to(w, HWND_OF(k), (n->tme_flags & 0x10) ? 0x2A0 : 0x2A1, (u64)g_mouse_btn, lp); } }
 void w32_mouse(Win32 *w, int x, int y, int ev) {
   int wheel = 0; if (ev == 7) { /* wheel: x is the delta (+120 up / -120 down per notch), the pointer stays where it is */ wheel = x ? (x > 0 ? (x < 120 ? 120 : x) : (x > -120 ? -120 : x)) : 0; x = g_mouse_x; y = g_mouse_y; }
   int dx = x - g_mouse_x, dy = y - g_mouse_y; g_mouse_x = x; g_mouse_y = y;
@@ -174,6 +186,7 @@ void w32_mouse(Win32 *w, int x, int y, int ev) {
   di_mouse(w, dx, dy, ev == 7 ? 0 : ev, wheel); if (raw_mouse(w, dx, dy, ev, wheel)) return;   /* RIDEV_NOLEGACY */
   static const u32 msgs[] = { 0x200, 0x201, 0x202, 0x204, 0x205, 0x207, 0x208, 0x20A };
   int t = wnd_alive(g_capture) ? g_capture : hit_test(x, y); int mt = menu_top_wnd(); if (mt >= 0) t = mt;   /* an open menu takes all mouse input */ if (t < 0) t = g_wnd[0].used ? 0 : -1; if (t < 0) return;
+  tme_mouse(w, x, y, t);
   if (!wnd_enabled_chain(t)) { /* a disabled window (owner of a modal dialog): mouse input is dropped, like Windows */ if (ev != 0) return; }
   int cx, cy; wnd_client_origin(t, &cx, &cy); int lx = x - cx, ly = y - cy; u64 lp = (u64)(u16)lx | ((u64)(u16)ly << 16);
   if (ev == 1 && ly < 0 && mt < 0 && menu_bar_hit(w, t, x, y) != -1) { /* the menu bar: WM_NCLBUTTONDOWN(HTMENU) → DefWindowProc opens the popup */ post_msg_to(w, HWND_OF(t), 0xA1, 5, (u64)(u16)(x + SCREEN_X0) | ((u64)(u16)(y + SCREEN_Y0) << 16)); return; }
@@ -185,7 +198,7 @@ void w32_mouse(Win32 *w, int x, int y, int ev) {
 void w32_wheel(Win32 *w, int delta) { di_mouse(w, 0, 0, 0, delta); if (raw_mouse(w, 0, 0, 7, delta)) return; int t = wnd_alive(g_focus) ? g_focus : hit_test(g_mouse_x, g_mouse_y); if (t < 0) return; post_msg_to(w, HWND_OF(t), 0x20A, ((u64)(u16)(s16)delta << 16) | (u64)g_mouse_btn, (u64)(u16)(g_mouse_x + SCREEN_X0) | ((u64)(u16)(g_mouse_y + SCREEN_Y0) << 16)); }
 void w32_tick(Win32 *w) { (void)w; }
 static void check_timers(Win32 *w) {
-  double now = host_now_ms(); tip_tick(w);
+  double now = host_now_ms(); tip_tick(w); tme_tick(w, now);
   for (int i = 0; i < g_timers_n; i++) if (now >= g_timers[i].next) { g_timers[i].next = now + g_timers[i].ms; int t = g_timers[i].wnd; u64 h = t >= 0 && wnd_alive(t) ? HWND_OF(t) : 0;
     /* one pending WM_TIMER per timer: do not flood the queue when the guest is slow */ int dup = 0; for (int q = w->msg_head; q != w->msg_tail; q = (q + 1) % MAX_MSGS) if (w->msgs[q].msg == 0x113 && w->msgs[q].hwnd == h && w->msgs[q].wparam == g_timers[i].id) { dup = 1; break; } if (!dup) post_msg_to(w, h, 0x113, g_timers[i].id, g_timers[i].proc); }
 }
