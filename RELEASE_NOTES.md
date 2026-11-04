@@ -1,3 +1,45 @@
+# v1.32.0 — real tooltips (tooltips_class32): toolbar hints in Notepad++ and Q-Dir, x86 and x64 (Android)
+
+**Why.** `tooltips_class32` was the last common control that was still a placeholder («not implemented yet — shown as an
+empty box»): every real program creates one (toolbars with `TBSTYLE_TOOLTIPS`, Q-Dir's own tooltip windows, Notepad++'s
+document tabs), and a hint that never appears is a visible difference from Windows.
+
+**Tooltip control (emu/x64/tooltip.inc).** Tools are registered with `TTM_ADDTOOL` (a window — `TTF_IDISHWND` — or a
+rectangle of a window's client area; text inline, a string resource of `hinst`, or `LPSTR_TEXTCALLBACK`); hover tracking
+runs from the message pump: the pointer resting on a tool for the initial delay (500 ms, `TTM_SETDELAYTIME`) posts a
+`WM_TIMER` to the tooltip window, whose procedure fetches the text — for callback tools through `WM_NOTIFY
+TTN_GETDISPINFOW/A` to the tool's window (`lpszText` = `szText`, a pointer, a string-resource id + `hinst`, or
+`TTF_DI_SETITEM` to cache it) — and shows the bubble below the cursor (white, 1 px grey border, 3 px margins, multi-line
+text, word-wrap at `TTM_SETMAXTIPWIDTH`, optional title, `TTF_CENTERTIP`, tracking tooltips through
+`TTM_TRACKACTIVATE/TRACKPOSITION`); it hides when the pointer leaves the tool, a button goes down or after the autopop time
+(5 s), reshows after 100 ms on the next tool, never steals activation or focus, and is transparent to the mouse.
+Messages: `TTM_ACTIVATE, ADDTOOL, DELTOOL, NEWTOOLRECT, RELAYEVENT, GETTOOLINFO, SETTOOLINFO, HITTEST, GETTEXT,
+UPDATETIPTEXT, GETTOOLCOUNT, ENUMTOOLS, GETCURRENTTOOL, WINDOWFROMPOINT, TRACKACTIVATE, TRACKPOSITION, SETTIPBKCOLOR,
+SETTIPTEXTCOLOR, GETDELAYTIME, SETDELAYTIME, GETTIPBKCOLOR, GETTIPTEXTCOLOR, SETMAXTIPWIDTH, GETMAXTIPWIDTH, SETMARGIN,
+GETMARGIN, POP, UPDATE, GETBUBBLESIZE, ADJUSTRECT, SETTITLE, POPUP, GETTITLE` (A and W variants), `WM_SETFONT/GETFONT`.
+TOOLINFO V1/V2/V3 sizes, x86 and x64 layouts.
+
+**Toolbars.** A `ToolbarWindow32` created with `TBSTYLE_TOOLTIPS` owns a tooltip window (`TB_GETTOOLTIPS`,
+`TB_SETTOOLTIPS`) whose tools are its buttons: hovering a button sends `TTN_GETDISPINFO` with the button's command id to the
+toolbar, which forwards it to its parent exactly like comctl32 (through the ReBar when the toolbar sits in a band) and falls
+back to the button's own label when the parent leaves the text empty.
+
+**Fixed on the way (both found with Notepad++).** `ChildWindowFromPointEx` honours `CWP_SKIPINVISIBLE / SKIPDISABLED /
+SKIPTRANSPARENT` and returns the topmost child (a parked invisible Scintilla at 0,0 no longer shadows the ReBar);
+`RealChildWindowFromPoint` added; menu lookup by command id is depth-first in item order like user32 — Notepad++ has
+`IDM_FILE_CLOSE` both as File ▸ Close and as the «✕» button at the right of the menu bar, and `GetMenuString` must return
+«Close».
+
+**Verified.** Notepad++ 8.8.9 x64 and x86: hovering the toolbar shows «Save» / «Close» (the real text produced by
+Notepad++'s own `TTN_GETDISPINFO` handler via `GetMenuString`); Q-Dir x64: «Up [BACKSPACE] / Please test R-mouse click :-)»
+(Q-Dir's own two-line tooltip). New tests `tooltip.exe` / `tooltip32.exe` (17 checks each: window tool, rectangle tool,
+callback text, toolbar tooltip through the parent, show/hide timing, `TTM_GETCURRENTTOOL/GETTEXT/GETTOOLCOUNT/DELTOOL/
+SETMAXTIPWIDTH`). Native suite 229 ok (ALL OK), browser e2e 46/46.
+
+**Limits.** `TTN_SHOW/TTN_POP/TTN_NEEDTEXT`-time repositioning by the owner is not sent; balloon style (`TTS_BALLOON`) and the
+title icon draw as a plain rectangle; `TTM_RELAYEVENT` is accepted but hover tracking is global (identical result for
+programs that relay mouse messages).
+
 # v1.31.0 — GDI+, shell icon services and the real shell folder view: Q-Dir (x64 and x86) browses the virtual disk (Android)
 
 **Why.** Q-Dir 12.8x (a real quad-pane file manager, ATL/WTL, ~2 MB) was the next «works like on Windows» target after
