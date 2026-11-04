@@ -1,3 +1,62 @@
+# v1.35.0 — real TrueType text: embedded font engine, proportional GDI everywhere, Cyrillic, font enumeration (Android)
+
+**Why.** Until now every program drew text with an 8x8 bitmap font stretched into fixed-width cells, which is why
+Notepad++ captions were clipped, dialogs looked nothing like Windows and Cyrillic rendered as boxes. Windows programs
+assume a real font system: proportional advances, `GetTextExtentExPoint` partial widths for caret placement, dialog base
+units derived from the dialog font, `EnumFontFamiliesEx` for font pickers. This release adds all of that as real behaviour
+(no stub, no host dependency — the rasterizer is part of the emulator and runs identically on Android/WebAssembly).
+
+**Font engine (emu/x64/ttf.inc).** A TrueType parser (`head`/`maxp`/`loca`/`glyf`/`cmap` formats 4 and 12/`hhea`/`hmtx`/
+`OS/2`), simple and composite glyphs (nested transforms), quadratic contours flattened and rasterized with a signed-area
+accumulation buffer (exact coverage, no supersampling; mild stem darkening for unhinted small sizes), a 4096-entry glyph
+cache keyed by face/size/style/code point, synthetic italic (shear), underline and strikeout, horizontal scaling
+(`lfWidth`). Faces are ordinary files in the guest file system, `C:\Windows\Fonts\{ptsans,ptsansb,cousine,cousineb}.ttf`
+(PT Sans regular/bold for the UI — Latin, Cyrillic, Greek; Cousine regular/bold for monospace — metric-compatible with
+Courier New; both SIL OFL, licences shipped next to them). `x64run` mounts `fonts/` next to the executable, the web/APK
+runtime fetches them into the VFS before the program starts (`public/x64/fonts`, precached by the PWA). Without the files
+everything falls back to the old bitmap glyphs.
+
+**Font selection (CreateFont/CreateFontIndirect A/W).** `lfHeight < 0` = em pixels, `> 0` = cell height (converted through
+`usWinAscent + usWinDescent`), `0` = 12 px; weight ≥ 600 picks the bold face; `FIXED_PITCH` or a monospace family name
+(Courier*, Consolas, Lucida Console, Fixedsys, Terminal, Cascadia, *Mono, …) picks Cousine; `MS Shell Dlg`, `Microsoft Sans
+Serif`, `Tahoma`, `Arial`, `Helvetica` are drawn 12 % condensed because dialogs were laid out for those narrower faces.
+Stock fonts are real now (`SYSTEM_FONT` bold 12 px, `DEFAULT_GUI_FONT` MS Shell Dlg 11 px, fixed stock fonts Cousine);
+`NONCLIENTMETRICS` reports Segoe UI 9 pt; tooltips use that 9 pt font.
+
+**GDI metrics and measurement — proportional everywhere.** `GetTextExtentPoint32/GetTextExtentPoint A/W` read the
+string (they used to multiply the length), `GetTextExtentExPoint A/W` (per-unit cumulative widths, `nFit`, surrogate
+pairs), `GetCharWidth32/GetCharWidth/GetCharWidthFloat/GetCharABCWidths A/W` (new), `GetTextMetrics A/W` (real
+ascent/descent/internal leading/average/max width, pitch-and-family flags, charset, proper A/W layouts), `GetTextFace
+A/W` (the selected face name), `GetObject(LOGFONT A/W)` (height, weight, italic/underline/strikeout, pitch, face name),
+`TextOut`/`ExtTextOut` alignment (`TA_RIGHT/CENTER/BASELINE/BOTTOM/UPDATECP`) from measured widths and the real ascent,
+`DrawText` word-wrap by pixel width, `DT_END_ELLIPSIS`/`DT_PATH_ELLIPSIS`, `DT_CALCRECT` equal to the extent. GDI+
+`DrawString`/`MeasureString` lay out with the same engine (family, bold/italic/underline/strikeout, wrap, alignment).
+
+**Controls and dialogs.** The `Edit` control measures text instead of counting columns: caret, selection highlight,
+click/drag hit testing, `ES_AUTOHSCROLL` scrolling (scrolls back after deletions), centre/right alignment, multi-line
+word wrap at pixel width; combo boxes, list boxes, menus, tabs, toolbars, status bars, headers, list/tree views, tooltips
+and group-box captions all go through `text_width`/`fnt_draw`. Dialog base units come from the dialog font (the 52-letter
+average the way Windows derives them), with the exact Windows values for the two standard dialog fonts (8 pt → 6x13,
+9 pt → 7x15) so templates designed on Windows keep their proportions.
+
+**Font enumeration (new).** `EnumFontFamiliesEx A/W`, `EnumFontFamilies A/W`, `EnumFonts A/W` call the guest callback
+per family (Segoe UI, Microsoft Sans Serif, Tahoma, Arial, MS Shell Dlg, Verdana, Courier New, Consolas, Lucida Console,
+PT Sans, Cousine, System, Fixedsys, Terminal) with `ENUMLOGFONTEX` + `NEWTEXTMETRICEX` (`TRUETYPE_FONTTYPE`, Latin/
+Greek/Cyrillic signature), honour the face filter and a `0` return — through continuations, x86 and x64.
+
+**Tests.** `tests/font.c` (26 checks, x64 + x86 in `run.sh`): proportional extents, partial widths, char widths, metrics,
+face names, `LOGFONT` round trip, enumeration (count / stop / filter), `DT_CALCRECT`/`DT_WORDBREAK`, Courier New 8 px cells,
+Cyrillic. The Inno Setup GUI test clicks moved with the VCL layout (forms scale by the font's average width). Full native
+suite (`run.sh`) and the browser e2e suite pass; Notepad++ x64 screenshots in `reports/` show the Find dialog and the
+editor with real glyphs.
+
+**Honest limits.** No hinting (small text is anti-aliased, not pixel-snapped like GDI); no kerning or OpenType shaping
+(Arabic/Indic shaping, ligatures are not done; combining marks overprint); only two families are bundled, every other
+family maps onto them (face names are still reported as requested); symbol fonts (Marlett, Wingdings, Segoe MDL2) fall
+back to bitmap glyphs or `?`; `GetGlyphOutline`, `GetFontData`, `AddFontResource`, `GetKerningPairs` are not implemented;
+ClearType-style sub-pixel rendering is not done (grayscale coverage only). Dialog proportions for fonts other than the two
+standard sizes are computed, not table-driven, and can differ by a pixel or two from Windows.
+
 # v1.34.0 — in-place rename (F2 / context menu / `LVM_EDITLABEL`), `IFolderView2`, DefView re-entry fix: Q-Dir x86/x64 (Android)
 
 **Why.** Renaming a file is the one thing every file manager does from the list itself: F2 or *Rename* in the right-click
