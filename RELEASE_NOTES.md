@@ -1,3 +1,60 @@
+# v1.37.0 — Notepad++ Preferences + Replace, real TrackMouseEvent, PuTTY panels, Q-Dir fonts (Android)
+
+**Notepad++ Settings → Preferences (x64 and x86).** The dialog crashed with `ColourPicker::init : CreateWindowEx() function
+return null` (0xc0000409): Preferences creates 26 child page dialogs with ~540 windows at once and the window table held 192.
+`MAX_WND` is 1024 now (tree-view handles carry a 10-bit window index, `TV_HBASE 0x544xxxxx`). Three Windows behaviours were
+also missing: a `WS_CHILD` dialog is placed at its template position inside the parent's client (`DIALOGEX 115, 10` → right
+of the category list; before, pages landed 64 px off and overlapped the bottom), `WM_ERASEBKGND` and `WM_ENABLE` reach an
+application's subclass of a common control (`SetWindowSubclass` chain or a replaced `GWLP_WNDPROC`) — Notepad++'s colour
+pickers are plain `Button`s that paint their colour in `WM_ERASEBKGND` and turn `COLOR_3DFACE` grey on `WM_ENABLE(FALSE)` —
+and `BM_SETCHECK` clamps to the style's maximum (Notepad++ sends flag values like 2 to two-state check boxes, which painted as
+indeterminate). All 24 categories open and render: General, Toolbar, Tab Bar, Editing 1/2 (track bars, combos), Dark Mode
+(13 pickers, grey while light mode is on — exactly as on Windows), Margins, New Document, Default Directory, Recent Files,
+File Association, Language, Indentation (list box), Highlighting, Print (header/footer combos), Searching, Backup,
+Auto-Completion, Multi-Instance & Date (the 1985-10-26 sample date is Notepad++'s own `_BTTF_time`), Delimiter, Performance,
+Cloud & Link (multi-line edit with scrollbar), Search Engine, MISC. — the list box scrolls to keep the selection visible.
+`reports/npp64_prefs.png`, `reports/npp32_prefs.png`.
+
+**Notepad++ Replace.** Tab from the "Find what" combo went back to the same combo (its focus lives in the inner Edit, which
+is not a direct child of the dialog), so the replacement text landed in the search field. `GetNextDlgTabItem` /
+`IsDialogMessage` now walk up from a focused child to the dialog-level control first, like Windows. Ctrl+H → `abc` → Tab →
+`xyz` → Replace All rewrites the document ("Replace All: 3 occurrences were replaced in entire file" in the dialog's status
+bar), Esc, Save As → `rep.txt` = `xyz xyz xyz` (now a `tests/run.sh` check). `reports/npp64_replace.png`.
+
+**`TrackMouseEvent` is real** (it returned TRUE and never sent anything). `TME_LEAVE` → `WM_MOUSELEAVE` when the pointer or the
+capture moves to another window (`WM_NCMOUSELEAVE` with `TME_NONCLIENT`), immediately when the pointer is already elsewhere at
+the time of the call; `TME_HOVER` → `WM_MOUSEHOVER` after `dwHoverTime` (default 400 ms) at rest, re-armed by every call;
+`TME_QUERY` reports what is tracked; `TME_CANCEL` stops it. Built-in push buttons end their hot state the same way instead of
+staying highlighted. New `tests/tme.c` (x64 + x86, 14 checks each, incl. a subclassed Button). Q-Dir's toolbar buttons no
+longer stick in the hot colour; tooltips of custom controls that rely on hover now appear (Q-Dir's "Back [ALT+LEFT]").
+
+**`SystemParametersInfo(SPI_GETNONCLIENTMETRICS)`** wrote the five `LOGFONT`s at the wrong offsets (one 4-byte int assumed
+between each; the real `NONCLIENTMETRICS` has two ints after the caption and small-caption fonts and none after the menu
+font) and always as `LOGFONTW`. Q-Dir builds its menu-bar and tab fonts from `lfMenuFont` and therefore read a shifted
+struct — face name `e UI`, italic = 'S', strikeout = 'e' — which is why its menu bar and tabs were drawn italic + struck
+through. A/W layouts (92 / 60-byte `LOGFONT`s), Windows 10 metrics (border 1, scroll 17, caption 22/36, menu 19, padded
+border 4) and an A/W `SPI_GETICONTITLELOGFONT`. `reports/qdir_hot.png`.
+
+**PuTTY configuration (x64).** Clicking a category never switched the panel: PuTTY is an ANSI build and compares the
+tree-view code with `TVN_SELCHANGEDA`, but a dialog created through `CreateDialogParamA` was registered as a Unicode window,
+so the control sent `TVN_SELCHANGEDW`. The `...A` dialog entry points now create ANSI windows (`IsWindowUnicode` is per
+window; list/tree views already pick A/W notifications from the parent). The Terminal panel then called a null import:
+PuTTY fills "Printer to send ANSI printer output to" through `winspool.drv` and does not expect `EnumPrinters` to be
+missing. `winspool.drv` shims: `EnumPrintersA/W` (no printers), `GetDefaultPrinter` (none), `OpenPrinter` →
+`ERROR_INVALID_PRINTER_NAME`, `StartDocPrinter` / `WritePrinter` fail, `ClosePrinter` ok, `DocumentProperties` → −1.
+Session → Terminal → Appearance panels switch and the old controls are destroyed (new `tests/run.sh` checks).
+`reports/putty.png`.
+
+**Menus.** The mnemonic underline was placed with a fixed cell width; with proportional fonts it ended up after the word
+(7-Zip's "Select All_"). It is now measured from the prefix and the glyph itself. `reports/7zfm.png`.
+
+**Tests.** `tests/run.sh` all green (incl. the new Notepad++ Preferences / Replace All, PuTTY panel and tme checks),
+browser e2e 46/46.
+
+**Known limits (honest).** Preference pages render and react, but settings that need a running Scintilla change (e.g. a new
+font) are only visually checked; no OLE drag & drop; `MS Shell Dlg` text is still ~4% wider than Windows (long button
+captions in the Find dialog touch the edges); keyboard cues are always drawn in menus (Windows hides them until Alt).
+
 # v1.36.0 — symbol glyphs, Notepad++ Find Next / Replace work exactly like Windows (Android)
 
 **Symbol glyphs that no bundled font covers.** Windows falls back to Segoe UI Symbol for geometric glyphs; the bundled
