@@ -8,7 +8,7 @@
  * goes into one framebuffer (the "screen" = the main window's client area, enlarged when a popup needs more room); a
  * window DC is a view into that framebuffer at the window's client origin, clipped to its visible size. */
 
-#define MAX_WND 192
+#define MAX_WND 1024   /* Notepad++ Preferences creates ~400 controls across its pages */
 #define HWND_FIRST 0x10042ull
 #define HWND_OF(i) (HWND_FIRST + (u64)(i) * 16)
 #define HWND_DESKTOP 0x10001ull
@@ -502,6 +502,8 @@ static void s_DestroyWindow(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0 || g_wnd
 static void wnd_frame(Cpu *c, int i);
 static int looks_like_rtf(const char *t); static char *rtf_to_text(const char *r, size_t n);
 static void ilr_resume(Cpu *c, u64 rax); static void wicread_resume(Cpu *c, u64 rax); static int dib_decode(Cpu *c, u64 bmi, u64 bits, u32 *dst, int dw, int dh, int flip_only_rows);
+/* a common control whose message flow the application intercepts (comctl32 subclass chain or a replaced GWLP_WNDPROC): WM_ERASEBKGND / WM_ENABLE must reach that code, as on Windows */
+static int wnd_app_subclassed(Wnd *n) { return n->builtin && !n->superclassed && n->wndproc && (n->nsub > 0 || (n->wndproc != builtin_slot(n->builtin) && n->wndproc != g_slot_subclass)); }
 static void wnd_erase(Cpu *c, int i) { Win32 *w = W; Wnd *n = &g_wnd[i]; u64 hb = n->cls_brush; u32 px = 0xf0f0f0; int skip = 0;
   if (w->api_trace) e_log("[user] erase #%d \"%s\" brush=%llx vis=%d at %d,%d %dx%d\n", i, n->clsname, (unsigned long long)hb, n->visible, n->x, n->y, n->w, n->h);
   if (n->is_dlg || n->builtin == BI_MSGBOX) px = 0xf0f0f0; else { GdiObj *b = gdi_get(w, hb); if (b) { if (b->kind == K_BRUSH && b->pen_width == -1) skip = 1; px = b->color; } else if (hb >= 1 && hb <= 31) px = g_sys_colors[hb - 1]; else if (!hb) skip = 1; }
@@ -518,7 +520,8 @@ static void erasebg_resume(Cpu *c, u64 rax) { Win32 *w = W; int ci = w->ncont - 
   beginpaint_fill(c, i, ps, hdc, 1); w32_cont_finish(c, hdc); }
 static void s_BeginPaint(Cpu *c) { Win32 *w = W; int i = wnd_of(ARG(0)); u64 ps = ARG(1); if (i < 0) { RET(0); return; } Wnd *n = &g_wnd[i]; int erase = n->erase; n->invalid = 0; n->erase = 0; if (i == 0) sync_main(w);
   u64 hdc = wnd_dc(c, i);
-  if (erase && hdc && (!n->builtin || n->superclassed) && !(n->is_dlg && n->dlgproc) && n->wndproc) {   /* WM_ERASEBKGND goes through the guest window procedure (VCL / custom frameworks paint their own background) */
+  int subclassed = wnd_app_subclassed(n);   /* SetWindowSubclass chain or a replaced GWLP_WNDPROC in front of a common control (Notepad++ ColourPicker draws its colour in WM_ERASEBKGND) */
+  if (erase && hdc && (!n->builtin || n->superclassed || subclassed) && !(n->is_dlg && n->dlgproc) && n->wndproc) {   /* WM_ERASEBKGND goes through the guest window procedure (VCL / custom frameworks paint their own background) */
     w32_push_cont(c, CONT_ERASEBG, (u64)i); w->cont[w->ncont - 1].data[1] = hdc; w->cont[w->ncont - 1].data[2] = ps; w32_guest_call(c, n->wndproc, HWND_OF(i), 0x14, hdc, 0); return; }
   if (erase) wnd_erase(c, i);
   beginpaint_fill(c, i, ps, hdc, 1); RET(hdc); }
@@ -626,7 +629,7 @@ static void s_DeferWindowPos(Cpu *c) { int i = wnd_of(ARG(1)); if (i >= 0) wnd_z
 static void s_EndDeferWindowPos(Cpu *c) { RET(1); }
 static void s_GetWindowPlacement(Cpu *c) { int i = wnd_of(ARG(0)); u64 p = ARG(1); if (i < 0) { RET(0); return; } int sx, sy; /* rcNormalPosition: workspace coordinates for top-level windows, PARENT CLIENT coordinates for children (7-Zip adds .top to the toolbar height) */ if (g_wnd[i].parent >= 0) { sx = g_wnd[i].x; sy = g_wnd[i].y; } else { wnd_window_origin(i, &sx, &sy); sx += SCREEN_X0; sy += SCREEN_Y0; } wr32(c, p, 44); wr32(c, p + 4, 0); wr32(c, p + 8, g_wnd[i].visible ? 1 : 0); wr32(c, p + 28, (u32)sx); wr32(c, p + 32, (u32)sy); wr32(c, p + 36, (u32)(sx + g_wnd[i].w)); wr32(c, p + 40, (u32)(sy + g_wnd[i].h)); RET(1); }
 static void s_SetWindowPlacement(Cpu *c) { int i = wnd_of(ARG(0)); u64 p = ARG(1); if (i < 0) { RET(0); return; } u32 show = rd32(c, p + 8); int l = (s32)rd32(c, p + 28), t = (s32)rd32(c, p + 32), r = (s32)rd32(c, p + 36), b = (s32)rd32(c, p + 40); if (show && show != 0) wnd_show_now(c, i); if (wnd_set_pos(c, i, l, t, r - l, b - t, 0, 1)) return; RET(1); }
-static void s_EnableWindow(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } int prev = !g_wnd[i].enabled; int en = ARG(1) != 0; if (g_wnd[i].enabled != en) { g_wnd[i].enabled = en; wnd_invalidate(i, 1); if (!en && (g_focus == i || (g_focus >= 0 && wnd_is_child_of(g_focus, i)))) g_focus = -1; if (!g_wnd[i].builtin) { Wnd *n = &g_wnd[i]; if (n->pid == W->pid && n->wndproc) { /* WM_ENABLE is sent synchronously, like Windows: VCL's TApplication reacts to it inside DisableTaskWindows */ w32_push_cont(c, CONT_RET_VAL_, (u64)prev); w32_guest_call(c, n->wndproc, HWND_OF(i), 0x0A, (u64)en, 0); return; } post_msg_to(W, HWND_OF(i), 0x0A, en, 0); } } RET(prev); }
+static void s_EnableWindow(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } int prev = !g_wnd[i].enabled; int en = ARG(1) != 0; if (g_wnd[i].enabled != en) { g_wnd[i].enabled = en; wnd_invalidate(i, 1); if (!en && (g_focus == i || (g_focus >= 0 && wnd_is_child_of(g_focus, i)))) g_focus = -1; if (!g_wnd[i].builtin || g_wnd[i].superclassed || wnd_app_subclassed(&g_wnd[i])) { Wnd *n = &g_wnd[i]; if (n->pid == W->pid && n->wndproc) { /* WM_ENABLE is sent synchronously, like Windows: VCL's TApplication reacts to it inside DisableTaskWindows */ w32_push_cont(c, CONT_RET_VAL_, (u64)prev); w32_guest_call(c, n->wndproc, HWND_OF(i), 0x0A, (u64)en, 0); return; } post_msg_to(W, HWND_OF(i), 0x0A, en, 0); } } RET(prev); }
 static void s_IsWindowEnabled(Cpu *c) { int i = wnd_of(ARG(0)); RET(i >= 0 && wnd_enabled_chain(i)); }
 static void s_IsWindow(Cpu *c) { int i = wnd_of(ARG(0)); RET(i >= 0 && !g_wnd[i].destroyed); }
 static void s_IsWindowVisible(Cpu *c) { int i = wnd_of(ARG(0)); RET(i >= 0 && wnd_visible_chain(i)); }
@@ -1501,7 +1504,7 @@ static int dlg_begin(Cpu *c, u64 hinst, u64 tmpl, u64 owner_h, u64 dlgproc, u64 
   int pw = cx * bx / 4, ph = cy * by / 8; const char *wcls = cls[0] && cls[0] != '#' ? cls : "#32770"; int owner = wnd_of(owner_h);
   u32 wstyle = (style & ~0x10000000u) | (owner >= 0 || !(style & 0x40000000u) ? 0 : 0); if (!(wstyle & 0x40000000u)) wstyle |= 0x80000000u;   /* WS_POPUP unless WS_CHILD */
   int fx = 0, fy = 0; if (!g_wnd[0].used && !(wstyle & 0x40000000u) && (style & 0x00C00000u) == 0x00C00000u) { fx = 16; fy = 39; }   /* template cx/cy are CLIENT units; the main-window path takes a full window size */
-  int i = wnd_create_obj(c, wcls, title, wstyle | 0x00C00000u * ((style & 0x00C00000u) == 0x00C00000u ? 1 : 0), exstyle, (style & 0x0800) || (style & 0x40000000u) == 0 ? 0x80000000 : x * bx / 4 + SCREEN_X0, (style & 0x0800) || (style & 0x40000000u) == 0 ? 0x80000000 : y * by / 8 + SCREEN_Y0, pw + fx, ph + fy, owner_h, 0, hinst, param, 1, 0);
+  int i = wnd_create_obj(c, wcls, title, wstyle | 0x00C00000u * ((style & 0x00C00000u) == 0x00C00000u ? 1 : 0), exstyle, (style & 0x0800) || (style & 0x40000000u) == 0 ? 0x80000000 : x * bx / 4, (style & 0x0800) || (style & 0x40000000u) == 0 ? 0x80000000 : y * by / 8, pw + fx, ph + fy, owner_h, 0, hinst, param, 1, 0);   /* a WS_CHILD dialog sits at the template position in its parent's client (Notepad++ Preferences pages: DIALOGEX 115, 10) */
   if (i < 0) return -1; Wnd *n = &g_wnd[i]; n->is_dlg = 1; n->dlgproc = dlgproc; n->modal = modal; n->base_x = bx; n->base_y = by; n->cls_brush = 0; n->builtin = n->builtin ? n->builtin : BI_DIALOG; if (!cls[0] || cls[0] == '#') n->wndproc = g_slot_dialog;
   if (dfont) n->font = dfont->handle; else n->font = g_dlg_font;   /* line height = cell height (13 for 8 pt), char width from the em (6) */
   if (modal && owner >= 0) { g_wnd[owner].enabled = 0; wnd_invalidate(owner, 1); }

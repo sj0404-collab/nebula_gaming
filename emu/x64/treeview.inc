@@ -6,12 +6,12 @@
    NM_CLICK/NM_DBLCLK/NM_RCLICK/NM_RETURN/TVN_KEYDOWN, keyboard navigation and an internal vertical scrollbar.  No label editing,
    no drag images, no custom draw (NM_CUSTOMDRAW is not sent: items are drawn by the emulator). */
 #define TV_MAX 1024
-#define TV_HBASE 0x54500000ull   /* bits 12..19: window index (< 256), bits 0..11: slot + 1 */
+#define TV_HBASE 0x54400000ull   /* bits 12..21: window index (< 1024), bits 0..11: slot + 1 */
 typedef struct { u8 used, expanded, cb_text, fetched; int parent, first, next; int image, selimage, children; u32 state; u64 lparam; char text[96]; } TvItem;
 typedef struct { TvItem *it; int cap, count; int sel, hot, top; int indent, itemh; u64 himl, himl_state; u32 bk, fg, line; int bk_set, fg_set; int vis_n, vis_cap; int *vis; u64 nmbuf; int pending, pending_action, pending_phase; u64 drop; int sel_image_w; } TreeView;
 static TreeView *tv_of(int i) { return g_wnd[i].cc; }
 static u64 tv_h(int i, int k) { return k < 0 ? 0 : TV_HBASE | ((u64)i << 12) | (u64)(k + 1); }
-static int tv_k(int i, TreeView *tv, u64 h) { if (!tv || !tv->it || ((u32)h >> 20) != (u32)(TV_HBASE >> 20) || (int)((h >> 12) & 0xFF) != i) return -1; int k = (int)(h & 0xFFF) - 1; return (k >= 0 && k < tv->cap && tv->it[k].used) ? k : -1; }
+static int tv_k(int i, TreeView *tv, u64 h) { if (!tv || !tv->it || ((u32)h >> 22) != (u32)(TV_HBASE >> 22) || (int)((h >> 12) & 0x3FF) != i) return -1; int k = (int)(h & 0xFFF) - 1; return (k >= 0 && k < tv->cap && tv->it[k].used) ? k : -1; }
 static void e_memset_guest(Cpu *c, u64 a, int v, u64 n) { for (u64 q = 0; q < n; q++) wr8(c, a + q, (u8)v); }
 static int tv_is_root(u64 h) { u32 l = (u32)h; return h == 0 || l == 0xFFFF0000u; }   /* TVI_ROOT (sign-extended on x64) */
 /* root chain: tv->root holds the first root item; we keep it in it[].parent == -1 and link via next. */
