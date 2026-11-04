@@ -18,7 +18,7 @@
 #define MENU_H 20
 #define SUPER_ADOPT(i, k) do { if (!g_wnd[i].builtin) { g_wnd[i].builtin = (k); g_wnd[i].superclassed = 1; } } while (0)
 enum { BI_NONE = 0, BI_BUTTON, BI_STATIC, BI_EDIT, BI_COMBO, BI_LISTBOX, BI_SCROLLBAR, BI_DIALOG, BI_PROGRESS, BI_LINK, BI_COMBOLIST, BI_UNSUPPORTED, BI_MSGBOX, BI_MENU, BI_STATUS, BI_TOOLBAR, BI_TAB, BI_TREE, BI_LIST, BI_REBAR, BI_COMBOEX, BI_DEFVIEW, BI_TOOLTIP, BI_TRACKBAR, BI_UPDOWN };
-enum { CONT_WNDCREATE = 6 /* = CONT_CREATEWND in win32.c */, CONT_WNDDESTROY = 400, CONT_CTLPAINT = 401, CONT_DLGINIT = 402, CONT_MODAL = 403, CONT_DLGMSG = 404, CONT_SENDCMD = 405, CONT_DLGPROC = 406, CONT_ERASEBG = 407, CONT_SETPOS = 408, CONT_STREAMIN = 409, CONT_ILREAD = 410, CONT_WICREAD = 411, CONT_MENUOPEN = 412, CONT_MENUDRAW = 413, CONT_TABSEL = 414, CONT_SUBCLASS = 415, CONT_DIENUM = 416, CONT_TVSEL = 417, CONT_TVEXP = 418, CONT_TVDISP = 419, CONT_ANSIOUT = 420, CONT_LVCHG = 421, CONT_LVDISP = 422, CONT_LVSORT = 423, CONT_LVCLICK = 424, CONT_CWPHOOK = 425, CONT_KBDHOOK = 426, CONT_HOOKNEXT = 427, CONT_FDINIT = 428, CONT_FDEVT = 429, CONT_FDOK = 430, CONT_SVGETWND = 431, CONT_SVBROWSE = 432, CONT_TTDISP = 433, CONT_TTFWD = 434, CONT_LVEDIT = 435, CONT_UDDELTA = 436, CONT_UDTEXT = 437, CONT_TBEND = 438, CONT_RET_VAL_ = 5 };
+enum { CONT_WNDCREATE = 6 /* = CONT_CREATEWND in win32.c */, CONT_WNDDESTROY = 400, CONT_CTLPAINT = 401, CONT_DLGINIT = 402, CONT_MODAL = 403, CONT_DLGMSG = 404, CONT_SENDCMD = 405, CONT_DLGPROC = 406, CONT_ERASEBG = 407, CONT_SETPOS = 408, CONT_STREAMIN = 409, CONT_ILREAD = 410, CONT_WICREAD = 411, CONT_MENUOPEN = 412, CONT_MENUDRAW = 413, CONT_TABSEL = 414, CONT_SUBCLASS = 415, CONT_DIENUM = 416, CONT_TVSEL = 417, CONT_TVEXP = 418, CONT_TVDISP = 419, CONT_ANSIOUT = 420, CONT_LVCHG = 421, CONT_LVDISP = 422, CONT_LVSORT = 423, CONT_LVCLICK = 424, CONT_CWPHOOK = 425, CONT_KBDHOOK = 426, CONT_HOOKNEXT = 427, CONT_FDINIT = 428, CONT_FDEVT = 429, CONT_FDOK = 430, CONT_SVGETWND = 431, CONT_SVBROWSE = 432, CONT_TTDISP = 433, CONT_TTFWD = 434, CONT_LVEDIT = 435, CONT_UDDELTA = 436, CONT_UDTEXT = 437, CONT_TBEND = 438, CONT_ENUMFONT = 439, CONT_RET_VAL_ = 5 };
 #define MAX_ITEMS 512
 static int combo_icon_cx(u64 himl);   /* comctl.inc: width reserved for an image-list icon (0 without image list) */
 static void combo_icon_draw(Cpu *c, u64 himl, u32 img1, u64 hdc, int x, int y, int h);   /* comctl.inc: draws item image (img1 = image + 1) centred in a row of height h */
@@ -650,6 +650,31 @@ static void s_GetWindow(Cpu *c) { int i = wnd_of(ARG(0)); u32 cmd = (u32)ARG(1);
 static void s_GetTopWindow(Cpu *c) { int i = wnd_of(ARG(0)); int best = -1; for (int k = 0; k < MAX_WND; k++) if (wnd_alive(k) && g_wnd[k].parent == i && (best < 0 || g_wnd[k].zseq > g_wnd[best].zseq)) best = k; RET(best >= 0 ? HWND_OF(best) : 0); }
 static void s_GetNextWindow(Cpu *c) { s_GetWindow(c); }
 static void s_GetLastActivePopup(Cpu *c) { RET(ARG(0)); }
+/* EnumFontFamilies(Ex): callback(ENUMLOGFONTEX*, NEWTEXTMETRICEX*, TRUETYPE_FONTTYPE, lParam) per installed family (via continuations); data[0] callback, data[1] lParam, data[2] index, data[3] wide, data[4] guest scratch, data[5] face filter (0 = all, else family index + 1) */
+static const char *const g_font_families[] = { "Segoe UI", "Microsoft Sans Serif", "Tahoma", "Arial", "MS Shell Dlg", "Verdana", "Courier New", "Consolas", "Lucida Console", "PT Sans", "Cousine", "System", "Fixedsys", "Terminal" };
+#define N_FONT_FAMILIES 14
+static int font_family_index(const char *n) { for (int k = 0; k < N_FONT_FAMILIES; k++) if (!e_stricmp(n, g_font_families[k])) return k; return -1; }
+static void enum_font_done(Cpu *c, u64 r) { Win32 *w = W; u64 *d = w->cont[w->ncont - 1].data; if (d[4]) w32_heap_free(w, d[4]); w32_cont_finish(c, r); }
+static void enum_font_step(Cpu *c) { Win32 *w = W; u64 *d = w->cont[w->ncont - 1].data; int k = (int)d[2]; int wide = (int)d[3]; if (d[5]) { if (k > 0) { enum_font_done(c, 1); return; } k = (int)d[5] - 1; } if (k >= N_FONT_FAMILIES) { enum_font_done(c, 1); return; } d[2] = (u64)((int)d[2] + 1);
+  const char *name = g_font_families[k]; int mono = k >= 6 && k <= 8 ? 1 : k == 10 || k >= 12 ? 1 : 0; u64 lf = d[4], tm = lf + 352; u8 *p = mem_ptr(c->mem, lf, 480, 1); if (!p) { enum_font_done(c, 0); return; } e_memset(p, 0, 480);
+  GdiObj tmp; e_memset(&tmp, 0, sizeof tmp); tmp.kind = K_FONT; fnt_setup(&tmp, -12, 400, 0, 0, 0, mono ? 0x31 : 0x22, name); int asc, desc, avg, maxw; int fh = fnt_metrics(&tmp, &asc, &desc, &avg, &maxw);
+  wr32(c, lf, (u32)-(s32)fh); wr32(c, lf + 16, 400); wr8(c, lf + 23, 1); wr8(c, lf + 26, 1); wr8(c, lf + 27, (u8)(mono ? 0x31 : 0x22));
+  if (wide) { put_w_utf8(c, lf + 28, name, 32); put_w_utf8(c, lf + 92, name, 64); put_w_utf8(c, lf + 220, "Regular", 32); put_w_utf8(c, lf + 284, "Western", 32); }
+  else { u8 *q = p + 28; for (int i = 0; name[i] && i < 31; i++) q[i] = (u8)name[i]; q = p + 60; for (int i = 0; name[i] && i < 63; i++) q[i] = (u8)name[i]; e_memcpy(p + 124, "Regular", 8); e_memcpy(p + 156, "Western", 8); }
+  wr32(c, tm, (u32)fh); wr32(c, tm + 4, (u32)asc); wr32(c, tm + 8, (u32)desc); wr32(c, tm + 12, (u32)(fh - 12)); wr32(c, tm + 20, (u32)avg); wr32(c, tm + 24, (u32)maxw); wr32(c, tm + 28, 400); wr32(c, tm + 36, 96); wr32(c, tm + 40, 96);
+  int ntm = wide ? 60 : 56; wr8(c, tm + (wide ? 55 : 51), (u8)(mono ? 0x36 : 0x27)); wr32(c, tm + ntm, 0x40); wr32(c, tm + ntm + 4, 2048); wr32(c, tm + ntm + 8, (u32)fh); wr32(c, tm + ntm + 12, (u32)avg); wr32(c, tm + ntm + 16, 0x80000207u); wr32(c, tm + ntm + 32, 1);   /* NEWTEXTMETRIC: ntmFlags NTM_TT_OPENTYPE, size/cell/avg; FONTSIGNATURE: Latin/Greek/Cyrillic, ANSI codepage */
+  w32_guest_call(c, d[0], lf, tm, 4, d[1]); }
+static void enum_fonts(Cpu *c, u64 lf, u64 cb, u64 lparam, int wide) { Win32 *w = W; if (!cb) { RET(0); return; } char face[64]; face[0] = 0; if (lf) { if (wide) wstr_to_utf8(c, lf + 28, face, sizeof face, 32); else { const char *n = rd_str(c, lf + 28, 32); if (n) { int i = 0; for (; n[i] && i < 31; i++) face[i] = n[i]; face[i] = 0; } } }
+  int fi = face[0] ? font_family_index(face) : -1; if (face[0] && fi < 0) { RET(1); return; } u64 scratch = w32_heap_alloc(w, 512, 1); if (!scratch) { RET(0); return; }
+  w32_push_cont(c, CONT_ENUMFONT, 0); u64 *d = w->cont[w->ncont - 1].data; d[0] = cb; d[1] = lparam; d[2] = 0; d[3] = (u64)wide; d[4] = scratch; d[5] = fi >= 0 ? (u64)(fi + 1) : 0; enum_font_step(c); }
+static void s_EnumFontFamiliesExW(Cpu *c) { enum_fonts(c, ARG(1), ARG(2), ARG(3), 1); }
+static void s_EnumFontFamiliesExA(Cpu *c) { enum_fonts(c, ARG(1), ARG(2), ARG(3), 0); }
+static void enum_fonts_name(Cpu *c, int wide) { Win32 *w = W; char face[64]; face[0] = 0; if (ARG(1)) text_in(c, ARG(1), wide, face, sizeof face); int fi = face[0] ? font_family_index(face) : -1; if (face[0] && fi < 0) { RET(1); return; } if (!ARG(2)) { RET(0); return; } u64 scratch = w32_heap_alloc(w, 512, 1); if (!scratch) { RET(0); return; }
+  w32_push_cont(c, CONT_ENUMFONT, 0); u64 *d = w->cont[w->ncont - 1].data; d[0] = ARG(2); d[1] = ARG(3); d[2] = 0; d[3] = (u64)wide; d[4] = scratch; d[5] = fi >= 0 ? (u64)(fi + 1) : 0; enum_font_step(c); }
+static void s_EnumFontFamiliesW(Cpu *c) { enum_fonts_name(c, 1); }
+static void s_EnumFontFamiliesA(Cpu *c) { enum_fonts_name(c, 0); }
+static void s_EnumFontsW(Cpu *c) { enum_fonts_name(c, 1); }
+static void s_EnumFontsA(Cpu *c) { enum_fonts_name(c, 0); }
 /* EnumChildWindows / EnumWindows / EnumThreadWindows: callback(hwnd, lparam) per window via continuations */
 #define CONT_ENUMWND 107
 static void enum_wnd_step(Cpu *c) { Win32 *w = W; int ci = w->ncont - 1; u64 *d = w->cont[ci].data; int parent = (int)(s64)d[0]; int from = (int)d[1]; int mode = (int)d[3];
@@ -1754,7 +1779,7 @@ void gdi_cont_resume(Cpu *c, int kind, u64 rax) {
     case CONT_LVSORT: lvsort_resume(c, rax); return;
     case CONT_LVCLICK: lvclick_resume(c, rax); return;
     case CONT_LVEDIT: lvedit_resume(c, rax); return;
-    case CONT_UDDELTA: uddelta_resume(c, rax); return; case CONT_UDTEXT: udtext_resume(c, rax); return; case CONT_TBEND: tbend_resume(c, rax); return;
+    case CONT_UDDELTA: uddelta_resume(c, rax); return; case CONT_UDTEXT: udtext_resume(c, rax); return; case CONT_TBEND: tbend_resume(c, rax); return; case CONT_ENUMFONT: { if (!(u32)rax) { enum_font_done(c, 0); return; } enum_font_step(c); return; }
     case CONT_DLGINIT: dlginit_resume(c, rax); return;
     case CONT_DLGPROC: dlgproc_resume(c, rax); return;
     case CONT_MODAL: { int m = g_nmodal - 1; if (m >= 0 && g_modal[m].phase == 2) { u64 res = modal_result(w, m); g_nmodal--; w32_cont_finish(c, res); return; } modal_resume(c, rax); return; }

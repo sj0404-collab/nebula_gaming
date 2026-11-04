@@ -104,12 +104,6 @@ static void s_GetStretchBltMode(Cpu *c) { RET(3); }
 static void s_CreatePenIndirect(Cpu *c) { u64 lp = ARG(0); call_shim_tail(c, s_CreatePen, rd32(c, lp), rd32(c, lp + 4), rd32(c, lp + 12), 0); }
 static void s_GetTextExtentPointW(Cpu *c) { call_shim_tail(c, s_GetTextExtentPoint32W, ARG(0), ARG(1), ARG(2), ARG(3)); }
 static void s_GetTextExtentPointA(Cpu *c) { call_shim_tail(c, s_GetTextExtentPoint32A, ARG(0), ARG(1), ARG(2), ARG(3)); }
-static void s_EnumFontsW(Cpu *c) { RET(1); }
-static void s_EnumFontsA(Cpu *c) { RET(1); }
-static void s_EnumFontFamiliesExW(Cpu *c) { RET(1); }
-static void s_EnumFontFamiliesExA(Cpu *c) { RET(1); }
-static void s_EnumFontFamiliesW(Cpu *c) { RET(1); }
-static void s_EnumFontFamiliesA(Cpu *c) { RET(1); }
 static void s_AddFontResourceW(Cpu *c) { RET(1); }
 static void s_AddFontResourceA(Cpu *c) { RET(1); }
 static void s_RemoveFontResourceW(Cpu *c) { RET(1); }
