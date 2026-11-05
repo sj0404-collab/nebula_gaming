@@ -88,6 +88,21 @@ if (st === 'fault' || st === 'exited') {
   await w.locator('[data-x64-tab="report"]').click().catch(() => {}); await sleep(300);
   console.log('report:', (await w.locator('[data-x64-report]').innerText().catch(() => '')).slice(0, 2000));
 }
+// ---- scripted actions before recording: --actions "click:0.5,0.83@80;key:Enter@40;wait:100" (coordinates are fractions of the
+// game screen, @N = frames the game must present after the action; a page screenshot step-<k>.png is taken after each) ----
+const actions = (opt('--actions', '') || '').split(';').map(a => a.trim()).filter(Boolean);
+for (let k = 0; k < actions.length; k++) {
+  const a = actions[k]; const m = /^(click|dblclick|key|wait|type):?([^@]*)(?:@(\d+))?$/.exec(a); if (!m) { console.log(`bad action: ${a}`); continue; }
+  const want = Number(m[3] || 60); const f0 = await framesNow(); const box = await screen.boundingBox();
+  if ((m[1] === 'click' || m[1] === 'dblclick') && box) { const [fx, fy] = m[2].split(',').map(Number); const x = box.x + box.width * fx, y = box.y + box.height * fy;
+    await page.mouse.move(x, y); await sleep(150); await page.mouse.down(); await sleep(120); await page.mouse.up(); if (m[1] === 'dblclick') { await sleep(80); await page.mouse.down(); await sleep(80); await page.mouse.up(); } console.log(`action ${k}: ${m[1]} at ${Math.round(x)},${Math.round(y)} (${fx},${fy})`); }
+  else if (m[1] === 'key') { await page.keyboard.press(m[2]); console.log(`action ${k}: key ${m[2]}`); }
+  else if (m[1] === 'type') { await page.keyboard.type(m[2], { delay: 120 }); console.log(`action ${k}: type ${m[2]}`); }
+  else console.log(`action ${k}: wait`);
+  const tA = Date.now(); while (Date.now() - tA < 600000) { const f = await framesNow(); if (f - f0 >= want) break; const stA = await status(); if (stA !== 'running') break; await sleep(1000); }
+  console.log(`  → frames ${f0} → ${await framesNow()} in ${((Date.now() - tA) / 1000).toFixed(0)} s, status=${await status()}`);
+  await page.screenshot({ path: resolve(OUT, `step-${k}.png`) });
+}
 // ---- record ----
 const acT0 = await page.evaluate(() => (window.__acs[0] ? window.__acs[0].currentTime : 0));
 const pcmStartIdx = await page.evaluate(() => window.__pcm.length);

@@ -21,6 +21,9 @@ on:
       jitskip:
         description: 'JIT bisection "lo:hi": instruction kinds in that range are interpreted (diagnostics), empty = off'
         default: ''
+      actions:
+        description: 'scripted input before recording, e.g. "click:0.5,0.83@80;key:Enter@40" (fractions of the game screen, @frames to wait)'
+        default: ''
 
 run-name: "game video · jit=${{ inputs.jit }} skip=${{ inputs.jitskip }} trace=${{ inputs.gltrace }} ${{ inputs.seconds }}s"
 permissions:
@@ -50,7 +53,7 @@ jobs:
           curl -sSL -o /tmp/ShatteredPD-v4.0.2-Windows.zip https://github.com/00-Evan/shattered-pixel-dungeon/releases/download/v4.0.2/ShatteredPD-v4.0.2-Windows.zip
           ls -la /tmp/ShatteredPD-v4.0.2-Windows.zip; unzip -l /tmp/ShatteredPD-v4.0.2-Windows.zip | head -15
       - name: Run the game in the emulator and record frames + audio
-        run: node e2e/record.mjs /tmp/ShatteredPD-v4.0.2-Windows.zip --seconds "${{ github.event.inputs.seconds || '15' }}" --settle-frames "${{ github.event.inputs.settle_frames || '400' }}" --jit "${{ github.event.inputs.jit || '1' }}" --gltrace "${{ github.event.inputs.gltrace }}" --jitskip "${{ github.event.inputs.jitskip }}" --out e2e/video
+        run: node e2e/record.mjs /tmp/ShatteredPD-v4.0.2-Windows.zip --seconds "${{ github.event.inputs.seconds || '15' }}" --settle-frames "${{ github.event.inputs.settle_frames || '400' }}" --jit "${{ github.event.inputs.jit || '1' }}" --gltrace "${{ github.event.inputs.gltrace }}" --jitskip "${{ github.event.inputs.jitskip }}" --actions "${{ github.event.inputs.actions }}" --out e2e/video
         timeout-minutes: 60
       - name: Mux with ffmpeg (exact per-frame durations + captured PCM)
         run: |
@@ -70,4 +73,5 @@ jobs:
             e2e/video/console.txt
             e2e/video/report.txt
             e2e/video/gltrace.txt
+            e2e/video/step-*.png
           if-no-files-found: warn
