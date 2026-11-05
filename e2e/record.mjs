@@ -44,6 +44,7 @@ await ctx.addInitScript(() => {
     return start.call(this, when, ...rest);
   };
 });
+if (opt('--jit', '1') === '0') await ctx.addInitScript(() => { try { localStorage.setItem('nebula_jit', '0'); } catch { /* ignore */ } });
 const page = await ctx.newPage();
 const errors = []; page.on('pageerror', e => errors.push(e.message));
 await page.goto(url); await page.waitForSelector('[aria-label="Start"]');
