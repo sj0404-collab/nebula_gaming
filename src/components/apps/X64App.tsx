@@ -486,7 +486,7 @@ export default function X64App() {
     const url = await new Promise<string>((res, rej) => { const im = new Image(); const u = URL.createObjectURL(file); im.onload = () => { const c = document.createElement('canvas'); const s = Math.min(1, 512 / Math.max(im.width, im.height)); c.width = Math.round(im.width * s); c.height = Math.round(im.height * s); c.getContext('2d')!.drawImage(im, 0, 0, c.width, c.height); URL.revokeObjectURL(u); res(c.toDataURL('image/jpeg', 0.85)); }; im.onerror = () => { URL.revokeObjectURL(u); rej(new Error('bad image')); }; im.src = u; }).catch(() => '');
     if (url) updatePrefs(id, { cover: url });
   }, [updatePrefs]);
-  const stop = useCallback(() => { const rt = rtRef.current; if (!rt) return; rt.stop(); setStats(rt.stats()); setFiles(rt.vfsList()); }, []);
+  const stop = useCallback(() => { const rt = rtRef.current; if (!rt) return; rt.stop(); setStats(rt.stats()); setApiStats(rt.apiStats()); setJitInfo(rt.jitStats()); setFiles(rt.vfsList()); }, []);   // a manual stop shows the same statistics as a normal exit (JIT regions, Win32 calls)
 
   // keyboard → guest
   const guestKey = useCallback((e: React.KeyboardEvent, down: boolean) => {
