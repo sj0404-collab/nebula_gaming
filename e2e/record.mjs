@@ -34,7 +34,12 @@ await ctx.addInitScript(() => {
   AudioBufferSourceNode.prototype.start = function (when, ...rest) {
     try {
       const b = this.buffer;
-      if (b) { const l = Array.from(b.getChannelData(0)), r = Array.from(b.numberOfChannels > 1 ? b.getChannelData(1) : b.getChannelData(0)); W.__pcm.push({ when: when ?? this.context.currentTime, rate: b.sampleRate, l, r }); }
+      if (b) {
+        const l = Float32Array.from(b.getChannelData(0)), r = Float32Array.from(b.numberOfChannels > 1 ? b.getChannelData(1) : b.getChannelData(0));
+        const at = when ?? this.context.currentTime; W.__pcm.push({ when: at, rate: b.sampleRate, l, r });
+        // keep only the last 90 s of context time (the game may run for many minutes before the recording starts)
+        while (W.__pcm.length && W.__pcm[0].when < at - 90) W.__pcm.shift();
+      }
     } catch { /* ignore */ }
     return start.call(this, when, ...rest);
   };
@@ -81,6 +86,7 @@ if (st === 'fault' || st === 'exited') {
 // ---- record ----
 const acT0 = await page.evaluate(() => (window.__acs[0] ? window.__acs[0].currentTime : 0));
 const pcmStartIdx = await page.evaluate(() => window.__pcm.length);
+await page.evaluate(() => { window.__pcmKeep = window.__pcm.length; }); // blocks before this index may be trimmed by the ring; we only read from here on
 const tStart = Date.now(); const stamps = []; let n = 0;
 while (Date.now() - tStart < seconds * 1000) {
   const t = Date.now() - tStart;
@@ -98,7 +104,8 @@ for (let i = 0; i < stamps.length; i++) { const d = ((i + 1 < stamps.length ? st
 if (stamps.length) concat += `file 'frames/${stamps[stamps.length - 1].name}'\n`;
 writeFileSync(resolve(OUT, 'concat.txt'), concat);
 // audio: blocks scheduled in [acT0, acT1] → WAV (stereo 16-bit) over exactly the recorded span
-const blocks = await page.evaluate((i0) => window.__pcm.slice(i0), pcmStartIdx);
+const blocks = await page.evaluate((t0) => window.__pcm.filter(b => b.when >= t0 - 0.05).map(b => ({ when: b.when, rate: b.rate, l: Array.from(b.l), r: Array.from(b.r) })), acT0);
+void pcmStartIdx;
 const rate = blocks[0]?.rate || 48000; const total = Math.max(1, Math.round(wallSec * rate));
 const pcm = new Int16Array(total * 2);
 let placed = 0;
