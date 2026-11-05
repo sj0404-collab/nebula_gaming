@@ -45,6 +45,8 @@ await ctx.addInitScript(() => {
   };
 });
 if (opt('--jit', '1') === '0') await ctx.addInitScript(() => { try { localStorage.setItem('nebula_jit', '0'); } catch { /* ignore */ } });
+const gltrace = opt('--gltrace', '');   // "<afterFrame>:<calls>" → the GL bridge logs decoded calls into the report (see gl.ts)
+if (gltrace) await ctx.addInitScript((t) => { try { localStorage.setItem('nebula_gltrace', t); } catch { /* ignore */ } }, gltrace);
 const page = await ctx.newPage();
 const errors = []; page.on('pageerror', e => errors.push(e.message));
 await page.goto(url); await page.waitForSelector('[aria-label="Start"]');
@@ -131,6 +133,7 @@ await w.locator('[data-x64-tab="report"]').click().catch(() => {}); await sleep(
 const rep = await page.evaluate(() => document.querySelector('[data-x64-report]')?.textContent || '');
 const repLines = rep.split('\n').filter(l => /\[gl\]|\[audio\]|GL_|wgl|fault|exception|not available|ignored|unsupported/i.test(l));
 console.log(`report: ${rep.length} chars; ${repLines.length} interesting lines:\n${repLines.slice(0, 120).join('\n')}\n--- report tail ---\n${rep.slice(-6000)}`);
+const tr = await page.evaluate(() => window.__gltrace || []); if (tr.length) { console.log(`gltrace: ${tr.length} lines\n${tr.slice(0, 400).join('\n')}`); writeFileSync(resolve(OUT, 'gltrace.txt'), tr.join('\n')); }
 writeFileSync(resolve(OUT, 'report.txt'), rep);
 await browser.close();
 if (server) { try { process.kill(-server.pid); } catch { /* ignore */ } }

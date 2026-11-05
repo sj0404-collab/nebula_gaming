@@ -95,6 +95,8 @@ export class GLBridge {
   gl: WebGL2RenderingContext | null = null;
   private canvas: OffscreenCanvas | HTMLCanvasElement | null = null;
   log: (t: string) => void = () => {};
+  /** call tracer (diagnostics): localStorage nebula_gltrace = "<afterFrame>:<calls>" → every GL call after that presented frame is logged with decoded arguments */
+  private traceAfter = -1; private traceLeft = 0; private frameNo = 0;
   mem: GLMem | null = null;
   private impl: (Impl | null)[] = [];
   private names: string[] = GL_FUNCS.map((f) => f[0]);
@@ -152,6 +154,7 @@ export class GLBridge {
         const gl = canvas.getContext('webgl2', { alpha: true, depth: true, stencil: true, antialias: false, preserveDrawingBuffer: true, premultipliedAlpha: false, powerPreference: 'high-performance' }) as WebGL2RenderingContext | null;
         if (!gl) { this.log('[gl] WebGL2 is not available on this device: OpenGL programs cannot create a context\n'); return 0; }
         this.gl = gl; this.canvas = canvas; this.width = w; this.height = h;
+        try { const t = typeof localStorage !== 'undefined' ? localStorage.getItem('nebula_gltrace') : null; if (t) { const [a, n] = t.split(':'); this.traceAfter = Number(a) || 0; this.traceLeft = -(Number(n) || 400); this.log(`[gl] call trace armed: after frame ${this.traceAfter}, ${-this.traceLeft} calls\n`); } } catch { /* no storage */ }
         this.s3tc = gl.getExtension('WEBGL_compressed_texture_s3tc'); this.aniso = gl.getExtension('EXT_texture_filter_anisotropic'); this.floatLinear = !!gl.getExtension('OES_texture_float_linear'); this.colorBufferFloat = !!gl.getExtension('EXT_color_buffer_float');
         gl.getExtension('EXT_float_blend'); gl.getExtension('OES_texture_half_float_linear');
         this.maxAttribs = gl.getParameter(gl.MAX_VERTEX_ATTRIBS) as number;
@@ -168,6 +171,30 @@ export class GLBridge {
     if (w !== this.width || h !== this.height) { this.canvas!.width = w; this.canvas!.height = h; this.width = w; this.height = h; }
     return 1;
   }
+  private trace(id: number, a: BigUint64Array): void {
+    this.traceLeft--;
+    const name = this.names[id]; const n = Math.min(a.length, 8);
+    const ints = Array.from(a.slice(0, n)).map((v) => { const u = U(v); return v > 0xffffffffn ? '0x' + v.toString(16) : (u > 0x10000 ? '0x' + u.toString(16) : String(I(v))); });
+    let extra = '';
+    try {
+      if (/^glClearColor$|^glBlendColor$|^glUniform[1-4]f$|^glVertexAttrib[1-4]f$/.test(name)) extra = ' floats=' + Array.from(a.slice(0, n)).map((v) => F(v).toPrecision(4)).join(',');
+      else if (/^glUniformMatrix[234]fv$/.test(name)) { const k = name[15] === '2' ? 4 : name[15] === '3' ? 9 : 16; const v = this.f32(a[3], k * Math.max(1, I(a[1]))); extra = ' m=[' + (v ? Array.from(v.slice(0, k)).map((x) => x.toPrecision(4)).join(',') : '?') + ']'; }
+      else if (/^glUniform[1-4]fv$/.test(name)) { const k = Number(name[9]) * Math.max(1, I(a[1])); const v = this.f32(a[2], Math.min(k, 16)); extra = ' v=[' + (v ? Array.from(v).map((x) => x.toPrecision(4)).join(',') : '?') + ']'; }
+      else if (/^glTex(Sub)?Image2D$/.test(name)) { const sub = name === 'glTexSubImage2D'; const w = I(a[sub ? 4 : 3]), h = I(a[sub ? 5 : 4]), fmt = U(a[6]), type = U(a[7]), ptr = a[8]; const bpp = fmt === GL.RGBA || fmt === 0x80E1 ? 4 : fmt === GL.RGB ? 3 : 1; const len = Math.min(w * h * bpp, 1 << 20); const v = ptr && this.bound.unpack === 0 ? this.u8(ptr, len) : null; let nz = 0; if (v) for (let i = 0; i < v.length; i += 7) if (v[i]) nz++; extra = ` ${w}x${h} fmt=0x${fmt.toString(16)} type=0x${type.toString(16)} ptr=0x${ptr.toString(16)} nonzero≈${v ? Math.round(nz * 7 / Math.max(1, v.length) * 100) : '?'}%`; }
+      else if (/^glDrawArrays$|^glDrawElements$/.test(name)) {
+        const attrs = this.curAttribs(); const parts: string[] = [];
+        for (let i = 0; i < attrs.length; i++) { const at = attrs[i]; if (!at.enabled) continue;
+          let sample = ''; if (!at.buffer && at.pointer && at.type === GL.FLOAT) { const st = at.stride || at.size * 4; const v0 = this.f32(at.pointer, at.size), v1 = this.f32(at.pointer + BigInt(st), at.size); sample = ' v0=[' + (v0 ? Array.from(v0).map((x) => x.toPrecision(4)).join(',') : '?') + '] v1=[' + (v1 ? Array.from(v1).map((x) => x.toPrecision(4)).join(',') : '?') + ']'; }
+          else if (!at.buffer && at.pointer && at.type === GL.UNSIGNED_BYTE) { const st = at.stride || at.size; const v0 = this.u8(at.pointer, at.size), v1 = this.u8(at.pointer + BigInt(st), at.size); sample = ' v0=[' + (v0 ? Array.from(v0).join(',') : '?') + '] v1=[' + (v1 ? Array.from(v1).join(',') : '?') + ']'; }
+          parts.push(`a${i}:${at.size}x0x${at.type.toString(16)}${at.normalized ? 'n' : ''} stride=${at.stride} ${at.buffer ? 'vbo' + at.buffer + '+' + at.pointer.toString() : 'ptr=0x' + at.pointer.toString(16)}${sample}`); }
+        const gl = this.gl!; const prog = gl.getParameter(gl.CURRENT_PROGRAM) as WebGLProgram | null; const vp = Array.from(gl.getParameter(gl.VIEWPORT) as Int32Array).join(',');
+        extra = ` viewport=[${vp}] prog=${prog ? 'yes' : 'NONE'} blend=${gl.isEnabled(gl.BLEND)} scissor=${gl.isEnabled(gl.SCISSOR_TEST)} depth=${gl.isEnabled(gl.DEPTH_TEST)} tex2d=${this.texUnits[0]?.get(GL.TEXTURE_2D) ?? 0} | ${parts.join(' | ')}`;
+      }
+    } catch (e) { extra = ' (trace error: ' + (e as Error).message + ')'; }
+    const line = `[gltrace] ${name}(${ints.join(', ')})${extra}`;
+    this.log(line + '\n'); const gt = globalThis as unknown as { __gltrace?: string[] }; (gt.__gltrace ??= []).push(line);
+    if (this.traceLeft === 0) this.log('[gltrace] --- end of trace ---\n');
+  }
   private describeRenderer(): string { const gl = this.gl!; const dbg = gl.getExtension('WEBGL_debug_renderer_info'); return dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : String(gl.getParameter(gl.RENDERER)); }
   probe(id: number): number { return this.impl[id] ? 1 : 0; }
 
@@ -176,6 +203,7 @@ export class GLBridge {
     const f = this.impl[id];
     if (!f) { this.setErr(GL.INVALID_OPERATION); this.warn(this.names[id], `${this.names[id]}: not available in the WebGL2 bridge (GL_INVALID_OPERATION)`); return 0n; }
     if (this.ff.recording && this.ff.record(id, this.names[id], a, this.mem!.psize())) return 0n;   // glNewList … glEndList: stored, not executed
+    if (this.traceLeft > 0) this.trace(id, a);
     try {
       const r = f(a);
       if (typeof r === 'bigint') return r; if (typeof r === 'number') return BigInt.asUintN(64, BigInt(Math.trunc(r))); return 0n;
@@ -186,6 +214,9 @@ export class GLBridge {
   /** host_gl_present: default framebuffer → BGRA rows (top first) at dst (wasm offset) */
   present(dst: Uint32Array, w: number, h: number): void {
     const gl = this.gl; if (!gl) return;
+    this.frameNo++; const gt = globalThis as unknown as { __gltrace?: string[] };
+    if (this.traceLeft < 0 && this.frameNo >= this.traceAfter) { this.traceLeft = -this.traceLeft; const l = `[gltrace] --- frame ${this.frameNo}: tracing ${this.traceLeft} calls (surface ${this.width}x${this.height}, present ${w}x${h}) ---`; this.log(l + '\n'); (gt.__gltrace ??= []).push(l); }
+    else if (this.traceLeft > 0) { const l = `[gltrace] --- present frame ${this.frameNo} (${w}x${h}) ---`; this.log(l + '\n'); (gt.__gltrace ??= []).push(l); }
     const rgba = new Uint8Array(w * h * 4);
     const readFb = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);

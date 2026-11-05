@@ -15,6 +15,9 @@ on:
       jit:
         description: 'x86→wasm JIT (1 = on, 0 = interpreter only)'
         default: '1'
+      gltrace:
+        description: 'GL call trace "<afterFrame>:<calls>" written into the report (diagnostics), empty = off'
+        default: ''
 
 permissions:
   contents: read
@@ -40,7 +43,7 @@ jobs:
           curl -sSL -o /tmp/ShatteredPD-v4.0.2-Windows.zip https://github.com/00-Evan/shattered-pixel-dungeon/releases/download/v4.0.2/ShatteredPD-v4.0.2-Windows.zip
           ls -la /tmp/ShatteredPD-v4.0.2-Windows.zip; unzip -l /tmp/ShatteredPD-v4.0.2-Windows.zip | head -15
       - name: Run the game in the emulator and record frames + audio
-        run: node e2e/record.mjs /tmp/ShatteredPD-v4.0.2-Windows.zip --seconds "${{ github.event.inputs.seconds || '15' }}" --settle-frames "${{ github.event.inputs.settle_frames || '400' }}" --jit "${{ github.event.inputs.jit || '1' }}" --out e2e/video
+        run: node e2e/record.mjs /tmp/ShatteredPD-v4.0.2-Windows.zip --seconds "${{ github.event.inputs.seconds || '15' }}" --settle-frames "${{ github.event.inputs.settle_frames || '400' }}" --jit "${{ github.event.inputs.jit || '1' }}" --gltrace "${{ github.event.inputs.gltrace }}" --out e2e/video
         timeout-minutes: 60
       - name: Mux with ffmpeg (exact per-frame durations + captured PCM)
         run: |
@@ -59,4 +62,5 @@ jobs:
             e2e/video/audio.wav
             e2e/video/console.txt
             e2e/video/report.txt
+            e2e/video/gltrace.txt
           if-no-files-found: warn
