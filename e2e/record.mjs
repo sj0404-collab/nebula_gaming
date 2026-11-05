@@ -122,15 +122,19 @@ const recOk = await screen.evaluate((c, fps) => { try {
   const stream = c.captureStream(fps); const rec = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp8', videoBitsPerSecond: 8_000_000 });
   window.__recChunks = []; rec.ondataavailable = (e) => { if (e.data && e.data.size) window.__recChunks.push(e.data); }; rec.start(500); window.__rec = rec; return true;
 } catch (e) { console.log('MediaRecorder unavailable: ' + e); return false; } }, 30).catch(() => false);
+const recClicks = (opt('--record-clicks', '') || '').split(';').map(a => a.trim()).filter(Boolean); let recIdx = 0, lastRecClick = Date.now();
 const tStart = Date.now(); const stamps = []; let n = 0;
 while (Date.now() - tStart < seconds * 1000) {
   const t = Date.now() - tStart;
   const name = `f${String(n).padStart(5, '0')}.png`;
   try { await screen.screenshot({ path: resolve(FRAMES, name), timeout: 5000 }); stamps.push({ name, t }); n++; } catch { /* skip */ }
   if (recOk) await sleep(400);   /* the MediaRecorder has the real frames; screenshots only steal main-thread time from the game */
-  // a little interaction so the recording is not static: move the pointer over the title
+  // a little interaction so the recording is not static: move the pointer over the title, or --record-clicks "fx,fy;fx,fy" (one every ~3 s)
   if (n === 20) await page.mouse.move(650, 420).catch(() => {});
   if (n === 40) await page.mouse.move(760, 480).catch(() => {});
+  if (recClicks.length && Date.now() - lastRecClick > 3000 && recIdx < recClicks.length) { const box = await screen.boundingBox(); const [fx, fy] = recClicks[recIdx++].split(',').map(Number);
+    if (box) { const x = box.x + box.width * fx, y = box.y + box.height * fy; await page.mouse.move(x, y); await sleep(100); await page.mouse.down(); await sleep(100); await page.mouse.up(); console.log(`record click ${recIdx} at ${x.toFixed(0)},${y.toFixed(0)} (t=${((Date.now() - tStart) / 1000).toFixed(1)} s)`); }
+    lastRecClick = Date.now(); }
 }
 const acT1 = await page.evaluate(() => (window.__acs[0] ? window.__acs[0].currentTime : 0));
 const wallSec = (Date.now() - tStart) / 1000;
