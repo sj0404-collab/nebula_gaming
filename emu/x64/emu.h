@@ -23,7 +23,7 @@ double host_now_ms(void); double host_wall_ms(void);
 /* JIT (cpu.c / jit.inc): compile an emitted wasm module (imports env.memory + the jit_* exports) and publish its "f" in the
    main module's indirect table; returns the table index (0 = unavailable / failed).  reuse != 0: overwrite that slot. */
 u32 host_jit_compile(const u8 *bytes, u64 len, u32 reuse);
-extern int g_jit_on; const char *jit_stats_text(void);   /* wall clock, ms since the Unix epoch (UTC) */                                  /* monotonic milliseconds */
+extern int g_jit_on, g_jit_hot; const char *jit_stats_text(void);   /* wall clock, ms since the Unix epoch (UTC) */                                  /* monotonic milliseconds */
 void   host_present(const u32 *bgra, int w, int h);        /* framebuffer of the GUI window changed */
 int    host_key(int vk);                                   /* 1 if virtual key currently pressed */
 void   host_exit(int code);                                /* guest called ExitProcess */

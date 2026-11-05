@@ -71,7 +71,7 @@ ex = inst.exports;
 table = ex.__indirect_function_table || null;
 if (needsJit) {
   for (const [k, v] of Object.entries(ex)) if (k.startsWith('jit_') && typeof v === 'function') jitImports[k] = v;
-  if (ex.x64_set_jit) ex.x64_set_jit(jit && table ? 1 : 0);
+  if (ex.x64_set_jit) ex.x64_set_jit(jit && table ? jit : 0);   // --jit N>1: hot threshold
 }
 for (const m of mounts) {
   const [host, guest] = m.split('=');

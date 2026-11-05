@@ -13,19 +13,30 @@
  * that table index like any function pointer.  The function re-validates its own code bytes on entry (returns 1 =
  * stale), so patched / regenerated guest code (JVM, .NET) is handled exactly like the decode cache handles it.
  * Natively there is no wasm engine: host_jit_compile returns 0 and everything stays on the interpreter. */
-#define JB_BITS 14
-#define JIT_HOT 96
+#define JB_BITS 16
+int g_jit_hot = 300;   /* block entries before translation (x64_set_jit(n>1) overrides) */
+#define JIT_HOT g_jit_hot
 #define JIT_MAX_INSNS 64
 #define JIT_MAX_BYTES 480
 typedef struct { u64 rip; Mem *mem; const u8 *code; u32 gen; u32 fn; s32 count; u16 pc; u8 m32; } Jb;   /* fn: table index of the region function, pc: entry block inside it */
 static Jb g_jb[1 << JB_BITS];
-#define JB_SLOT(rip) (&g_jb[((rip) ^ ((rip) >> JB_BITS)) & ((1 << JB_BITS) - 1)])
+#define JB_SLOT(rip) (&g_jb[((rip) ^ ((rip) >> JB_BITS)) & ((1 << JB_BITS) - 2)])   /* 2-way set: slot and slot+1 */
+static void jit_drop(Jb *b);
+/* finds the entry for a block start (2-way set-associative); when absent returns the victim (empty, or the colder way) with rip = 0 */
+static inline Jb *jb_lookup(u64 rip, void *mem, int m32) {
+  Jb *b = JB_SLOT(rip);
+  if (b->rip == rip && b->mem == mem && b->m32 == m32) return b;
+  if (b[1].rip == rip && b[1].mem == mem && b[1].m32 == m32) return b + 1;
+  Jb *v = !b->rip ? b : !b[1].rip ? b + 1 : (b->fn && !b[1].fn) ? b + 1 : (!b->fn && b[1].fn) ? b : b->count <= b[1].count ? b : b + 1;
+  if (v->fn) jit_drop(v);
+  v->rip = 0; v->fn = 0; v->count = 0; return v;
+}
 int g_jit_on = 0;
 static u32 g_jit_free[4096]; static int g_jit_nfree;
 #define JIT_MAX_FN 65536
 static u16 g_fnref[JIT_MAX_FN];   /* JB entries referencing a table slot; 0 → slot reusable */
-#define JIT_MAX_BLOCKS 48
-#define JIT_MAX_REGION_INSNS 640
+#define JIT_MAX_BLOCKS 160
+#define JIT_MAX_REGION_INSNS 2400
 struct JitStats { u64 blocks, stale, nodc, exec, fails, insns, steps, bytes, dsteps, dinterp; } g_jit_st;
 
 #ifdef __wasm__
@@ -52,7 +63,7 @@ JEXPORT(jit_alu) u64 jit_alu(Cpu *c, int op, u64 a, u64 b, int sz) { return alu(
 JEXPORT(jit_shift) u64 jit_shift(Cpu *c, int op, u64 v, int cnt, int sz) { return shift(c, op, v, cnt, sz); }
 
 /* ---- wasm byte emitter ---- */
-typedef struct { u8 *b; u32 n, cap; int depth; const u64 *starts; int nblk, blk, m32; } Buf;   /* starts/nblk/blk: region blocks (sorted) and the one being emitted */
+typedef struct { u8 *b; u32 n, cap; int depth; const u64 *starts; int nblk, blk, m32; const u8 *retblk; } Buf;   /* retblk[j]: block j is a call fall-through (ret landing) */   /* starts/nblk/blk: region blocks (sorted) and the one being emitted */
 static void b8(Buf *B, u32 v) { if (B->n < B->cap) B->b[B->n] = (u8)v; B->n++; }
 static void bu(Buf *B, u64 v) { do { u8 x = v & 0x7f; v >>= 7; if (v) x |= 0x80; b8(B, x); } while (v); }
 static void bs(Buf *B, s64 v) { for (;;) { u8 x = v & 0x7f; v >>= 7; if ((v == 0 && !(x & 0x40)) || (v == -1 && (x & 0x40))) { b8(B, x); return; } b8(B, x | 0x80); } }
@@ -113,6 +124,16 @@ static void e_goto(Buf *B, u64 t, int k) {
   if (j > B->blk) { OP(BR); bu(B, lbl_block(B, j)); return; }
   e_lget(B, L_C); e_ld(B, 0x29, 3, CO_ICOUNT); e_lget(B, L_LIMIT); OP(0x5A); e_if(B, 0); e_i64c(B, t); OP(RETURN); e_end(B);   /* i64.ge_u: time slice used up */
   e_i32c(B, j); e_lset(B, L_PC); OP(BR); bu(B, lbl_loop(B));
+}
+/* control transfer to the rip in L_RET (ret): call landing blocks of this region are reached through the dispatch loop, anything else leaves */
+static void e_goto_dyn(Buf *B, int k) {
+  e_icount(B, k);
+  int any = 0; for (int j = 0; j < B->nblk; j++) if (B->retblk[j]) any = 1;
+  if (any) {
+    e_lget(B, L_C); e_ld(B, 0x29, 3, CO_ICOUNT); e_lget(B, L_LIMIT); OP(0x5A); e_if(B, 0); e_lget(B, L_RET); OP(RETURN); e_end(B);
+    for (int j = 0; j < B->nblk; j++) if (B->retblk[j]) { e_lget(B, L_RET); e_i64c(B, B->starts[j]); OP(I64_EQ); e_if(B, 0); e_i32c(B, j); e_lset(B, L_PC); OP(BR); bu(B, lbl_loop(B)); e_end(B); }
+  }
+  e_lget(B, L_RET); OP(RETURN);
 }
 /* effective address of a memory operand → stack (i64) */
 typedef struct { const Dc *e; u64 rip; u8 kind, need, fdef, fuse, fk, sz, seg; } JItem;
@@ -393,11 +414,11 @@ static int e_insn(Buf *B, const JItem *it, const u8 *code, int m32, int k) {
       return 1; }
     case FK_JMP8: { u64 t = next + (u64)(s64)(s8)code[e->hdr]; if (m32) t = (u32)t; e_goto(B, t, k + 1); return 1; }
     case FK_JMP32: { u64 t = next + (u64)(s64)imm32_at(code, e->hdr); if (m32) t = (u32)t; e_goto(B, t, k + 1); return 1; }
-    case FK_CALL: { u64 t = next + (u64)(s64)imm32_at(code, e->hdr); if (m32) t = (u32)t; e_push_begin(B, psz, m32, start); e_i64c(B, next); e_push_end(B, psz); e_exit_const(B, t, k + 1); return 1; }
-    case FK_RET: e_pop(B, psz, m32, start); e_exit_top(B, k + 1); return 1;
+    case FK_CALL: { u64 t = next + (u64)(s64)imm32_at(code, e->hdr); if (m32) t = (u32)t; e_push_begin(B, psz, m32, start); e_i64c(B, next); e_push_end(B, psz); e_goto(B, t, k + 1); return 1; }
+    case FK_RET: e_pop(B, psz, m32, start); e_lset(B, L_RET); e_goto_dyn(B, k + 1); return 1;
     case FK_RET_N: { u32 n = code[e->hdr] | (code[e->hdr + 1] << 8); e_pop(B, psz, m32, start); e_lset(B, L_RET);
       e_lget(B, L_C); e_ldreg(B, RSP, 8); e_i64c(B, n); OP(I64_ADD); if (m32) { e_i64c(B, 0xffffffffull); OP(I64_AND); } e_st(B, 0x37, 3, CO_R(RSP));
-      e_icount(B, k + 1); e_lget(B, L_RET); OP(RETURN); return 1; }
+      e_goto_dyn(B, k + 1); return 1; }
 
     /* ---- SSE (scalar/packed moves, arithmetic, logic, compares, conversions) ---- */
     case FK_SSE_MOV: { u8 op2 = e->op2; int bytes = (op2 == 0x28 || op2 == 0x29) ? 16 : e->rep == 0xF3 ? 4 : e->rep == 0xF2 ? 8 : 16; int load = op2 == 0x10 || op2 == 0x28;
@@ -472,7 +493,7 @@ static void e_tlb_func(Buf *B) {
 }
 
 /* ---- region translation ---- */
-static u8 g_jit_body[65536], g_jit_tlb[256], g_jit_mod[65536 + 1024];
+static u8 g_jit_body[262144], g_jit_tlb[256], g_jit_mod[262144 + 1024];
 typedef struct { u64 start, end; int first, n; u8 term; } RBlk;   /* instructions it[first .. first+n), term: ends with a control transfer */
 static int dc_valid(Mem *m, u32 gen, int m32, u64 a, const u8 *code, Dc **out) {
   Dc *e = DC_SLOT(a);
@@ -489,7 +510,7 @@ static int term_targets(const Dc *e, u64 start, const u8 *code, int m32, u64 t[2
     case FK_JCC32: t[n++] = next + (u64)(s64)imm32_at(code, e->hdr + 1); t[n++] = next; break;
     case FK_JMP8: t[n++] = next + (u64)(s64)(s8)code[e->hdr]; break;
     case FK_JMP32: t[n++] = next + (u64)(s64)imm32_at(code, e->hdr); break;
-    case FK_CALL: t[n++] = next; break;   /* the callee is its own region; the return lands here */
+    case FK_CALL: t[n++] = next + (u64)(s64)imm32_at(code, e->hdr); t[n++] = next; break;   /* callee joins the region when it has been executed; the return lands on next */
     default: break;
   }
   if (m32) for (int i = 0; i < n; i++) t[i] = (u32)t[i];
@@ -529,16 +550,12 @@ static int jit_translate(Cpu *c, Jb *b0) {
   if (nb == 0) return 0;
   /* a terminator's fall-through to the very next block is only free when the blocks are adjacent — they are, by construction (sorted, cut at the next start) */
   static u64 bstarts[JIT_MAX_BLOCKS]; for (int i = 0; i < nb; i++) bstarts[i] = blk[i].start;
+  static u8 retblk[JIT_MAX_BLOCKS]; for (int i = 0; i < nb; i++) retblk[i] = 0;
+  for (int i = 0; i < nb; i++) if (blk[i].term && it[blk[i].first + blk[i].n - 1].fk == FK_CALL) { for (int j = 0; j < nb; j++) if (blk[j].start == blk[i].end) retblk[j] = 1; }
   /* flags liveness per block (backwards; everything live at a block end) */
   for (int i = 0; i < nb; i++) { int live = FL_ALL; for (int q = blk[i].first + blk[i].n - 1; q >= blk[i].first; q--) { it[q].need = (u8)(it[q].fdef & live); live = (live & ~it[q].fdef) | it[q].fuse; } }
-  Buf body = { g_jit_body, 0, sizeof g_jit_body, 0, bstarts, nb, 0, m32 }; Buf *B = &body;
+  Buf body = { g_jit_body, 0, sizeof g_jit_body, 0, bstarts, nb, 0, m32, retblk }; Buf *B = &body;
   bu(B, 2); bu(B, 7); OP(0x7E); bu(B, 2); OP(0x7C);   /* locals 4..10: i64, 11..12: f64 */
-  /* code bytes of every block must still be what we translated (self-modifying / regenerated code → stale) */
-  for (int i = 0; i < nb; i++) for (u64 off = blk[i].start; off < blk[i].end; off += 8) {
-    u32 nbyt = blk[i].end - off < 8 ? (u32)(blk[i].end - off) : 8; u64 w = 0; __builtin_memcpy(&w, rbase + (off - lo), nbyt); u64 msk = nbyt == 8 ? ~0ull : (1ull << (nbyt * 8)) - 1;
-    e_lget(B, L_CODE); e_ld(B, 0x29, 0, off - lo); if (nbyt < 8) { e_i64c(B, msk); OP(I64_AND); } e_i64c(B, w); OP(I64_NE);
-    e_if(B, 0); e_i64c(B, 1); OP(RETURN); e_end(B);
-  }
   /* layout:  block $fault  loop $dispatch  block $b(nb-1) … block $b0  br_table pc  end $b0 CODE0 end $b1 CODE1 … end $b(nb-1) CODE(nb-1)  end $dispatch  end $fault  <fault exit> */
   OP(0x02); OP(0x40); OP(0x03); OP(0x40); for (int i = 0; i < nb; i++) { OP(0x02); OP(0x40); }
   e_lget(B, L_PC); OP(BR_TABLE); bu(B, nb); for (int i = 0; i < nb; i++) bu(B, i); bu(B, nb - 1);
@@ -546,6 +563,12 @@ static int jit_translate(Cpu *c, Jb *b0) {
   for (int i = 0; i < nb; i++) {
     OP(0x0B);   /* end $b_i → CODE_i */
     B->blk = i; int k = 0;
+    /* the block's code bytes must still be what we translated (self-modifying / regenerated code → stale, return 1): checked on every entry of the block */
+    for (u64 off = blk[i].start; off < blk[i].end; off += 8) {
+      u32 nbyt = blk[i].end - off < 8 ? (u32)(blk[i].end - off) : 8; u64 w = 0; __builtin_memcpy(&w, rbase + (off - lo), nbyt); u64 msk = nbyt == 8 ? ~0ull : (1ull << (nbyt * 8)) - 1;
+      e_lget(B, L_CODE); e_ld(B, 0x29, 0, off - lo); if (nbyt < 8) { e_i64c(B, msk); OP(I64_AND); } e_i64c(B, w); OP(I64_NE);
+      e_if(B, 0); e_i64c(B, 1); OP(RETURN); e_end(B);
+    }
     for (int q = blk[i].first; q < blk[i].first + blk[i].n; q++) {
       const Dc *e = it[q].e; u64 next = it[q].rip + e->len; if (m32) next = (u32)next;
       int done = 0;
@@ -591,8 +614,8 @@ static int jit_translate(Cpu *c, Jb *b0) {
   if (!fn || fn >= JIT_MAX_FN) { g_jit_st.fails++; if (reuse) g_jit_free[g_jit_nfree++] = reuse; return 0; }
   /* publish every block start as an entry (the hot one first so b0 is certainly set) */
   for (int i = 0; i < nb; i++) {
-    Jb *b = JB_SLOT(blk[i].start);
-    if (b != b0) { if (b->rip == blk[i].start && b->mem == m && b->m32 == m32 && b->fn && b->gen == gen) continue; if (b->fn) jit_drop(b); }
+    Jb *b = jb_lookup(blk[i].start, m, m32);
+    if (b != b0) { if (b->rip == blk[i].start && b->fn && b->gen == gen) continue; if (b->fn) jit_drop(b); }
     b->rip = blk[i].start; b->mem = m; b->m32 = m32; b->fn = fn; b->pc = (u16)i; b->code = rbase; b->gen = gen; b->count = JIT_HOT; g_fnref[fn]++;
   }
   g_jit_st.blocks++; g_jit_st.insns += nit; g_jit_st.steps += steps; g_jit_st.bytes += mod.n;
@@ -604,11 +627,8 @@ typedef u64 (*JitFn)(Cpu *c, const u8 *code, int pc, u64 limit);
 static inline int jit_enter(Cpu *c, u64 budget) {
   int ran = 0; u64 ic0 = c->icount;
   for (;;) {
-    Jb *b = JB_SLOT(c->rip);
-    if (b->rip != c->rip || b->mem != c->mem || b->m32 != c->mode32) {
-      if (b->fn) jit_drop(b);
-      b->rip = c->rip; b->mem = c->mem; b->m32 = c->mode32; b->count = 1; b->fn = 0; return ran;
-    }
+    Jb *b = jb_lookup(c->rip, c->mem, c->mode32);
+    if (!b->rip) { b->rip = c->rip; b->mem = c->mem; b->m32 = c->mode32; b->count = 1; b->fn = 0; return ran; }
     if (!b->fn) {
       if (++b->count < JIT_HOT) return ran;
       if (!jit_translate(c, b)) { b->count = -2000000; g_jit_st.nodc++; return ran; }
