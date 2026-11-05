@@ -40,7 +40,13 @@ type Exports = {
   x64_vfs_size(path: bigint): bigint; x64_vfs_data(path: bigint): bigint; x64_vfs_list(): bigint; x64_vfs_add_lazy?(path: bigint, n: bigint): number; x64_vfs_written?(path: bigint): number;
   x64_stdin_write(data: bigint, n: bigint): void; x64_stdin_eof(): void; x64_wants_stdin(): number;
   x64_vfs_sync(): void; x64_chdir(path: bigint): number;
+  /** x86->wasm JIT (emu/x64/jit.inc): on/off (n > 1 = hot-block threshold); stats text */
+  x64_set_jit?(on: number): void; x64_jit_stats?(): bigint;
+  __indirect_function_table?: WebAssembly.Table;
 };
+
+/** JIT regions compiled this session (each is a small wasm module instantiated against the emulator's memory) */
+export interface JitInfo { enabled: boolean; modules: number; bytes: number; compileMs: number; failed: number; stats: string }
 
 export const RUN_OK = 0, RUN_EXIT = 1, RUN_FAULT = 2, RUN_YIELD = 3, RUN_BREAK = 4;
 
@@ -61,6 +67,8 @@ export class X64Runtime {
   readonly audio = new HostAudio();
   status: RunStatus = 'idle';
   moduleBytes = 0;
+  jit: JitInfo = { enabled: false, modules: 0, bytes: 0, compileMs: 0, failed: 0, stats: '' };
+  private jitImports: Record<string, unknown> = {};
   onConsole: ((fd: number, text: string) => void) | null = null;
   onPresent: ((px: Uint8Array, w: number, h: number) => void) | null = null;
   onStop: ((stats: RunStats) => void) | null = null;
@@ -121,15 +129,44 @@ export class X64Runtime {
         host_fs_mkdir: (path: bigint) => { this.disk.mkdir(this.cstr(path)); return 1; },
         host_fs_remove: (path: bigint) => { const p = this.cstr(path); this.cache.delete(diskKey(p)); this.disk.remove(p); return 1; },
         host_fs_rename: (from: bigint, to: bigint) => { const f = this.cstr(from), t = this.cstr(to); const c = this.cache.get(diskKey(f)); if (c) { this.cache.delete(diskKey(f)); this.cache.set(diskKey(t), c); } void this.disk.rename(f, t); return 1; },
+        // x86->wasm JIT: the emulator hands over a complete wasm module for a hot code region; it is compiled synchronously, instantiated
+        // against the emulator's memory and its entry published in the shared function table (slot index returned; 0 = failed -> interpreter)
+        host_jit_compile: (p: bigint, n: bigint, reuse: number) => this.jitCompile(p, Number(n), reuse),
       },
     };
     const { instance } = await WebAssembly.instantiate(bytes, imports);
     this.ex = instance.exports as unknown as Exports;
+    this.jitSetup();
     await this.loadFonts(url.replace(/[^/]*$/, 'fonts/'));
     this.disk.onActivity = () => this.onDisk?.();
     await this.restoreDisk();
     if (!this.disposed) this.unregister = registerLiveVfs(this);   // File Explorer / Notepad write through to this live disk copy
   }
+  /** enables the JIT when the engine can grow the exported table and the user has not switched it off (localStorage nebula_jit = '0') */
+  private jitSetup(): void {
+    const ex = this.ex!; const table = ex.__indirect_function_table;
+    if (!ex.x64_set_jit || !table) return;
+    for (const k of ['jit_step', 'jit_mem', 'jit_alu', 'jit_shift']) { const f = (ex as unknown as Record<string, unknown>)[k]; if (typeof f !== 'function') return; this.jitImports[k] = f; }
+    let pref = '1'; try { pref = localStorage.getItem('nebula_jit') ?? '1'; } catch { /* no storage */ }
+    const on = pref !== '0' ? (Number(pref) > 1 ? Number(pref) : 1) : 0;
+    ex.x64_set_jit(on); this.jit.enabled = on > 0;
+  }
+  private jitCompile(p: bigint, n: number, reuse: number): number {
+    const ex = this.ex!; const table = ex.__indirect_function_table!; const t = performance.now();
+    try {
+      const mod = new WebAssembly.Module(this.bytesAt(p, n).slice());
+      const inst = new WebAssembly.Instance(mod, { env: { memory: ex.memory, ...this.jitImports } });
+      const idx = reuse ? BigInt(reuse) : table.grow(1n);
+      table.set(idx, inst.exports.f as (...a: unknown[]) => unknown);
+      this.jit.modules++; this.jit.bytes += n; this.jit.compileMs += performance.now() - t;
+      return Number(idx);
+    } catch (e) {
+      this.jit.failed++; if (this.jit.failed <= 3) this.onLog?.(`jit: region compile failed: ${String(e)}`);
+      return 0;
+    }
+  }
+  /** JIT counters as text (regions, executions, interpreter fallbacks) */
+  jitStats(): JitInfo { if (this.ex?.x64_jit_stats) this.jit.stats = this.cstr(this.ex.x64_jit_stats()); return { ...this.jit }; }
   /** the bundled TrueType faces become C:\Windows\Fonts (the emulator's GDI text engine reads them from the VFS; without them it falls back to bitmap glyphs) */
   private async loadFonts(base: string): Promise<void> {
     const files = ['ptsans.ttf', 'ptsansb.ttf', 'cousine.ttf', 'cousineb.ttf'];

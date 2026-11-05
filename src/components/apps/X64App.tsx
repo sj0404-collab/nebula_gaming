@@ -5,7 +5,7 @@ import { scanLibrary, classifyExe, loadPrefs, savePrefs, makeLnk, type LibraryIt
 import { peIconDataUrl } from '../../lib/x64/peicon';
 import { zipEntries, zipRead } from '../../lib/x64/zip';
 import { useOS } from '../../lib/os';
-import { X64Runtime, vkFromEvent, wasm64Supported, type PeInfo, type RunStats, type VfsEntry } from '../../lib/x64/runtime';
+import { X64Runtime, vkFromEvent, wasm64Supported, type JitInfo, type PeInfo, type RunStats, type VfsEntry } from '../../lib/x64/runtime';
 import { FramePresenter } from '../../lib/x64/present';
 import { takeX64Launch, onX64Launch, type X64Launch } from '../../lib/x64/launch';
 
@@ -142,6 +142,7 @@ export default function X64App() {
   const [touch] = useState(() => typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches);
   const [moduleKB, setModuleKB] = useState(0);
   const [apiStats, setApiStats] = useState('');
+  const [jitInfo, setJitInfo] = useState<JitInfo | null>(null);
   const [frames, setFrames] = useState(0);
   const autoTabRef = useRef(true);   // true until the user picks a tab during a run: a console program that opens a window (dlg.exe, a Python GUI) is then shown on the screen tab as soon as its first frame arrives, like on Windows
   const nextId = useRef(1);
@@ -198,7 +199,7 @@ export default function X64App() {
     rt.onLog = (text) => setLog(l => [...l.slice(-199), text.trimEnd()]);
     rt.onStdinWait = (w) => { setWaitingStdin(w); if (w) { setTab('console'); setTimeout(() => stdinRef.current?.focus(), 30); } };
     rt.onPresent = (px, w, h) => { presenterRef.current?.present(px, w, h); setFrames(f => { if (f === 0 && autoTabRef.current) setTab('screen'); return f + 1; }); };
-    rt.onStop = (s) => { setStats(s); setApiStats(rt.apiStats()); setFiles(rt.vfsList()); rescanRef.current(true); if (s.status !== 'exited' || !s.hasWindow) setTab(t => (s.hasWindow && s.status === 'exited') ? t : (s.status === 'fault' ? 'report' : t === 'screen' && !s.hasWindow ? 'console' : t)); };
+    rt.onStop = (s) => { setStats(s); setApiStats(rt.apiStats()); setJitInfo(rt.jitStats()); setFiles(rt.vfsList()); rescanRef.current(true); if (s.status !== 'exited' || !s.hasWindow) setTab(t => (s.hasWindow && s.status === 'exited') ? t : (s.status === 'fault' ? 'report' : t === 'screen' && !s.hasWindow ? 'console' : t)); };
     rt.onDisk = () => setDisk({ files: rt.diskFiles, writes: rt.disk.writes, bytes: rt.disk.bytes, queued: rt.disk.queued() });
     rt.init().then(async () => {
       if (!alive) return;
@@ -784,7 +785,7 @@ export default function X64App() {
           )}
           {tab === 'report' && (
             <div className="min-h-0 flex-1 overflow-auto p-4" data-x64-report>
-              {current ? <PeReport e={current} stats={stats} log={log} apiStats={apiStats} /> : <div className="text-slate-400">Select an executable to see its compatibility report.</div>}
+              {current ? <PeReport e={current} stats={stats} log={log} apiStats={apiStats} jit={jitInfo} /> : <div className="text-slate-400">Select an executable to see its compatibility report.</div>}
             </div>
           )}
           {/* status bar */}
@@ -800,7 +801,7 @@ export default function X64App() {
   );
 }
 
-function PeReport({ e, stats, log, apiStats }: { e: ExeEntry; stats: RunStats | null; log: string[]; apiStats: string }) {
+function PeReport({ e, stats, log, apiStats, jit }: { e: ExeEntry; stats: RunStats | null; log: string[]; apiStats: string; jit: JitInfo | null }) {
   const i = e.info; const v = VERDICT[i.ok ? (i.verdict ?? 'invalid') : 'invalid'] ?? VERDICT.invalid;
   return (
     <div className="space-y-3">
@@ -832,6 +833,7 @@ function PeReport({ e, stats, log, apiStats }: { e: ExeEntry; stats: RunStats | 
           <div className="mt-1 text-slate-600">{stats.icount.toLocaleString()} instructions in {(stats.elapsedMs / 1000).toFixed(2)} s ({stats.mips.toFixed(1)} MIPS) · {stats.frames} frames presented · {stats.memMB.toFixed(1)} MB host memory reserved this session{stats.title ? ` · window “${stats.title}”` : ''}</div>
           {stats.status === 'fault' && <div className="mt-1 rounded bg-rose-50 p-2 font-mono text-[10px] text-rose-800" data-x64-fault>STOP at RIP {stats.errorRip}: {stats.error}<br />bytes: {stats.errorBytes}</div>}
           {stats.report && <pre className="mt-2 whitespace-pre-wrap rounded bg-amber-50 p-2 font-mono text-[10px] text-amber-900">{stats.report}</pre>}
+          {jit && <div className="mt-1 text-slate-600" data-x64-jit={jit.enabled ? jit.modules : 'off'}>x86&rarr;wasm JIT: {jit.enabled ? `${jit.modules} regions (${(jit.bytes / 1024).toFixed(0)} KB wasm, compiled in ${jit.compileMs.toFixed(0)} ms${jit.failed ? `, ${jit.failed} failed` : ''})` : 'off'}{jit.stats ? <span className="font-mono text-[10px]"> &middot; {jit.stats}</span> : null}</div>}
           {apiStats && <details className="mt-2"><summary className="cursor-pointer text-slate-500">Win32 API calls ({apiStats.split(',').length})</summary><div className="mt-1 break-words font-mono text-[10px] text-slate-600">{apiStats.split(',').join('  ')}</div></details>}
           {log.length > 0 && <details className="mt-2"><summary className="cursor-pointer text-slate-500">Emulator log ({log.length})</summary><pre className="mt-1 max-h-40 overflow-auto font-mono text-[10px]">{log.join('\n')}</pre></details>}
         </div>

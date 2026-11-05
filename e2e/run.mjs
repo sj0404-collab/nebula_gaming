@@ -260,6 +260,23 @@ await test('x64: hello.exe (UCRT console, printf/qsort/malloc/math) runs to exit
   await page.screenshot({ path: resolve(SHOTS, 'x64-hello.png') });
   await closeAll();
 });
+await test('x64: bench.exe runs through the x86->wasm JIT (regions compiled in the browser, results identical to the interpreter)', async () => {
+  const w = await x64Open();
+  await w.locator('[data-x64-exe="bench.exe"]').click();
+  await w.locator('[data-x64-run]').click();
+  await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout: 60_000 });
+  const con = await w.locator('[data-x64-console]').innerText();
+  expect(/sieve\(2M\): 148933 primes/.test(con), 'sieve result wrong: ' + con.slice(0, 300));
+  expect(/mandelbrot\(200x100x200\): 5108 inside/.test(con), 'mandelbrot result wrong (SSE through the JIT): ' + con.slice(0, 300));
+  await w.locator('[data-x64-tab="report"]').click();
+  const jit = await w.locator('[data-x64-jit]').getAttribute('data-x64-jit');
+  expect(jit !== null && jit !== 'off' && Number(jit) > 0, 'JIT did not compile any region (data-x64-jit=' + jit + ')');
+  const sieveMs = Number((/sieve\(2M\): 148933 primes in ([\d.]+) ms/.exec(con) || [])[1]);
+  console.log(`      JIT regions: ${jit}, sieve ${sieveMs} ms`);
+  expect(sieveMs > 0 && sieveMs < 600, `sieve too slow for JIT code: ${sieveMs} ms (interpreter ~1000 ms)`);
+  await page.screenshot({ path: resolve(SHOTS, 'x64-jit.png') });
+  await closeAll();
+});
 await test('x64: runtime pack — the REAL msvcp140.dll (VC++ 2015–2022 Redistributable) is installed into C:\\Windows\\System32 on demand and std::cout works through it', async () => {
   const w = await x64Open();
   const packStatus = async () => w.locator('[data-x64-pack]').getAttribute('data-x64-pack');
