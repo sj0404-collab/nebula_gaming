@@ -127,6 +127,7 @@ while (Date.now() - tStart < seconds * 1000) {
   const t = Date.now() - tStart;
   const name = `f${String(n).padStart(5, '0')}.png`;
   try { await screen.screenshot({ path: resolve(FRAMES, name), timeout: 5000 }); stamps.push({ name, t }); n++; } catch { /* skip */ }
+  if (recOk) await sleep(400);   /* the MediaRecorder has the real frames; screenshots only steal main-thread time from the game */
   // a little interaction so the recording is not static: move the pointer over the title
   if (n === 20) await page.mouse.move(650, 420).catch(() => {});
   if (n === 40) await page.mouse.move(760, 480).catch(() => {});
