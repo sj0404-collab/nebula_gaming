@@ -152,12 +152,14 @@ export class X64Runtime {
     ex.x64_set_jit(on); this.jit.enabled = on > 0;
   }
   private jitCompile(p: bigint, n: number, reuse: number): number {
-    const ex = this.ex!; const table = ex.__indirect_function_table!; const t = performance.now();
+    const ex = this.ex!; const t = performance.now();
+    // the table of a memory64 module is indexed with i64 (table64): the DOM typings still say number
+    const table = ex.__indirect_function_table as unknown as { grow(n: bigint): bigint; set(i: bigint, f: unknown): void };
     try {
       const mod = new WebAssembly.Module(this.bytesAt(p, n).slice());
       const inst = new WebAssembly.Instance(mod, { env: { memory: ex.memory, ...this.jitImports } });
       const idx = reuse ? BigInt(reuse) : table.grow(1n);
-      table.set(idx, inst.exports.f as (...a: unknown[]) => unknown);
+      table.set(idx, inst.exports.f);
       this.jit.modules++; this.jit.bytes += n; this.jit.compileMs += performance.now() - t;
       return Number(idx);
     } catch (e) {
