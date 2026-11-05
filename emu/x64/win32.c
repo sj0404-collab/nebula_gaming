@@ -1073,6 +1073,24 @@ static void s_SetEntriesInAclA(Cpu *c) { if (ARG(3)) wrp(c, ARG(3), w32_heap_all
 static void s_SetEntriesInAclW(Cpu *c) { s_SetEntriesInAclA(c); }
 static void s_GetAdaptersAddresses(Cpu *c) { if (ARG(4)) wr32(c, ARG(4), 0); RET(232); }   /* ERROR_NO_DATA: no interfaces */
 static void s_GetUnicastIpAddressTable(Cpu *c) { RET(50); }
+/* IP Helper (iphlpapi): one loopback interface, as on a Windows machine without network — the JDK's NetworkInterface.getAll
+   (SecureRandom seeding, UUIDs) enumerates with GetIfTable + GetIpAddrTable; net.dll delay-loads iphlpapi, so a missing export
+   is a fatal 0xC06D007F in the JVM instead of a clean "no interfaces" */
+static void fill_ifrow(Cpu *c, u64 a) {   /* MIB_IFROW, 860 bytes */
+  u8 *p = mem_ptr(c->mem, a, 860, 1); if (!p) return; e_memset(p, 0, 860);
+  static const char nm[] = "\\DEVICE\\TCPIP_{846EE342-7039-11DE-9D20-806E6F6E6963}"; for (size_t i = 0; nm[i] && i < 255; i++) p[2 * i] = (u8)nm[i];
+  wr32(c, a + 512, 1); wr32(c, a + 516, 24); wr32(c, a + 520, 1500); wr32(c, a + 524, 1073741824u); wr32(c, a + 528, 0);   /* index 1, MIB_IF_TYPE_LOOPBACK, mtu, speed */
+  wr32(c, a + 540, 1); wr32(c, a + 544, 5);   /* admin up, oper status connected */
+  static const char ds[] = "Software Loopback Interface 1"; wr32(c, a + 600, (u32)sizeof ds - 1); e_memcpy(p + 604, ds, sizeof ds); }
+static void s_GetIfTable(Cpu *c) { u64 tab = ARG(0), psz = ARG(1); u32 need = 4 + 860; if (!psz) { RET(87); return; } u32 have = rd32(c, psz); wr32(c, psz, need); if (!tab || have < need) { RET(122); return; } wr32(c, tab, 1); fill_ifrow(c, tab + 4); RET(0); }
+static void s_GetIfEntry(Cpu *c) { u64 a = ARG(0); if (!a) { RET(87); return; } if (rd32(c, a + 512) != 1) { RET(2); return; } fill_ifrow(c, a); RET(0); }
+static void s_GetIpAddrTable(Cpu *c) { u64 tab = ARG(0), psz = ARG(1); u32 need = 4 + 24; if (!psz) { RET(87); return; } u32 have = rd32(c, psz); wr32(c, psz, need); if (!tab || have < need) { RET(122); return; }
+  wr32(c, tab, 1); u64 r = tab + 4; wr32(c, r, 0x0100007f); wr32(c, r + 4, 1); wr32(c, r + 8, 0x000000ff); wr32(c, r + 12, 0xffffff7f); wr32(c, r + 16, 65535); wr32(c, r + 20, 1 << 16 /* MIB_IPADDR_PRIMARY */); RET(0); }   /* 127.0.0.1/8 on index 1 (network byte order) */
+static void s_GetFriendlyIfIndex(Cpu *c) { RET((u32)ARG(0)); }
+static void s_GetNumberOfInterfaces(Cpu *c) { if (ARG(0)) wr32(c, ARG(0), 1); RET(0); }
+static void s_GetAdaptersInfo(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), 0); RET(232); }   /* ERROR_NO_DATA: the loopback is not an adapter */
+static void s_GetIfTable2(Cpu *c) { RET(50); }
+static void s_GetIpForwardTable(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), 4); RET(232); }
 static void s_MapVirtualKeyW(Cpu *c) { RET(0); }
 static void s_retm1(Cpu *c) { RET(~0ull); }
 static void s_initterm(Cpu *c) { cont_push(c, CONT_INITTERM); Win32 *w = W; w->cont[w->ncont - 1].data[0] = ARG(0); w->cont[w->ncont - 1].data[1] = ARG(1); w->cont[w->ncont - 1].data[2] = 0; c->r[RAX] = 0; w32_cont_resume(c); }
@@ -1444,7 +1462,7 @@ static const ShimDef shims[] = {
   ACL_SHIMS \
   S(AllocateAndInitializeSid), S(FreeSid), S(SetEntriesInAclA), S(SetEntriesInAclW), S(ConvertStringSecurityDescriptorToSecurityDescriptorW), S(ConvertStringSecurityDescriptorToSecurityDescriptorA),
   SA("RegEnumKeyExA", ret2), SA("RegEnumKeyExW", ret2), SA("RegEnumValueW", ret2), SA("RegEnumValueA", ret2), SA("RegGetValueA", RegGetValueW), SA("RegNotifyChangeKeyValue", ret0), SA("RegQueryInfoKeyA", RegQueryInfoKeyW), SA("RegDeleteKeyW", ret2), SA("RegDeleteValueW", ret2), SA("RegFlushKey", ret0),
-  S(GetAdaptersAddresses), S(GetUnicastIpAddressTable), SA("FreeMibTable", ret0), SA("CancelMibChangeNotify2", ret0), SA("NotifyIpInterfaceChange", ret50), SA("ConvertInterfaceIndexToLuid", ret50), SA("ConvertInterfaceLuidToNameW", ret50), SA("ConvertInterfaceLuidToIndex", ret50), SA("GetBestInterfaceEx", ret50), SA("GetIfEntry2", ret50), SA("GetIpForwardTable2", ret50), SA("GetAdaptersInfo", ret50), SA("GetNetworkParams", ret50), SA("NotifyAddrChange", ret50), SA("NotifyRouteChange", ret50), SA("GetPerAdapterInfo", ret50), SA("if_nametoindex", ret0), SA("if_indextoname", ret0), SA("ConvertInterfaceLuidToGuid", ret50), SA("ConvertInterfaceGuidToLuid", ret50),
+  S(GetAdaptersAddresses), S(GetUnicastIpAddressTable), S(GetIfTable), S(GetIfEntry), S(GetIpAddrTable), S(GetFriendlyIfIndex), S(GetNumberOfInterfaces), S(GetAdaptersInfo), S(GetIfTable2), S(GetIpForwardTable), SA("FreeMibTable", ret0), SA("CancelMibChangeNotify2", ret0), SA("NotifyIpInterfaceChange", ret50), SA("ConvertInterfaceIndexToLuid", ret50), SA("ConvertInterfaceLuidToNameW", ret50), SA("ConvertInterfaceLuidToIndex", ret50), SA("GetBestInterfaceEx", ret50), SA("GetIfEntry2", ret50), SA("GetIpForwardTable2", ret50), SA("GetAdaptersInfo", ret50), SA("GetNetworkParams", ret50), SA("NotifyAddrChange", ret50), SA("NotifyRouteChange", ret50), SA("GetPerAdapterInfo", ret50), SA("if_nametoindex", ret0), SA("if_indextoname", ret0), SA("ConvertInterfaceLuidToGuid", ret50), SA("ConvertInterfaceGuidToLuid", ret50),
   S(GetThreadLocale), S(GetUserDefaultLCID), S(GetUserDefaultLangID), S(GetSystemDefaultLangID), S(GetUserDefaultUILanguage), S(GetLocaleInfoA), S(GetLocaleInfoW), S(GetLocaleInfoEx), S(IsValidLocale), S(IsValidCodePage), S(EnumSystemLocalesW), S(EnumDateFormatsW), S(EnumDateFormatsA), S(EnumDateFormatsExW), S(EnumDateFormatsExEx), S(EnumTimeFormatsW), S(EnumTimeFormatsA), S(EnumTimeFormatsEx), S(GetUserDefaultLocaleName), S(LCMapStringW), S(LCMapStringEx), S(LCMapStringA), S(CompareStringW), S(CompareStringA), S(CompareStringEx), S(CompareStringOrdinal), S(GetStringTypeW), S(GetStringTypeA), S(MultiByteToWideChar), S(WideCharToMultiByte), S(CharUpperA),
   S(lstrlenA), S(lstrlenW), S(lstrcpyA), S(lstrcmpiA), S(lstrcmpA), S(InterlockedCompareExchange), S(InterlockedExchange), S(InterlockedIncrement), S(InterlockedDecrement), S(InterlockedExchangeAdd), S(QueueUserAPC),
   S(CreateNamedPipeW), S(CreateNamedPipeA), S(ConnectNamedPipe), S(ReadFileEx), S(WriteFileEx), S(RtlNtStatusToDosError), S(CancelIo), SA("CancelIoEx", CancelIo),
