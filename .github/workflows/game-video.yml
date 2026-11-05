@@ -35,6 +35,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
+      - uses: mlugg/setup-zig@v2
+      - name: Build the wasm64 module from the current source (the committed public/x64/nebula_x64.wasm may lag behind emu/x64)
+        run: ZIG=zig ./emu/x64/build.sh
       - run: npm ci
       - run: npm run build
       - name: Playwright chromium + ffmpeg

@@ -46,3 +46,6 @@ jobs:
             fi
           done
           exit $fail
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: nebula_x64-wasm, path: public/x64/nebula_x64.wasm }
