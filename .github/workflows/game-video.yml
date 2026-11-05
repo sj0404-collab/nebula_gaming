@@ -58,4 +58,5 @@ jobs:
             e2e/video/title-screen.png
             e2e/video/audio.wav
             e2e/video/console.txt
+            e2e/video/report.txt
           if-no-files-found: warn

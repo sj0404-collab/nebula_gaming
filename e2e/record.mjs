@@ -127,6 +127,11 @@ const con = await page.evaluate(() => document.querySelector('[data-x64-console]
 const gl = con.split('\n').filter(l => /\[gl\]|\[audio\]|GL_|wgl|fault|exception/i.test(l));
 console.log(`console: ${con.length} chars; ${gl.length} gl/audio lines:\n${gl.slice(0, 80).join('\n')}\n--- console tail ---\n${con.slice(-5000)}`);
 writeFileSync(resolve(OUT, 'console.txt'), con);
+await w.locator('[data-x64-tab="report"]').click().catch(() => {}); await sleep(500);
+const rep = await page.evaluate(() => document.querySelector('[data-x64-report]')?.textContent || '');
+const repLines = rep.split('\n').filter(l => /\[gl\]|\[audio\]|GL_|wgl|fault|exception|not available|ignored|unsupported/i.test(l));
+console.log(`report: ${rep.length} chars; ${repLines.length} interesting lines:\n${repLines.slice(0, 120).join('\n')}\n--- report tail ---\n${rep.slice(-6000)}`);
+writeFileSync(resolve(OUT, 'report.txt'), rep);
 await browser.close();
 if (server) { try { process.kill(-server.pid); } catch { /* ignore */ } }
 process.exit(stamps.length > 0 ? 0 : 1);
