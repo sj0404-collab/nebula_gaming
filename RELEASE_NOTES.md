@@ -1,3 +1,33 @@
+# v1.40.1 — x64 JIT: two region-cache bugs fixed (CoreCLR / System.Text.Json fault)
+
+Since v1.38.0 (the x86-64 → wasm JIT) the browser e2e test that runs a real C# program on the official .NET 10 runtime
+failed at the JSON step with `unhandled exception 0xc0000005 at 0x107fe0d8` (CI of v1.38.0, v1.39.0 and v1.40.0 red;
+the interpreter alone — `nebula_jit=0` — was fine). The fault was reproduced deterministically outside the browser
+(`node emu/tests/wasm_run.mjs --jit 1 … nebula-dotnet-test.exe linq-throw-nre-json-reflect-regex-gc`) and traced with
+a new per-instruction history to two bugs in the region cache of `emu/x64/jit.inc`:
+
+1. **A compiled region's function-table slot could be freed while still referenced.** While the blocks of a freshly
+   compiled region are published into the 2-way set-associative block table, `jb_lookup()` may evict a block of that
+   very region; its refcount went through 0 and the slot was pushed onto the free list, the next translation reused
+   it, and an older entry `(rip A, pc N)` then executed block N of an unrelated region — in the crash a `ret` of the
+   wrong function popped a stack address and CoreCLR's exception dispatch found no frame. A reference is now held
+   during publishing, the hot block is published last and the entry is looked up again after translation.
+2. **Stale detection inside a region rewound to the entry rip.** Every block checks its code bytes on entry (CoreCLR
+   patches the write barrier after a GC, regenerates stubs, …). When a *later* block of the region was stale the function
+   returned "stale" and the interpreter resumed at the region **entry** although the earlier blocks had already run — the
+   write barrier was re-executed with `rcx` already shifted by 22 bits → AV at 0x1800 on the finalizer thread. The stale
+   exit now sets `rip` to the stale block.
+
+Result: the .NET e2e test (LINQ, exceptions, hardware NullReferenceException, JSON, reflection, Regex, GC on CoreCLR with
+the JIT on) passes again in the browser; `wasm_run` on the full test mode exits with the expected code 3.
+
+Diagnostics that stay in the build (used to find this, useful for the next one): `x64_history_raw(n, at_exc)` — raw
+block history with JIT region exits (`>x`) and hardware exceptions (`!x`), plus a snapshot taken at the last hardware
+exception; `x64_last_exc_rip()`; `x64_jit_skip(lo, hi)` / `wasm_run --jitskip lo:hi` — step instruction kinds `[lo,hi)`
+instead of translating them (bisection of translation bugs); `wasm_run -v` prints all of it on a FAULT.
+
+Android-only deliverable as before: the APK from this tag is the release.
+
 # v1.40.0 — OpenGL 1.x fixed-function pipeline + GLU on WebGL2 (Android)
 
 **Classic OpenGL games now render.** Until now the `opengl32.dll` bridge exposed WebGL2 as a core-profile GL 3.3 context:
