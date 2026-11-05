@@ -66,6 +66,9 @@ export class X64Runtime {
   private ex: Exports | null = null;
   private dec = new TextDecoder(); private enc = new TextEncoder();
   private t0 = 0; private frames = 0; private raf = 0; private timer = 0; private running = false;
+  /** zero-delay continuation for a busy guest: a MessageChannel task is not clamped to 4 ms like nested timers and still
+   *  lets input events and painting run between slices (rAF alone would cap a 12 ms slice at ~70% of the CPU) */
+  private chan: MessageChannel | null = null; private pending = false;
   /** the device's sound output (Web Audio); the guest's waveOut/DirectSound/WASAPI/XAudio2 streams end up here */
   readonly audio = new HostAudio();
   status: RunStatus = 'idle';
@@ -249,23 +252,29 @@ export class X64Runtime {
     return null;
   }
 
-  private schedule() {
-    if (this.audio.active()) { this.timer = window.setTimeout(() => this.frame(), document.hidden ? 4 : 2); return; }   /* rAF stops in hidden tabs; audible tabs keep their timers */
+  private schedule(busy = false) {
+    if (busy && typeof MessageChannel !== 'undefined') {
+      if (!this.chan) { this.chan = new MessageChannel(); this.chan.port1.onmessage = () => { if (this.pending) { this.pending = false; this.frame(); } }; }
+      this.pending = true; this.chan.port2.postMessage(0); return;
+    }
+    if (this.audio.active() || document.hidden) { this.timer = window.setTimeout(() => this.frame(), document.hidden ? 4 : 2); return; }   /* rAF stops in hidden tabs; audible tabs keep their timers */
     this.raf = requestAnimationFrame(() => this.frame());
   }
-  /** one host frame: run guest code for up to ~12 ms or until it yields for a presented frame / sleep */
+  /** one host slice: run guest code for up to ~12 ms. A guest that only pauses briefly (a JVM parks its threads for a
+   *  millisecond at a time) is waited for inside the slice instead of handing the time to a 4-16 ms host timer. */
   private frame() {
     if (!this.running || !this.ex) return;
-    const ex = this.ex; const start = performance.now(); let r = RUN_OK;
+    const ex = this.ex; const start = performance.now(); let r = RUN_OK, more = false;
     this.pads.poll();
-    for (let i = 0; i < 64; i++) {
+    for (;;) {
       r = ex.x64_run(400_000n);
       if (r === RUN_YIELD) {
         if (ex.x64_wants_stdin()) { this.waitingStdin = true; this.status = 'waiting-stdin'; this.onStdinWait?.(true); return; }
-        if (ex.x64_sleep_ms() > 0.5 || ex.x64_has_window()) break; continue;
-      }
-      if (r !== RUN_OK) break;
-      if (performance.now() - start > 12) break;
+        const s = ex.x64_sleep_ms();
+        if (s < 0 || s > 1.5) break;                     /* waiting for input, or a real sleep: come back on the next host frame */
+        if (s > 0) { const until = performance.now() + s; while (performance.now() < until) { /* shorter than any host timer */ } }
+      } else if (r !== RUN_OK) break;
+      if (performance.now() - start > 12) { more = true; break; }
     }
     if (r === RUN_EXIT || r === RUN_FAULT || r === RUN_BREAK) {
       this.running = false; this.status = r === RUN_EXIT ? 'exited' : r === RUN_FAULT ? 'fault' : 'break';
@@ -273,10 +282,10 @@ export class X64Runtime {
       this.onStop?.(this.stats());
       return;
     }
-    this.schedule();
+    this.schedule(more);
   }
 
-  stop() { if (this.running) { this.running = false; this.status = 'stopped'; cancelAnimationFrame(this.raf); clearTimeout(this.timer); this.audio.flush(); void this.syncDisk(); if (this.waitingStdin) { this.waitingStdin = false; this.onStdinWait?.(false); } } }
+  stop() { if (this.running) { this.running = false; this.status = 'stopped'; this.pending = false; cancelAnimationFrame(this.raf); clearTimeout(this.timer); this.audio.flush(); void this.syncDisk(); if (this.waitingStdin) { this.waitingStdin = false; this.onStdinWait?.(false); } } }
 
   private resumeFromStdin() { if (this.waitingStdin && this.running) { this.waitingStdin = false; this.status = 'running'; this.onStdinWait?.(false); this.schedule(); } }
   /** feed text to the guest's stdin (a trailing newline is what line-oriented programs expect) */

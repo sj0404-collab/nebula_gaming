@@ -173,7 +173,14 @@ void w32_audio_pump(void) {
   if (g_aud_host_state == 0) return;
   int rate = g_aud_host_rate, per = rate / 100, target = rate / 10;   /* 10 ms blocks, 100 ms of lead */
   static float blk[2 * 3840]; if (per > 3840) per = 3840;
-  int queued = host_audio_queued(); int blocks = 0;
+  int queued, blocks = 0;
+  if (g_aud_host_state == 1) queued = host_audio_queued();
+  else {   /* no host output (wasm_run, tests): pace the mixer against the clock, otherwise every scheduler pick would mix 200 ms of sound */
+    static double t0 = -1; double now = host_now_ms(); if (t0 < 0) t0 = now;
+    long long played = (long long)((now - t0) / 1000.0 * rate), q = (long long)g_aud_written - played;
+    if (q < 0) { t0 = now - (double)g_aud_written * 1000.0 / rate; q = 0; }
+    queued = (int)q;
+  }
   while (queued < target && blocks < 20) {
     aud_mix_block(blk, per); host_audio_write(blk, per); g_aud_written += (u64)per; queued += per; blocks++;
     for (int i = 0; i < AUD_MAX; i++) { AStream *s = &g_astr[i]; if (s->used && s->kind == AS_WASAPI && s->playing && s->event_mode && s->ev_kobj >= 0) kobj_signal(s->w, s->ev_kobj); }
