@@ -31,17 +31,17 @@ jobs:
           objdump -d -M intel /tmp/jitdiff.exe | grep -c 'cvtsi2ss\|cvttss2si\|xorps' || true
           fail=0
           for exe in /tmp/jitdiff.exe /tmp/jitdiff32.exe; do
-            ./emu/x64/x64run --quiet "$exe" | grep -a 'camera\|scalar\|cmp\|packed\|asm\|done' > /tmp/jd_native.txt
-            node emu/tests/wasm_run.mjs --max-ms 600000 --jit 0 "$exe" | grep -a 'camera\|scalar\|cmp\|packed\|asm\|done' > /tmp/jd_interp.txt
-            node emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 "$exe" | grep -a 'camera\|scalar\|cmp\|packed\|asm\|done' > /tmp/jd_jit.txt
+            ./emu/x64/x64run --quiet "$exe" | grep -a 'camera\|scalar\|cmp\|packed\|asm\|misc\|done' > /tmp/jd_native.txt
+            node emu/tests/wasm_run.mjs --max-ms 600000 --jit 0 "$exe" | grep -a 'camera\|scalar\|cmp\|packed\|asm\|misc\|done' > /tmp/jd_interp.txt
+            node emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 "$exe" | grep -a 'camera\|scalar\|cmp\|packed\|asm\|misc\|done' > /tmp/jd_jit.txt
             echo "== $exe (native | wasm interpreter | wasm JIT)"; paste /tmp/jd_native.txt /tmp/jd_interp.txt /tmp/jd_jit.txt
             grep -q 'jitdiff done' /tmp/jd_native.txt || { echo "::error::$exe did not finish natively"; fail=1; }
             cmp -s /tmp/jd_native.txt /tmp/jd_interp.txt || { echo "::error::wasm interpreter differs from the native interpreter for $exe"; fail=1; }
             if ! cmp -s /tmp/jd_jit.txt /tmp/jd_interp.txt; then
               echo "::error::JIT output differs from the interpreter for $exe — bisecting by instruction kind"; fail=1
-              for r in 1:48 48:49 49:50 50:51 51:52 100:104 104:105 105:106 106:107 107:108 108:112 112:115; do
-                node emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 --jitskip $r "$exe" | grep -a 'camera\|scalar\|cmp\|packed\|asm' > /tmp/jd_skip.txt
-                if cmp -s /tmp/jd_skip.txt <(grep -a 'camera\|scalar\|cmp\|packed\|asm' /tmp/jd_interp.txt); then echo "skip $r: MATCH (the difference is inside kinds $r)"; else echo "skip $r: still differs"; fi
+              for r in 1:48 48:49 49:50 50:51 51:52 100:104 104:105 105:106 106:107 107:108 108:112 112:115 115:116 116:118 118:119 119:120 120:121 121:122 122:123 123:124 124:125 125:126 126:127; do
+                node emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 --jitskip $r "$exe" | grep -a 'camera\|scalar\|cmp\|packed\|asm\|misc' > /tmp/jd_skip.txt
+                if cmp -s /tmp/jd_skip.txt <(grep -a 'camera\|scalar\|cmp\|packed\|asm\|misc' /tmp/jd_interp.txt); then echo "skip $r: MATCH (the difference is inside kinds $r)"; else echo "skip $r: still differs"; fi
               done
             fi
           done
