@@ -120,6 +120,12 @@ writeFileSync(resolve(OUT, 'audio.wav'), Buffer.concat([hdr, Buffer.from(pcm.buf
 let peak = 0; for (let i = 0; i < pcm.length; i++) { const v = Math.abs(pcm[i]); if (v > peak) peak = v; }
 console.log(`recorded ${stamps.length} frames in ${wallSec.toFixed(1)} s (${(stamps.length / wallSec).toFixed(1)} fps); audio: ${blocks.length} blocks, ${placed} samples placed, rate ${rate}, peak ${(peak / 32767).toFixed(3)}, context clock ${acT0.toFixed(2)}→${acT1.toFixed(2)} s`);
 console.log(`final status=${await status()} frames=${await framesNow()} errors=${errors.length}`);
+// emulator console (GL / audio / API log lines) — the tail, plus every [gl] line, for diagnosing a black screen
+await w.locator('[data-x64-tab="console"]').click().catch(() => {}); await sleep(300);
+const con = await page.evaluate(() => document.querySelector('[data-x64-console]')?.textContent || '');
+const gl = con.split('\n').filter(l => /\[gl\]|\[audio\]|GL_|wgl|fault|exception/i.test(l));
+console.log(`console: ${con.length} chars; ${gl.length} gl/audio lines:\n${gl.slice(0, 80).join('\n')}\n--- console tail ---\n${con.slice(-5000)}`);
+writeFileSync(resolve(OUT, 'console.txt'), con);
 await browser.close();
 if (server) { try { process.kill(-server.pid); } catch { /* ignore */ } }
 process.exit(stamps.length > 0 ? 0 : 1);
