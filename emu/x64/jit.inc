@@ -427,7 +427,7 @@ static int e_insn(Buf *B, const JItem *it, const u8 *code, int m32, int k) {
       e_prep_mem(B, it, lanes * w, 0);
       for (int lane = 0; lane < lanes; lane++) {
         e_lget(B, L_C); e_lget(B, L_C); e_ld(B, dbl ? F64_LOAD : F32_LOAD, dbl ? 3 : 2, CO_X(e->reg) + lane * w);
-        if (it->fk == JK_SSE_MINMAX) { e_lset(B, L_F0); e_xmm_fsrc(B, e, lane * w, dbl); e_lset(B, L_F1); e_lget(B, L_F0); e_lget(B, L_F1); e_lget(B, L_F0); e_lget(B, L_F1); OP(op2 == 0x5F ? (dbl ? F64_GT : F32_GT) : (dbl ? F64_LT : F32_LT)); OP(SELECT); }
+        if (it->fk == JK_SSE_MINMAX) { if (!dbl) OP(F64_PROMOTE); e_lset(B, L_F0); e_xmm_fsrc(B, e, lane * w, dbl); if (!dbl) OP(F64_PROMOTE); e_lset(B, L_F1); e_lget(B, L_F0); e_lget(B, L_F1); e_lget(B, L_F0); e_lget(B, L_F1); OP(op2 == 0x5F ? F64_GT : F64_LT); OP(SELECT); if (!dbl) OP(F32_DEMOTE); }   /* unordered/equal → source operand, like the interpreter */
         else { e_xmm_fsrc(B, e, lane * w, dbl); OP(dbl ? (op2 == 0x58 ? F64_ADD : op2 == 0x59 ? F64_MUL : op2 == 0x5C ? F64_SUB : F64_DIV) : (op2 == 0x58 ? F32_ADD : op2 == 0x59 ? F32_MUL : op2 == 0x5C ? F32_SUB : F32_DIV)); }
         e_st(B, dbl ? F64_STORE : F32_STORE, dbl ? 3 : 2, CO_X(e->reg) + lane * w);
       }

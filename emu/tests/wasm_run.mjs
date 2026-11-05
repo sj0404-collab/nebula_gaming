@@ -58,7 +58,7 @@ const imports = {
       } catch (e) {
         jitFail++;
         if (jitFail <= 3) { console.error('[jit] compile failed:', String(e)); if (process.env.JIT_DUMP) fs.writeFileSync(`/tmp/jitfail${jitFail}.wasm`, bytesAt(p, Number(n))); }
-        return 0n;
+        return 0;
       }
     },
   },
