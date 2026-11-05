@@ -20,6 +20,7 @@
 static int g_dump_frames; static int g_frame_count; static const char *g_dump_prefix = "frame";
 void host_write(int fd, const char *p, size_t n) { if (fd == 3) { if (getenv("X64_LOG")) fwrite(p, 1, n, stderr); return; } fwrite(p, 1, n, fd == 2 ? stderr : stdout); fflush(fd == 2 ? stderr : stdout); }
 double host_wall_ms(void) { struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6; }
+u32 host_jit_compile(const u8 *bytes, u64 len, u32 reuse) { (void)bytes; (void)len; (void)reuse; return 0; }   /* no wasm engine natively: interpreter only */
 double host_now_ms(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6; }
 void host_present(const u32 *bgra, int w, int h) {
   g_frame_count++;

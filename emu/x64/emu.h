@@ -19,7 +19,11 @@ typedef int8_t   s8;  typedef int16_t  s16; typedef int32_t  s32; typedef int64_
 
 /* ---------- host interface (implemented in host_native.c or imported from JS in wasm) ---------- */
 void   host_write(int fd, const char *p, size_t n);        /* console output (1 stdout, 2 stderr, 3 emulator log) */
-double host_now_ms(void); double host_wall_ms(void);   /* wall clock, ms since the Unix epoch (UTC) */                                  /* monotonic milliseconds */
+double host_now_ms(void); double host_wall_ms(void);
+/* JIT (cpu.c / jit.inc): compile an emitted wasm module (imports env.memory + the jit_* exports) and publish its "f" in the
+   main module's indirect table; returns the table index (0 = unavailable / failed).  reuse != 0: overwrite that slot. */
+u32 host_jit_compile(const u8 *bytes, u64 len, u32 reuse);
+extern int g_jit_on; const char *jit_stats_text(void);   /* wall clock, ms since the Unix epoch (UTC) */                                  /* monotonic milliseconds */
 void   host_present(const u32 *bgra, int w, int h);        /* framebuffer of the GUI window changed */
 int    host_key(int vk);                                   /* 1 if virtual key currently pressed */
 void   host_exit(int code);                                /* guest called ExitProcess */

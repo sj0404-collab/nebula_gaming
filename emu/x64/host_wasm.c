@@ -6,6 +6,8 @@ __attribute__((import_module("env"), import_name("host_present"))) void js_prese
 __attribute__((import_module("env"), import_name("host_math"))) double js_math(int op, double a, double b);
 void host_write(int fd, const char *p, size_t n) { js_write(fd, p, n); }
 double host_now_ms(void) { return js_now_ms(); }
+__attribute__((import_module("env"), import_name("host_jit_compile"))) u32 js_jit_compile(const u8 *bytes, u64 len, u32 reuse);
+u32 host_jit_compile(const u8 *bytes, u64 len, u32 reuse) { return js_jit_compile(bytes, len, reuse); }
 __attribute__((import_module("env"), import_name("host_wall_ms"))) double js_wall_ms(void);
 double host_wall_ms(void) { return js_wall_ms(); }
 void host_present(const u32 *bgra, int w, int h) { js_present(bgra, w, h); }

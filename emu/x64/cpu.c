@@ -824,15 +824,18 @@ static void exec_0f(Ins *i, Cpu *c) {
   }
 }
 
-int cpu_run(Cpu *c, u64 max_insns) {
-  c->status = RUN_OK;
-  for (u64 n = 0; n < max_insns; n++) {
+#include "jit.inc"
+static int g_bstart;   /* set by cpu_step1 when the instruction transferred control (next rip is a block start) */
+/* one interpreter step at c->rip; returns 1 when cpu_run must return c->status */
+static int cpu_step1(Cpu *c) {
+  {
     /* import trampolines live in the shim region: dispatch to the Win32 personality */
     if (c->rip - G_SHIM_BASE < G_SHIM_SIZE) {
       int r = w32_dispatch(c, c->rip);
-      if (r != RUN_OK) { c->status = r; return r; }
-      if (c->status != RUN_OK) return c->status;
-      continue;
+      g_bstart = 1;
+      if (r != RUN_OK) { c->status = r; return 1; }
+      if (c->status != RUN_OK) return 1;
+      return 0;
     }
 #ifdef X64_WATCH
     if (c->rip == X64_WATCH || c->rip == X64_WATCH2) { e_log("[watch] rip=%llx tid=%d rax=%llx rbx=%llx rsp=%llx rbp=%llx rsi=%llx rdi=%llx r12=%llx r13=%llx r14=%llx r15=%llx\n", (unsigned long long)c->rip, c->w->th[c->w->cur_th].tid, (unsigned long long)c->r[0], (unsigned long long)c->r[3], (unsigned long long)c->r[4], (unsigned long long)c->r[5], (unsigned long long)c->r[6], (unsigned long long)c->r[7], (unsigned long long)c->r[12], (unsigned long long)c->r[13], (unsigned long long)c->r[14], (unsigned long long)c->r[15]);
@@ -846,9 +849,9 @@ int cpu_run(Cpu *c, u64 max_insns) {
     int hit = e->rip == c->rip && code && (w0 & e->m0) == e->b0 && (w1 & e->m1) == e->b1 && e->m32 == c->mode32;
     if (hit && e->fast) {   /* specialised handler: no Ins at all */
       u64 start = c->rip, nx = fast_exec(c, e, code, start);
-      if (nx) { if (c->status != RUN_OK) { c->hist[c->hist_i++ & 4095] = start; if (c->status == RUN_FAULT) { c->err_rip = start; if (c->exc_code) { c->rip = start; if (w32_hw_exception(c)) continue; } } return c->status; }
-        if (nx != start + e->len) c->hist[c->hist_i++ & 4095] = nx;   /* history keeps block starts (branch targets); straight-line code is implied */
-        c->rip = nx; c->icount++; if (c->trace) e_log("%llx\n", (unsigned long long)c->rip); continue; }
+      if (nx) { if (c->status != RUN_OK) { c->hist[c->hist_i++ & 4095] = start; if (c->status == RUN_FAULT) { c->err_rip = start; if (c->exc_code) { c->rip = start; if (w32_hw_exception(c)) { g_bstart = 1; return 0; } } } return 1; }
+        if (nx != start + e->len) { c->hist[c->hist_i++ & 4095] = nx; g_bstart = 1; }   /* history keeps block starts (branch targets); straight-line code is implied */
+        c->rip = nx; c->icount++; if (c->trace) e_log("%llx\n", (unsigned long long)c->rip); return 0; }
     }
     c->hist[c->hist_i++ & 4095] = c->rip;
     Ins in; in.c = c; in.start = c->rip; in.ip = c->rip; in.fend = c->rip; in.code = code;
@@ -876,11 +879,26 @@ int cpu_run(Cpu *c, u64 max_insns) {
       }
     }
     if (c->status != RUN_OK) {
-      if (c->status == RUN_FAULT) { c->err_rip = in.start; if (c->exc_code) { c->rip = in.start; if (w32_hw_exception(c)) continue; } }
-      return c->status;
+      if (c->status == RUN_FAULT) { c->err_rip = in.start; if (c->exc_code) { c->rip = in.start; if (w32_hw_exception(c)) { g_bstart = 1; return 0; } } }
+      return 1;
     }
+    if (in.ip != in.fend) g_bstart = 1;
     c->rip = c->mode32 ? (u32)in.ip : in.ip; c->icount++;
     if (c->trace) e_log("%llx\n", (unsigned long long)c->rip);
+  }
+  return 0;
+}
+
+int cpu_run(Cpu *c, u64 max_insns) {
+  c->status = RUN_OK; int bstart = 1;
+  for (u64 n = 0; n < max_insns; n++) {
+    if (bstart && g_jit_on && !c->trace && c->rip - G_SHIM_BASE >= G_SHIM_SIZE) {   /* block start: run / count / translate (jit.inc) */
+      u64 ic0 = c->icount;
+      if (jit_enter(c, max_insns - n)) { n += c->icount - ic0; if (c->status != RUN_OK) return c->status; continue; }
+    }
+    g_bstart = 0; g_jit_st.dinterp++;
+    if (cpu_step1(c)) return c->status;
+    bstart = g_bstart;
   }
   return RUN_OK;
 }

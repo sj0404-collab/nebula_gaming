@@ -12,6 +12,6 @@ echo "[2/2] wasm64 module"
 mkdir -p ../../public/x64
 $ZIG cc -target wasm64-freestanding -O2 -fno-builtin-memcpy -fno-builtin-memset \
   -Wl,--no-entry -Wl,--strip-all -Wl,--export-memory -Wl,-z,stack-size=1048576 -Wl,--initial-memory=67108864 -Wl,--max-memory=4294901760 \
-  -Wl,--export=__heap_base \
+  -Wl,--export=__heap_base -Wl,--export-table -Wl,--growable-table \
   $SRC host_wasm.c -o ../../public/x64/nebula_x64.wasm
 ls -la x64run ../../public/x64/nebula_x64.wasm

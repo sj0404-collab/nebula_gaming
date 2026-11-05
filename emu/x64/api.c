@@ -153,6 +153,8 @@ static int run_one(Proc *p, u64 budget) {
   if ((r == RUN_FAULT || r == RUN_BREAK || r == RUN_EXIT) && tc != &p->cpu) { Cpu *m = &p->cpu; Cpu saved = *m; *m = *tc; m->mem = saved.mem; m->w = saved.w; p->w32.th[0].cpu = m; }
   return r;
 }
+EXPORT(x64_set_jit) void x64_set_jit(int on) { g_jit_on = on; }   /* host has a wasm engine and provided host_jit_compile */
+EXPORT(x64_jit_stats) const char *x64_jit_stats(void) { return jit_stats_text(); }
 EXPORT(x64_run) int x64_run(u64 budget) {
   if (!g_loaded) return RUN_FAULT;
   g_want_stdin = 0;
