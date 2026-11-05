@@ -1,3 +1,61 @@
+# v1.39.0 — Game controllers: XInput, DirectInput8, winmm + the phone's own pads and an on-screen controller (Android)
+
+**Windows games now see a real game controller.** Every Windows gamepad API a game may use is implemented on top of one
+XInput-shaped controller state (`emu/x64/emu.h: PadState g_pads[4]`) that the host fills from the browser's **Gamepad API**
+(any Bluetooth/USB pad paired with the phone — Xbox, DualShock/DualSense, 8BitDo, generic "standard mapping" pads) or
+from the new **on-screen controller** in the Programs window (touch bar → 🎮): left analog stick, d-pad, A/B/X/Y,
+LB/RB, LT/RT, Back/Start.  The on-screen pad is merged into controller 0 together with a physical pad (buttons OR-ed,
+larger axis deflection wins), so a game can be played with the thumb-stick on glass and a physical pad at the same time.
+
+**Windows side — what games get (`emu/x64/win32_compat.inc`, `input.inc`, `win32.c`):**
+
+* **XInput 1.4 / 1.3 / 9.1.0** (`xinput1_4.dll`, `xinput1_3.dll`, `xinput9_1_0.dll`, `xinputuap.dll`): `XInputGetState`,
+  `XInputSetState` (→ **rumble on the phone's pad** through `vibrationActuator.playEffect('dual-rumble')`),
+  `XInputGetCapabilities` (gamepad subtype, voice/FFB flags honest), `XInputEnable`, `XInputGetBatteryInformation`
+  (wired/full), `XInputGetKeystroke` (connected → `ERROR_EMPTY`, i.e. "no keystroke pending": games then poll `GetState`),
+  `XInputGetDSoundAudioDeviceGuids`/`XInputGetAudioDeviceIds` (no headset), plus
+  the **undocumented ordinals 100 (`XInputGetStateEx`, Guide button) and 108 (`XInputGetCapabilitiesEx`, VID 045E / PID 028E)**
+  that SDL2, Unity and MonoGame resolve by number. `dwPacketNumber` changes only when the state changes; unplugged slots
+  return `ERROR_DEVICE_NOT_CONNECTED` exactly like Windows.
+* **winmm joystick** (`joyGetNumDevs` = 16, `joyGetDevCapsA/W` — "Controller (XBOX 360 For Windows)", 5 axes, 10 buttons,
+  POV, `joyGetPos`, `joyGetPosEx` (`JOYINFOEX`: X/Y/Z/R/U axes 0..65535, buttons, POV in centidegrees / `JOY_POVCENTERED`),
+  `joyGetThreshold`/`joySetThreshold`, `joyConfigChanged`; `joySetCapture` answers `JOYERR_UNPLUGGED` so programs fall back
+  to polling, which every one of them does) — what old Win32/DirectX-7-era games and SDL 1.2 use.
+* **DirectInput8 game controller** (`IDirectInput8::EnumDevices(DI8DEVCLASS_GAMECTRL / DI8DEVTYPE_GAMEPAD)`, `CreateDevice`
+  by instance/product GUID, `IDirectInputDevice8::SetDataFormat(c_dfDIJoystick/2)`, `SetCooperativeLevel`, `EnumObjects`
+  (5 axes, 10 buttons, 1 POV with the standard `DIJOFS_*` offsets, usage page 1 / usages 0x30-0x35, 0x39, 9/1-10),
+  `GetObjectInfo` by offset / id / usage, `SetProperty`/`GetProperty` (`DIPROP_RANGE` — default 0..65535, custom ranges
+  honoured in `GetDeviceState`; `DIPROP_BUFFERSIZE`, `DIPROP_AXISMODE`, `DIPROP_GRANULARITY`, dead zone / saturation
+  / autocenter / calibration mode answered with Windows' defaults, the rest `DIERR_UNSUPPORTED`), `Acquire`/`Unacquire`,
+  `Poll`, `GetDeviceState` (`DIJOYSTATE` layout — also what `c_dfDIJoystick2` reads for its first 80 bytes — axes scaled
+  to the game's range, triggers on the Z axis as on Windows, POV in hundredths of degrees, `DIERR_NOTACQUIRED`/
+  `DIERR_INPUTLOST` on unplug), `GetDeviceData` (buffered button/axis changes),
+  `GetCapabilities`, `GetDeviceInfo`, `RunControlPanel`/`SendDeviceData`/`CreateEffect` → honest `DIERR_UNSUPPORTED`.
+* **Hot-plug** in all three APIs: a pad connected after the game started is seen on the next poll, an unplugged one
+  reports the right error, and winmm captured windows get `MM_JOY*` messages only while the pad exists.
+* 32-bit (x86) programs get the same through the stdcall thunks (`stdcall32.inc` regenerated).
+
+**Host side (`src/lib/x64/pad.ts`, `runtime.ts`, `VirtualPad.tsx`):** standard-mapping Gamepad → XInput layout
+(buttons 0-3 → A B X Y, 4/5 → LB/RB, 6/7 → analog LT/RT, 8/9 → Back/Start, 10/11 → stick clicks, 12-15 → d-pad, 16 →
+Guide), stick axes scaled to ±32767 with Y inverted as XInput expects, polled once per emulator frame (`x64_pad` export);
+non-standard mappings fall back to the first four axes/buttons; `XInputSetState` → `playEffect('dual-rumble')` with the
+motors' strengths, or a no-op if the pad has no actuator. The status bar shows what the emulator currently sees
+(`🎮 Xbox Wireless Controller (STANDARD GAMEPAD …)`, `on-screen pad`).
+
+**Tests:** `emu/tests/pad.c` (33 checks — XInput connect/disconnect/packet numbers/caps/ordinals 100+108/rumble, winmm
+caps/pos/posex/capture message, DirectInput8 enumeration/objects/ranges/state/scaled axes/POV/unplug → `DIERR_INPUTLOST`)
+runs natively with the host schedule `--pad '0:1,0x1010,255,0,16384,-8192,0,0@300' --pad '0:0,0,…@2500'` for x64 and x86
+(248 checks total in `tests/run.sh`), and in the browser e2e suite with a simulated Gamepad API device (33/33 plus the
+vibration actuator being driven) and with the on-screen controller (49 e2e tests).
+
+**Honest limits:** no `MM_JOY*` capture messages (polling only); `XInputGetKeystroke` never reports `VK_PAD_*` keystrokes
+(games use `GetState`); Chrome/WebView exposes a pad to the page only after a button is pressed on it (browser privacy rule —
+press any button once after pairing); the Gamepad API has no battery level (reported as "wired"), no gyro/touchpad, and
+rumble is only available where the browser implements `vibrationActuator` (Chrome ≥ 68 on Android, pads that support it);
+DirectInput force-feedback effects are not implemented (games fall back to no rumble when `CreateEffect` fails, XInput
+rumble works); the on-screen pad has one analog stick (right stick / stick clicks are buttons-only there); HID/raw-input
+access to the pad (`RIM_TYPEHID`) is not exposed — games that bypass all three APIs and read HID reports directly see no pad.
+
 # v1.38.0 — x86→wasm JIT: hot code runs as WebAssembly (Android)
 
 **The emulator now compiles hot x86/x86-64 code to WebAssembly at run time** (`emu/x64/jit.inc`, 900 lines) instead of

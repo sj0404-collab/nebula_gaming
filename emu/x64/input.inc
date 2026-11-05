@@ -2,8 +2,8 @@
    Raw Input: RegisterRawInputDevices records the interest per process; w32_key / w32_mouse then queue RAWINPUT records and post
    WM_INPUT to the target window (RIDEV_NOLEGACY suppresses the ordinary WM_KEY* and WM_MOUSE* messages).  DirectInput8: a COM
    IDirectInput8 whose CreateDevice hands out a system keyboard (256 DIK scan-code bytes) and a system mouse (relative axes,
-   buttons, wheel, DIMOUSESTATE/DIMOUSESTATE2), immediate GetDeviceState and buffered GetDeviceData; no joysticks (the
-   emulator reports "no game controller" here and through XInput). */
+   buttons, wheel, DIMOUSESTATE/DIMOUSESTATE2), immediate GetDeviceState and buffered GetDeviceData; game pads from
+   g_pads (DI8DEVTYPE_GAMEPAD, DIJOYSTATE layout, DIPROP_RANGE), the same state XInput and winmm joy* report. */
 
 /* VK → DirectInput / scan-code-set-1 make code */
 static u8 vk_to_dik(int vk) {
