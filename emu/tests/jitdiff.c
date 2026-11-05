@@ -117,12 +117,83 @@ static uint32_t t_asm(void) {
 #else
 static uint32_t t_asm(void) { return 0; }
 #endif
+/* 6. integer forms added to the translator in v1.42 (both bitnesses): inc/dec r32, push imm, leave, bt/bts/btr/btc on registers and
+ *    on memory bit strings (negative offsets), bt imm, bsf/bsr (incl. zero input: destination unchanged, ZF), bswap, shld/shrd,
+ *    mul/imul/div/idiv one-operand forms (incl. the #DE-free slow paths), imul with live flags, shufps/shufpd, cvtdq2ps,
+ *    movlps/movhps/movhlps/movlhps, 32-bit mode call/jmp/push through memory */
+#include <xmmintrin.h>
+#include <emmintrin.h>
+static uint32_t bitstr[64];
+typedef uint32_t (*fn_t)(uint32_t);
+static uint32_t __attribute__((noinline)) f_a(uint32_t x) { return x * 3u + 1u; }
+static uint32_t __attribute__((noinline)) f_b(uint32_t x) { return x ^ 0x5bd1e995u; }
+static uint32_t __attribute__((noinline)) f_c(uint32_t x) { return (x << 5) | (x >> 27); }
+static fn_t fns[3] = { f_a, f_b, f_c };
+static uint32_t t_misc(void) {
+  uint32_t h = 2166136261u; rng = 0x2545F491u;
+  for (int i = 0; i < 64; i++) bitstr[i] = rnd();
+  for (int it = 0; it < 2000; it++) {
+    uint32_t a = rnd(), b = rnd() | 1, c = rnd();
+    /* inc/dec, push imm, leave-ish frames come from the compiler; make sure some run with live flags */
+    uint32_t x = a; for (int k = 0; k < (int)(b & 7) + 1; k++) { x++; if (x == 0) h ^= 1; } for (int k = 0; k < (int)(c & 3) + 1; k++) { x--; if ((int32_t)x < 0) h += 3; }
+    /* bt family: register forms */
+    uint32_t cf1, cf2, cf3, cf4, r1 = a, r2 = a, r3 = a;
+    __asm__("xor %0, %0\n\tbt %2, %1\n\tsetc %b0" : "=&q"(cf1) : "r"(a), "r"(b) : "cc");
+    __asm__("xor %0, %0\n\tbts %2, %1\n\tsetc %b0" : "=&q"(cf2), "+r"(r1) : "r"(c) : "cc");
+    __asm__("xor %0, %0\n\tbtr %2, %1\n\tsetc %b0" : "=&q"(cf3), "+r"(r2) : "r"(c) : "cc");
+    __asm__("xor %0, %0\n\tbtc %2, %1\n\tsetc %b0" : "=&q"(cf4), "+r"(r3) : "r"(c) : "cc");
+    uint32_t cf5, cf6, r4 = a; __asm__("xor %0, %0\n\tbt $13, %1\n\tsetc %b0" : "=&q"(cf5) : "r"(a) : "cc"); __asm__("xor %0, %0\n\tbts $29, %1\n\tsetc %b0" : "=&q"(cf6), "+r"(r4) : : "cc");
+    /* bt family: memory bit strings with signed offsets (-1024 .. 1023) */
+    int32_t off = (int32_t)(c % 2048) - 1024; uint32_t cm1, cm2, cm3;
+    __asm__("xor %0, %0\n\tbtl %2, %1\n\tsetc %b0" : "=&q"(cm1) : "m"(bitstr[32]), "r"(off) : "cc");
+    __asm__("xor %0, %0\n\tbtsl %2, %1\n\tsetc %b0" : "=&q"(cm2), "+m"(bitstr[32]) : "r"(off) : "cc", "memory");
+    __asm__("xor %0, %0\n\tbtcl %2, %1\n\tsetc %b0" : "=&q"(cm3), "+m"(bitstr[32]) : "r"(off) : "cc", "memory");
+    uint32_t cm4; __asm__("xor %0, %0\n\tbtl $7, %1\n\tsetc %b0" : "=&q"(cm4) : "m"(bitstr[(c >> 3) & 63]) : "cc");
+    uint32_t cm5; __asm__("xor %0, %0\n\tbtrl $31, %1\n\tsetc %b0" : "=&q"(cm5), "+m"(bitstr[(c >> 9) & 63]) : : "cc", "memory");
+    /* bsf / bsr with zero input: destination stays, ZF set */
+    uint32_t v = (it & 3) == 0 ? 0 : a, d1 = 0x77, d2 = 0x99, z1, z2;
+    __asm__("bsf %2, %0\n\tsetz %b1" : "+r"(d1), "=&q"(z1) : "r"(v) : "cc"); __asm__("bsr %2, %0\n\tsetz %b1" : "+r"(d2), "=&q"(z2) : "r"(v) : "cc");
+    uint32_t bs = __builtin_bswap32(a); uint64_t bs64 = __builtin_bswap64(((uint64_t)a << 32) | c);
+    /* shld / shrd */
+    uint32_t s1 = a, s2 = a; __asm__("shld $7, %1, %0" : "+r"(s1) : "r"(c) : "cc"); __asm__("shrd $13, %1, %0" : "+r"(s2) : "r"(c) : "cc");
+    uint32_t s3 = a, s4 = a; uint32_t zf1, zf2; __asm__("shld $1, %2, %0\n\tsetc %b1" : "+r"(s3), "=&q"(zf1) : "r"(c) : "cc"); __asm__("shrd $31, %2, %0\n\tsets %b1" : "+r"(s4), "=&q"(zf2) : "r"(c) : "cc");
+    /* mul / imul / div / idiv one-operand (32-bit) */
+    uint32_t lo, hi, ilo, ihi, mf, imf;
+    __asm__("mull %3\n\tsetc %b2" : "=a"(lo), "=d"(hi), "=&q"(mf) : "r"(b), "a"(a) : "cc");
+    __asm__("imull %3\n\tseto %b2" : "=a"(ilo), "=d"(ihi), "=&q"(imf) : "r"(b), "a"(a) : "cc");
+    uint32_t q, r; { uint32_t dhi = (it & 1) ? 0 : (c % b); __asm__("divl %4" : "=a"(q), "=d"(r) : "a"(a), "d"(dhi), "r"(b) : "cc"); }
+    int32_t iq, ir; { int32_t num = (int32_t)a, den = (int32_t)(b | 2); if ((it & 7) == 3) { num = INT32_MIN; den = -1; } int32_t dhi = num >> 31;   /* INT32_MIN / -1 is #DE-free only through the 64-bit path: skip the trap case itself */
+      if (den == -1 && num == INT32_MIN) { iq = 0; ir = 0; } else __asm__("idivl %4" : "=a"(iq), "=d"(ir) : "a"(num), "d"(dhi), "r"(den) : "cc"); }
+    /* imul with live flags (overflow check), 64-bit unsigned/signed division through the compiler */
+    int32_t p; int ov; { int32_t m1 = (int32_t)a, m2 = (int32_t)(c >> 4); ov = __builtin_mul_overflow(m1, m2, &p); }
+    uint64_t u64 = ((uint64_t)a << 20) | c, q64 = u64 / (uint64_t)b, r64 = u64 % (uint64_t)b; int64_t s64 = (int64_t)(((uint64_t)c << 32) | a) - 0x7000000000000000ll, sq = s64 / (int64_t)(int32_t)b, sr = s64 % (int64_t)(int32_t)b;
+    /* SSE shuffles and conversions */
+    __m128 fx = _mm_set_ps((float)(int32_t)a, (float)(int32_t)b, 1.5f, -2.25f), fy = _mm_set_ps(3.f, (float)(int32_t)c, -7.f, 0.125f);
+    __m128 sh1 = _mm_shuffle_ps(fx, fy, 0x1B), sh2 = _mm_shuffle_ps(fy, fx, 0xC9), sh3 = _mm_shuffle_ps(fx, fx, 0x4E);
+    __m128i iv = _mm_set_epi32((int32_t)a, (int32_t)b, (int32_t)c, -12345); __m128 cv = _mm_cvtepi32_ps(iv);
+    __m128 hl = _mm_movehl_ps(fx, fy), lh = _mm_movelh_ps(fx, fy); float two[2] = { (float)c, (float)a }; __m128 ld = _mm_loadl_pi(fx, (const __m64 *)two), hd_ = _mm_loadh_pi(fy, (const __m64 *)two);
+    float st[2]; _mm_storeh_pi((__m64 *)st, sh1);
+    __m128d dx = _mm_set_pd((double)(int32_t)a, 2.5), dy = _mm_set_pd(-1.0, (double)(int32_t)c); __m128d shd = _mm_shuffle_pd(dx, dy, 1);
+    float o[4]; _mm_storeu_ps(o, sh1); for (int k = 0; k < 4; k++) h = hf(h, o[k]); _mm_storeu_ps(o, sh2); for (int k = 0; k < 4; k++) h = hf(h, o[k]); _mm_storeu_ps(o, sh3); for (int k = 0; k < 4; k++) h = hf(h, o[k]);
+    _mm_storeu_ps(o, cv); for (int k = 0; k < 4; k++) h = hf(h, o[k]); _mm_storeu_ps(o, hl); for (int k = 0; k < 4; k++) h = hf(h, o[k]); _mm_storeu_ps(o, lh); for (int k = 0; k < 4; k++) h = hf(h, o[k]);
+    _mm_storeu_ps(o, ld); for (int k = 0; k < 4; k++) h = hf(h, o[k]); _mm_storeu_ps(o, hd_); for (int k = 0; k < 4; k++) h = hf(h, o[k]); h = hf(hf(h, st[0]), st[1]);
+    double od[2]; _mm_storeu_pd(od, shd); h = hd(hd(h, od[0]), od[1]);
+    /* indirect calls through a table (jmp/call [mem] in both modes) */
+    uint32_t fv = fns[c % 3](a); fv = fns[(c >> 2) % 3](fv);
+    uint32_t vals[] = { x, cf1, cf2, cf3, cf4, cf5, cf6, r1, r2, r3, r4, cm1, cm2, cm3, cm4, cm5, d1, d2, z1, z2, bs, (uint32_t)bs64, (uint32_t)(bs64 >> 32), s1, s2, s3, s4, zf1, zf2, lo, hi, ilo, ihi, mf, imf, q, r, (uint32_t)iq, (uint32_t)ir,
+      (uint32_t)p, (uint32_t)ov, (uint32_t)q64, (uint32_t)(q64 >> 32), (uint32_t)r64, (uint32_t)sq, (uint32_t)(sq >> 32), (uint32_t)sr, fv };
+    for (unsigned k = 0; k < sizeof vals / sizeof vals[0]; k++) h = h32(h, vals[k]);
+  }
+  for (int i = 0; i < 64; i++) h = h32(h, bitstr[i]);
+  return h;
+}
 int main(void) {
   printf("camera   %08x\n", t_camera());
   printf("scalar   %08x\n", t_scalar());
   printf("cmp      %08x\n", t_cmp());
   printf("packed   %08x\n", t_packed());
   printf("asm      %08x\n", t_asm());
+  printf("misc     %08x\n", t_misc());
   printf("jitdiff done\n");
   return 0;
 }

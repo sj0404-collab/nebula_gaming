@@ -99,7 +99,8 @@ static int blk_of(Buf *B, u64 rip) { for (int i = 0; i < B->nblk; i++) if (B->st
 #define MO_TLB    ((u64)__builtin_offsetof(Mem, tlb))
 enum { I64_ADD = 0x7C, I64_SUB = 0x7D, I64_MUL = 0x7E, I64_AND = 0x83, I64_OR = 0x84, I64_XOR = 0x85, I64_SHL = 0x86, I64_SHR_S = 0x87, I64_SHR_U = 0x88,
        I64_EQZ = 0x50, I64_EQ = 0x51, I64_NE = 0x52, I64_LT_U = 0x54, I64_LE_U = 0x58, I64_POPCNT = 0x7B, I64_EXT_U = 0xAD, I64_EXT32_S = 0xC4, I32_WRAP = 0xA7,
-       I32_EQZ = 0x45, I32_AND = 0x71, I32_OR = 0x72, I32_XOR = 0x73, DROP = 0x1A, SELECT = 0x1B, RETURN = 0x0F, CALL = 0x10, BR_IF = 0x0D };
+       I32_EQZ = 0x45, I32_AND = 0x71, I32_OR = 0x72, I32_XOR = 0x73, DROP = 0x1A, SELECT = 0x1B, RETURN = 0x0F, CALL = 0x10, BR_IF = 0x0D,
+       I64_CLZ = 0x79, I64_CTZ = 0x7A, I64_DIV_S = 0x7F, I64_DIV_U = 0x80, I64_REM_S = 0x81, I64_REM_U = 0x82, I64_GE_U = 0x5A, I32_EQ = 0x46, I32_NE = 0x47, F32_CVT_I32S = 0xB2 };
 static void e_i64c(Buf *B, u64 v) { OP(0x42); bs(B, (s64)v); }
 static void e_i32c(Buf *B, s32 v) { OP(0x41); bs(B, v); }
 static void e_lget(Buf *B, int l) { OP(0x20); bu(B, l); }
@@ -224,7 +225,9 @@ static void e_flags(Buf *B, int kind, int sz, int need) {
 static void e_mask(Buf *B, int sz) { if (sz < 8) { e_i64c(B, sz == 4 ? 0xffffffffull : sz == 2 ? 0xffffull : 0xffull); OP(I64_AND); } }
 /* ---- flags liveness ---- */
 enum { K_INL, K_STEP, K_TERM };
-enum { JK_TEST8_IMM = 100, JK_TEST_AL_IMM, JK_TEST_A_IMM, JK_MOV8_R_IMM, JK_CVTSI2SD, JK_CVTSD2SI, JK_SQRT, JK_CVT5A, JK_MOVD_X_RM, JK_MOVD_RM_X, JK_MOVQ_X, JK_MOVQ_RM_X, JK_PLOGIC, JK_MOVDQ, JK_SSE_MINMAX };
+enum { JK_TEST8_IMM = 100, JK_TEST_AL_IMM, JK_TEST_A_IMM, JK_MOV8_R_IMM, JK_CVTSI2SD, JK_CVTSD2SI, JK_SQRT, JK_CVT5A, JK_MOVD_X_RM, JK_MOVD_RM_X, JK_MOVQ_X, JK_MOVQ_RM_X, JK_PLOGIC, JK_MOVDQ, JK_SSE_MINMAX,
+       /* 115.. (v1.42): the forms the JVM template interpreter, 32-bit code and libGDX's math lean on */
+       JK_INCDEC_R = 115, JK_PUSH_IMM, JK_LEAVE, JK_BT, JK_BSF, JK_BSWAP, JK_SHLD, JK_MUL1, JK_DIV, JK_MOVLH, JK_SHUFPS, JK_CVTDQ2PS };
 /* class / operand size / segment of an instruction: the interpreter's fast class when it has one, otherwise the prefixed
    (66 → 16-bit, fs:/gs:) and SSE forms the translator handles itself */
 static void jit_fast(const Dc *e, JItem *it) {
@@ -241,6 +244,18 @@ static void jit_fast(const Dc *e, JItem *it) {
     if (e->p66 && !e->rep) {
       if (op2 == 0x6E) it->fk = JK_MOVD_X_RM; else if (op2 == 0x7E) it->fk = JK_MOVD_RM_X; else if (op2 == 0xD6) it->fk = JK_MOVQ_RM_X;
       else if (op2 == 0xDB || op2 == 0xDF || op2 == 0xEB || op2 == 0xEF) it->fk = JK_PLOGIC; else if (op2 == 0x6F || op2 == 0x7F) it->fk = JK_MOVDQ;
+      else if ((op2 == 0x12 || op2 == 0x13 || op2 == 0x16 || op2 == 0x17) && e->mod != 3) it->fk = JK_MOVLH;   /* movlpd / movhpd */
+      else if (op2 == 0xC6) it->fk = JK_SHUFPS;   /* shufpd */
+      else if (op2 >= 0xC8 && op2 <= 0xCF) return;   /* 66 bswap: undefined */
+      else if ((op2 == 0xA3 || op2 == 0xAB || op2 == 0xB3 || op2 == 0xBB || (op2 == 0xBA && (e->reg & 7) >= 4)) && e->mod == 3) { it->fk = JK_BT; it->sz = 2; }
+      return;
+    }
+    if (!e->p66 && !e->rep) {
+      if (op2 == 0xA3 || op2 == 0xAB || op2 == 0xB3 || op2 == 0xBB || (op2 == 0xBA && (e->reg & 7) >= 4)) it->fk = JK_BT;
+      else if (op2 == 0xBC || op2 == 0xBD) it->fk = JK_BSF; else if (op2 >= 0xC8 && op2 <= 0xCF) it->fk = JK_BSWAP;
+      else if (op2 == 0xA4 || op2 == 0xAC) it->fk = JK_SHLD;
+      else if (op2 == 0x12 || op2 == 0x13 || op2 == 0x16 || op2 == 0x17) it->fk = JK_MOVLH;
+      else if (op2 == 0xC6) it->fk = JK_SHUFPS; else if (op2 == 0x5B) it->fk = JK_CVTDQ2PS;
       return;
     }
     return;
@@ -248,9 +263,14 @@ static void jit_fast(const Dc *e, JItem *it) {
   if (e->rep) return;
   if (!e->p66 && !e->seg) {
     if (op == 0xF6 && (e->reg & 7) == 0) it->fk = JK_TEST8_IMM; else if (op == 0xA8) it->fk = JK_TEST_AL_IMM; else if (op == 0xA9) it->fk = JK_TEST_A_IMM; else if (op >= 0xB0 && op <= 0xB7) it->fk = JK_MOV8_R_IMM;
+    else if (e->m32 && op >= 0x40 && op <= 0x4F) it->fk = JK_INCDEC_R;   /* 32-bit mode: inc/dec r32 (no REX there) */
+    else if (op == 0x68 || op == 0x6A) it->fk = JK_PUSH_IMM; else if (op == 0xC9) it->fk = JK_LEAVE;
+    else if (op == 0xF7 && (e->reg & 7) >= 4) it->fk = (e->reg & 7) < 6 ? JK_MUL1 : JK_DIV;
+    else if (e->m32 && op == 0xFF) it->fk = FK_FF;   /* the interpreter keeps its generic path for these in 32-bit mode; the translator uses psz-sized loads */
+    else if (e->m32 && op == 0xC7) it->fk = FK_MOV_RM_IMM32; else if (e->m32 && op >= 0xB8 && op <= 0xBF) it->fk = FK_MOV_R_IMM;
     return;
   }
-  if (e->p66) { if (e->seg) return; it->sz = 2; } else it->seg = e->mod == 3 ? 0 : e->seg;
+  if (e->p66) { if (e->seg) return; it->sz = 2; if (op == 0x90 && !e->rexb) { it->fk = FK_NOP; return; } if (e->m32 && op >= 0x40 && op <= 0x4F) { it->fk = JK_INCDEC_R; return; } } else it->seg = e->mod == 3 ? 0 : e->seg;
   if (e->m32 && (op == 0xFF || op == 0x63 || op == 0xC7 || (op >= 0xB8 && op <= 0xBF))) return;
   switch (op) {
     case 0x88: it->fk = FK_MOV8_RM_R; return; case 0x8A: it->fk = FK_MOV8_R_RM; return; case 0x80: it->fk = FK_ALU8_RM_IMM; return; case 0xC6: it->fk = FK_MOV8_RM_IMM; return;
@@ -285,6 +305,11 @@ static void jit_classify(JItem *it, const u8 *code) {
     case FK_F7_NOTNEG: if ((e->reg & 7) == 3) it->fdef = FL_ALL; return;
     case FK_SHIFT_IMM: case FK_SHIFT_1: { int cnt = it->fk == FK_SHIFT_1 ? 1 : code[e->mr_end] & (it->sz == 8 ? 63 : 31); if (cnt && (e->reg & 7) >= 4) it->fdef = FL_ALL; else { it->fdef = FL_ALL; it->fuse = FL_ALL; } return; }
     case FK_SHIFT_CL: it->fdef = FL_ALL; it->fuse = FL_ALL; return;
+    case JK_INCDEC_R: it->fdef = FL_ALL & ~FB_CF; return;
+    case JK_BT: it->fdef = FB_CF; return;
+    case JK_BSF: it->fdef = FB_ZF; return;
+    case JK_SHLD: { int cnt = code[e->mr_end] & (it->sz == 8 ? 63 : 31); it->fdef = cnt ? (FB_CF | FB_ZF | FB_SF | FB_PF) : 0; return; }
+    case JK_MUL1: it->fdef = FB_CF | FB_OF; return;
     case FK_SETCC: case FK_CMOV: it->fuse = cc_use(e->op2 & 15); return;
     default: return;   /* mov/lea/push/pop/movzx/movsx/cdq/nop/sse: no flags */
   }
@@ -350,6 +375,9 @@ static void e_xmm_fsrc(Buf *B, const Dc *e, int off, int dbl) { if (e->mod == 3)
 /* xmm/m destination at byte offset off: push address (register → c, memory → host), later e_xmm_dst_store */
 static void e_xmm_dst(Buf *B, const Dc *e, int off) { (void)off; e_lget(B, e->mod == 3 ? L_C : L_HOST); }
 static void e_xmm_dst_store(Buf *B, const Dc *e, int off, int bytes) { if (e->mod == 3) e_st(B, bytes == 4 ? 0x3E : 0x37, bytes == 4 ? 2 : 3, CO_X(e->rm) + off); else e_st(B, bytes == 4 ? 0x3E : 0x37, 0, off); }
+static void e_rm_load_s32(Buf *B, const Dc *e) { if (e->mod == 3) { e_lget(B, L_C); e_ld(B, 0x34, 2, CO_R(e->rm)); } else { e_lget(B, L_HOST); e_ld(B, 0x34, 0, 0); } }   /* sign-extended 32-bit r/m */
+static void e_rflags_begin(Buf *B, u64 clear) { e_lget(B, L_C); e_lget(B, L_C); e_ld(B, 0x29, 3, CO_RFLAGS); e_i64c(B, ~clear); OP(I64_AND); }   /* … then OR the new bits, e_rflags_end */
+static void e_rflags_end(Buf *B) { e_st(B, 0x37, 3, CO_RFLAGS); }
 /* returns 0 if the item could not be emitted inline (caller falls back to a step) */
 int g_jit_skip_lo = -1, g_jit_skip_hi = -1;   /* diagnostics: instruction kinds in [lo,hi) are stepped instead of translated (x64_jit_skip) */
 static int e_insn(Buf *B, const JItem *it, const u8 *code, int m32, int k) {
@@ -380,6 +408,67 @@ static int e_insn(Buf *B, const JItem *it, const u8 *code, int m32, int k) {
     case JK_TEST_AL_IMM: case JK_TEST_A_IMM: { int s = it->fk == JK_TEST_AL_IMM ? 1 : sz; if (!need) return 1;
       if (s == 1) e_ldr8(B, e, RAX); else e_ldreg(B, RAX, s); e_i64c(B, s == 1 ? code[e->hdr] : (u64)imm_at(code, e->hdr, isz) & mask(s)); OP(I64_AND); e_lset(B, L_T2); e_flags(B, 2, s, need); return 1; }
     case JK_MOV8_R_IMM: { int r = (e->op & 7) | (e->rexb << 3); e_lget(B, L_C); e_i64c(B, code[e->hdr]); e_st(B, 0x3C, 0, r8_off(e, r)); return 1; }
+    case JK_INCDEC_R: { int r = e->op & 7, dec = (e->op & 8) != 0; e_lget(B, L_C); e_ldreg(B, r, sz); if (need) e_ltee(B, L_T0); e_i64c(B, 1); if (need) e_ltee(B, L_T1); OP(dec ? I64_SUB : I64_ADD);
+      if (need) { e_mask(B, sz); e_ltee(B, L_T2); e_flags(B, dec ? 1 : 0, sz, need); } e_streg(B, r, sz); return 1; }
+    case JK_PUSH_IMM: { if (sz == 2) return 0; u64 v = e->op == 0x6A ? (u64)(s64)(s8)code[e->hdr] : (u64)(s64)imm32_at(code, e->hdr); e_push_begin(B, psz, m32, start); e_i64c(B, v); e_push_end(B, psz); return 1; }
+    case JK_LEAVE: { if (sz == 2) return 0; e_lget(B, L_C); e_ldreg(B, RBP, 8); if (m32) { e_i64c(B, 0xffffffffull); OP(I64_AND); } e_st(B, 0x37, 3, CO_R(RSP));
+      e_lget(B, L_C); e_pop(B, psz, m32, start); e_streg(B, RBP, 8); return 1; }
+    case JK_BT: { /* bt/bts/btr/btc r/m, reg | r/m, imm8: CF = bit; memory + register offset addresses the bit string (signed offset, like the interpreter) */
+      int bits = sz * 8, imm = e->op2 == 0xBA, kind = imm ? (e->reg & 7) - 4 : (e->op2 == 0xA3 ? 0 : e->op2 == 0xAB ? 1 : e->op2 == 0xB3 ? 2 : 3), write = kind != 0;   /* 0 bt 1 bts 2 btr 3 btc */
+      if (sz == 2 && e->mod != 3) return 0;
+      int cb = imm ? (code[e->mr_end] & (bits - 1)) : -1;   /* constant bit, or -1 = dynamic in L_T3 */
+      if (e->mod != 3) {
+        if (imm) e_prep_mem(B, it, sz, write);
+        else { e_ea(B, it); e_lget(B, L_C); e_ld(B, sz == 8 ? 0x29 : 0x34, sz == 8 ? 3 : 2, CO_R(e->reg)); e_i64c(B, sz == 8 ? 6 : 5); OP(I64_SHR_S); e_i64c(B, sz == 8 ? 3 : 2); OP(I64_SHL); OP(I64_ADD); if (m32) { e_i64c(B, 0xffffffffull); OP(I64_AND); } e_host(B, sz, write, start); }
+      }
+      if (!imm) { e_ldreg(B, e->reg, sz); e_i64c(B, bits - 1); OP(I64_AND); e_lset(B, L_T3); }
+      e_rm_load(B, e, sz); e_lset(B, L_T0);
+      if (need & FB_CF) { e_rflags_begin(B, F_CF); e_lget(B, L_T0); if (cb >= 0) e_i64c(B, cb); else e_lget(B, L_T3); OP(I64_SHR_U); e_i64c(B, 1); OP(I64_AND); OP(I64_OR); e_rflags_end(B); }
+      if (write) { e_dst_addr(B, e); e_lget(B, L_T0); e_i64c(B, 1); if (cb >= 0) e_i64c(B, cb); else e_lget(B, L_T3); OP(I64_SHL); if (kind == 2) { e_i64c(B, ~0ull); OP(I64_XOR); } OP(kind == 1 ? I64_OR : kind == 2 ? I64_AND : I64_XOR); e_dst_store(B, e, sz); }
+      return 1; }
+    case JK_BSF: { if (sz == 2) return 0; int bsr = e->op2 == 0xBD; e_prep_mem(B, it, sz, 0); e_rm_load(B, e, sz); e_lset(B, L_T0);
+      e_lget(B, L_T0); OP(I64_EQZ); e_if(B, 0);
+        if (need & FB_ZF) { e_rflags_begin(B, 0); e_i64c(B, F_ZF); OP(I64_OR); e_rflags_end(B); }
+      e_else(B);
+        if (need & FB_ZF) { e_rflags_begin(B, F_ZF); e_rflags_end(B); }
+        e_lget(B, L_C); if (bsr) { e_i64c(B, 63); e_lget(B, L_T0); OP(I64_CLZ); OP(I64_SUB); } else { e_lget(B, L_T0); OP(I64_CTZ); } e_streg(B, e->reg, sz);
+      e_end(B); return 1; }
+    case JK_BSWAP: { if (sz == 2) return 0; int r = (e->op2 & 7) | (e->rexb << 3); e_ldreg(B, r, sz); e_lset(B, L_T0); e_lget(B, L_C);
+      for (int i = 0; i < sz; i++) { e_lget(B, L_T0); if (i) { e_i64c(B, 8 * i); OP(I64_SHR_U); } e_i64c(B, 0xff); OP(I64_AND); if (sz - 1 - i) { e_i64c(B, 8 * (sz - 1 - i)); OP(I64_SHL); } if (i) OP(I64_OR); }
+      e_streg(B, r, sz); return 1; }
+    case JK_SHLD: { if (sz == 2) return 0; int bits = sz * 8, cnt = code[e->mr_end] & (bits - 1), left = e->op2 == 0xA4; if (!cnt) return 1;
+      e_prep_mem(B, it, sz, 1); e_rm_load(B, e, sz); e_lset(B, L_T0); e_ldreg(B, e->reg, sz); e_lset(B, L_T1);
+      if (left) { e_lget(B, L_T0); e_i64c(B, cnt); OP(I64_SHL); e_lget(B, L_T1); e_i64c(B, bits - cnt); OP(I64_SHR_U); OP(I64_OR); }
+      else { e_lget(B, L_T0); e_i64c(B, cnt); OP(I64_SHR_U); e_lget(B, L_T1); e_i64c(B, bits - cnt); OP(I64_SHL); OP(I64_OR); }
+      e_mask(B, sz); e_lset(B, L_T2);
+      if (need & (FB_ZF | FB_SF | FB_PF)) e_flags(B, 2, sz, need & (FB_ZF | FB_SF | FB_PF));
+      if (need & FB_CF) { e_rflags_begin(B, F_CF); e_lget(B, L_T0); e_i64c(B, left ? bits - cnt : cnt - 1); OP(I64_SHR_U); e_i64c(B, 1); OP(I64_AND); OP(I64_OR); e_rflags_end(B); }
+      e_dst_addr(B, e); e_lget(B, L_T2); e_dst_store(B, e, sz); return 1; }
+    case JK_MUL1: { if (sz != 4) return 0; int sgn = (e->reg & 7) == 5; e_prep_mem(B, it, 4, 0);   /* mul/imul r/m32: edx:eax = eax * r/m */
+      if (sgn) { e_lget(B, L_C); e_ld(B, 0x34, 2, CO_R(RAX)); e_rm_load_s32(B, e); } else { e_ldreg(B, RAX, 4); e_rm_load(B, e, 4); }
+      OP(I64_MUL); e_lset(B, L_T2);
+      e_lget(B, L_C); e_lget(B, L_T2); e_streg(B, RAX, 4); e_lget(B, L_C); e_lget(B, L_T2); e_i64c(B, 32); OP(I64_SHR_U); e_streg(B, RDX, 4);
+      if (need) { e_rflags_begin(B, F_CF | F_OF); if (sgn) { e_lget(B, L_T2); e_lget(B, L_T2); OP(I64_EXT32_S); OP(I64_NE); } else { e_lget(B, L_T2); e_i64c(B, 32); OP(I64_SHR_U); OP(I64_EQZ); OP(I32_EQZ); } OP(I64_EXT_U); e_i64c(B, F_CF | F_OF); OP(I64_MUL); OP(I64_OR); e_rflags_end(B); }
+      return 1; }
+    case JK_DIV: { if (sz == 2) return 0; int sgn = (e->reg & 7) == 7; e_prep_mem(B, it, sz, 0);   /* div/idiv: the fast case inline, #DE and 128-bit dividends through the interpreter step */
+      if (sz == 4) {
+        e_lget(B, L_C); e_ld(B, 0x29, 3, CO_R(RDX)); e_i64c(B, 32); OP(I64_SHL); e_ldreg(B, RAX, 4); OP(I64_OR); e_lset(B, L_T0);   /* edx:eax */
+        if (sgn) e_rm_load_s32(B, e); else e_rm_load(B, e, 4); e_lset(B, L_T1);
+        if (sgn) { e_lget(B, L_T1); OP(I64_EQZ); e_lget(B, L_T1); e_i64c(B, ~0ull); OP(I64_EQ); e_lget(B, L_T0); e_i64c(B, 0x8000000000000000ull); OP(I64_EQ); OP(I32_AND); OP(I32_OR); }
+        else { e_lget(B, L_T1); OP(I64_EQZ); e_lget(B, L_T0); e_i64c(B, 32); OP(I64_SHR_U); e_lget(B, L_T1); OP(I64_GE_U); OP(I32_OR); }
+        e_if(B, 0); e_step(B, start, next, k); e_else(B);
+          e_lget(B, L_T0); e_lget(B, L_T1); OP(sgn ? I64_DIV_S : I64_DIV_U); e_lset(B, L_T2);
+          if (sgn) { e_lget(B, L_T2); e_lget(B, L_T2); OP(I64_EXT32_S); OP(I64_NE); e_if(B, 0); e_step(B, start, next, k); e_else(B); }
+          e_lget(B, L_C); e_lget(B, L_T0); e_lget(B, L_T1); OP(sgn ? I64_REM_S : I64_REM_U); e_streg(B, RDX, 4); e_lget(B, L_C); e_lget(B, L_T2); e_streg(B, RAX, 4);
+          if (sgn) e_end(B);
+        e_end(B); return 1; }
+      e_ldreg(B, RAX, 8); e_lset(B, L_T0); e_rm_load(B, e, 8); e_lset(B, L_T1);
+      if (sgn) { e_lget(B, L_T1); OP(I64_EQZ); e_lget(B, L_C); e_ld(B, 0x29, 3, CO_R(RDX)); e_lget(B, L_T0); e_i64c(B, 63); OP(I64_SHR_S); OP(I64_NE); OP(I32_OR); e_lget(B, L_T1); e_i64c(B, ~0ull); OP(I64_EQ); e_lget(B, L_T0); e_i64c(B, 0x8000000000000000ull); OP(I64_EQ); OP(I32_AND); OP(I32_OR); }
+      else { e_lget(B, L_T1); OP(I64_EQZ); e_lget(B, L_C); e_ld(B, 0x29, 3, CO_R(RDX)); OP(I64_EQZ); OP(I32_EQZ); OP(I32_OR); }
+      e_if(B, 0); e_step(B, start, next, k); e_else(B);
+        e_lget(B, L_C); e_lget(B, L_T0); e_lget(B, L_T1); OP(sgn ? I64_REM_S : I64_REM_U); e_st(B, 0x37, 3, CO_R(RDX));
+        e_lget(B, L_C); e_lget(B, L_T0); e_lget(B, L_T1); OP(sgn ? I64_DIV_S : I64_DIV_U); e_st(B, 0x37, 3, CO_R(RAX));
+      e_end(B); return 1; }
     case FK_F7_TEST: e_prep_mem(B, it, sz, 0); e_test(B, e, sz, 0, (u64)imm_at(code, e->mr_end, isz) & mask(sz), need); return 1;
     case FK_F7_NOTNEG: { e_prep_mem(B, it, sz, 1); e_dst_addr(B, e);
       if ((e->reg & 7) == 2) { e_rm_load(B, e, sz); e_i64c(B, ~0ull); OP(I64_XOR); }
@@ -398,10 +487,17 @@ static int e_insn(Buf *B, const JItem *it, const u8 *code, int m32, int k) {
     case FK_SHIFT_CL: e_prep_mem(B, it, sz, 1); e_shift(B, e, sz, 0, need, 1); return 1;
     case FK_SETCC: e_prep_mem(B, it, 1, 1); e_dst_addr(B, e); e_cond(B, e->op2 & 15); OP(I64_EXT_U); e_dst_store8(B, e); return 1;
     case FK_CMOV: e_prep_mem(B, it, sz, 0); e_lget(B, L_C); e_rm_load(B, e, sz); e_ldreg(B, e->reg, sz); e_cond(B, e->op2 & 15); OP(SELECT); e_streg(B, e->reg, sz); return 1;
-    case FK_IMUL_R_RM: case FK_IMUL_IMM: { if (need || sz == 2) return 0;
+    case FK_IMUL_R_RM: case FK_IMUL_IMM: { if (sz == 2 || (need && sz == 8)) return 0;
       e_prep_mem(B, it, sz, 0); e_lget(B, L_C);
-      if (it->fk == FK_IMUL_R_RM) { e_ldreg(B, e->reg, sz); e_rm_load(B, e, sz); } else { e_rm_load(B, e, sz); e_i64c(B, e->op == 0x6B ? (u64)(s64)(s8)code[e->mr_end] : (u64)(s64)imm32_at(code, e->mr_end)); }
-      OP(I64_MUL); e_streg(B, e->reg, sz); return 1; }
+      if (!need) {
+        if (it->fk == FK_IMUL_R_RM) { e_ldreg(B, e->reg, sz); e_rm_load(B, e, sz); } else { e_rm_load(B, e, sz); e_i64c(B, e->op == 0x6B ? (u64)(s64)(s8)code[e->mr_end] : (u64)(s64)imm32_at(code, e->mr_end)); }
+        OP(I64_MUL); e_streg(B, e->reg, sz); return 1; }
+      /* 32-bit with live flags (Java's Math.multiplyExact, overflow checks): signed 64-bit product, CF=OF = does not fit, SF/ZF/PF of the low half */
+      if (it->fk == FK_IMUL_R_RM) { e_lget(B, L_C); e_ld(B, 0x34, 2, CO_R(e->reg)); e_rm_load_s32(B, e); } else { e_rm_load_s32(B, e); e_i64c(B, e->op == 0x6B ? (u64)(s64)(s8)code[e->mr_end] : (u64)(s64)imm32_at(code, e->mr_end)); }
+      OP(I64_MUL); e_ltee(B, L_T0); e_mask(B, 4); e_ltee(B, L_T2); e_streg(B, e->reg, 4);
+      e_flags(B, 2, 4, need & (FB_ZF | FB_SF | FB_PF));
+      if (need & (FB_CF | FB_OF)) { e_rflags_begin(B, F_CF | F_OF); e_lget(B, L_T0); e_lget(B, L_T0); OP(I64_EXT32_S); OP(I64_NE); OP(I64_EXT_U); e_i64c(B, F_CF | F_OF); OP(I64_MUL); OP(I64_OR); e_rflags_end(B); }
+      return 1; }
     case FK_PUSH: { int r = (e->op & 7) | (e->rexb << 3); e_push_begin(B, psz, m32, start); e_ldreg(B, r, 8); e_push_end(B, psz); return 1; }
     case FK_POP: { int r = (e->op & 7) | (e->rexb << 3); e_lget(B, L_C); e_pop(B, psz, m32, start); e_streg(B, r, 8); return 1; }
     case FK_FF: { int sub = e->reg & 7;
@@ -409,9 +505,9 @@ static int e_insn(Buf *B, const JItem *it, const u8 *code, int m32, int k) {
         e_rm_load(B, e, sz); if (need) e_ltee(B, L_T0); e_i64c(B, 1); if (need) e_ltee(B, L_T1); OP(sub ? I64_SUB : I64_ADD);
         if (need) { e_mask(B, sz); e_ltee(B, L_T2); e_flags(B, sub ? 1 : 0, sz, need); }
         e_dst_store(B, e, sz); return 1; }
-      if (sub == 6) { e_prep_mem(B, it, 8, 0); e_rm_load(B, e, 8); e_lset(B, L_RET); e_push_begin(B, psz, m32, start); e_lget(B, L_RET); e_push_end(B, psz); return 1; }
-      if (sub == 2) { e_prep_mem(B, it, 8, 0); e_rm_load(B, e, 8); e_lset(B, L_RET); e_push_begin(B, psz, m32, start); e_i64c(B, next); e_push_end(B, psz); e_icount(B, k + 1); e_lget(B, L_RET); OP(RETURN); return 1; }
-      if (sub == 4) { e_prep_mem(B, it, 8, 0); e_rm_load(B, e, 8); e_exit_top(B, k + 1); return 1; }
+      if (sub == 6) { e_prep_mem(B, it, psz, 0); e_rm_load(B, e, psz); e_lset(B, L_RET); e_push_begin(B, psz, m32, start); e_lget(B, L_RET); e_push_end(B, psz); return 1; }
+      if (sub == 2) { e_prep_mem(B, it, psz, 0); e_rm_load(B, e, psz); e_lset(B, L_RET); e_push_begin(B, psz, m32, start); e_i64c(B, next); e_push_end(B, psz); e_icount(B, k + 1); e_lget(B, L_RET); OP(RETURN); return 1; }
+      if (sub == 4) { e_prep_mem(B, it, psz, 0); e_rm_load(B, e, psz); e_exit_top(B, k + 1); return 1; }
       return 0; }
     case FK_JCC8: case FK_JCC32: { u64 t = it->fk == FK_JCC8 ? next + (u64)(s64)(s8)code[e->hdr] : next + (u64)(s64)imm32_at(code, e->hdr + 1); if (m32) t = (u32)t;
       e_cond(B, it->fk == FK_JCC8 ? (e->op & 15) : (e->op2 & 15)); e_if(B, 0);
@@ -441,6 +537,20 @@ static int e_insn(Buf *B, const JItem *it, const u8 *code, int m32, int k) {
       if (load) { e_lget(B, L_C); e_xmm_src(B, e, 0, 8); e_st(B, 0x37, 3, CO_X(e->reg)); e_lget(B, L_C); e_xmm_src(B, e, 8, 8); e_st(B, 0x37, 3, CO_X(e->reg) + 8); }
       else { e_xmm_dst(B, e, 0); e_lget(B, L_C); e_ld(B, 0x29, 3, CO_X(e->reg)); e_xmm_dst_store(B, e, 0, 8); e_xmm_dst(B, e, 8); e_lget(B, L_C); e_ld(B, 0x29, 3, CO_X(e->reg) + 8); e_xmm_dst_store(B, e, 8, 8); }
       return 1; }
+    case JK_MOVLH: { u8 op2 = e->op2; int hi_dst = op2 == 0x16 || op2 == 0x17, store = op2 == 0x13 || op2 == 0x17;   /* movlps/movhps/movlpd/movhpd, movhlps (0F 12 reg), movlhps (0F 16 reg) */
+      if (e->mod == 3) { if (store || e->p66) return 0; e_lget(B, L_C); e_lget(B, L_C); e_ld(B, 0x29, 3, CO_X(e->rm) + (op2 == 0x12 ? 8 : 0)); e_st(B, 0x37, 3, CO_X(e->reg) + (hi_dst ? 8 : 0)); return 1; }
+      e_prep_mem(B, it, 8, store);
+      if (store) { e_lget(B, L_HOST); e_lget(B, L_C); e_ld(B, 0x29, 3, CO_X(e->reg) + (hi_dst ? 8 : 0)); e_st(B, 0x37, 0, 0); }
+      else { e_lget(B, L_C); e_lget(B, L_HOST); e_ld(B, 0x29, 0, 0); e_st(B, 0x37, 3, CO_X(e->reg) + (hi_dst ? 8 : 0)); }
+      return 1; }
+    case JK_SHUFPS: { int imm = code[e->mr_end]; e_prep_mem(B, it, 16, 0);
+      if (e->p66) { e_lget(B, L_C); e_ld(B, 0x29, 3, CO_X(e->reg) + (imm & 1) * 8); e_lset(B, L_T0); e_xmm_src(B, e, ((imm >> 1) & 1) * 8, 8); e_lset(B, L_T1);
+        e_lget(B, L_C); e_lget(B, L_T0); e_st(B, 0x37, 3, CO_X(e->reg)); e_lget(B, L_C); e_lget(B, L_T1); e_st(B, 0x37, 3, CO_X(e->reg) + 8); return 1; }
+      e_lget(B, L_C); e_ld(B, 0x35, 2, CO_X(e->reg) + (imm & 3) * 4); e_lset(B, L_T0); e_lget(B, L_C); e_ld(B, 0x35, 2, CO_X(e->reg) + ((imm >> 2) & 3) * 4); e_lset(B, L_T1);
+      e_xmm_src(B, e, ((imm >> 4) & 3) * 4, 4); e_lset(B, L_T2); e_xmm_src(B, e, ((imm >> 6) & 3) * 4, 4); e_lset(B, L_T3);
+      e_lget(B, L_C); e_lget(B, L_T0); e_st(B, 0x3E, 2, CO_X(e->reg)); e_lget(B, L_C); e_lget(B, L_T1); e_st(B, 0x3E, 2, CO_X(e->reg) + 4);
+      e_lget(B, L_C); e_lget(B, L_T2); e_st(B, 0x3E, 2, CO_X(e->reg) + 8); e_lget(B, L_C); e_lget(B, L_T3); e_st(B, 0x3E, 2, CO_X(e->reg) + 12); return 1; }
+    case JK_CVTDQ2PS: { e_prep_mem(B, it, 16, 0); for (int lane = 0; lane < 4; lane++) { e_lget(B, L_C); e_xmm_src(B, e, lane * 4, 4); OP(I32_WRAP); OP(F32_CVT_I32S); e_st(B, F32_STORE, 2, CO_X(e->reg) + lane * 4); } return 1; }
     case JK_MOVQ_X: e_prep_mem(B, it, 8, 0); e_lget(B, L_C); e_xmm_src(B, e, 0, 8); e_st(B, 0x37, 3, CO_X(e->reg)); e_lget(B, L_C); e_i64c(B, 0); e_st(B, 0x37, 3, CO_X(e->reg) + 8); return 1;
     case JK_MOVQ_RM_X: e_prep_mem(B, it, 8, 1); e_xmm_dst(B, e, 0); e_lget(B, L_C); e_ld(B, 0x29, 3, CO_X(e->reg)); e_xmm_dst_store(B, e, 0, 8); if (e->mod == 3) { e_lget(B, L_C); e_i64c(B, 0); e_st(B, 0x37, 3, CO_X(e->rm) + 8); } return 1;
     case JK_MOVD_X_RM: e_prep_mem(B, it, sz, 0); e_lget(B, L_C); e_rm_load(B, e, sz); e_st(B, 0x37, 3, CO_X(e->reg)); e_lget(B, L_C); e_i64c(B, 0); e_st(B, 0x37, 3, CO_X(e->reg) + 8); return 1;
