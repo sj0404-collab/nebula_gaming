@@ -21,7 +21,7 @@ mkdir -p "$OUT"; OUT=$(cd "$OUT" && pwd)
 [ -n "$PLAIN" ] && { mkdir -p "$PLAIN"; PLAIN=$(cd "$PLAIN" && pwd); }
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 echo "dotnet-pack: downloading $URL"
-case "$URL" in file://*) cp "${URL#file://}" "$work/rt.zip" ;; *) curl -fL --retry 5 --retry-delay 3 -o "$work/rt.zip" "$URL" ;; esac
+case "$URL" in file://*) cp "${URL#file://}" "$work/rt.zip" ;; *) curl -fL --retry 8 --retry-delay 5 --retry-all-errors -C - -o "$work/rt.zip" "$URL" ;; esac
 ls -la "$work/rt.zip"
 mkdir -p "$work/rt"; unzip -q "$work/rt.zip" -d "$work/rt"
 [ -f "$work/rt/dotnet.exe" ] || { echo "dotnet-pack: dotnet.exe not found in the zip" >&2; exit 1; }

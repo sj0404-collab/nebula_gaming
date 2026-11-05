@@ -13,7 +13,7 @@ OUT=${1:-public/x64/sys32}
 URL=${VC_REDIST_URL:-https://aka.ms/vs/17/release/vc_redist.x64.exe}
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 echo "runtime-pack: downloading $URL"
-curl -fL --retry 5 --retry-delay 3 -o "$work/vc_redist.x64.exe" "$URL"
+curl -fL --retry 8 --retry-delay 5 --retry-all-errors -C - -o "$work/vc_redist.x64.exe" "$URL"
 ls -la "$work/vc_redist.x64.exe"
 # the Burn bundle carries its payload as cabinets (a10..a13); each payload is itself a cabinet with <name>.dll_<arch> entries
 cabextract -q -d "$work/s1" "$work/vc_redist.x64.exe"

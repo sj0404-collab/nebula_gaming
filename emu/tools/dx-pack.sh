@@ -17,7 +17,7 @@ OUT=${1:-public/x64/dx}; PLAIN=${2:-}
 URL=${DX_REDIST_URL:-https://download.microsoft.com/download/8/4/A/84A35BF1-DAFE-4AE8-82AF-AD2AE20B6B14/directx_Jun2010_redist.exe}
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 if [ -n "${DX_REDIST_FILE:-}" ] && [ -f "$DX_REDIST_FILE" ]; then cp "$DX_REDIST_FILE" "$work/redist.exe"; else
-  echo "dx-pack: downloading $URL"; curl -fL --retry 5 --retry-delay 3 -o "$work/redist.exe" "$URL"; fi
+  echo "dx-pack: downloading $URL"; curl -fL --retry 8 --retry-delay 5 --retry-all-errors -C - -o "$work/redist.exe" "$URL"; fi
 ls -la "$work/redist.exe"
 cabextract -q -d "$work/s1" "$work/redist.exe"
 mkdir -p "$work/dll"
