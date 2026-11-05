@@ -1,3 +1,41 @@
+# v1.41.0 — JIT: `cvtsi2ss` converted ints as UNSIGNED (black screen in Shattered Pixel Dungeon); recorded game video with sound; JIT differential test
+
+**What was wrong.** With the x86-64 → wasm JIT on (the default since v1.38.0) Shattered Pixel Dungeon started, played its
+music, presented 400+ frames — and the window stayed black. With the JIT off (`nebula_jit=0`) the title screen was drawn.
+A new GL call tracer in the WebGL2 bridge (`localStorage nebula_gltrace = "<afterFrame>:<calls>"`, decoded uniforms /
+attributes / texture uploads) showed the only difference: the camera matrix uploaded with `glUniformMatrix4fv` had
+`tx = 2.887e+16` instead of `-1.002` — every sprite was translated off-screen. Bisecting by instruction kind in the browser
+(`nebula_jitskip = lo:hi` → `x64_jit_skip`, seven parallel runner jobs) pointed at the SSE conversions, and the emitter
+had `F32_CVT_I64S = 0xB5`: that is wasm's `f32.convert_i64_u`. `f32.convert_i64_s` is `0xB4`. Every `cvtsi2ss` of a
+negative integer produced a huge positive float (the `f64` form, `0xB9`, was right, which is why .NET and the integer
+tests never noticed). One byte — `emu/x64/jit.inc`.
+
+**Proof, all on the GitHub runner (nothing is built or tested in the sandbox any more).**
+- `.github/workflows/game-video.yml` (manual): builds the wasm from source, installs the official GPL Windows build of
+  Shattered Pixel Dungeon v4.0.2 through the Programs UI exactly as a user would, waits for the game loop, then records
+  15 s of the screen canvas **with the sound the audio bridge schedules** (`e2e/record.mjs` hooks `AudioBufferSourceNode.start`,
+  ffmpeg muxes per-frame durations + PCM → `game.mp4`). Before the fix: black frames, music playing; after the fix with
+  the JIT on: the title screen (logo, intro text, “Enter the Dungeon”), music at −25 dB mean. The JIT reaches the title
+  ~2× sooner than the interpreter (640 s vs 1290 s on a 2-vCPU runner; 30 MIPS vs 17 MIPS — a JVM interpreting its own
+  bytecode is a hard case for a block JIT).
+- `emu/tests/jitdiff.c` + `.github/workflows/jitdiff.yml` (~5 min, runs on every push touching the JIT): the same
+  deterministic float/int/SSE workload (the noosa camera matrix, scalar chains with int↔float↔double conversions,
+  NaN compares, min/max, sign-mask negation, packed loops, and hand-written HotSpot/clang forms such as
+  `xorps xmm0,xmm0; cvtsi2ss xmm0, eax`) must print identical checksums under the native runner, the wasm interpreter
+  and the wasm JIT, for x64 and x86. It does now — and the checksums equal the ones a real x86-64 CPU prints for the same
+  source (`6b10a989 aca66469 94e334b9 cd28baa0 4bd76ec9`). On a mismatch the workflow bisects by instruction kind itself.
+  The same step runs in the main CI.
+- `e2e/record.mjs --jit 0|1 --jitskip lo:hi --gltrace a:n` and the workflow inputs make every such experiment a one-line
+  dispatch; artifacts: `game.mp4`, `title.png`, `audio.wav`, `report.txt`, `gltrace.txt`.
+
+**Also.** CI runs on every push to `wip-dotnet` (not only `main`/tags); the `.NET under JIT` CI step no longer fails on the
+guest's own exit code 3 (pipefail); the game-video workflow builds the wasm module from the current `emu/x64` so the
+committed `public/x64/nebula_x64.wasm` cannot mask a change.
+
+**Honest limits.** Unchanged from v1.40.1 (no D3D9/DirectDraw, fixed-function GL subset, SPD needs 2.6 GB of guest
+address space, a few frames per second on the runner). The audio capture in the recorder is the emulator's output stream,
+not a microphone — it is exactly what the device would play.
+
 # v1.40.1 — x64 JIT: two region-cache bugs fixed (CoreCLR / System.Text.Json fault)
 
 Since v1.38.0 (the x86-64 → wasm JIT) the browser e2e test that runs a real C# program on the official .NET 10 runtime
