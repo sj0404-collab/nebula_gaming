@@ -2,7 +2,7 @@ name: CI (emulator · Android)
 
 on:
   push:
-    branches: [main]
+    branches: [main, wip-dotnet]   # wip-dotnet: every WIP push gets the full build + test run on the runner (no local test runs)
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -100,6 +100,16 @@ jobs:
           mkdir -p /tmp/dn/pack && (cd public/x64/dotnet && find . -name '*.gz' -print0 | while IFS= read -r -d '' f; do mkdir -p "/tmp/dn/pack/$(dirname "$f")"; gunzip -c "$f" > "/tmp/dn/pack/${f%.gz}"; done)
           ls -la /tmp/dn/pack /tmp/dn/app | head -20
           ./emu/tests/dotnet.sh /tmp/dn/pack /tmp/dn/app /tmp/dn/fx /tmp/dn/csc/tasks/netcore/bincore
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - name: .NET on the wasm64 module WITH the x86-64->wasm JIT (node 24 + emu/tests/wasm_run.mjs; the native runner is interpreter-only, JIT bugs only show here and in the browser)
+        run: |
+          APP=$PWD/public/x64/samples/dotnet
+          set -o pipefail
+          node emu/tests/wasm_run.mjs -v --max-ms 900000 --jit 1 --mount "/tmp/dn/pack=C:\Program Files\dotnet" --mount "$APP=C:\app" "$APP/nebula-dotnet-test.exe" linq-throw-nre-json-reflect-regex-gc 2>&1 | tail -40 | tee /tmp/wasm_jit.log
+          grep -q 'exit 3' /tmp/wasm_jit.log
+          node emu/tests/wasm_run.mjs --max-ms 900000 --jit 1 --mount "/tmp/dn/pack=C:\Program Files\dotnet" --mount "$APP=C:\app" "$APP/nebula-dotnet-test.exe" json 2>&1 | tail -5 | tee /tmp/wasm_jit2.log
+          grep -q 'exit 3' /tmp/wasm_jit2.log
       - name: wasm64 module is bit-identical to the committed public/x64/nebula_x64.wasm
         run: |
           git status --porcelain public/x64/nebula_x64.wasm
