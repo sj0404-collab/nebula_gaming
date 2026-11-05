@@ -88,7 +88,10 @@ function formatComponents(format: number): number {
 /** bytes of one pixel for (format, type) */
 function pixelBytes(format: number, type: number): number { const tb = typeBytes(type); if (!tb) return 0; return isPacked(type) ? tb : tb * formatComponents(format); }
 
+import { FixedFunction, type FFHost } from './glff';
+
 export class GLBridge {
+  private ff: FixedFunction;
   gl: WebGL2RenderingContext | null = null;
   private canvas: OffscreenCanvas | HTMLCanvasElement | null = null;
   log: (t: string) => void = () => {};
@@ -125,7 +128,20 @@ export class GLBridge {
   private s3tc: WEBGL_compressed_texture_s3tc | null = null; private aniso: EXT_texture_filter_anisotropic | null = null; private floatLinear = false; private colorBufferFloat = false;
   private maxAttribs = 16; private drawBuffer: number = GL.BACK;
 
-  constructor() { this.names.forEach((n, i) => this.byName.set(n, i)); this.impl = new Array(this.names.length).fill(null); this.register(); }
+  constructor() { this.names.forEach((n, i) => this.byName.set(n, i)); this.impl = new Array(this.names.length).fill(null); this.ff = new FixedFunction(this.ffHost()); this.register(); }
+  private ffHost(): FFHost {
+    return {
+      gl: () => this.gl!, def: (n, f) => this.def(n, f), warn: (k, m) => this.warn(k, m), setErr: (e) => this.setErr(e),
+      f32: (a, n) => this.f32(a, n), f64: (a, n) => this.f64(a, n), i32: (a, n) => this.i32(a, n), u8: (a, n, w) => this.u8(a, n, w), view: (a, n, t) => this.view(a, n, t),
+      wrf32: (a, v) => this.wrf32(a, v), wrf64: (a, v) => this.wrf64(a, v), wr32: (a, v) => this.wr32(a, v), wrp: (a, v) => this.wrp(a, v), gstr: (t) => this.gstr(t), rdstr: (a) => this.rdstr(a),
+      alloc: (n) => this.mem!.alloc(n), free: (p) => this.mem!.free(p),
+      pixels: (ptr, w, h, format, type) => this.pixels(ptr, w, h, 1, format, type), texIdOn: (unit, target) => this.texUnits[unit]?.get(this.texTarget(target)) ?? 0,
+      texHasAlpha: (id) => { const ti = this.texInfo.get(id); const f = ti?.levels.get(0)?.ifmt ?? 0; return f === GL.RGBA || f === GL.RGBA8 || f === GL.LUMINANCE_ALPHA || f === GL.ALPHA || f === 0x8058 || f === 0x8C43 || f === 0x881A || f === 0x8814 || f === 0x8056 || f === 0x8057 || f === 0x8051 + 0x100; },
+      bound: () => this.bound, bufObj: (id) => this.buf.get(id) ?? null, vaoObj: (id) => this.vao.get(id) ?? null, progObj: (id) => this.prog.get(id) ?? null,
+      callImpl: (name, args) => { const id = this.byName.get(name); const f = id !== undefined ? this.impl[id] : null; return f ? f(BigUint64Array.from(args)) : undefined; },
+      unpackAlign: () => this.unpackAlign, viewport: () => Array.from(this.gl!.getParameter(this.gl!.VIEWPORT) as Int32Array),
+    };
+  }
 
   /** host_gl_init: (re)size the drawing surface; 1 = WebGL2 ready */
   init(w: number, h: number): number {
@@ -159,6 +175,7 @@ export class GLBridge {
   call(id: number, a: BigUint64Array): bigint {
     const f = this.impl[id];
     if (!f) { this.setErr(GL.INVALID_OPERATION); this.warn(this.names[id], `${this.names[id]}: not available in the WebGL2 bridge (GL_INVALID_OPERATION)`); return 0n; }
+    if (this.ff.recording && this.ff.record(id, this.names[id], a, this.mem!.psize())) return 0n;   // glNewList … glEndList: stored, not executed
     try {
       const r = f(a);
       if (typeof r === 'bigint') return r; if (typeof r === 'number') return BigInt.asUintN(64, BigInt(Math.trunc(r))); return 0n;
@@ -194,6 +211,7 @@ export class GLBridge {
     return new C(buf, o, n); }
   private i32(addr: bigint, n: number, write = false): Int32Array | null { const o = this.mem!.ptr(addr, n * 4, write); if (!o) { this.setErr(GL.INVALID_OPERATION); return null; } if (o % 4) { const c = new Uint8Array(n * 4); c.set(new Uint8Array(this.mem!.buffer(), o, n * 4)); return new Int32Array(c.buffer); } return new Int32Array(this.mem!.buffer(), o, n); }
   private f32(addr: bigint, n: number, write = false): Float32Array | null { const o = this.mem!.ptr(addr, n * 4, write); if (!o) { this.setErr(GL.INVALID_OPERATION); return null; } if (o % 4) { const c = new Uint8Array(n * 4); c.set(new Uint8Array(this.mem!.buffer(), o, n * 4)); return new Float32Array(c.buffer); } return new Float32Array(this.mem!.buffer(), o, n); }
+  private f64(addr: bigint, n: number): Float64Array | null { const o = this.mem!.ptr(addr, n * 8, false); if (!o) { this.setErr(GL.INVALID_OPERATION); return null; } if (o % 8) { const c = new Uint8Array(n * 8); c.set(new Uint8Array(this.mem!.buffer(), o, n * 8)); return new Float64Array(c.buffer); } return new Float64Array(this.mem!.buffer(), o, n); }
   private wr32(addr: bigint, v: number) { if (!addr) return; const o = this.mem!.ptr(addr, 4, true); if (o) new DataView(this.mem!.buffer()).setInt32(o, v | 0, true); }
   private wru32(addr: bigint, v: number) { if (!addr) return; const o = this.mem!.ptr(addr, 4, true); if (o) new DataView(this.mem!.buffer()).setUint32(o, v >>> 0, true); }
   private wrf32(addr: bigint, v: number) { if (!addr) return; const o = this.mem!.ptr(addr, 4, true); if (o) new DataView(this.mem!.buffer()).setFloat32(o, v, true); }
@@ -207,7 +225,7 @@ export class GLBridge {
   private gstr(s: string): bigint { let p = this.strings.get(s); if (p) return p; const bytes = new TextEncoder().encode(s); p = this.mem!.alloc(bytes.length + 1); const d = this.u8(p, bytes.length + 1, true); if (d) { d.set(bytes); d[bytes.length] = 0; } this.strings.set(s, p); return p; }
   private freshAttribs(): Attrib[] { const a: Attrib[] = []; for (let i = 0; i < this.maxAttribs; i++) a.push({ enabled: false, size: 4, type: GL.FLOAT, normalized: false, integer: false, stride: 0, pointer: 0n, buffer: 0, divisor: 0 }); return a; }
   private curAttribs(): Attrib[] { let a = this.attribs.get(this.bound.vao); if (!a) { a = this.freshAttribs(); this.attribs.set(this.bound.vao, a); } return a; }
-  private texTarget(t: number): number { return t >= GL.TEXTURE_CUBE_MAP_POSITIVE_X && t < GL.TEXTURE_CUBE_MAP_POSITIVE_X + 6 ? GL.TEXTURE_CUBE_MAP : t; }
+  private texTarget(t: number): number { return t >= GL.TEXTURE_CUBE_MAP_POSITIVE_X && t < GL.TEXTURE_CUBE_MAP_POSITIVE_X + 6 ? GL.TEXTURE_CUBE_MAP : t === GL.TEXTURE_1D ? GL.TEXTURE_2D : t; }   // 1D textures live as h=1 2D textures
   private curTex(target: number): number { return this.texUnits[this.bound.unit]?.get(this.texTarget(target)) ?? 0; }
   private bufTargetId(target: number): number { switch (target) { case GL.ARRAY_BUFFER: return this.bound.array; case GL.ELEMENT_ARRAY_BUFFER: return this.bound.element; case GL.PIXEL_PACK_BUFFER: return this.bound.pack; case GL.PIXEL_UNPACK_BUFFER: return this.bound.unpack; case GL.UNIFORM_BUFFER: return this.bound.uniform; case GL.COPY_READ_BUFFER: return this.bound.copyRead; case GL.COPY_WRITE_BUFFER: return this.bound.copyWrite; case GL.TRANSFORM_FEEDBACK_BUFFER: return this.bound.tfb; default: return 0; } }
   private gen(n: number, out: bigint, kind: keyof GLBridge['next'], make: () => number) { for (let i = 0; i < n; i++) this.wru32(out + BigInt(i * 4), make()); }
@@ -341,7 +359,7 @@ export class GLBridge {
       case GL.MAX_SERVER_WAIT_TIMEOUT: return 0; case GL.MIN_PROGRAM_TEXEL_OFFSET: return gl.getParameter(gl.MIN_PROGRAM_TEXEL_OFFSET) as number; case GL.PRIMITIVE_RESTART: return false;
       case GL.TEXTURE_CUBE_MAP_SEAMLESS: case GL.PROGRAM_POINT_SIZE: return true; case GL.MULTISAMPLE: case GL.ALPHA_TEST: case GL.LIGHTING: case GL.FRAMEBUFFER_SRGB: case GL.DEPTH_CLAMP: case GL.POINT_SPRITE: return false;
       case GL.DEPTH_BITS: return gl.getParameter(gl.DEPTH_BITS) as number; case GL.STENCIL_BITS: return gl.getParameter(gl.STENCIL_BITS) as number;
-      default: { const v = gl.getParameter(pname); if (gl.getError() === GL.INVALID_ENUM && v === null) { this.setErr(GL.INVALID_ENUM); this.warn('get:' + pname, `glGet*(0x${pname.toString(16)}): unknown parameter → GL_INVALID_ENUM`); return null; }
+      default: { const fv = this.ff.getParam(pname); if (fv !== undefined) return fv; const v = gl.getParameter(pname); if (gl.getError() === GL.INVALID_ENUM && v === null) { this.setErr(GL.INVALID_ENUM); this.warn('get:' + pname, `glGet*(0x${pname.toString(16)}): unknown parameter → GL_INVALID_ENUM`); return null; }
         if (v && typeof v === 'object' && !Array.isArray(v) && !(v instanceof Float32Array) && !(v instanceof Int32Array) && !(v instanceof Uint32Array)) { const o = v as object; return this.bufIds.get(o as WebGLBuffer) ?? this.texIds.get(o as WebGLTexture) ?? this.progIds.get(o as WebGLProgram) ?? this.fboIds.get(o as WebGLFramebuffer) ?? this.rboIds.get(o as WebGLRenderbuffer) ?? 0; }
         return v as number | number[] | boolean; } } }
   private paramArray(pname: number): number[] | null { const v: unknown = this.getParam(pname); if (v === null) return null; if (typeof v === 'number') return [v]; if (typeof v === 'boolean') return [v ? 1 : 0]; if (typeof v === 'bigint') return [Number(v)]; if (Array.isArray(v)) return v.map((x) => typeof x === 'boolean' ? (x ? 1 : 0) : Number(x)); if (v instanceof Float32Array || v instanceof Int32Array || v instanceof Uint32Array) return Array.from(v); return [0]; }
@@ -359,13 +377,14 @@ export class GLBridge {
 
   // ---- entry points ----
   private def(name: string, f: Impl) { const id = this.byName.get(name); if (id === undefined) { this.log(`[gl] internal: ${name} is not in gltable.ts\n`); return; } this.impl[id] = f; }
+  private callName(name: string, args: bigint[]) { const id = this.byName.get(name); const f = id !== undefined ? this.impl[id] : null; return f ? f(BigUint64Array.from(args)) : undefined; }
   private alias(name: string, of: string) { const id = this.byName.get(of); if (id !== undefined && this.impl[id]) this.def(name, this.impl[id]!); }
   private register() {
     const g = () => this.gl!;
     // -- state --
     this.def('glGetError', () => { const e = this.err; if (e) { this.err = 0; return e; } return g().getError(); });
     this.def('glEnable', (a) => this.enable(U(a[0]), true)); this.def('glDisable', (a) => this.enable(U(a[0]), false));
-    this.def('glIsEnabled', (a) => { const cap = U(a[0]); if (cap === GL.MULTISAMPLE || cap === GL.ALPHA_TEST || cap === GL.LIGHTING || cap === GL.FRAMEBUFFER_SRGB || cap === GL.TEXTURE_2D || cap === GL.POINT_SMOOTH || cap === GL.LINE_SMOOTH) return 0; if (cap === GL.PROGRAM_POINT_SIZE || cap === GL.TEXTURE_CUBE_MAP_SEAMLESS) return 1; const r = g().isEnabled(cap); if (g().getError() === GL.INVALID_ENUM) { this.setErr(GL.INVALID_ENUM); return 0; } return r ? 1 : 0; });
+    this.def('glIsEnabled', (a) => { const cap = U(a[0]); const ffv = this.ff.isEnabled(cap); if (ffv !== undefined) return ffv; if (cap === GL.MULTISAMPLE || cap === GL.FRAMEBUFFER_SRGB || cap === GL.POINT_SMOOTH || cap === GL.LINE_SMOOTH) return 0; if (cap === GL.PROGRAM_POINT_SIZE || cap === GL.TEXTURE_CUBE_MAP_SEAMLESS) return 1; const r = g().isEnabled(cap); if (g().getError() === GL.INVALID_ENUM) { this.setErr(GL.INVALID_ENUM); return 0; } return r ? 1 : 0; });
     this.def('glEnablei', (a) => { if (U(a[1]) !== 0) { this.setErr(GL.INVALID_VALUE); this.warn('enablei', 'glEnablei/glDisablei with index > 0: per-draw-buffer blending is not available in WebGL2'); return; } this.enable(U(a[0]), true); }); this.def('glDisablei', (a) => { if (U(a[1]) !== 0) { this.setErr(GL.INVALID_VALUE); return; } this.enable(U(a[0]), false); }); this.def('glIsEnabledi', (a) => U(a[1]) === 0 ? (g().isEnabled(U(a[0])) ? 1 : 0) : 0);
     this.def('glHint', (a) => { const t = U(a[0]); if (t === 0x8192 /* GENERATE_MIPMAP_HINT */ || t === 0x8B8B /* FRAGMENT_SHADER_DERIVATIVE_HINT */) g().hint(t, U(a[1])); });
     this.def('glViewport', (a) => g().viewport(I(a[0]), I(a[1]), I(a[2]), I(a[3]))); this.def('glScissor', (a) => g().scissor(I(a[0]), I(a[1]), I(a[2]), I(a[3])));
@@ -378,14 +397,11 @@ export class GLBridge {
     this.def('glBlendFunci', (a) => { if (U(a[0]) === 0) g().blendFunc(U(a[1]), U(a[2])); else this.setErr(GL.INVALID_VALUE); }); this.def('glBlendFuncSeparatei', (a) => { if (U(a[0]) === 0) g().blendFuncSeparate(U(a[1]), U(a[2]), U(a[3]), U(a[4])); else this.setErr(GL.INVALID_VALUE); }); this.def('glBlendEquationi', (a) => { if (U(a[0]) === 0) g().blendEquation(U(a[1])); else this.setErr(GL.INVALID_VALUE); }); this.def('glBlendEquationSeparatei', (a) => { if (U(a[0]) === 0) g().blendEquationSeparate(U(a[1]), U(a[2])); else this.setErr(GL.INVALID_VALUE); });
     this.alias('glBlendFuncSeparateEXT', 'glBlendFuncSeparate'); this.alias('glBlendEquationEXT', 'glBlendEquation'); this.alias('glBlendEquationSeparateEXT', 'glBlendEquationSeparate');
     this.def('glCullFace', (a) => g().cullFace(U(a[0]))); this.def('glFrontFace', (a) => g().frontFace(U(a[0]))); this.def('glLineWidth', (a) => g().lineWidth(F(a[0]))); this.def('glPolygonOffset', (a) => g().polygonOffset(F(a[0]), F(a[1]))); this.def('glSampleCoverage', (a) => g().sampleCoverage(F(a[0]), B(a[1])));
-    this.def('glPointSize', (a) => { if (F(a[0]) !== 1) this.warn('pointsize', 'glPointSize: WebGL2 takes the point size only from gl_PointSize in the vertex shader (core-profile behaviour); the call is ignored'); });
-    this.def('glPolygonMode', (a) => { const m = U(a[1]); if (m !== GL.FILL) { this.setErr(GL.INVALID_ENUM); this.warn('polymode', 'glPolygonMode(GL_LINE/GL_POINT): wireframe rasterisation is not available in WebGL2 → GL_INVALID_ENUM'); } });
     this.def('glPointParameterf', () => {}); this.def('glPointParameterfv', () => {}); this.def('glPointParameteri', () => {}); this.def('glPointParameteriv', () => {}); this.alias('glPointParameterfARB', 'glPointParameterf'); this.alias('glPointParameterfvARB', 'glPointParameterfv');
     this.def('glPixelStorei', (a) => this.pixelStore(U(a[0]), I(a[1]))); this.def('glPixelStoref', (a) => this.pixelStore(U(a[0]), F(a[1]) | 0));
     this.def('glReadBuffer', (a) => g().readBuffer(this.bound.fbRead ? U(a[0]) : this.defaultDrawBuffer(U(a[0])))); this.def('glDrawBuffer', (a) => { const m = U(a[0]); this.drawBuffer = m; g().drawBuffers([this.bound.fbDraw ? m : this.defaultDrawBuffer(m)]); });
     this.def('glDrawBuffers', (a) => { const n = I(a[0]); const v = this.i32(a[1], n); if (v) g().drawBuffers(Array.from(v, (x) => this.bound.fbDraw ? x >>> 0 : this.defaultDrawBuffer(x >>> 0))); });
     this.def('glClampColor', () => {}); this.def('glProvokingVertex', () => {}); this.def('glPrimitiveRestartIndex', () => this.warn('restart', 'glPrimitiveRestartIndex: WebGL2 always uses the fixed restart index (0xFFFF/0xFFFFFFFF)')); this.def('glMinSampleShading', () => {}); this.def('glSampleMaski', () => {}); this.def('glBlendBarrier', () => {});
-    this.def('glLogicOp', () => this.legacy('glLogicOp')); this.def('glShadeModel', () => {}); this.def('glAlphaFunc', () => this.warn('alphafunc', 'glAlphaFunc/GL_ALPHA_TEST: the alpha test does not exist in WebGL2 (use discard in the fragment shader) — ignored'));
     // -- getters --
     this.def('glGetString', (a) => this.getString(U(a[0]))); this.def('glGetStringi', (a) => { if (U(a[0]) !== GL.EXTENSIONS) { this.setErr(GL.INVALID_ENUM); return 0n; } const i = U(a[1]); if (i >= this.extList.length) { this.setErr(GL.INVALID_VALUE); return 0n; } return this.gstr(this.extList[i]); }); this.alias('glGetStringiEXT', 'glGetStringi');
     this.def('glGetIntegerv', (a) => { const v = this.paramArray(U(a[0])); if (v) v.forEach((x, i) => this.wr32(a[1] + BigInt(i * 4), typeof x === 'number' && !Number.isInteger(x) ? Math.round(x) : x)); });
@@ -404,7 +420,7 @@ export class GLBridge {
     this.def('glGenTextures', (a) => this.gen(I(a[0]), a[1], 'tex', () => { const id = this.next.tex++; this.texInfo.set(id, { target: 0, levels: new Map(), genMipmap: false }); return id; }));
     this.def('glDeleteTextures', (a) => { for (const id of this.ids(I(a[0]), a[1])) { const t = this.tex.get(id); if (t) { g().deleteTexture(t); this.texIds.delete(t); } this.tex.delete(id); this.texInfo.delete(id); for (const u of this.texUnits) for (const [k, v] of u) if (v === id) u.delete(k); } });
     this.def('glIsTexture', (a) => this.tex.has(U(a[0])) ? 1 : 0);
-    this.def('glBindTexture', (a) => { const target = this.texTarget(U(a[0])), id = U(a[1]); if (target === GL.TEXTURE_1D || target === GL.TEXTURE_RECTANGLE || target === GL.TEXTURE_BUFFER || target === GL.TEXTURE_2D_MULTISAMPLE) { this.setErr(GL.INVALID_ENUM); this.warn('textarget:' + target, `glBindTexture(0x${target.toString(16)}): 1D / rectangle / buffer / multisample textures are not available in WebGL2 → GL_INVALID_ENUM`); return; }
+    this.def('glBindTexture', (a) => { const target = this.texTarget(U(a[0])), id = U(a[1]); if (target === GL.TEXTURE_RECTANGLE || target === GL.TEXTURE_BUFFER || target === GL.TEXTURE_2D_MULTISAMPLE) { this.setErr(GL.INVALID_ENUM); this.warn('textarget:' + target, `glBindTexture(0x${target.toString(16)}): rectangle / buffer / multisample textures are not available in WebGL2 → GL_INVALID_ENUM`); return; }
       let t: WebGLTexture | null = null; if (id) { t = this.tex.get(id) ?? null; if (!t) { t = g().createTexture()!; this.tex.set(id, t); this.texIds.set(t, id); if (!this.texInfo.has(id)) this.texInfo.set(id, { target, levels: new Map(), genMipmap: false }); } const ti = this.texInfo.get(id)!; if (!ti.target) ti.target = target; }
       g().bindTexture(target, t); this.texUnits[this.bound.unit].set(target, id); });
     this.def('glActiveTexture', (a) => { const u = U(a[0]) - GL.TEXTURE0; if (u < 0 || u >= 32) { this.setErr(GL.INVALID_ENUM); return; } this.bound.unit = u; g().activeTexture(GL.TEXTURE0 + u); }); this.alias('glActiveTextureARB', 'glActiveTexture'); this.def('glClientActiveTexture', () => {}); this.alias('glClientActiveTextureARB', 'glClientActiveTexture');
@@ -425,7 +441,8 @@ export class GLBridge {
       if (this.bound.unpack) { g().texSubImage3D(target, level, x, y, z, w, h, d, format, type, Number(a[10])); return; }
       const px = this.pixels(a[10], w, h, d, format, type); if (!px || !px.data) return; this.withUnpackTight(px.format !== format, () => g().texSubImage3D(target, level, x, y, z, w, h, d, px.format, px.type, px.data as ArrayBufferView)); });
     this.alias('glTexSubImage3DEXT', 'glTexSubImage3D');
-    this.def('glTexImage1D', () => { this.setErr(GL.INVALID_ENUM); this.warn('tex1d', 'glTexImage1D: 1D textures are not available in WebGL2 → GL_INVALID_ENUM'); }); this.def('glTexSubImage1D', () => this.setErr(GL.INVALID_ENUM)); this.def('glCopyTexImage1D', () => this.setErr(GL.INVALID_ENUM)); this.def('glCopyTexSubImage1D', () => this.setErr(GL.INVALID_ENUM));
+    this.def('glTexImage1D', (a) => this.callName('glTexImage2D', [BigInt(GL.TEXTURE_2D), a[1], a[2], a[3], 1n, a[4], a[5], a[6], a[7]])); this.def('glTexSubImage1D', (a) => this.callName('glTexSubImage2D', [BigInt(GL.TEXTURE_2D), a[1], a[2], 0n, a[3], 1n, a[4], a[5], a[6]]));
+    this.def('glCopyTexImage1D', (a) => this.callName('glCopyTexImage2D', [BigInt(GL.TEXTURE_2D), a[1], a[2], a[3], a[4], a[5], 1n, a[6]])); this.def('glCopyTexSubImage1D', (a) => this.callName('glCopyTexSubImage2D', [BigInt(GL.TEXTURE_2D), a[1], a[2], 0n, a[3], a[4], a[5], 1n]));
     this.def('glTexStorage2D', (a) => { const target = U(a[0]), levels = I(a[1]), ifmt = this.fmtType(U(a[2]), GL.RGBA, GL.UNSIGNED_BYTE).ifmt, w = I(a[3]), h = I(a[4]); g().texStorage2D(target, levels, ifmt, w, h); for (let l = 0; l < levels; l++) this.noteLevel(target, l, Math.max(1, w >> l), Math.max(1, h >> l), 1, ifmt); }); this.alias('glTexStorage2DEXT', 'glTexStorage2D');
     this.def('glTexStorage3D', (a) => { const target = U(a[0]), levels = I(a[1]), ifmt = this.fmtType(U(a[2]), GL.RGBA, GL.UNSIGNED_BYTE).ifmt, w = I(a[3]), h = I(a[4]), d = I(a[5]); g().texStorage3D(target, levels, ifmt, w, h, d); for (let l = 0; l < levels; l++) this.noteLevel(target, l, Math.max(1, w >> l), Math.max(1, h >> l), d, ifmt); });
     this.def('glCopyTexImage2D', (a) => { const ft = this.fmtType(U(a[2]), GL.RGBA, GL.UNSIGNED_BYTE); g().copyTexImage2D(U(a[0]), I(a[1]), ft.ifmt, I(a[3]), I(a[4]), I(a[5]), I(a[6]), 0); this.noteLevel(U(a[0]), I(a[1]), I(a[5]), I(a[6]), 1, ft.ifmt); });
@@ -607,16 +624,18 @@ export class GLBridge {
     this.def('glBeginTransformFeedback', (a) => g().beginTransformFeedback(U(a[0]))); this.def('glEndTransformFeedback', () => g().endTransformFeedback()); this.def('glPauseTransformFeedback', () => g().pauseTransformFeedback()); this.def('glResumeTransformFeedback', () => g().resumeTransformFeedback());
     // -- debug output (KHR_debug): accepted, messages go to the emulator log; no callbacks into the guest from here --
     this.def('glDebugMessageCallback', () => this.warn('debugcb', 'glDebugMessageCallback: GL debug messages are written to the emulator log instead of calling back into the program')); this.alias('glDebugMessageCallbackARB', 'glDebugMessageCallback'); this.def('glDebugMessageControl', () => {}); this.alias('glDebugMessageControlARB', 'glDebugMessageControl'); this.def('glDebugMessageInsert', (a) => this.log(`[gl] app: ${this.rdstr(a[5], I(a[4]) >= 0 ? I(a[4]) : -1)}\n`)); this.def('glObjectLabel', () => {}); this.def('glGetObjectLabel', (a) => this.wrstr(a[4], I(a[2]), '', a[3])); this.def('glPushDebugGroup', () => {}); this.def('glPopDebugGroup', () => {});
-    // -- the fixed-function pipeline of GL 1.x: a core-profile error, logged once per entry point --
+    // -- the fixed-function pipeline of GL 1.x + GLU: emulated on top of WebGL2 (glff.ts) --
+    this.ff.register();
+    // -- whatever GL 1.1 export is still missing: a core-profile error, logged once per entry point --
     GL_FUNCS.forEach(([n, , exported], id) => { if (exported && n.startsWith('gl') && !this.impl[id]) this.impl[id] = () => this.legacy(n); });   // GL 1.1 exports always resolve; unimplemented extensions stay unprobed (wglGetProcAddress → NULL)
   }
   // ---- implementations shared by several entry points ----
   private enable(cap: number, on: boolean) {
     const gl = this.gl!;
+    if (this.ff.enable(cap, on)) return;
     switch (cap) {
-      case GL.TEXTURE_2D: case GL.TEXTURE_1D: case GL.TEXTURE_3D: case GL.TEXTURE_CUBE_MAP: case GL.TEXTURE_RECTANGLE: case GL.MULTISAMPLE: case GL.POINT_SMOOTH: case GL.LINE_SMOOTH: case GL.POLYGON_SMOOTH: case GL.TEXTURE_CUBE_MAP_SEAMLESS: case GL.PROGRAM_POINT_SIZE: case GL.POINT_SPRITE: case GL.FRAMEBUFFER_SRGB: case GL.SAMPLE_ALPHA_TO_ONE: case GL.DEBUG_OUTPUT: case GL.DEBUG_OUTPUT_SYNCHRONOUS: case GL.SAMPLE_SHADING: case GL.PRIMITIVE_RESTART_FIXED_INDEX: return;   // always-on / not-applicable in WebGL2: silently accepted like a permissive driver
+      case GL.TEXTURE_3D: case GL.TEXTURE_CUBE_MAP: case GL.TEXTURE_RECTANGLE: case GL.MULTISAMPLE: case GL.POINT_SMOOTH: case GL.LINE_SMOOTH: case GL.POLYGON_SMOOTH: case GL.TEXTURE_CUBE_MAP_SEAMLESS: case GL.PROGRAM_POINT_SIZE: case GL.POINT_SPRITE: case GL.FRAMEBUFFER_SRGB: case GL.SAMPLE_ALPHA_TO_ONE: case GL.DEBUG_OUTPUT: case GL.DEBUG_OUTPUT_SYNCHRONOUS: case GL.SAMPLE_SHADING: case GL.PRIMITIVE_RESTART_FIXED_INDEX: return;   // always-on / not-applicable in WebGL2: silently accepted like a permissive driver
       case GL.PRIMITIVE_RESTART: this.warn('restart', 'GL_PRIMITIVE_RESTART: WebGL2 always restarts on the fixed index (0xFFFF/0xFFFFFFFF); glPrimitiveRestartIndex cannot change it'); return;
-      case GL.ALPHA_TEST: if (on) this.warn('alphafunc', 'GL_ALPHA_TEST: the alpha test does not exist in WebGL2 (use discard in the fragment shader) — ignored'); return;
       case GL.DEPTH_CLAMP: if (on) this.warn('depthclamp', 'GL_DEPTH_CLAMP: not available in WebGL2 — ignored'); return;
       case GL.LIGHTING: case GL.COLOR_MATERIAL: case GL.NORMALIZE: case GL.FOG: case GL.TEXTURE_GEN_S: case GL.TEXTURE_GEN_T: case GL.TEXTURE_GEN_R: case GL.TEXTURE_GEN_Q: case GL.COLOR_SUM: case GL.LINE_STIPPLE: case GL.POLYGON_STIPPLE: case GL.COLOR_LOGIC_OP: case GL.INDEX_LOGIC_OP: if (on) this.legacy(`glEnable(0x${cap.toString(16)})`); return;
     }
@@ -652,6 +671,7 @@ export class GLBridge {
     this.mem!.free(m.ptr); return 1; }
   private drawArrays(mode: number, first: number, count: number, instances: number) {
     const gl = this.gl!; if (count <= 0) return;
+    if (this.ff.ownsDraw()) { if (instances > 1) this.warn('ffinst', 'instanced draw with fixed-function vertex arrays: drawn once'); this.ff.drawArrays(mode, first, count); return; }
     if (mode === GL.QUADS) { const nq = count >> 2; const prep = this.prepareDraw(first, nq * 4, null); if (!prep.ok) return; const ibo = this.quadIndices(nq); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
       if (first === 0) { if (instances > 1) gl.drawElementsInstanced(gl.TRIANGLES, nq * 6, gl.UNSIGNED_INT, 0, instances); else gl.drawElements(gl.TRIANGLES, nq * 6, gl.UNSIGNED_INT, 0); }
       else { const idx = new Uint32Array(nq * 6); for (let i = 0; i < nq; i++) { const b = first + i * 4; idx[i * 6] = b; idx[i * 6 + 1] = b + 1; idx[i * 6 + 2] = b + 2; idx[i * 6 + 3] = b; idx[i * 6 + 4] = b + 2; idx[i * 6 + 5] = b + 3; } if (!this.scratchIbo) this.scratchIbo = gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.scratchIbo); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STREAM_DRAW); gl.drawElements(gl.TRIANGLES, nq * 6, gl.UNSIGNED_INT, 0); }
@@ -661,6 +681,7 @@ export class GLBridge {
     if (instances > 1) gl.drawArraysInstanced(mode, first, count, instances); else gl.drawArrays(mode, first, count); }
   private drawElements(mode: number, count: number, type: number, indices: bigint, instances: number, baseVertex: number) {
     const gl = this.gl!; if (count <= 0) return;
+    if (this.ff.ownsDraw() && !baseVertex) { this.ff.drawElements(mode, count, type, indices); return; }
     if (baseVertex) { this.setErr(GL.INVALID_OPERATION); this.warn('basevertex', 'glDrawElementsBaseVertex with a non-zero base vertex: not available in WebGL2 → GL_INVALID_OPERATION'); return; }
     if (mode === GL.QUADS) {   // expand the quad index list into triangles (index data read back from the element buffer when needed)
       const bytes = count * typeBytes(type); let src: Uint8Array | null;

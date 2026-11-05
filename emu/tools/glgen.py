@@ -4,7 +4,7 @@
   python3 emu/tools/glgen.py /home/user/wine_spec emu/x64 src/lib/x64
 
 Sources:
-  * opengl32.spec (Wine) — every function the real opengl32.dll exports (GL 1.1 + wgl), with argument types;
+  * opengl32.spec / glu32.spec (Wine) — every function the real opengl32.dll / glu32.dll exports (GL 1.1 + wgl + GLU), with argument types;
   * GL_CORE below — GL 1.2 … 3.3 core + the extensions the bridge implements, reachable through wglGetProcAddress.
 Signature letters: v void, i 32-bit (GLint/GLenum/GLuint/GLsizei/GLboolean/GLbitfield), q 64-bit on both bitnesses (GLint64/GLuint64),
 z pointer-sized (GLintptr/GLsizeiptr: 4 bytes on x86, 8 on x64), f float, d double, p pointer (incl. GLsync). The same ids are used on both sides (gl_funcs.inc / gltable.ts), so the C side marshals arguments
@@ -380,6 +380,39 @@ glBlendEquationEXT v:i
 glBlendFuncSeparateEXT v:iiii
 glBlendEquationSeparateEXT v:ii
 glMultiTexCoord2fARB v:iff
+glClientActiveTexture v:i
+glFogCoordPointer v:iip
+glFogCoordd v:d
+glFogCoordf v:f
+glFogCoordfv v:p
+glLoadTransposeMatrixd v:p
+glLoadTransposeMatrixf v:p
+glMultTransposeMatrixd v:p
+glMultTransposeMatrixf v:p
+glMultiTexCoord1f v:if
+glMultiTexCoord1fARB v:if
+glMultiTexCoord1fv v:ip
+glMultiTexCoord2d v:idd
+glMultiTexCoord2dARB v:idd
+glMultiTexCoord2f v:iff
+glMultiTexCoord2fv v:ip
+glMultiTexCoord2fvARB v:ip
+glMultiTexCoord2i v:iii
+glMultiTexCoord2iARB v:iii
+glMultiTexCoord3f v:ifff
+glMultiTexCoord3fARB v:ifff
+glMultiTexCoord3fv v:ip
+glMultiTexCoord4f v:iffff
+glMultiTexCoord4fARB v:iffff
+glMultiTexCoord4fv v:ip
+glMultiTexCoord4fvARB v:ip
+glSecondaryColor3f v:fff
+glSecondaryColorPointer v:iiip
+glWindowPos2f v:ff
+glWindowPos2fARB v:ff
+glWindowPos2i v:ii
+glWindowPos2iARB v:ii
+glWindowPos3f v:fff
 glDrawRangeElementsEXT v:iiiiip
 glTexImage3DEXT v:iiiiiiiiip
 glTexSubImage3DEXT v:iiiiiiiiiip
@@ -425,7 +458,7 @@ def parse_spec(path):
         if not m: continue
         name, args = m.group(1), m.group(2).split()
         sig = "".join(TYPEMAP[a] for a in args)
-        ret = "p" if name in ("wglGetProcAddress", "wglGetDefaultProcAddress", "wglGetCurrentContext", "wglGetCurrentDC", "glGetString", "wglCreateContext", "wglCreateLayerContext") else ("i" if name.startswith("wgl") or name in ("glGetError", "glIsEnabled", "glIsList", "glIsTexture", "glRenderMode", "glGenLists", "glAreTexturesResident") else "v")
+        ret = "p" if name in ("wglGetProcAddress", "wglGetDefaultProcAddress", "wglGetCurrentContext", "wglGetCurrentDC", "glGetString", "wglCreateContext", "wglCreateLayerContext", "gluErrorString", "gluErrorUnicodeStringEXT", "gluGetString", "gluNewQuadric", "gluNewTess", "gluNewNurbsRenderer") else ("i" if name.startswith("wgl") or name in ("glGetError", "glIsEnabled", "glIsList", "glIsTexture", "glRenderMode", "glGenLists", "glAreTexturesResident", "gluBuild1DMipmaps", "gluBuild2DMipmaps", "gluScaleImage", "gluProject", "gluUnProject", "gluCheckExtension") else "v")
         out.append((name, ret + ":" + sig))
     return out
 
@@ -433,6 +466,7 @@ def main():
     spec_dir, cdir, tsdir = sys.argv[1], sys.argv[2], sys.argv[3]
     fns = {}; exported = set()
     for n, s in parse_spec(os.path.join(spec_dir, "opengl32.spec")): fns[n] = s; exported.add(n)
+    for n, s in parse_spec(os.path.join(spec_dir, "glu32.spec")): fns[n] = s; exported.add(n)   # glu32.dll: implemented by the bridge too (matrices, mipmaps, quadrics)
     for line in GL_CORE.strip().splitlines():
         parts = line.split()
         if not parts: continue
