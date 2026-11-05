@@ -429,7 +429,7 @@ export class FixedFunction {
       case E.VERTEX_ARRAY: return this.arr.vertex.on ? 1 : 0; case E.NORMAL_ARRAY: return this.arr.normal.on ? 1 : 0; case E.COLOR_ARRAY: return this.arr.color.on ? 1 : 0; case E.TEXTURE_COORD_ARRAY: return this.arr.tc[this.clientUnit].on ? 1 : 0; case E.INDEX_ARRAY: case E.EDGE_FLAG_ARRAY: return 0;
       case E.VERTEX_ARRAY_SIZE: return this.arr.vertex.size; case E.VERTEX_ARRAY_TYPE: return this.arr.vertex.type; case E.VERTEX_ARRAY_STRIDE: return this.arr.vertex.stride; case E.NORMAL_ARRAY_TYPE: return this.arr.normal.type; case E.NORMAL_ARRAY_STRIDE: return this.arr.normal.stride;
       case E.COLOR_ARRAY_SIZE: return this.arr.color.size; case E.COLOR_ARRAY_TYPE: return this.arr.color.type; case E.COLOR_ARRAY_STRIDE: return this.arr.color.stride; case E.TEXTURE_COORD_ARRAY_SIZE: return this.arr.tc[this.clientUnit].size; case E.TEXTURE_COORD_ARRAY_TYPE: return this.arr.tc[this.clientUnit].type; case E.TEXTURE_COORD_ARRAY_STRIDE: return this.arr.tc[this.clientUnit].stride;
-      case E.EDGE_FLAG: return 1; case 0x0D34 /* MAX_PIXEL_MAP_TABLE */: return 256; case 0x0D35 /* MAX_NAME_STACK_DEPTH */: return 64; case 0x0D30 /* MAX_LIST_NESTING */: return 64; case 0x0D37 /* MAX_EVAL_ORDER */: return 8; case 0x0D3B /* MAX_CLIENT_ATTRIB_STACK_DEPTH */: return 16;
+      case E.EDGE_FLAG: return 1; case 0x0D34 /* MAX_PIXEL_MAP_TABLE */: return 256; case 0x0D37 /* MAX_NAME_STACK_DEPTH */: return 64; case 0x0B31 /* MAX_LIST_NESTING */: return 64; case 0x0D30 /* MAX_EVAL_ORDER */: return 8; case 0x0D35 /* MAX_ATTRIB_STACK_DEPTH */: return 16; case 0x0D3B /* MAX_CLIENT_ATTRIB_STACK_DEPTH */: return 16;
     }
     void unit; return undefined;
   }

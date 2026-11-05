@@ -1,3 +1,81 @@
+# v1.40.0 — OpenGL 1.x fixed-function pipeline + GLU on WebGL2 (Android)
+
+**Classic OpenGL games now render.** Until now the `opengl32.dll` bridge exposed WebGL2 as a core-profile GL 3.3 context:
+any program that used `glBegin/glEnd`, `glMatrixMode`, `glLight*`, display lists or `glu32.dll` got `GL_INVALID_OPERATION`
+and a black window. v1.40.0 adds a complete fixed-function layer (`src/lib/x64/glff.ts`, ~800 lines) that translates
+GL 1.0–1.5 state into generated GLSL ES 3.00 programs on the fly — the same approach ANGLE/Mesa use for compatibility
+contexts — so games written against Quake/Half-Life-era OpenGL, GLUT/SDL 1.2 samples, Java/LWJGL 2 and old Delphi/VB
+programs draw on the phone's GPU through WebGL2.
+
+**What is implemented (every item is verified pixel by pixel by `glff.exe` / `glff32.exe` — 96 checks, ALL OK on x64 and x86):**
+
+* **Immediate mode**: `glBegin`/`glEnd` with all ten primitive kinds (`GL_POINTS`, `GL_LINES`, `GL_LINE_STRIP`,
+  `GL_LINE_LOOP`, `GL_TRIANGLES`, `GL_TRIANGLE_STRIP`, `GL_TRIANGLE_FAN`, `GL_QUADS`, `GL_QUAD_STRIP`, `GL_POLYGON`),
+  `glVertex2/3/4{s,i,f,d}[v]`, `glColor3/4{b,ub,s,us,i,ui,f,d}[v]`, `glNormal3*`, `glTexCoord1/2/3/4*`,
+  `glMultiTexCoord*` / `glMultiTexCoord*ARB` (4 units), `glRect*`, `glArrayElement`, `glEdgeFlag` (accepted).
+  Vertices are batched into one interleaved stream VBO per `glEnd` (own VAO; the program's VAO/VBO/program bindings are
+  restored afterwards, so mixed GLSL + immediate-mode code keeps working).
+* **Matrix stacks**: `GL_MODELVIEW` (32 deep), `GL_PROJECTION`, `GL_TEXTURE` (per unit), `glLoadIdentity`, `glLoadMatrix*`,
+  `glMultMatrix*`, `glLoadTransposeMatrix*`, `glMultTransposeMatrix*`, `glTranslate*`, `glRotate*`, `glScale*`,
+  `glOrtho`, `glFrustum`, `glPushMatrix`/`glPopMatrix` with `GL_STACK_OVERFLOW`/`UNDERFLOW`; `glGet*v` of
+  `GL_MODELVIEW_MATRIX`, `GL_PROJECTION_MATRIX`, `GL_TEXTURE_MATRIX`, `GL_MATRIX_MODE`, stack depths.
+* **Lighting**: 8 lights (`glLight*` position/direction/ambient/diffuse/specular/spot exponent & cutoff/attenuation),
+  `glMaterial*` (front/back, `GL_SHININESS`, `GL_EMISSION`), `glColorMaterial`, `glLightModel*` (global ambient,
+  local viewer, two-sided), `glShadeModel(GL_FLAT/GL_SMOOTH)`, `GL_NORMALIZE`/`GL_RESCALE_NORMAL`, `glGetLight*`/
+  `glGetMaterial*` — per-vertex Gouraud as in the GL 1.x spec (positional and directional lights, spotlights, specular
+  with half-vector).
+* **Texturing**: `GL_TEXTURE_2D` and `GL_TEXTURE_1D` (stored as height-1 2D textures: `glTexImage1D`, `glTexSubImage1D`,
+  `glCopyTexImage1D`), two active fixed-function units, `glTexEnv*` with `GL_MODULATE`, `GL_REPLACE`, `GL_DECAL`,
+  `GL_BLEND`, `GL_ADD` and `GL_COMBINE`/`GL_COMBINE_ALPHA` (`GL_ARB_texture_env_combine` sources/operands/scale),
+  `glTexGen*` with `GL_OBJECT_LINEAR`, `GL_EYE_LINEAR`, `GL_SPHERE_MAP`, `GL_NORMAL_MAP`, `GL_REFLECTION_MAP`,
+  texture matrices, `GL_TEXTURE_LOD_BIAS` accepted.
+* **Fog** (`GL_LINEAR`, `GL_EXP`, `GL_EXP2`, by eye-space depth), **alpha test** (`glAlphaFunc`, all eight functions),
+  **six user clip planes** (`glClipPlane` in eye space, `GL_CLIP_PLANE0-5`), **`glPolygonMode(GL_LINE/GL_POINT)`** (polygon
+  outlines without the triangle diagonals — the classic wireframe look), `glPointSize`, `glDepthRange`, `glFog*`.
+* **Display lists**: `glGenLists`, `glNewList(GL_COMPILE / GL_COMPILE_AND_EXECUTE)`, `glEndList`, `glCallList`,
+  `glCallLists` (all eight index types + `glListBase`), `glDeleteLists`, `glIsList`, nested lists, lists containing
+  matrix operations, state changes and `glBegin/glEnd` batches (compiled once into GPU-ready vertex data; attributes not
+  set inside the list are taken from the current state at call time, exactly as the spec requires), pointer arguments
+  (`glTexImage2D`, `glLightfv`, …) snapshotted at compile time.
+* **Attribute stacks**: `glPushAttrib`/`glPopAttrib` for `GL_CURRENT_BIT`, `GL_ENABLE_BIT`, `GL_LIGHTING_BIT`,
+  `GL_TEXTURE_BIT`, `GL_FOG_BIT`, `GL_COLOR_BUFFER_BIT`, `GL_DEPTH_BUFFER_BIT`, `GL_STENCIL_BUFFER_BIT`, `GL_POLYGON_BIT`,
+  `GL_LINE_BIT`, `GL_POINT_BIT`, `GL_SCISSOR_BIT`, `GL_VIEWPORT_BIT`, `GL_TRANSFORM_BIT`, `GL_HINT_BIT`, `GL_LIST_BIT`;
+  `glPushClientAttrib`/`glPopClientAttrib` (`GL_CLIENT_VERTEX_ARRAY_BIT`).
+* **Raster operations**: `glRasterPos*`, `glWindowPos*`, `glBitmap` (with the raster-position advance used for text),
+  `glDrawPixels` (all GL 1.x formats/types the texture path accepts), `glCopyPixels(GL_COLOR)`, `glPixelZoom`,
+  `GL_CURRENT_RASTER_POSITION`/`COLOR`/`POSITION_VALID` queries — drawn through a small blit program so they respect
+  depth/scissor/blend like real bitmaps.
+* **Client-side vertex arrays (GL 1.1)**: `glEnableClientState`/`glDisableClientState`, `glVertexPointer`, `glNormalPointer`,
+  `glColorPointer`, `glTexCoordPointer` (per `glClientActiveTexture` unit), `glInterleavedArrays` (all 14 formats),
+  `glDrawArrays`/`glDrawElements`/`glDrawRangeElements`/`glMultiDrawArrays` with these arrays, `GL_DOUBLE` arrays converted,
+  VBO-backed (`GL_ARRAY_BUFFER` bound) and plain memory pointers, `glGetPointerv`.
+* **GLU (`glu32.dll`, 53 exports, also for 32-bit programs with doubles on the x86 stack)**: `gluPerspective`, `gluOrtho2D`,
+  `gluLookAt`, `gluPickMatrix`, `gluProject`, `gluUnProject`, `gluBuild1DMipmaps`/`gluBuild2DMipmaps`
+  (non-power-of-two sources rescaled, every level generated), `gluScaleImage`, `gluErrorString`, `gluGetString`,
+  `gluCheckExtension`, quadrics (`gluNewQuadric`, `gluQuadricNormals/Texture/DrawStyle/Orientation`, `gluSphere`,
+  `gluCylinder`, `gluDisk`, `gluPartialDisk`, `gluDeleteQuadric`).
+* **State queries**: `glIsEnabled`/`glGet*v` for all the legacy enables and values above (`GL_CURRENT_COLOR`,
+  `GL_CURRENT_NORMAL`, `GL_LIGHTING`, `GL_FOG_*`, `GL_ALPHA_TEST_*`, `GL_SHADE_MODEL`, `GL_POLYGON_MODE`,
+  `GL_MAX_LIGHTS` = 8, `GL_MAX_CLIP_PLANES` = 6, stack depths, `GL_LIST_INDEX`/`GL_LIST_MODE`, …),
+  `glGetTexEnv*`, `glGetTexGen*`, `glGetClipPlane`; `GL_INVALID_OPERATION` for state calls inside `glBegin/glEnd`.
+* The GL export table grew from 762 to **848 entry points** (`emu/tools/glgen.py` now also reads Wine's `glu32.spec`;
+  `glActiveTextureARB`, `glClientActiveTexture`, `glMultiTexCoord*`, `glWindowPos*`, `glLoadTransposeMatrix*`,
+  `glFogCoord*`, `glSecondaryColor*` are resolvable through `wglGetProcAddress`).
+
+**Honest limits (each answered with a GL error and one log line, never a silent fake):**
+`glRenderMode(GL_SELECT/GL_FEEDBACK)` selection and feedback buffers, the accumulation buffer (`glAccum`),
+evaluators (`glMap*`/`glEvalMesh*` — NURBS curves/surfaces in GLU as well), `gluTess*` tessellation objects
+(`gluNewTess` returns NULL), `glLogicOp`, `glLineStipple`/`glPolygonStipple`, `GL_COLOR_MATRIX`, secondary colour and
+fog-coordinate per-vertex attributes (accepted, not used), `glPolygonMode(GL_BACK)` separate from the front mode,
+`GL_TEXTURE_3D`/cube maps in the fixed-function stages, and only texture units 0 and 1 are sampled by the generated shaders (units 2–3 keep their state; `GL_MAX_TEXTURE_UNITS` still reports 8 for GLSL programs).
+Lighting is per-vertex (Gouraud) exactly like GL 1.x, so highly tessellated objects look right, flat-shaded big quads look
+like they did on 1990s hardware.
+
+**Tests:** `emu/tests/glff.c` (`glff.exe` x64 / `glff32.exe` x86, built with `-lopengl32 -lglu32`) — 96 pixel-verified checks
+covering every bullet above, in the Programs → tests list and in the browser e2e (`e2e/run.mjs`, 51 tests, both exes end
+with `ALL OK 96/96` on SwiftShader); `tests/run.sh` (250 checks) runs both on the native null driver. `gltri.exe` now
+reports `glBegin/glEnd error=0x0`.
+
 # v1.39.0 — Game controllers: XInput, DirectInput8, winmm + the phone's own pads and an on-screen controller (Android)
 
 **Windows games now see a real game controller.** Every Windows gamepad API a game may use is implemented on top of one
