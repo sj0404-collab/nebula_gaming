@@ -52,11 +52,11 @@ static void s_NtOpenFile(Cpu *c) { u64 a0 = ARG(0), a1 = ARG(1), a2 = ARG(2), a3
 /* NtQueryAttributesFile(oa, FILE_BASIC_INFORMATION*) */
 static void s_NtQueryAttributesFile(Cpu *c) { char path[1024]; if (!nt_object_path(c, ARG(0), path, sizeof path)) { RET(0xC0000033u); return; }
   u64 size = 0; int st = vfs_stat(path, &size); if (!st) { RET(0xC0000034u); return; }
-  u64 a = ARG(1), ft = vfs_filetime(); wr64(c, a, ft); wr64(c, a + 8, ft); wr64(c, a + 16, ft); wr64(c, a + 24, ft); wr32(c, a + 32, st == 2 ? 0x10 : 0x80); wr32(c, a + 36, 0); RET(0); }
+  u64 a = ARG(1), ft = vfs_mtime_path(path); wr64(c, a, ft); wr64(c, a + 8, ft); wr64(c, a + 16, ft); wr64(c, a + 24, ft); wr32(c, a + 32, st == 2 ? 0x10 : 0x80); wr32(c, a + 36, 0); RET(0); }
 /* NtQueryFullAttributesFile(oa, FILE_NETWORK_OPEN_INFORMATION* 56 B: 4 times, AllocationSize @32, EndOfFile @40, Attributes @48) */
 static void s_NtQueryFullAttributesFile(Cpu *c) { char path[1024]; if (!nt_object_path(c, ARG(0), path, sizeof path)) { RET(0xC0000033u); return; }
   u64 size = 0; int st = vfs_stat(path, &size); if (!st) { RET(0xC0000034u); return; }
-  u64 a = ARG(1), ft = vfs_filetime(); for (int k = 0; k < 4; k++) wr64(c, a + 8 * k, ft); wr64(c, a + 32, (size + 4095) & ~4095ull); wr64(c, a + 40, size); wr32(c, a + 48, st == 2 ? 0x10 : 0x80); wr32(c, a + 52, 0); RET(0); }
+  u64 a = ARG(1), ft = vfs_mtime_path(path); for (int k = 0; k < 4; k++) wr64(c, a + 8 * k, ft); wr64(c, a + 32, (size + 4095) & ~4095ull); wr64(c, a + 40, size); wr32(c, a + 48, st == 2 ? 0x10 : 0x80); wr32(c, a + 52, 0); RET(0); }
 /* NtCreateNamedPipeFile(&h, access, oa, iosb, share, disposition, options, type, readmode, completionmode, maxinst, inquota, outquota, timeout):
  * server end; the client opens the same name through NtCreateFile/CreateFileW. Direction from the access mask (GENERIC_READ/WRITE, FILE_READ/WRITE_DATA). */
 static void s_NtCreateNamedPipeFile(Cpu *c) { u64 hp = ARG(0); u32 access = (u32)ARG(1); u64 iosb = ARG(3);

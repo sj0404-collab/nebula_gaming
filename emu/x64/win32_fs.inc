@@ -156,14 +156,14 @@ static u32 attrs_of(int st) { return st == 2 ? 0x10 : 0x80; }
 static void file_attrs(Cpu *c, const char *n) { u64 sz; int st = vfs_stat(n, &sz); if (!st) { W->last_error = 2; RET(0xffffffffu); return; } RET(attrs_of(st)); }
 static void s_GetFileAttributesA(Cpu *c) { file_attrs(c, name_a(c, ARG(0))); }
 static void s_GetFileAttributesW(Cpu *c) { file_attrs(c, name_w(c, ARG(0))); }
-static void file_attrs_ex(Cpu *c, const char *n) { u64 sz; int st = vfs_stat(n, &sz); if (!st) { W->last_error = 2; RET(0); return; } u64 a = ARG(2); u64 ft = vfs_filetime(); wr32(c, a, attrs_of(st)); wr64(c, a + 4, ft); wr64(c, a + 12, ft); wr64(c, a + 20, ft); wr32(c, a + 28, (u32)(sz >> 32)); wr32(c, a + 32, (u32)sz); RET(1); }
+static void file_attrs_ex(Cpu *c, const char *n) { u64 sz; int st = vfs_stat(n, &sz); if (!st) { W->last_error = 2; RET(0); return; } u64 a = ARG(2); u64 ft = vfs_mtime_path(n); wr32(c, a, attrs_of(st)); wr64(c, a + 4, ft); wr64(c, a + 12, ft); wr64(c, a + 20, ft); wr32(c, a + 28, (u32)(sz >> 32)); wr32(c, a + 32, (u32)sz); RET(1); }
 static void s_GetFileAttributesExA(Cpu *c) { file_attrs_ex(c, name_a(c, ARG(0))); }
 static void s_GetFileAttributesExW(Cpu *c) { file_attrs_ex(c, name_w(c, ARG(0))); }
-static void s_GetFileInformationByHandle(Cpu *c) { int fd = handle_fd(ARG(0)); if (fd < 3) { W->last_error = 6; RET(0); return; } u64 a = ARG(1); u64 ft = vfs_filetime(); s64 sz = vfs_size(fd); wr32(c, a, vfs_fd_isdir(fd) ? 0x10 : 0x80); wr64(c, a + 4, ft); wr64(c, a + 12, ft); wr64(c, a + 20, ft); wr32(c, a + 28, 0x4e45); wr32(c, a + 32, (u32)((u64)sz >> 32)); wr32(c, a + 36, (u32)sz); wr32(c, a + 40, 1); wr32(c, a + 44, 0); wr32(c, a + 48, (u32)fd); RET(1); }
+static void s_GetFileInformationByHandle(Cpu *c) { int fd = handle_fd(ARG(0)); if (fd < 3) { W->last_error = 6; RET(0); return; } u64 a = ARG(1); u64 ft = vfs_mtime_fd(fd); s64 sz = vfs_size(fd); wr32(c, a, vfs_fd_isdir(fd) ? 0x10 : 0x80); wr64(c, a + 4, ft); wr64(c, a + 12, ft); wr64(c, a + 20, ft); wr32(c, a + 28, 0x4e45); wr32(c, a + 32, (u32)((u64)sz >> 32)); wr32(c, a + 36, (u32)sz); wr32(c, a + 40, 1); wr32(c, a + 44, 0); wr32(c, a + 48, (u32)fd); RET(1); }
 /* GetFileInformationByHandleEx(h, class, buf, size): FileBasicInfo 0, FileStandardInfo 1, FileNameInfo 2, FileAttributeTagInfo 9, FileIdInfo 18 */
 static void s_GetFileInformationByHandleEx(Cpu *c) {
   int fd = handle_fd(ARG(0)); u32 cls = (u32)ARG(1); u64 a = ARG(2), n = ARG(3); if (fd < 3) { W->last_error = 6; RET(0); return; }
-  u64 ft = vfs_filetime(); s64 sz = vfs_size(fd); int dir = vfs_fd_isdir(fd);
+  u64 ft = vfs_mtime_fd(fd); s64 sz = vfs_size(fd); int dir = vfs_fd_isdir(fd);
   switch (cls) {
   case 0: if (n < 40) { W->last_error = 24; RET(0); return; } wr64(c, a, ft); wr64(c, a + 8, ft); wr64(c, a + 16, ft); wr64(c, a + 24, ft); wr32(c, a + 32, dir ? 0x10 : 0x80); wr32(c, a + 36, 0); RET(1); return;
   case 1: if (n < 24) { W->last_error = 24; RET(0); return; } wr64(c, a, (u64)sz); wr64(c, a + 8, (u64)sz); wr32(c, a + 16, 1); wr8(c, a + 20, 0); wr8(c, a + 21, (u8)dir); RET(1); return;
@@ -173,22 +173,23 @@ static void s_GetFileInformationByHandleEx(Cpu *c) {
   default: W->last_error = 87; RET(0); return;   /* ERROR_INVALID_PARAMETER */
   }
 }
-static void s_GetFileTime(Cpu *c) { u64 ft = vfs_filetime(); if (ARG(1)) wr64(c, ARG(1), ft); if (ARG(2)) wr64(c, ARG(2), ft); if (ARG(3)) wr64(c, ARG(3), ft); RET(1); }
+static void s_GetFileTime(Cpu *c) { int fd = handle_fd(ARG(0)); u64 ft = fd >= 3 ? vfs_mtime_fd(fd) : vfs_filetime(); if (ARG(1)) wr64(c, ARG(1), ft); if (ARG(2)) wr64(c, ARG(2), ft); if (ARG(3)) wr64(c, ARG(3), ft); RET(1); }
+static void s_SetFileTime(Cpu *c) { int fd = handle_fd(ARG(0)); if (fd < 3) { W->last_error = 6; RET(0); return; } u64 ft = ARG(3) ? rd64(c, ARG(3)) : 0; if (ft) vfs_set_mtime_fd(fd, ft); RET(1); }
 /* FindFirstFile family: data layout A = 320 bytes, W = 592 bytes */
-static void fill_find(Cpu *c, u64 a, const char *name, u64 sz, int dir, int wide) {
-  u64 ft = vfs_filetime(); wr32(c, a, dir ? 0x10 : 0x80); wr64(c, a + 4, ft); wr64(c, a + 12, ft); wr64(c, a + 20, ft); wr32(c, a + 28, (u32)(sz >> 32)); wr32(c, a + 32, (u32)sz); wr32(c, a + 36, 0); wr32(c, a + 40, 0);
+static void fill_find(Cpu *c, u64 a, const char *name, u64 sz, int dir, int wide, u64 ft) {
+  wr32(c, a, dir ? 0x10 : 0x80); wr64(c, a + 4, ft); wr64(c, a + 12, ft); wr64(c, a + 20, ft); wr32(c, a + 28, (u32)(sz >> 32)); wr32(c, a + 32, (u32)sz); wr32(c, a + 36, 0); wr32(c, a + 40, 0);
   if (wide) { put_w(c, a + 44, name, 260); wr16(c, a + 44 + 520, 0); } else { put_a(c, a + 44, name, 260); wr8(c, a + 44 + 260, 0); }
 }
 static void find_first(Cpu *c, const char *pat, u64 data, int wide) {
   int h = vfs_find_first(pat); char name[260]; u64 sz; int dir;
   if (h < 0 || !vfs_find_next(h, name, sizeof name, &sz, &dir)) { if (h >= 0) vfs_find_close(h); W->last_error = 2; RET(~0ull); return; }
-  fill_find(c, data, name, sz, dir, wide); RET(H_FIND_BASE + h);
+  fill_find(c, data, name, sz, dir, wide, vfs_find_mtime(h)); RET(H_FIND_BASE + h);
 }
 static void s_FindFirstFileA(Cpu *c) { find_first(c, name_a(c, ARG(0)), ARG(1), 0); }
 static void s_FindFirstFileW(Cpu *c) { find_first(c, name_w(c, ARG(0)), ARG(1), 1); }
 static void s_FindFirstFileExA(Cpu *c) { find_first(c, name_a(c, ARG(0)), ARG(2), 0); }
 static void s_FindFirstFileExW(Cpu *c) { find_first(c, name_w(c, ARG(0)), ARG(2), 1); }
-static void find_next(Cpu *c, int wide) { u64 h = ARG(0); char name[260]; u64 sz; int dir; if (h < H_FIND_BASE || h >= H_FIND_BASE + 64 || !vfs_find_next((int)(h - H_FIND_BASE), name, sizeof name, &sz, &dir)) { W->last_error = 18; RET(0); return; } fill_find(c, ARG(1), name, sz, dir, wide); RET(1); }
+static void find_next(Cpu *c, int wide) { u64 h = ARG(0); char name[260]; u64 sz; int dir; if (h < H_FIND_BASE || h >= H_FIND_BASE + 64 || !vfs_find_next((int)(h - H_FIND_BASE), name, sizeof name, &sz, &dir)) { W->last_error = 18; RET(0); return; } fill_find(c, ARG(1), name, sz, dir, wide, vfs_find_mtime((int)(h - H_FIND_BASE))); RET(1); }
 static void s_FindNextFileA(Cpu *c) { find_next(c, 0); }
 static void s_FindNextFileW(Cpu *c) { find_next(c, 1); }
 static void s_FindClose(Cpu *c) { u64 h = ARG(0); if (h >= H_FIND_BASE && h < H_FIND_BASE + 64) vfs_find_close((int)(h - H_FIND_BASE)); RET(1); }
@@ -780,7 +781,7 @@ static void s_mktemp(Cpu *c) { u64 a = ARG(0); u64 l = e_strlen(gstr(c, a)); u32
 
 #define FS_SHIMS \
   S(CreateFileA), S(CreateFileW), SA("CreateFile2", CreateFileW), S(ReadFile), S(WriteFile), S(CloseHandle), S(GetFileType), S(GetFileSize), S(GetFileSizeEx), S(SetFilePointer), S(SetFilePointerEx), S(SetEndOfFile), \
-  S(GetFileAttributesA), S(GetFileAttributesW), S(GetFileAttributesExA), S(GetFileAttributesExW), S(GetFileInformationByHandle), S(GetFileTime), \
+  S(GetFileAttributesA), S(GetFileAttributesW), S(GetFileAttributesExA), S(GetFileAttributesExW), S(GetFileInformationByHandle), S(GetFileTime), S(SetFileTime), \
   S(FindFirstFileA), S(FindFirstFileW), S(FindFirstFileExA), S(FindFirstFileExW), S(FindNextFileA), S(FindNextFileW), S(FindClose), \
   S(ReplaceFileA), S(ReplaceFileW), S(DeleteFileA), S(DeleteFileW), S(CreateDirectoryA), S(CreateDirectoryW), S(RemoveDirectoryA), S(RemoveDirectoryW), S(MoveFileA), S(MoveFileW), SA("MoveFileExA", MoveFileA), SA("MoveFileExW", MoveFileW), S(CopyFileA), S(CopyFileW), \
   S(GetCurrentDirectoryA), S(GetCurrentDirectoryW), S(SetCurrentDirectoryA), S(SetCurrentDirectoryW), S(GetFullPathNameA), S(GetFullPathNameW), S(GetTempPathA), S(GetTempPathW), SA("GetTempPath2A", GetTempPathA), SA("GetTempPath2W", GetTempPathW), S(GetTempFileNameA), S(GetTempFileNameW), \

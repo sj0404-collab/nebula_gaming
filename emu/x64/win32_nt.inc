@@ -22,7 +22,7 @@ static void s_RtlGetVersion(Cpu *c) { u64 a = ARG(0); if (!a) { RET(NT_INVALID_P
   wr32(c, a + 4, 10); wr32(c, a + 8, 0); wr32(c, a + 12, 19045); wr32(c, a + 16, 2); wr16(c, a + 20, 0); RET(0); }
 
 /* fills FILE_BASIC_INFORMATION (40 B) at a */
-static void nt_basic_info(Cpu *c, u64 a, int fd) { u64 ft = vfs_filetime(); int dir = vfs_fd_isdir(fd); wr64(c, a, ft); wr64(c, a + 8, ft); wr64(c, a + 16, ft); wr64(c, a + 24, ft); wr32(c, a + 32, dir ? 0x10 : 0x80); wr32(c, a + 36, 0); }
+static void nt_basic_info(Cpu *c, u64 a, int fd) { u64 ft = vfs_mtime_fd(fd); int dir = vfs_fd_isdir(fd); wr64(c, a, ft); wr64(c, a + 8, ft); wr64(c, a + 16, ft); wr64(c, a + 24, ft); wr32(c, a + 32, dir ? 0x10 : 0x80); wr32(c, a + 36, 0); }
 /* FILE_STANDARD_INFORMATION (24 B) */
 static void nt_standard_info(Cpu *c, u64 a, int fd) { s64 sz = vfs_kind(fd) == FD_PIPE ? 0 : vfs_size(fd); int dir = vfs_fd_isdir(fd); wr64(c, a, (u64)((sz + 4095) & ~4095ll)); wr64(c, a + 8, (u64)sz); wr32(c, a + 16, 1); wr8(c, a + 20, 0); wr8(c, a + 21, (u8)dir); wr16(c, a + 22, 0); }
 static u64 nt_file_id(int fd) { int n = vfs_fd_node(fd); return n >= 0 ? 0x1000000ull + (u64)n : 0x2000000ull + (u64)fd; }
@@ -60,7 +60,7 @@ static void s_NtQueryInformationFile(Cpu *c) {
   case 34: /* FileAttributeTagInformation */ if (len < 8) { st = NT_BUFFER_TOO_SMALL; break; } wr32(c, buf, vfs_fd_isdir(fd) ? 0x10 : 0x80); wr32(c, buf + 4, 0); info = 8; break;
   case 59: /* FileIdInformation: VolumeSerialNumber u64, FileId 16 B */ if (len < 24) { st = NT_BUFFER_TOO_SMALL; break; } wr64(c, buf, 0x4e45); wr64(c, buf + 8, nt_file_id(fd)); wr64(c, buf + 16, 0); info = 24; break;
   case 68: /* FileStatInformation: FileId 0, Creation 8, LastAccess 16, LastWrite 24, Change 32, AllocationSize 40, EndOfFile 48, FileAttributes 56, ReparseTag 60, NumberOfLinks 64, EffectiveAccess 68 */ {
-    if (len < 72) { st = NT_BUFFER_TOO_SMALL; break; } u64 ft = vfs_filetime(); s64 sz = kind == FD_PIPE ? 0 : vfs_size(fd);
+    if (len < 72) { st = NT_BUFFER_TOO_SMALL; break; } u64 ft = kind == FD_PIPE ? vfs_filetime() : vfs_mtime_fd(fd); s64 sz = kind == FD_PIPE ? 0 : vfs_size(fd);
     wr64(c, buf, nt_file_id(fd)); wr64(c, buf + 8, ft); wr64(c, buf + 16, ft); wr64(c, buf + 24, ft); wr64(c, buf + 32, ft); wr64(c, buf + 40, (u64)((sz + 4095) & ~4095ll)); wr64(c, buf + 48, (u64)sz);
     wr32(c, buf + 56, vfs_fd_isdir(fd) ? 0x10 : 0x80); wr32(c, buf + 60, 0); wr32(c, buf + 64, 1); wr32(c, buf + 68, 0x12019f); info = 72; break; }
   default: st = NT_INVALID_INFO_CLS; break;
@@ -129,7 +129,7 @@ static void s_NtQueryDirectoryFile(Cpu *c) {
   for (;;) {
     char name[300]; u64 size = 0; int is_dir = 0;
     if (g_dirscan[k].dots < 2) { e_snprintf(name, sizeof name, g_dirscan[k].dots == 0 ? "." : ".."); is_dir = 1; }
-    else if (!vfs_find_next(g_dirscan[k].fh, name, sizeof name, &size, &is_dir)) break;
+    else { if (!vfs_find_next(g_dirscan[k].fh, name, sizeof name, &size, &is_dir)) break; ft = vfs_find_mtime(g_dirscan[k].fh); }
     if (!e_strcmp(name, ".") || !e_strcmp(name, "..")) { if (g_dirscan[k].dots >= 2) continue; }
     u32 nl = (u32)e_strlen(name) * 2, need = (name_off + nl + 7) & ~7u;
     if (pos + need > buf + len) { if (count == 0) { nt_iosb(c, iosb, NT_BUFFER_OVERFLOW, 0); RET(NT_BUFFER_OVERFLOW); return; } break; }   /* entry stays for the next call */

@@ -228,7 +228,7 @@ typedef struct { u64 hwnd; u32 msg; u64 wparam, lparam; u32 time; } GuestMsg;
 #define FD_MAX 512
 enum { FD_FILE = 1, FD_CONSOLE, FD_PIPE, FD_MAP, FD_PROC, FD_NULL, FD_KOBJ, FD_SOCK };   /* FD_SOCK: winsock socket (win32_net.inc table) */   /* FD_KOBJ: event / mutex / semaphore / thread (kobj table) */
 typedef struct { int kind; int node; u64 pos; int append, eof, err, unget, alias, obj, wend; int noinherit; } FdEnt;   /* noinherit: not copied into children */
-typedef struct { int used; char dir[512]; char pat[128]; int cursor; int dots; } VFind;
+typedef struct { int used; char dir[512]; char pat[128]; int cursor; int dots; u64 last_mtime; } VFind;
 typedef struct { u64 addr, size; int fd; } MapView;
 typedef struct {
   FdEnt fd[FD_MAX]; int redir[3]; char cwd[512]; VFind find[32];
@@ -434,6 +434,7 @@ int  vfs_remove(const char *path);
 int  vfs_rename(const char *from, const char *to);
 int  vfs_chdir(const char *path);
 int  vfs_stat(const char *path, u64 *size);
+u64  vfs_now_filetime(void); u64 vfs_find_mtime(int h); u64 vfs_mtime_path(const char *path); u64 vfs_mtime_fd(int fd); int vfs_set_mtime_fd(int fd, u64 ft);
 const VNodeInfo *vfs_node_info(int i, VNodeInfo *out);
 const u8 *vfs_node_data(int i);
 int vfs_delete_on_close(int fd, int on);

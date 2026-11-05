@@ -8,7 +8,7 @@
 #define VFS_MAX_FIND  32
 #define VFS_PATH      512
 
-typedef struct { char path[VFS_PATH]; u8 *data; u64 size, cap; int is_dir; int written; int used; int owned, evicted, opens, pinned, del_pending, unlinked; } VNode;   /* del_pending: remove when the last handle closes; unlinked: name already gone from the index */   /* owned: data from emu_alloc (else a host mapping); evicted: bytes live on a write-back mount, reloaded on open; opens: FdEnts referencing the node */
+typedef struct { char path[VFS_PATH]; u8 *data; u64 size, cap; int is_dir; int written; int used; int owned, evicted, opens, pinned, del_pending, unlinked; u64 mtime; } VNode;   /* mtime: FILETIME of the last write (creation / last data change), 0 = unknown → set when first asked */   /* del_pending: remove when the last handle closes; unlinked: name already gone from the index */   /* owned: data from emu_alloc (else a host mapping); evicted: bytes live on a write-back mount, reloaded on open; opens: FdEnts referencing the node */
 
 static VNode *g_nodes; static int g_ncap;            /* dynamic node table */
 static int *g_hash; static int g_hcap;                /* open-addressing index: 0 empty, -1 tombstone, else node index + 1 */
@@ -73,7 +73,7 @@ int vfs_find_node(const char *path) {
 static int node_alloc(const char *norm) {
   static int next_free = 0; if (!g_ncap) nodes_grow();
   for (int pass = 0; pass < 2; pass++) {
-    for (int k = 0; k < g_ncap; k++) { int i = (next_free + k) % g_ncap; if (!g_nodes[i].used) { e_memset(&g_nodes[i], 0, sizeof g_nodes[i]); g_nodes[i].used = 1; e_snprintf(g_nodes[i].path, VFS_PATH, "%s", norm); hash_insert(i); next_free = i + 1; return i; } }
+    for (int k = 0; k < g_ncap; k++) { int i = (next_free + k) % g_ncap; if (!g_nodes[i].used) { e_memset(&g_nodes[i], 0, sizeof g_nodes[i]); g_nodes[i].used = 1; g_nodes[i].mtime = vfs_now_filetime(); e_snprintf(g_nodes[i].path, VFS_PATH, "%s", norm); hash_insert(i); next_free = i + 1; return i; } }
     int old = g_ncap; nodes_grow(); if (g_ncap == old) break; next_free = old; }
   return -1;
 }
@@ -145,6 +145,10 @@ int vfs_rename(const char *from, const char *to) { int i = vfs_find_node(from); 
 int vfs_chdir(const char *path) { char norm[VFS_PATH]; vfs_normalize(path, norm, sizeof norm); int i = vfs_find_node(norm); if (i == -1 || (i >= 0 && !g_nodes[i].is_dir)) return 0; e_snprintf(g_cwd, sizeof g_cwd, "%s", norm); return 1; }
 /* stat: returns 0 missing, 1 file, 2 dir */
 int vfs_stat(const char *path, u64 *size) { if (vfs_is_null_dev(path)) { if (size) *size = 0; return 3; } int i = vfs_find_node(path); if (i == -1) return 0; if (i == -2) { if (size) *size = 0; return 2; } if (size) *size = g_nodes[i].size; return g_nodes[i].is_dir ? 2 : 1; }
+/* real per-file times: a file keeps the time of its creation / last write (programs compare them to detect outside changes) */
+u64 vfs_now_filetime(void) { return ((u64)(host_wall_ms() / 1000.0) + 11644473600ull) * 10000000ull + ((u64)host_wall_ms() % 1000ull) * 10000ull; }
+static u64 node_mtime(int i) { if (i < 0 || i >= g_ncap || !g_nodes[i].used) return vfs_now_filetime(); if (!g_nodes[i].mtime) g_nodes[i].mtime = vfs_now_filetime(); return g_nodes[i].mtime; }
+u64 vfs_mtime_path(const char *path) { int i = vfs_find_node(path); if (i < 0) { static u64 boot; if (!boot) boot = vfs_now_filetime(); return boot; } return node_mtime(i); }
 const VNodeInfo *vfs_node_info(int i, VNodeInfo *out) { if (i < 0 || i >= g_ncap || !g_nodes[i].used) return 0; out->path = g_nodes[i].path; out->data = g_nodes[i].data; out->size = g_nodes[i].size; out->is_dir = g_nodes[i].is_dir; out->written = g_nodes[i].written; return out; }
 const u8 *vfs_node_data(int i) { if (i < 0 || i >= g_ncap || !g_nodes[i].used || g_nodes[i].is_dir) return 0; node_load(i); g_nodes[i].pinned = 1; return g_nodes[i].data; }
 int vfs_node_count(void) { return g_ncap; }
@@ -161,6 +165,8 @@ static Mapping g_maps[MAP_MAX];
 /* ---------- per-process fd table (fd ≥ 3) ---------- */
 /* access: 1 read, 2 write; disp: 1 CREATE_NEW, 2 CREATE_ALWAYS, 3 OPEN_EXISTING, 4 OPEN_ALWAYS, 5 TRUNCATE_EXISTING; returns fd or -errno (-2 ENOENT, -17 EEXIST, -13 EACCES, -24 EMFILE, -21 EISDIR) */
 static FdEnt *vf(int fd) { fd -= 3; if (fd < 0 || fd >= FD_MAX || !vfs_P->fd[fd].kind) return 0; return &vfs_P->fd[fd]; }
+u64 vfs_mtime_fd(int fd) { FdEnt *f = vf(fd); if (!f || f->kind != FD_FILE || f->node < 0) return vfs_mtime_path(""); return node_mtime(f->node); }
+int vfs_set_mtime_fd(int fd, u64 ft) { FdEnt *f = vf(fd); if (!f || f->kind != FD_FILE || f->node < 0) return 0; g_nodes[f->node].mtime = ft ? ft : vfs_now_filetime(); return 1; }
 static int slot_alloc(void) { for (int k = 0; k < FD_MAX; k++) if (!vfs_P->fd[k].kind) return k; return -1; }
 static void ent_addref(FdEnt *e) {
   if (e->kind == FD_FILE) { if (e->node >= 0) g_nodes[e->node].opens++; }
@@ -197,10 +203,10 @@ int vfs_open(const char *path, int access, int disp, int append) {
   if (i == -2 || (i >= 0 && g_nodes[i].is_dir)) { if (access & 2) return -21; }
   if (i == -1) {
     if (disp == 3 || disp == 5) return -2;
-    i = node_alloc(norm); if (i < 0) return -24; ensure_parents(norm); g_nodes[i].written = 1;
+    i = node_alloc(norm); if (i < 0) return -24; ensure_parents(norm); g_nodes[i].written = 1, g_nodes[i].mtime = vfs_now_filetime();
   } else if (i >= 0) {
     if (disp == 1) return -17;
-    if (disp == 2 || disp == 5) { if (g_nodes[i].evicted) { node_drop_data(&g_nodes[i]); g_nodes[i].evicted = 0; } g_nodes[i].size = 0; g_nodes[i].written = 1; }
+    if (disp == 2 || disp == 5) { if (g_nodes[i].evicted) { node_drop_data(&g_nodes[i]); g_nodes[i].evicted = 0; } g_nodes[i].size = 0; g_nodes[i].written = 1, g_nodes[i].mtime = vfs_now_filetime(); }
     else if (!g_nodes[i].is_dir) node_load(i);
   }
   int fd = ent_new(FD_FILE); if (fd < 0) return -24; FdEnt *e = vf(fd); e->node = i; e->append = append; if (i >= 0) g_nodes[i].opens++; return fd;
@@ -282,7 +288,7 @@ u8 *vfs_map_data(int fd, u64 *size) {
   *size = m->size; return m->data;
 }
 int vfs_map_write_back(int fd, const u8 *src, u64 n) { u64 sz; u8 *d = vfs_map_data(fd, &sz); if (!d) return 0; if (n > sz) n = sz; if (!e_memcmp(d, src, (size_t)n)) return 1;   /* read-only views (and unchanged ones) must not dirty the node: a write-back would truncate the very host file the data is mapped from */
-  e_memcpy(d, src, (size_t)n); FdEnt *f = vf(fd); if (f && g_maps[f->obj].node >= 0) { VNode *v = &g_nodes[g_maps[f->obj].node]; if (v->size < n) v->size = n; v->written = 1; } return 1; }
+  e_memcpy(d, src, (size_t)n); FdEnt *f = vf(fd); if (f && g_maps[f->obj].node >= 0) { VNode *v = &g_nodes[g_maps[f->obj].node]; if (v->size < n) v->size = n; v->written = 1, v->mtime = vfs_now_filetime(); } return 1; }
 /* process handles */
 int vfs_proc_handle(int pid) { int fd = ent_new(FD_PROC); if (fd < 0) return -1; vf(fd)->obj = pid; proc_handle_ref(pid, 1); return fd; }
 int vfs_fd_pid(int fd) { FdEnt *f = vf(fd); return f && f->kind == FD_PROC ? f->obj : -1; }
@@ -321,7 +327,7 @@ s64 vfs_write(int fd, const u8 *buf, u64 n) {
   if (f->append) f->pos = v->size;
   if (!grow(v, f->pos + n)) return -1;
   if (f->pos > v->size) e_memset(v->data + v->size, 0, (size_t)(f->pos - v->size));
-  e_memcpy(v->data + f->pos, buf, (size_t)n); f->pos += n; if (f->pos > v->size) v->size = f->pos; v->written = 1;
+  e_memcpy(v->data + f->pos, buf, (size_t)n); f->pos += n; if (f->pos > v->size) v->size = f->pos; v->written = 1, v->mtime = vfs_now_filetime();
   if (g_vfs_tap && e_strstr_(v->path, g_vfs_tap)) host_write(3, (const char *)buf, (size_t)n);   /* debugging aid: mirror writes to files matching X64_TAP to the emulator log */
   return (s64)n;
 }
@@ -336,7 +342,7 @@ void vfs_clearerr(int fd) { FdEnt *f = vf(fd); if (f) { f->eof = 0; f->err = 0; 
 int vfs_ungetc(int fd, int ch) { FdEnt *f = vf(fd); if (!f) return -1; f->unget = ch & 0xff; f->eof = 0; return ch & 0xff; }
 int vfs_truncate(int fd) { FdEnt *f = vf(fd); if (!f || f->kind != FD_FILE || f->node < 0) return 0; VNode *v = &g_nodes[f->node];
   if (f->pos > v->size) { if (!grow(v, f->pos)) return 0; e_memset(v->data + v->size, 0, (size_t)(f->pos - v->size)); }   /* extending: zero-fill (SetEndOfFile past EOF) */
-  v->size = f->pos; v->written = 1; return 1; }
+  v->size = f->pos; v->written = 1, v->mtime = vfs_now_filetime(); return 1; }
 int vfs_fd_isdir(int fd) { FdEnt *f = vf(fd); if (!f || f->kind != FD_FILE) return 0; return f->node == -2 || (f->node >= 0 && g_nodes[f->node].is_dir); }
 const char *vfs_fd_path(int fd) { FdEnt *f = vf(fd); if (!f || f->kind != FD_FILE || f->node < 0) return g_cwd; return g_nodes[f->node].path; }
 /* new process: inherit the parent's table (all entries, same numbers — Windows semantics for inheritable handles) */
@@ -391,13 +397,14 @@ int vfs_find_first(const char *pattern) {
   return h;
 }
 /* next entry: returns 1 and fills name/size/is_dir, or 0 when done */
+u64 vfs_find_mtime(int h) { if (h < 0 || h >= VFS_MAX_FIND || !g_find[h].used || !g_find[h].last_mtime) return vfs_now_filetime(); return g_find[h].last_mtime; }
 int vfs_find_next(int h, char *name, size_t cap, u64 *size, int *is_dir) {
   if (h < 0 || h >= VFS_MAX_FIND || !g_find[h].used) return 0; VFind *f = &g_find[h];
   if (f->dots > 0) { e_snprintf(name, cap, f->dots == 2 ? "." : ".."); *size = 0; *is_dir = 1; f->dots--; return 1; }
   for (; f->cursor < g_ncap; f->cursor++) {
     VNode *v = &g_nodes[f->cursor]; if (!v->used || !in_dir(v->path, f->dir)) continue;
     const char *b = basename_of(v->path); if (!win_match(f->pat, b)) continue;
-    e_snprintf(name, cap, "%s", b); *size = v->size; *is_dir = v->is_dir; f->cursor++; return 1;
+    e_snprintf(name, cap, "%s", b); *size = v->size; *is_dir = v->is_dir; f->last_mtime = node_mtime(f->cursor); f->cursor++; return 1;
   }
   return 0;
 }
