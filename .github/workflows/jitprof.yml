@@ -9,6 +9,9 @@ on:
       exe_args:
         description: extra arguments for wasm_run.mjs (e.g. --jit 8)
         default: ''
+      jvm_seconds:
+        description: how long to run the Shattered Pixel Dungeon JVM under the profiler
+        default: '240'
   push:
     branches: [wip-dotnet, main]
     paths: ['emu/tests/bench.c', 'emu/tools/profsum.mjs', '.github/workflows/jitprof.yml']
@@ -48,3 +51,30 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: jit-profile, path: /tmp/prof }
+
+  # the real thing: the JVM of Shattered Pixel Dungeon (jpackage launcher → java → LWJGL) under wasm_run for N seconds (no WebGL
+  # host there, so it stops at the GL context; everything before — class loading, the template interpreter, C1/C2 code — is profiled)
+  jvm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - name: Build wasm64 module (with names)
+        run: |
+          cd emu/x64
+          zig cc -target wasm64-freestanding -O2 -fno-builtin-memcpy -fno-builtin-memset \
+            -Wl,--no-entry -Wl,--export-memory -Wl,-z,stack-size=1048576 -Wl,--initial-memory=67108864 -Wl,--max-memory=4294901760 \
+            -Wl,--export=__heap_base -Wl,--export-table -Wl,--growable-table \
+            lib.c cpu.c pe.c win32.c gdi.c vfs.c api.c dxbc.c host_wasm.c -o /tmp/nebula_x64.names.wasm
+      - name: Shattered Pixel Dungeon (JVM) · ${{ inputs.jvm_seconds || 240 }} s under the JIT, profiled
+        run: |
+          curl -sSL -o /tmp/spd.zip https://github.com/00-Evan/shattered-pixel-dungeon/releases/download/v4.0.2/ShatteredPD-v4.0.2-Windows.zip
+          mkdir -p /tmp/spd /tmp/prof && (cd /tmp/spd && unzip -q /tmp/spd.zip) && ls /tmp/spd
+          node --cpu-prof --cpu-prof-dir=/tmp/prof --cpu-prof-name=spd.cpuprofile emu/tests/wasm_run.mjs --wasm /tmp/nebula_x64.names.wasm --max-ms $(( ${{ inputs.jvm_seconds || 240 }} * 1000 )) --jit 1 ${{ inputs.exe_args }} --mount "/tmp/spd=C:\\spd" "/tmp/spd/Shattered Pixel Dungeon.exe" 2>&1 | tail -30
+          node emu/tools/profsum.mjs /tmp/prof/spd.cpuprofile 45
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: jvm-profile, path: /tmp/prof }
