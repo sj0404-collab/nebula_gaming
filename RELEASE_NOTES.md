@@ -1,3 +1,47 @@
+# v1.42.0 — 3.5× faster in the browser (28 → 100+ MIPS in Shattered Pixel Dungeon), mouse clicks land where the picture is, a new game actually starts; x86 JIT 3×
+
+**Speed — where the time really went.** A profile of the real JVM under the emulator (new `jitprof.yml` *jvm* job: the
+Shattered Pixel Dungeon JVM runs under `wasm_run.mjs` with `node --cpu-prof`) and a reading of the browser frame loop found
+three things that had nothing to do with the JIT:
+- The host frame loop handed the CPU back to the browser whenever **every** guest thread was momentarily blocked — and a
+  JVM parks its threads for a millisecond at a time. Each hand-off cost a 4 ms timer (16 ms without audio); the game got
+  ~20 % of the main thread. Now a guest that only pauses for ≤1.5 ms is waited for inside the slice, and a busy guest
+  continues through a `MessageChannel` task (not clamped like nested timers; input and painting still run in between).
+  Result in the recorded runs: 28–33 MIPS → **103–120 MIPS**, title screen after ~180 s instead of ~680 s, 10–20 fps in
+  the menus instead of 4.
+- Every scheduler pick copied the current thread's 12 KB context out and back in (64 continuation frames). Now a thread
+  that stays current copies nothing, and a switch copies only the live continuations.
+- Each PeekMessage walked the whole 1024-entry window table twice looking for something to repaint; now it exits at once
+  when nothing is invalid. The software audio mixer no longer mixes 200 ms of sound per scheduler pick when there is no host
+  output (node tests) — it is paced by the clock like the real output.
+
+**JIT fast paths for what the JVM and C++ compilers actually emit** (all were falling back to the interpreter, one step
+each): `inc/dec r32` in 32-bit mode, `push imm`, `leave`, `bt/bts/btr/btc` (register, immediate and memory bit strings),
+`bsf/bsr`, `bswap`, `shld/shrd`, `mul/imul/div/idiv` (one-operand forms), `imul` with live flags, `shufps/shufpd`,
+`cvtdq2ps`, `movlps/movhps/movlhps/movhlps`, `66 90`; 32-bit `call/jmp/push/mov` memory forms that were excluded wholesale.
+`emu/tests/jitdiff.c` got a `misc` section covering every new kind (zero inputs for bsf/bsr, overflow for imul, 64-bit
+division, the SSE shuffles, indirect calls); native = wasm interpreter = wasm JIT on x64 and x86 (`jitdiff.yml` bisects
+the new kinds too). Bench (`jitprof.yml`): x86 JIT **97 → 298–438 MIPS**, `bits` 2322 → 72–196 ms; x64 unchanged to
+slightly faster (318 → 326–461 MIPS, machine-dependent).
+
+**Mouse.** Clicks reached the game but at the wrong place: the pointer was scaled to the *launcher's* unused 800×600
+framebuffer (`x64_screen_w/h` reported the root process) while the picture came from the child's 1280×720 one. The host
+now asks for the framebuffer that was presented last. `input!…` statistics in the report (`last_target_…_screen_x_y_client_x_y`,
+window rect / non-client origin) make this checkable from a recorded run.
+
+**A new game starts.** Clicking *Start* killed the JVM with `Internal Error (0xc06d007f)`: `net.dll` delay-loads
+`iphlpapi.dll`, `NetworkInterface.getAll` (SecureRandom seeding) called `GetIfTable`, which did not exist — a delay-load
+"procedure not found" is fatal inside HotSpot. `GetIfTable / GetIpAddrTable / GetIfEntry / GetFriendlyIfIndex /
+GetNumberOfInterfaces / GetAdaptersInfo / GetIpForwardTable` now describe one loopback interface (127.0.0.1/8), as on a
+Windows machine without network. Recorded: Welcome → title → *Choose Your Hero* (Warrior, splash art) → *Start* →
+*Descending…* (sewer intro, Continue) with music — `game.mp4` (screenshots) and `game-smooth.mp4` (in-page
+`MediaRecorder` of the canvas, 30 fps) in the `game-video` artifact; `record.mjs` keeps console / report / `hs_err` logs
+when the program dies on an action.
+
+**Windows behaviour.** Files have real times now: creation / last write (`SetFileTime` honoured) in every query
+(`GetFileAttributesEx`, `GetFileInformationByHandle(Ex)`, `GetFileTime`, `FindFirstFile`, `NtQuery*`). Before, every query
+returned "now", so Notepad++ asked to *Reload* a file it had just opened as soon as the second changed.
+
 # v1.41.0 — JIT: `cvtsi2ss` converted ints as UNSIGNED (black screen in Shattered Pixel Dungeon); recorded game video with sound; JIT differential test
 
 **What was wrong.** With the x86-64 → wasm JIT on (the default since v1.38.0) Shattered Pixel Dungeon started, played its
