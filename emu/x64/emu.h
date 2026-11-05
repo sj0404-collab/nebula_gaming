@@ -265,6 +265,7 @@ enum { BLOCK_NONE = 0, BLOCK_STDIN, BLOCK_PROC, BLOCK_PIPE_R, BLOCK_PIPE_W, BLOC
 int  proc_main_thread_kobj(int pid);
 void proc_suspend_main(int pid);
 struct Thread *proc_thread_by_tid(int pid, int tid);
+int w32_input_stats(char *buf, int cap);                /* host-input diagnostics appended to x64_api_stats (user.inc) */
 Win32 *proc_w32_at(int i);                          /* iterate live processes (NULL when i is past the table) */
 int  proc_spawn(Win32 *parent, const char *exe_path, const char *cmdline, const int std_fd[3]);   /* returns pid or -errno */
 extern const char *const *g_spawn_env; extern int g_spawn_nenv; extern const char *g_spawn_cwd;   /* CreateProcess lpCurrentDirectory (0 = inherit) */   /* CreateProcess lpEnvironment: when set, the child gets exactly these "NAME=value" strings instead of inheriting */

@@ -270,7 +270,8 @@ EXPORT(x64_mem_used) u64 x64_mem_used(void) { return emu_alloc_used(); }
 EXPORT(x64_has_window) int x64_has_window(void) { return g_w32.win.created; }
 EXPORT(x64_api_stats) const char *x64_api_stats(void) {
   static char buf[8192]; int p = 0; buf[0] = 0;
-  for (int i = 2; i < g_w32.nslots && p < (int)sizeof buf - 128; i++) if (g_w32.slots[i].calls) p += e_snprintf(buf + p, sizeof buf - p, "%s%s!%s:%d", p ? "," : "", g_w32.slots[i].dll, g_w32.slots[i].name, g_w32.slots[i].calls);
+  for (int i = 2; i < g_w32.nslots && p < (int)sizeof buf - 400; i++) if (g_w32.slots[i].calls) p += e_snprintf(buf + p, sizeof buf - p, "%s%s!%s:%d", p ? "," : "", g_w32.slots[i].dll, g_w32.slots[i].name, g_w32.slots[i].calls);
+  if (p) buf[p++] = ','; p += w32_input_stats(buf + p, (int)sizeof buf - p);
   return buf;
 }
 /* bytes of the error instruction for the report */
