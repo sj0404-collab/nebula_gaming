@@ -17,8 +17,10 @@ static u32 cur_tid(Win32 *w) { return (u32)w->th[w->cur_th].tid; }
 static u64 gm_rd(Win32 *w, u64 a, int n) { const u8 *p = mem_ptr(w->mem, a, (u64)n, 0); if (!p) return 0; u64 v = 0; for (int i = n - 1; i >= 0; i--) v = (v << 8) | p[i]; return v; }
 
 /* ---- switching ---- */
-void w32_thread_sync(Win32 *w) { w->th[w->cur_th].ctx = w->tctx; }
-static void thread_load(Win32 *w, int i) { w->tctx = w->th[i].ctx; w->cpu = w->th[i].cpu; w->cpu->w = w; w->cur_th = i; }
+/* a context is ~12 KB, almost all of it the continuation stack: copy only the live part (cont[] is the last field) */
+static void ctx_copy(ThreadCtx *d, const ThreadCtx *s) { int n = s->ncont < 0 ? 0 : s->ncont > 64 ? 64 : s->ncont; e_memcpy(d, s, offsetof(ThreadCtx, cont) + (size_t)n * sizeof s->cont[0]); }
+void w32_thread_sync(Win32 *w) { ctx_copy(&w->th[w->cur_th].ctx, &w->tctx); }
+static void thread_load(Win32 *w, int i) { if (i != w->cur_th) ctx_copy(&w->tctx, &w->th[i].ctx); w->cpu = w->th[i].cpu; w->cpu->w = w; w->cur_th = i; }
 int w32_thread_count(Win32 *w) { int n = 0; for (int i = 0; i < THREAD_MAX; i++) if (w->th[i].used && w->th[i].state == 1) n++; return n; }
 
 /* ---- wait bookkeeping (timed waits survive shim retries) ---- */
@@ -90,11 +92,11 @@ static int ctx_runnable(Win32 *w, ThreadCtx *x, int tid) {
   return 1;
 }
 int w32_thread_pick(Win32 *w) {
-  w32_thread_sync(w);
   for (int k = 1; k <= THREAD_MAX; k++) {
     int i = (w->cur_th + k) % THREAD_MAX; Thread *t = &w->th[i];
     if (!t->used || t->state != 1 || t->suspend > 0) continue;
-    if (ctx_runnable(w, &t->ctx, t->tid)) { t->ctx.block = BLOCK_NONE; thread_load(w, i); return 1; }
+    if (i == w->cur_th) { if (ctx_runnable(w, &w->tctx, t->tid)) { w->block = BLOCK_NONE; return 1; } continue; }   /* staying on the same thread: no context copies */
+    if (ctx_runnable(w, &t->ctx, t->tid)) { w32_thread_sync(w); t->ctx.block = BLOCK_NONE; thread_load(w, i); return 1; }
   }
   return 0;
 }

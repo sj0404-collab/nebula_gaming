@@ -236,7 +236,10 @@ static int wnd_siblings_topdown(int parent, int skip, int *order);
    controls; with WS_CLIPSIBLINGS the DcSnap clip keeps the higher siblings intact — Notepad++'s Scintilla over its tab bar); returns the first invalid visible window */
 static int next_invalid_in(int i) { if (!g_wnd[i].visible) return -1; if (g_wnd[i].invalid) return i; int order[MAX_WND]; int n = wnd_siblings_topdown(i, -1, order);
   for (int a = 0; a < n; a++) { int r = next_invalid_in(order[a]); if (r >= 0) return r; } return -1; }
-static int next_invalid(void) { int order[MAX_WND]; int n = 0; for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].parent < 0) order[n++] = k;
+static int next_invalid(void) { int order[MAX_WND]; int n = 0, any = 0;
+  for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].invalid) { any = 1; break; }
+  if (!any) return -1;   /* the common case of a polling message loop: nothing to paint, no z-order walk */
+  for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].parent < 0) order[n++] = k;
   for (int a = 1; a < n; a++) { int v = order[a], b = a - 1; while (b >= 0 && g_wnd[order[b]].zseq > g_wnd[v].zseq) { order[b + 1] = order[b]; b--; } order[b + 1] = v; }
   for (int a = 0; a < n; a++) { int r = next_invalid_in(order[a]); if (r >= 0) return r; } return -1; }
 static int next_message(Cpu *c, GuestMsg *out, int remove, u64 filter_hwnd) {

@@ -283,7 +283,7 @@ int  proc_enum(int idx, int *pid, int *ppid, const char **name);   /* 1 if idx v
 #define THREAD_MAX 64
 #define THREAD_CTX_FIELDS \
   u64 last_error; u32 exec_state; \
-  struct { int kind; u64 ret_addr, rsp, data[16]; int idx; u32 clean32; u32 seq; u8 chain; } cont[64]; int ncont; u32 cont_seq;   /* seq: guest-entry generation when pushed; chain: result goes to the continuation below (pushed by the same shim step) */   /* continuation stack for guest callbacks (clean32: 32-bit stdcall bytes popped when the shim finally returns) */ \
+  int ncont; u32 cont_seq;   /* seq: guest-entry generation when pushed; chain: result goes to the continuation below (pushed by the same shim step) */   /* continuation stack for guest callbacks (clean32: 32-bit stdcall bytes popped when the shim finally returns) */ \
   int sleeping; double sleep_until_ms; \
   int block; int block_pids[8]; int nblock_pids; int block_pipe; \
   u64 block_addr, block_val; int block_flag;                                       /* CS / SRW / CV / WaitOnAddress waits */ \
@@ -291,8 +291,9 @@ int  proc_enum(int idx, int *pid, int *ppid, const char **name);   /* 1 if idx v
   int wait_active; u64 wait_rip; double wait_deadline; int wake_snap;              /* timed wait in progress (deadline < 0: infinite) */ \
   int spawn_wait_pid, spawn_wait_mode;                                             /* _spawn*(P_WAIT/P_OVERLAY) in progress */ \
   int pw_active, pw_fd; u64 pw_rip, pw_total, pw_done;                             /* partially completed pipe write, resumed on shim retry */ \
-  struct { u64 fn, a0, a1, a2; } apc[8]; int napc;                                  /* user APCs queued by ReadFileEx/WriteFileEx/QueueUserAPC, delivered by alertable SleepEx */
-typedef struct { THREAD_CTX_FIELDS } ThreadCtx;
+  struct { u64 fn, a0, a1, a2; } apc[8]; int napc;                                  /* user APCs queued by ReadFileEx/WriteFileEx/QueueUserAPC, delivered by alertable SleepEx */ \
+  struct { int kind; u64 ret_addr, rsp, data[16]; int idx; u32 clean32; u32 seq; u8 chain; } cont[64]   /* LAST: a thread switch copies only the ncont live entries (ctx_copy) */
+typedef struct { THREAD_CTX_FIELDS; } ThreadCtx;
 #define MAX_TLS_IMAGES 8
 typedef struct Thread {
   int used, state, tid, suspend, kobj;   /* state 1 running, 2 exited */
@@ -311,7 +312,7 @@ struct Win32 {
   char exe_name[260]; char exe_path[600]; char cmdline[1024];   /* exe_path: full guest path of the image (GetModuleFileName(NULL), PEB ImagePathName) */
   u64 teb, peb, cmdline_a, cmdline_w, env_w, env_a;           /* teb: main thread's TEB */
   int mode32; u64 dll_next32;                                 /* PE32 process: every thread's Cpu runs in 32-bit mode, DLLs are mapped below 2 GB */
-  union { ThreadCtx tctx; struct { THREAD_CTX_FIELDS }; };    /* current thread's state (see Thread.ctx) */
+  union { ThreadCtx tctx; struct { THREAD_CTX_FIELDS; }; };    /* current thread's state (see Thread.ctx) */
   Thread th[THREAD_MAX]; int nth, cur_th; Cpu tcpu[THREAD_MAX]; int next_tid;
   struct { u64 tmpl, tmpl_size, blk_size; } tls[MAX_TLS_IMAGES]; int ntls;   /* static TLS templates (exe + DLLs), index = slot in the TEB+0x58 array */
   GuestModule mods[MAX_MODULES]; int nmods; u64 dll_next; u32 exe_exp_rva, exe_exp_size;   /* export directory of the main image (Bun exports napi_* for .node addons) */
