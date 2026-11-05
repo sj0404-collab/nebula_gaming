@@ -97,6 +97,8 @@ void host_gl_present(u32 *bgra, int w, int h) { js_gl_present(bgra, w, h); }
 __attribute__((import_module("env"), import_name("host_audio_open"))) int js_audio_open(int rate);
 __attribute__((import_module("env"), import_name("host_audio_write"))) void js_audio_write(const float *lr, int frames);
 __attribute__((import_module("env"), import_name("host_audio_queued"))) int js_audio_queued(void);
+__attribute__((import_module("env"), import_name("host_pad_rumble"))) void js_pad_rumble(int idx, int lo, int hi);
+void host_pad_rumble(int idx, int lo, int hi) { js_pad_rumble(idx, lo, hi); }
 int host_audio_open(int rate) { return js_audio_open(rate); }
 void host_audio_write(const float *lr, int frames) { js_audio_write(lr, frames); }
 int host_audio_queued(void) { return js_audio_queued(); }

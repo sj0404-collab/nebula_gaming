@@ -223,6 +223,13 @@ EXPORT(x64_wants_stdin) int x64_wants_stdin(void) { return g_want_stdin; }
 EXPORT(x64_key) void x64_key(int vk, int down) { w32_key(&g_w32, vk, down); }
 EXPORT(x64_char) void x64_char(unsigned ch) { w32_char(&g_w32, ch); }
 EXPORT(x64_mouse) void x64_mouse(int x, int y, int ev) { w32_mouse(&g_w32, x, y, ev); }
+PadState g_pads[4];
+/* host → emulator: controller state (connected 0/1, XInput button bits, triggers 0..255, sticks -32768..32767 with +Y up); the packet number advances on change */
+EXPORT(x64_pad) void x64_pad(int idx, int connected, u32 buttons, int lt, int rt, int lx, int ly, int rx, int ry) {
+  if (idx < 0 || idx > 3) return; PadState *p = &g_pads[idx];
+  if (p->connected == connected && p->buttons == buttons && p->lt == lt && p->rt == rt && p->lx == lx && p->ly == ly && p->rx == rx && p->ry == ry) return;
+  p->connected = connected; p->buttons = buttons; p->lt = lt; p->rt = rt; p->lx = lx; p->ly = ly; p->rx = rx; p->ry = ry; p->packet++;
+}
 EXPORT(x64_icount) u64 x64_icount(void) { u64 n = 0; for (int i = 0; i < g_nprocs; i++) if (g_procs[i]) { n += g_procs[i]->cpu.icount; for (int t = 1; t < THREAD_MAX; t++) n += g_procs[i]->w32.tcpu[t].icount; } return n; }
 EXPORT(x64_exit_code) int x64_exit_code(void) { return g_cpu.exit_code; }
 EXPORT(x64_error) const char *x64_error(void) { return g_cpu.err; }

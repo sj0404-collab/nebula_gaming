@@ -225,16 +225,27 @@ static void s_cxxexc_sdtor(Cpu *c) { if (ARG(1) & 1) w32_heap_free(W, ARG(0)); R
 static void s_cxxexc_what(Cpu *c) { u64 m = rd64(c, ARG(0) + 8); if (!m) { static const char u[] = "Unknown exception"; m = w32_heap_alloc(W, sizeof u, 0); u8 *p = m ? mem_ptr(c->mem, m, sizeof u, 1) : 0; if (p) e_memcpy(p, u, sizeof u); wr64(c, ARG(0) + 8, m); } RET(m); }
 static void vsprintf_common(Cpu *c, u64 opts, u64 buf, u64 len, u64 fmt, u64 va, int wide);
 static void s__vsnwprintf(Cpu *c) { vsprintf_common(c, 1, ARG(0), ARG(1), ARG(2), ARG(3), 1); }
-/* XInput: no controller is connected (ERROR_DEVICE_NOT_CONNECTED) — games fall back to keyboard/mouse; the Gamepad API bridge is future work */
-static void s_XInputGetState(Cpu *c) { if (ARG(1)) { u8 *p = mem_ptr(c->mem, ARG(1), 16, 1); if (p) e_memset(p, 0, 16); } RET(1167); }
+/* XInput 1.3 / 1.4 / 9.1.0 over the host controllers (g_pads, fed by the Gamepad API and the on-screen pad); an empty slot answers
+   ERROR_DEVICE_NOT_CONNECTED (1167) exactly like Windows, so games keep polling and pick the pad up when it appears */
+static PadState *xpad(Cpu *c, int *idx) { u32 i = (u32)ARG(0); *idx = (int)i; return i < 4 && g_pads[i].connected ? &g_pads[i] : 0; }
+static void s_XInputGetState(Cpu *c) { int i; PadState *p = xpad(c, &i); u64 st = ARG(1); if (!st) { RET(87); return; } u8 *d = mem_ptr(c->mem, st, 16, 1); if (!d) { RET(87); return; } e_memset(d, 0, 16); if (!p) { RET(1167); return; }
+  wr32(c, st, p->packet); wr16(c, st + 4, (u16)(p->buttons & 0xffff)); d[6] = (u8)p->lt; d[7] = (u8)p->rt; wr16(c, st + 8, (u16)(s16)p->lx); wr16(c, st + 10, (u16)(s16)p->ly); wr16(c, st + 12, (u16)(s16)p->rx); wr16(c, st + 14, (u16)(s16)p->ry); RET(0); }
+static void s_XInputSetState(Cpu *c) { int i; PadState *p = xpad(c, &i); u64 v = ARG(1); if (!v) { RET(87); return; } if (!p) { RET(1167); return; } host_pad_rumble(i, rd16(c, v), rd16(c, v + 2)); RET(0); }
+/* XINPUT_CAPABILITIES: Type, SubType, Flags, Gamepad (12), Vibration (4) = 20 bytes */
+static void s_XInputGetCapabilities(Cpu *c) { int i; PadState *p = xpad(c, &i); u64 cp = ARG(2); if (!cp) { RET(87); return; } u8 *d = mem_ptr(c->mem, cp, 20, 1); if (!d) { RET(87); return; } e_memset(d, 0, 20); if (!p) { RET(1167); return; }
+  d[0] = 1; /* XINPUT_DEVTYPE_GAMEPAD */ d[1] = 1; /* XINPUT_DEVSUBTYPE_GAMEPAD */ wr16(c, cp + 2, 0x0004 /* XINPUT_CAPS_FFB_SUPPORTED */); wr16(c, cp + 4, 0xF3FF); d[6] = 0xFF; d[7] = 0xFF; wr16(c, cp + 8, 0xFFC0); wr16(c, cp + 10, 0xFFC0); wr16(c, cp + 12, 0xFFC0); wr16(c, cp + 14, 0xFFC0); wr16(c, cp + 16, 0xFF); wr16(c, cp + 18, 0xFF); RET(0); }
+static void s_XInputGetCapabilitiesEx(Cpu *c) { /* (dwReserved, dwUserIndex, dwFlags, XINPUT_CAPABILITIES_EX*) — hidden ordinal 108 used by SDL/Steam */ u32 i = (u32)ARG(1); u64 cp = ARG(3); if (!cp) { RET(87); return; } u8 *d = mem_ptr(c->mem, cp, 36, 1); if (!d) { RET(87); return; } e_memset(d, 0, 36); if (i >= 4 || !g_pads[i].connected) { RET(1167); return; }
+  d[0] = 1; d[1] = 1; wr16(c, cp + 2, 4); wr16(c, cp + 4, 0xF3FF); d[6] = d[7] = 0xFF; wr16(c, cp + 8, 0xFFC0); wr16(c, cp + 10, 0xFFC0); wr16(c, cp + 12, 0xFFC0); wr16(c, cp + 14, 0xFFC0); wr16(c, cp + 16, 0xFF); wr16(c, cp + 18, 0xFF); wr16(c, cp + 20, 0x045E); wr16(c, cp + 22, 0x028E); wr16(c, cp + 24, 0x0114); RET(0); }
+static void s_XInputGetBatteryInformation(Cpu *c) { int i; PadState *p = xpad(c, &i); u64 b = ARG(2); if (!b) { RET(87); return; } if (!p) { wr16(c, b, 0); RET(1167); return; } wr8(c, b, 1 /* BATTERY_TYPE_WIRED */); wr8(c, b + 1, 3 /* BATTERY_LEVEL_FULL */); RET(0); }
+static void s_XInputGetKeystroke(Cpu *c) { int i; PadState *p = xpad(c, &i); if ((u32)ARG(0) == 0xFF) { for (int k = 0; k < 4; k++) if (g_pads[k].connected) { p = &g_pads[k]; break; } } if (!p) { RET(1167); return; } RET(4306 /* ERROR_EMPTY: no keystroke queued */); }
 static void s_XInputNotConnected(Cpu *c) { RET(1167); }
 static void s_XInputEnable(Cpu *c) { RET(0); }
 #define DX_COMPAT_SHIMS \
   SA("??0exception@@QEAA@XZ", cxxexc_ctor0), SA("??0exception@@QEAA@AEBQEBD@Z", cxxexc_ctor_msg), SA("??0exception@@QEAA@AEBQEBDH@Z", cxxexc_ctor_msg_nocopy), SA("??0exception@@QEAA@AEBV0@@Z", cxxexc_ctor_copy), \
   SA("??4exception@@QEAAAEAV0@AEBV0@@Z", cxxexc_assign), SA("??1exception@@UEAA@XZ", cxxexc_dtor), SA("??_Gexception@@UEAAPEAXI@Z", cxxexc_sdtor), SA("?what@exception@@UEBAPEBDXZ", cxxexc_what), \
   S(_vsnwprintf), SA("RegOpenKeyA", RegOpenKeyExA), SA("RegOpenKeyW", RegOpenKeyExA), SA("IsBadReadPtr", ret0), SA("IsBadWritePtr", ret0), SA("IsBadCodePtr", ret0), SA("IsBadStringPtrA", ret0), SA("IsBadStringPtrW", ret0), \
-  S(XInputGetState), SA("XInputGetStateEx", XInputGetState), SA("XInputSetState", XInputNotConnected), SA("XInputGetCapabilities", XInputNotConnected), \
-  SA("XInputGetBatteryInformation", XInputNotConnected), SA("XInputGetKeystroke", XInputNotConnected), SA("XInputGetDSoundAudioDeviceGuids", XInputNotConnected), SA("XInputGetAudioDeviceIds", XInputNotConnected), S(XInputEnable),
+  S(XInputGetState), SA("XInputGetStateEx", XInputGetState), S(XInputSetState), S(XInputGetCapabilities), S(XInputGetCapabilitiesEx), \
+  S(XInputGetBatteryInformation), S(XInputGetKeystroke), SA("XInputGetDSoundAudioDeviceGuids", XInputNotConnected), SA("XInputGetAudioDeviceIds", XInputNotConnected), S(XInputEnable),
 #define CXX_NEWDELETE_SHIMS DX_COMPAT_SHIMS \
   SA("??2@YAPEAX_K@Z", cxx_new), SA("??_U@YAPEAX_K@Z", cxx_new), SA("??2@YAPEAX_KAEBUnothrow_t@std@@@Z", cxx_new), SA("??_U@YAPEAX_KAEBUnothrow_t@std@@@Z", cxx_new), \
   SA("??3@YAXPEAX@Z", cxx_delete), SA("??_V@YAXPEAX@Z", cxx_delete), SA("??3@YAXPEAX_K@Z", cxx_delete), SA("??_V@YAXPEAX_K@Z", cxx_delete), \

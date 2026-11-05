@@ -641,7 +641,7 @@ static const char *ordinal_table_name(const char *dll, u32 ord) {
   for (size_t i = 0; i < sizeof g_ordinals / sizeof g_ordinals[0]; i++) if (g_ordinals[i].ord == ord && !e_strnicmp_(g_ordinals[i].dll, b, bl) && !g_ordinals[i].dll[bl]) return g_ordinals[i].name;
   return 0; }
 static const char *ordinal_name(const char *dll, u32 ord) {
-  if (dll && !e_strnicmp_(dll, "xinput", 6)) { switch (ord) { case 100: return "XInputGetStateEx"; case 101: return "XInputWaitForGuideButton"; case 102: return "XInputCancelGuideButtonWait"; case 103: return "XInputPowerOffController"; default: return 0; } }   /* hidden exports used by Steam Input / SDL */
+  if (dll && !e_strnicmp_(dll, "xinput", 6)) { switch (ord) { case 100: return "XInputGetStateEx"; case 101: return "XInputWaitForGuideButton"; case 102: return "XInputCancelGuideButtonWait"; case 103: return "XInputPowerOffController"; case 108: return "XInputGetCapabilitiesEx"; default: return 0; } }   /* hidden exports used by Steam Input / SDL */
   if (!dll) return 0;
   if (!e_stricmp(dll, "ws2_32") || !e_stricmp(dll, "wsock32")) { static const char *const t[] = { 0, "accept", "bind", "closesocket", "connect", "getpeername", "getsockname", "getsockopt", "htonl", "htons", "ioctlsocket", "inet_addr", "inet_ntoa", "listen", "ntohl", "ntohs", "recv", "recvfrom", "select", "send", "sendto", "setsockopt", "shutdown", "socket" };
     if (ord < 24) return t[ord]; switch (ord) { case 51: return "gethostbyaddr"; case 52: return "gethostbyname"; case 53: return "getprotobyname"; case 54: return "getprotobynumber"; case 55: return "getservbyname"; case 56: return "getservbyport"; case 57: return "gethostname";

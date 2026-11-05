@@ -51,7 +51,13 @@ int    host_net_name(int s, int peer, u8 *ip4, int *port);             /* local 
 /* host audio output (browser: Web Audio → the device's audio stack; native runner: silent clock + optional WAV dump) */
 int    host_audio_open(int rate);                                      /* returns the actual output rate (stereo float32 interleaved), 0 = no output */
 void   host_audio_write(const float *lr, int frames);
-int    host_audio_queued(void);                                        /* frames written but not yet played */
+int    host_audio_queued(void);
+/* game controllers (XInput layout, 4 slots): the host writes them from the Gamepad API / on-screen pad through x64_pad; XInput,
+   winmm joystick and DirectInput8 read them.  buttons: XINPUT_GAMEPAD_* bits (DPAD 1/2/4/8, START 0x10, BACK 0x20, LS 0x40, RS 0x80,
+   LB 0x100, RB 0x200, GUIDE 0x400, A 0x1000, B 0x2000, X 0x4000, Y 0x8000); sticks -32768..32767 (+Y up), triggers 0..255 */
+typedef struct { int connected; u32 buttons; int lt, rt, lx, ly, rx, ry; u32 packet; } PadState;
+extern PadState g_pads[4];
+void   host_pad_rumble(int idx, int lo, int hi);                         /* 0..65535 each; 0/0 stops */                                        /* frames written but not yet played */
 void   w32_audio_pump(void);                                           /* win32_audio.inc: mix + feed the host (scheduler, before every pick) */
 int    w32_audio_pending(void);                                        /* a stream is playing: keep polling (timers/events come from the mixer) */
 int    w32_audio_cb_pending(void);                                     /* waveOut callbacks waiting for their owner process */

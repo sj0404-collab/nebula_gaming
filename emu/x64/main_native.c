@@ -49,6 +49,7 @@ int main(int argc, char **argv) {
   const char *mounts[16][2]; int nmounts = 0; int no_stdin = 0;
   struct { int vk; double at; int down; } keys[64]; int nkeys = 0; int ai = 1; int stats = 0;
   struct { int x, y; double at; int ev; } clicks[64]; int nclicks = 0;
+  struct { double at; int idx, conn; unsigned btn; int lt, rt, lx, ly, rx, ry; } pads[32]; int npads = 0;   /* --pad idx:conn,buttons,lt,rt,lx,ly,rx,ry@ms: host controller state (XInput layout) */
   struct { const char *s; double at; } types[16]; int ntypes = 0;   /* --type "text@ms": host text input (UTF-8) through x64_char, one code point per ~15 ms */   /* --click x,y@ms: move + left down + up (ev 0 move, 1 down, 2 up) */
   for (; ai < argc && argv[ai][0] == '-'; ai++) {
     if (!strcmp(argv[ai], "--inspect")) inspect = 1;
@@ -63,6 +64,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[ai], "--no-stdin")) no_stdin = 1;
     else if (!strcmp(argv[ai], "--stats")) stats = 1;
     else if (!strcmp(argv[ai], "--key") && ai + 1 < argc) { int vk; double at; int dur = 100; if (sscanf(argv[++ai], "%i@%lf:%d", &vk, &at, &dur) >= 2 && nkeys < 62) { keys[nkeys].vk = vk; keys[nkeys].at = at; keys[nkeys].down = 1; nkeys++; keys[nkeys].vk = vk; keys[nkeys].at = at + dur; keys[nkeys].down = 0; nkeys++; } }
+    else if (!strcmp(argv[ai], "--pad") && ai + 1 < argc) { int idx, conn, lt, rt, lx, ly, rx, ry; unsigned btn; double at; if (sscanf(argv[++ai], "%d:%d,%i,%d,%d,%d,%d,%d,%d@%lf", &idx, &conn, &btn, &lt, &rt, &lx, &ly, &rx, &ry, &at) == 10 && npads < 32) { pads[npads].at = at; pads[npads].idx = idx; pads[npads].conn = conn; pads[npads].btn = btn; pads[npads].lt = lt; pads[npads].rt = rt; pads[npads].lx = lx; pads[npads].ly = ly; pads[npads].rx = rx; pads[npads].ry = ry; npads++; } }
     else if (!strcmp(argv[ai], "--type") && ai + 1 < argc) { char *arg = strdup(argv[++ai]); char *at = strrchr(arg, '@'); if (at && ntypes < 16) { *at = 0; types[ntypes].s = arg; types[ntypes].at = atof(at + 1); ntypes++; } }
     else if (!strcmp(argv[ai], "--click") && ai + 1 < argc) { int x, y; double at; if (sscanf(argv[++ai], "%d,%d@%lf", &x, &y, &at) == 3 && nclicks < 61) { clicks[nclicks].x = x; clicks[nclicks].y = y; clicks[nclicks].at = at; clicks[nclicks].ev = 0; nclicks++; clicks[nclicks] = clicks[nclicks - 1]; clicks[nclicks].ev = 1; clicks[nclicks].at = at + 1; nclicks++; clicks[nclicks] = clicks[nclicks - 1]; clicks[nclicks].ev = 2; clicks[nclicks].at = at + 60; nclicks++; } }
     else if (!strcmp(argv[ai], "--rclick") && ai + 1 < argc) { int x, y; double at; if (sscanf(argv[++ai], "%d,%d@%lf", &x, &y, &at) == 3 && nclicks < 61) { clicks[nclicks].x = x; clicks[nclicks].y = y; clicks[nclicks].at = at; clicks[nclicks].ev = 0; nclicks++; clicks[nclicks] = clicks[nclicks - 1]; clicks[nclicks].ev = 3; clicks[nclicks].at = at + 1; nclicks++; clicks[nclicks] = clicks[nclicks - 1]; clicks[nclicks].ev = 4; clicks[nclicks].at = at + 60; nclicks++; } }   /* --rclick: right button */
@@ -99,12 +101,13 @@ int main(int argc, char **argv) {
   if (getenv("X64_DWATCH")) { extern u64 g_dwatch; g_dwatch = strtoull(getenv("X64_DWATCH"), 0, 16); }
   if (getenv("X64_WATCH")) { extern u64 g_watch[8]; extern int g_watch_n; char *ws = strdup(getenv("X64_WATCH")); for (char *t = strtok(ws, ","); t && g_watch_n < 8; t = strtok(0, ",")) g_watch[g_watch_n++] = strtoull(t, 0, 16); }
   u64 trace_after = getenv("X64_TRACE_AFTER") ? strtoull(getenv("X64_TRACE_AFTER"), 0, 10) : 0; int trace_on = 0;
-  double t0 = host_now_ms(); int r; int ki = 0, ci = 0; u64 yields = 0; int stdin_eof = 0;
+  double t0 = host_now_ms(); int r; int ki = 0, ci = 0, pi = 0; u64 yields = 0; int stdin_eof = 0;
   for (;;) {
     double el = host_now_ms() - t0;
     if (el > max_ms) { if (!quiet) { fprintf(stderr, "[x64run] time limit reached\n"); if (getenv("X64_HIST")) { extern u64 x64_rip(void); fprintf(stderr, "[x64run] rip=%llx regs: %s\n[x64run] last blocks: %s\n", (unsigned long long)x64_rip(), x64_regs(), x64_history()); unsigned char b[512]; u64 a = (x64_rip() & ~0xfull) - 256; if (x64_mem_copy(a, b, 512)) { FILE *f = fopen("/tmp/rip_tl.bin", "wb"); if (f) { fwrite(b, 1, 512, f); fclose(f); fprintf(stderr, "[x64run] dumped 512 bytes from 0x%llx to /tmp/rip_tl.bin\n", (unsigned long long)a); } } } } r = -1; break; }
     while (ki < nkeys && keys[ki].at <= el) { x64_key(keys[ki].vk, keys[ki].down); ki++; }
     while (ci < nclicks && clicks[ci].at <= el) { x64_mouse(clicks[ci].x, clicks[ci].y, clicks[ci].ev); ci++; }
+    while (pi < npads && pads[pi].at <= el) { extern void x64_pad(int, int, u32, int, int, int, int, int, int); x64_pad(pads[pi].idx, pads[pi].conn, pads[pi].btn, pads[pi].lt, pads[pi].rt, pads[pi].lx, pads[pi].ly, pads[pi].rx, pads[pi].ry); pi++; }
     for (int q = 0; q < ntypes; q++) if (types[q].s && types[q].at <= el) { const unsigned char *u = (const unsigned char *)types[q].s; while (*u) { unsigned cp = *u++; int ex = cp >= 0xF0 ? 3 : cp >= 0xE0 ? 2 : cp >= 0xC0 ? 1 : 0; cp &= ex == 3 ? 7 : ex == 2 ? 15 : ex == 1 ? 31 : 255; while (ex-- > 0 && *u) cp = (cp << 6) | (*u++ & 63); extern void x64_char(unsigned); x64_char(cp); } types[q].s = 0; }
     if (g_prof) { extern u64 x64_rip(void); r = x64_run(20000); prof_sample(x64_rip()); } else r = x64_run(2000000);
     if (trace_after && !trace_on && x64_icount() >= trace_after) { extern void w32_api_trace(int); w32_api_trace(1); trace_on = 1; fprintf(stderr, "[x64run] apitrace enabled at %llu instructions\n", (unsigned long long)x64_icount()); }
