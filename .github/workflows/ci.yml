@@ -110,6 +110,24 @@ jobs:
           grep -q 'exit 3' /tmp/wasm_jit.log
           node emu/tests/wasm_run.mjs --max-ms 900000 --jit 1 --mount "/tmp/dn/pack=C:\Program Files\dotnet" --mount "$APP=C:\app" "$APP/nebula-dotnet-test.exe" json 2>&1 | tail -5 | tee /tmp/wasm_jit2.log
           grep -q 'exit 3' /tmp/wasm_jit2.log
+      - name: JIT differential test (emu/tests/jitdiff.c, x64 + x86) — interpreter vs x86->wasm JIT must print identical checksums
+        run: |
+          set -o pipefail
+          zig cc -target x86_64-windows-gnu -O2 -o /tmp/jitdiff.exe emu/tests/jitdiff.c
+          zig cc -target x86-windows-gnu -O2 -o /tmp/jitdiff32.exe emu/tests/jitdiff.c
+          for exe in /tmp/jitdiff.exe /tmp/jitdiff32.exe; do
+            ./emu/x64/x64run --quiet "$exe" | grep -a 'camera\|scalar\|cmp\|packed\|done' > /tmp/jd_native.txt
+            node emu/tests/wasm_run.mjs --max-ms 600000 --jit 0 "$exe" | grep -a 'camera\|scalar\|cmp\|packed\|done' > /tmp/jd_interp.txt
+            node emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 "$exe" | grep -a 'camera\|scalar\|cmp\|packed\|done' > /tmp/jd_jit.txt
+            echo "== $exe"; paste /tmp/jd_native.txt /tmp/jd_interp.txt /tmp/jd_jit.txt
+            grep -q 'jitdiff done' /tmp/jd_native.txt
+            cmp /tmp/jd_native.txt /tmp/jd_interp.txt
+            if ! cmp /tmp/jd_jit.txt /tmp/jd_interp.txt; then
+              echo "::error::JIT output differs from the interpreter for $exe — bisecting by instruction kind"
+              for r in 48:52 104:115 1:48 100:104; do node emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 --jitskip $r "$exe" | grep -a 'camera\|scalar\|cmp\|packed' > /tmp/jd_skip.txt; if cmp -s /tmp/jd_skip.txt /tmp/jd_interp.txt; then echo "skip $r: MATCH (bug inside kinds $r)"; else echo "skip $r: still differs"; fi; done
+              exit 1
+            fi
+          done
       - name: wasm64 module is bit-identical to the committed public/x64/nebula_x64.wasm
         run: |
           git status --porcelain public/x64/nebula_x64.wasm

@@ -22,6 +22,7 @@ on:
         description: 'JIT bisection "lo:hi": instruction kinds in that range are interpreted (diagnostics), empty = off'
         default: ''
 
+run-name: "game video · jit=${{ inputs.jit }} skip=${{ inputs.jitskip }} trace=${{ inputs.gltrace }} ${{ inputs.seconds }}s"
 permissions:
   contents: read
 
