@@ -7,6 +7,8 @@ import { zipEntries, zipRead } from '../../lib/x64/zip';
 import { useOS } from '../../lib/os';
 import { X64Runtime, vkFromEvent, wasm64Supported, type JitInfo, type PeInfo, type RunStats, type VfsEntry } from '../../lib/x64/runtime';
 import { FramePresenter } from '../../lib/x64/present';
+import { VirtualPad } from './VirtualPad';
+import { type PadState } from '../../lib/x64/pad';
 import { takeX64Launch, onX64Launch, type X64Launch } from '../../lib/x64/launch';
 
 interface ExeEntry { id: number; name: string; bytes: Uint8Array; info: PeInfo; source: 'sample' | 'file' | 'disk'; pending?: string[]; path?: string; kind?: 'installer' | 'program'; cwd?: string }   // path: guest path when not C:\nebula\<name>   // pending: companion files fetched on first Run (big runtimes)
@@ -31,12 +33,13 @@ const SAMPLES: { name: string; href: string; desc: string; args?: string; files?
   { name: 'nebula-dotnet-test.exe', href: '/x64/samples/dotnet/nebula-dotnet-test.exe', desc: '.NET 10 (C#): the OFFICIAL Microsoft .NET Runtime (CoreCLR + RyuJIT, win-x64) runs on the emulator — installed on demand into C:\\Program Files\\dotnet (the .NET pack, ~34 MB). apphost launcher + nebula-dotnet-test.dll. Args pick the steps: linq, throw, nre (hardware null-reference → managed exception), json, reflect, regex, culture, async, thread, taskrun, bgspin (GC suspends a spinning thread), proc (Process.Start cmd.exe), http (HttpClient), gc', args: 'linq-throw-nre-json-reflect-regex-gc', files: ['nebula-dotnet-test.dll', 'nebula-dotnet-test.runtimeconfig.json', 'nebula-dotnet-test.deps.json'], dir: 'dotnet' },
   { name: 'fx.exe', href: '/x64/samples/dotnet/fx.exe', desc: 'Classic .NET Framework 4.8 console exe (AnyCPU, IL only, 5 KB): started directly, the emulator hands it to dotnet.exe with a generated runtimeconfig — it runs on the .NET 10 runtime in compatibility mode (LINQ, exceptions, File IO, args). Exit code 5', args: 'a b', dir: 'dotnet' },
   { name: 'd3dcompile.exe', href: '/x64/samples/d3dcompile.exe', needsDx: true, desc: 'DirectX pack test: loads the REAL D3DCompiler_43.dll (Microsoft DirectX End-User Runtimes, June 2010) from C:\\Windows\\System32, compiles HLSL vs_4_0/ps_4_0 at run time, disassembles it and draws the result through Direct3D 11 → WebGL2 (installs the DirectX pack on first use)' },
-  { name: 'dxpack.exe', href: '/x64/samples/dxpack.exe', needsDx: true, desc: 'DirectX pack test: d3dx9_43 matrix/vector math, D3DX11CompileFromMemory, X3DAudio1_7 3-D panning, XInput (honest: no controller) — all real Microsoft DLLs except XInput' },
+  { name: 'dxpack.exe', href: '/x64/samples/dxpack.exe', needsDx: true, desc: 'DirectX pack test: d3dx9_43 matrix/vector math, D3DX11CompileFromMemory, X3DAudio1_7 3-D panning, XInput (controller slot empty unless a pad is connected) — all real Microsoft DLLs except XInput' },
   { name: 'audio.exe', href: '/x64/samples/audio.exe', needsDx: true, desc: 'Sound through the device: waveOut (event + function callbacks), DirectSound 8 (secondary buffer, notifications, volume), WASAPI (IMMDeviceEnumerator → IAudioClient event-driven → IAudioRenderClient), PlaySound(SND_MEMORY|SND_SYNC) and the REAL XAudio2_7.dll from the DirectX pack — five tones, ~2.5 s. Tap/click once if the browser keeps audio suspended until a gesture.' },
   { name: 'hello.exe', href: '/x64/samples/hello.exe', desc: 'UCRT console: printf/qsort/malloc/math (light console exe)' },
   { name: 'cmd.exe', href: '/x64/apps/cmd.exe', desc: 'Command Prompt: the emulator\'s own cmd.exe (52 KB, kernel32 only; the same binary is embedded at C:\\Windows\\System32\\cmd.exe so system(), _popen and subprocess(shell=True) work). Default args run demo.bat and then stay interactive — type dir, echo, set, if, for, pipes and redirections into the console, or start any program on the virtual disk (jq.exe, python.exe …). Try: /c "dir /b | sort /r" · /c "python.exe -c print(42) | findstr 42"', args: '/k demo.bat' },
   { name: 'powershell.exe', href: '/x64/apps/powershell.exe', desc: 'Windows PowerShell subset: the emulator\'s own powershell.exe (91 KB, kernel32 only; embedded at C:\\Windows\\System32\\WindowsPowerShell\\v1.0 so installers that shell out to PowerShell work — opencode unpacks ripgrep with Expand-Archive through it). Cmdlets: Expand-Archive / [IO.Compression.ZipFile]::ExtractToDirectory (deflate + stored), Get-FileHash, Get-ChildItem, Get/Set-Content, Select-String, Where/Select/Measure-Object, Test-Path, Join-Path, New/Copy/Remove-Item, $env:, -f, -join, try/catch, if/foreach/while, & external programs, exit N. Not implemented: objects/properties beyond strings and numbers, modules, classes, .NET beyond ZipFile/Path.', args: '-NoProfile -File demo.ps1' },
   { name: 'bench.exe', href: '/x64/samples/bench.exe', desc: 'CPU benchmark: sieve, mandelbrot, memcpy (heavy compute)' },
+  { name: 'pad.exe', href: '/x64/samples/pad.exe', desc: 'Game controller test: XInput 1.4, winmm joystick, DirectInput8 game pad — plug in a Bluetooth/USB pad (or open the on-screen pad) within 2 s of starting; it expects A+START, LT, left stick' },
   { name: 'busybox64.exe', href: '/x64/samples/busybox64.exe', desc: 'Real third-party binary: busybox-w32 (mingw64). Try args: ls -l · cat readme.txt · wc · sort · grep · sed · awk · sha256sum · gzip -f · date -u · factor 1234567891; type into the console line when it reads stdin' },
   { name: 'plink.exe', href: '/x64/samples/plink.exe', desc: 'Real third-party binary: PuTTY plink 0.85 (MSVC/clang-cl). Try args: -V' },
   { name: 'threads.exe', href: '/x64/samples/threads.exe', desc: 'Win32 threads & sync self-test: CreateThread, critical sections, SRW locks, condition variables, events, mutexes, semaphores, WaitForMultipleObjects, TLS, Interlocked (39 checks)' },
@@ -125,6 +128,9 @@ export default function X64App() {
   const iconCache = useRef(new Map<string, string | null>());
   const [prefs, setPrefs] = useState<Record<string, LibraryPrefs>>(() => loadPrefs());
   const [fs, setFs] = useState(false);                        // fullscreen program view (game mode)
+  const [vpad, setVpad] = useState(false);                    // on-screen game controller (controller 0 for XInput/DirectInput/winmm)
+  const [padInfo, setPadInfo] = useState('');
+  const onVpad = useCallback((p: PadState) => { rtRef.current?.setVirtualPad(p); }, []);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [disk, setDisk] = useState({ files: 0, writes: 0, bytes: 0, queued: 0 });
   const [menuFor, setMenuFor] = useState<string | null>(null);
@@ -259,7 +265,7 @@ export default function X64App() {
 
   // stats ticker while running
   useEffect(() => {
-    const t = setInterval(() => { const rt = rtRef.current; if (rt && (rt.status === 'running' || rt.status === 'waiting-stdin')) { setStats(rt.stats()); setDisk({ files: rt.diskFiles, writes: rt.disk.writes, bytes: rt.disk.bytes, queued: rt.disk.queued() }); } }, 500);
+    const t = setInterval(() => { const rt = rtRef.current; if (rt && (rt.status === 'running' || rt.status === 'waiting-stdin')) { setStats(rt.stats()); setDisk({ files: rt.diskFiles, writes: rt.disk.writes, bytes: rt.disk.bytes, queued: rt.disk.queued() }); setPadInfo(rt.pads.describe()); } }, 500);
     return () => clearInterval(t);
   }, []);
 
@@ -662,7 +668,7 @@ export default function X64App() {
                       <div className="truncate text-[13px] font-semibold">{current.kind === 'installer' ? 'Installing: ' : ''}{current.path ?? current.name}{stats?.title && stats.title !== current.name ? <span className="font-normal text-slate-500"> — {stats.title}</span> : null}</div>
                       <div className="text-[10px] text-slate-500">
                         {fetching ? fetching : running ? (stats?.status === 'waiting-stdin' ? 'waiting for console input' : stats?.hasWindow ? `running · ${stats.frames} frames · ${stats.procs} process${stats.procs === 1 ? '' : 'es'}` : 'starting…') : stats?.status === 'exited' ? `finished (exit code ${stats.exitCode}) in ${((stats.elapsedMs) / 1000).toFixed(1)} s` : stats?.status === 'fault' ? `stopped with an error: ${stats.error}` : stats?.status}
-                        {stats ? ` · ${stats.mips.toFixed(0)} MIPS` : ''}{disk.writes ? ` · ${disk.writes} files written (${(disk.bytes / 1048576).toFixed(1)} MB)${disk.queued ? ' · saving…' : ' · saved'}` : ''}
+                        {stats ? ` · ${stats.mips.toFixed(0)} MIPS` : ''}{padInfo ? <span data-x64-pads={padInfo}> · 🎮 {padInfo}</span> : null}{disk.writes ? ` · ${disk.writes} files written (${(disk.bytes / 1048576).toFixed(1)} MB)${disk.queued ? ' · saving…' : ' · saved'}` : ''}
                       </div>
                     </div>
                     {running && stats?.hasWindow && <button data-x64-show-screen onClick={() => { autoTabRef.current = false; setTab('screen'); }} className="flex items-center gap-1 rounded bg-indigo-600 px-2 py-1 font-semibold text-white hover:bg-indigo-700"><Monitor size={12} /> Show</button>}
@@ -730,11 +736,13 @@ export default function X64App() {
                   <div className="mt-1 text-[10px] text-slate-500">GUI windows render here through WebGL; console programs write to the Console tab.</div>
                 </div>
               )}
+              {running && vpad && <VirtualPad onChange={onVpad} onClose={() => setVpad(false)} />}
               {running && stats?.hasWindow && (
                 <div data-x64-touchbar className={`absolute bottom-2 left-1/2 flex max-w-full -translate-x-1/2 gap-1 overflow-x-auto rounded-full bg-black/50 px-2 py-1 ${touch ? '' : 'opacity-0 hover:opacity-100'}`} onMouseDown={e => e.stopPropagation()}>
                   <button data-x64-kbd className={`min-w-9 select-none rounded-full px-2 py-1.5 text-white ${imeOpen ? 'bg-indigo-500' : 'bg-white/15'}`} title="Soft keyboard: type into the Windows program" aria-pressed={imeOpen}
                     onPointerDown={e => { e.preventDefault(); e.stopPropagation(); }} onClick={e => { e.preventDefault(); toggleIme(); }}><Keyboard size={14} className="mx-auto" /></button>
-                  <Gamepad2 size={14} className="my-auto shrink-0 text-white/60" />
+                  <button data-x64-vpad-toggle className={`min-w-9 select-none rounded-full px-2 py-1.5 text-white ${vpad ? 'bg-indigo-500' : 'bg-white/15'}`} title="On-screen game controller (XInput / DirectInput controller 0)" aria-pressed={vpad}
+                    onPointerDown={e => { e.preventDefault(); e.stopPropagation(); }} onClick={e => { e.preventDefault(); setVpad(v => !v); }}><Gamepad2 size={14} className="mx-auto" /></button>
                   {TOUCH_KEYS.map(k => (
                     <button key={k.vk} className={`min-w-9 shrink-0 select-none rounded-full px-2 py-1.5 text-[11px] font-bold text-white active:bg-indigo-500 ${sticky.includes(k.vk) ? 'bg-indigo-500' : 'bg-white/15'}`} aria-pressed={k.sticky ? sticky.includes(k.vk) : undefined}
                       onPointerDown={e => { e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); touchKey(k.vk, true, k.sticky); }}

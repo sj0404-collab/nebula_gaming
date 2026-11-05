@@ -44,7 +44,7 @@ const imports = {
     host_fs_write: () => 1, host_fs_size: () => -1n, host_fs_read: () => 0, host_fs_mkdir: () => 1, host_fs_remove: () => 1, host_fs_rename: () => 1,
     host_gfx_init: () => 0, host_gfx_shader: () => 0, host_gfx_buffer: () => 0, host_gfx_texture: () => 0, host_gfx_clear: () => {}, host_gfx_clear_depth: () => {}, host_gfx_draw: () => {}, host_gfx_readback: () => {}, host_gfx_free: () => {},
     host_gl_init: () => 0, host_gl_probe: () => 0, host_gl_call: () => 0n, host_gl_present: () => {},
-    host_audio_open: () => 0, host_audio_write: () => 0, host_audio_queued: () => 0,
+    host_audio_open: () => 0, host_audio_write: () => 0, host_audio_queued: () => 0, host_pad_rumble: () => {},
     // JIT: compile a wasm module emitted by emu/x64/jit.c and publish its function in the main module's table
     host_jit_compile: (p, n, reuse) => {
       const t = performance.now();

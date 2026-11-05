@@ -277,6 +277,46 @@ await test('x64: bench.exe runs through the x86->wasm JIT (regions compiled in t
   await page.screenshot({ path: resolve(SHOTS, 'x64-jit.png') });
   await closeAll();
 });
+await test('x64: pad.exe — a (simulated) Gamepad API controller reaches the program through XInput, winmm and DirectInput8 (hot-plug at 300 ms, unplug at 2.5 s)', async () => {
+  // a standard-mapping pad that "appears" 300 ms after the emulator status turns running and "disappears" at 2.5 s — exactly the host --pad schedule of tests/run.sh
+  await page.evaluate(() => {
+    let t0 = 0; window.__origGetGamepads = navigator.getGamepads;
+    const btn = (p, v = p ? 1 : 0) => ({ pressed: p, touched: p, value: v });
+    const pad = () => ({ id: 'E2E Fake Pad (STANDARD GAMEPAD Vendor: 045e Product: 028e)', index: 0, connected: true, mapping: 'standard', timestamp: performance.now(),
+      buttons: [btn(true), btn(false), btn(false), btn(false), btn(false), btn(false), btn(false, 1), btn(false), btn(false), btn(true), btn(false), btn(false), btn(false), btn(false), btn(false), btn(false), btn(false)],
+      axes: [0.5, 0.25, 0, 0], vibrationActuator: { type: 'dual-rumble', playEffect: () => { window.__rumbled = (window.__rumbled || 0) + 1; return Promise.resolve('complete'); }, reset: () => Promise.resolve('complete') } });
+    navigator.getGamepads = () => { if (!t0) { const el = document.querySelector('[data-x64-status="running"]'); if (el) t0 = performance.now(); } const dt = t0 ? performance.now() - t0 : -1; return dt >= 300 && dt < 2500 ? [pad(), null, null, null] : [null, null, null, null]; };
+  });
+  const w = await x64Open();
+  await w.locator('[data-x64-exe="pad.exe"]').click();
+  await w.locator('[data-x64-run]').click();
+  await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout: 60_000 });
+  const con = await w.locator('[data-x64-console]').innerText();
+  expect(/ALL OK 33\/33/.test(con), 'pad.exe checks failed: ' + con.split('\n').filter((l) => /FAIL|ALL OK|js:/.test(l)).join('\n').slice(0, 1500));
+  const rumbled = await page.evaluate(() => { const n = window.__rumbled || 0; navigator.getGamepads = window.__origGetGamepads; return n; });
+  expect(rumbled > 0, 'XInputSetState did not reach the pad\'s vibration actuator');
+  await page.screenshot({ path: resolve(SHOTS, 'x64-pad.png') });
+  await closeAll();
+});
+await test('x64: on-screen game controller — toggled from the touch bar, pressing A updates controller 0 (visible to XInput as a connected pad)', async () => {
+  const w = await x64Open();
+  await w.locator('[data-x64-exe="NebulaStrike.exe"]').click();
+  await w.locator('[data-x64-run]').click();
+  await page.waitForFunction(() => Number(document.querySelector('[data-x64-screen]')?.getAttribute('data-frames') || 0) > 2, null, { timeout: 30_000 });
+  await w.locator('[data-x64-vpad-toggle]').click();
+  await page.waitForSelector('[data-x64-vpad]', { timeout: 5_000 });
+  expect(await w.locator('[data-x64-vpad-btn]').count() >= 14, 'on-screen pad buttons missing');
+  const a = w.locator('[data-x64-vpad-btn="a"]'); const box = await a.boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2); await page.mouse.down();
+  await page.waitForTimeout(700);
+  const during = await w.locator('[data-x64-pads]').getAttribute('data-x64-pads').catch(() => null);
+  await page.mouse.up();
+  expect(during !== null && /on-screen pad/.test(during), 'status line does not list the on-screen pad while it is shown: ' + during);
+  await w.locator('[data-x64-vpad-hide]').click();
+  await page.waitForFunction(() => !document.querySelector('[data-x64-vpad]'), null, { timeout: 5_000 });
+  await page.screenshot({ path: resolve(SHOTS, 'x64-vpad.png') });
+  await closeAll();
+});
 await test('x64: runtime pack — the REAL msvcp140.dll (VC++ 2015–2022 Redistributable) is installed into C:\\Windows\\System32 on demand and std::cout works through it', async () => {
   const w = await x64Open();
   const packStatus = async () => w.locator('[data-x64-pack]').getAttribute('data-x64-pack');

@@ -1,4 +1,5 @@
 import { WebGLGfx } from './gfx';
+import { PadBridge, type PadState } from './pad';
 import { GLBridge } from './gl';
 import { HostAudio } from './audio';
 import { registerLiveVfs } from './diskbus';
@@ -40,6 +41,8 @@ type Exports = {
   x64_vfs_size(path: bigint): bigint; x64_vfs_data(path: bigint): bigint; x64_vfs_list(): bigint; x64_vfs_add_lazy?(path: bigint, n: bigint): number; x64_vfs_written?(path: bigint): number;
   x64_stdin_write(data: bigint, n: bigint): void; x64_stdin_eof(): void; x64_wants_stdin(): number;
   x64_vfs_sync(): void; x64_chdir(path: bigint): number;
+  /** game controller slot (XInput layout) from the host */
+  x64_pad?(idx: number, connected: number, buttons: number, lt: number, rt: number, lx: number, ly: number, rx: number, ry: number): void;
   /** x86->wasm JIT (emu/x64/jit.inc): on/off (n > 1 = hot-block threshold); stats text */
   x64_set_jit?(on: number): void; x64_jit_stats?(): bigint;
   __indirect_function_table?: WebAssembly.Table;
@@ -69,6 +72,8 @@ export class X64Runtime {
   moduleBytes = 0;
   jit: JitInfo = { enabled: false, modules: 0, bytes: 0, compileMs: 0, failed: 0, stats: '' };
   private jitImports: Record<string, unknown> = {};
+  /** game controllers: Gamepad API + on-screen pad → x64_pad (src/lib/x64/pad.ts) */
+  pads = new PadBridge((i, p) => this.ex?.x64_pad?.(i, p.connected ? 1 : 0, p.buttons, p.lt, p.rt, p.lx, p.ly, p.rx, p.ry));
   onConsole: ((fd: number, text: string) => void) | null = null;
   onPresent: ((px: Uint8Array, w: number, h: number) => void) | null = null;
   onStop: ((stats: RunStats) => void) | null = null;
@@ -132,6 +137,8 @@ export class X64Runtime {
         // x86->wasm JIT: the emulator hands over a complete wasm module for a hot code region; it is compiled synchronously, instantiated
         // against the emulator's memory and its entry published in the shared function table (slot index returned; 0 = failed -> interpreter)
         host_jit_compile: (p: bigint, n: bigint, reuse: number) => this.jitCompile(p, Number(n), reuse),
+        // XInputSetState → the physical pad's vibration actuator
+        host_pad_rumble: (idx: number, lo: number, hi: number) => this.pads.rumble(idx, lo, hi),
       },
     };
     const { instance } = await WebAssembly.instantiate(bytes, imports);
@@ -167,6 +174,8 @@ export class X64Runtime {
       return 0;
     }
   }
+  /** on-screen pad state (merged into controller slot 0; connected = shown) */
+  setVirtualPad(p: PadState) { this.pads.setVirtual(p); if (this.running) this.pads.poll(); }
   /** JIT counters as text (regions, executions, interpreter fallbacks) */
   jitStats(): JitInfo { if (this.ex?.x64_jit_stats) this.jit.stats = this.cstr(this.ex.x64_jit_stats()); return { ...this.jit }; }
   /** the bundled TrueType faces become C:\Windows\Fonts (the emulator's GDI text engine reads them from the VFS; without them it falls back to bitmap glyphs) */
@@ -246,6 +255,7 @@ export class X64Runtime {
   private frame() {
     if (!this.running || !this.ex) return;
     const ex = this.ex; const start = performance.now(); let r = RUN_OK;
+    this.pads.poll();
     for (let i = 0; i < 64; i++) {
       r = ex.x64_run(400_000n);
       if (r === RUN_YIELD) {
