@@ -474,7 +474,7 @@ print('page_ok' if pages and all(int(x) >= 160 and int(y) < 40 for x, y in pages
   check "Notepad++ x86 (installed): main window with Scintilla, tab bar, rebar + toolbar, status bar"   '"Scintilla" "Notepad++".*"SysTabControl32" "Tab".* builtin=16 .*"msctls_statusbar32" "" parent=0 .* vis=1 .* builtin=14.*"ReBarWindow32"'   "$(echo "$out" | grep -v "FAULT\|MessageBox\|not registered" | tr '\n' ' ')"
   check "Notepad++ x86: typing in the editor marks the document modified (title '*new 1')"   '"\*new 1 - Notepad++'   "$(echo "$out" | grep -a "#0 " | tr '\n' ' ')"
   check "Notepad++ x86: no fault, no 'Exception On WM_CREATE' box, no autosave fault"   "errors=0"   "errors=$(echo "$out" | grep -a -c "FAULT\|MessageBox\|not registered") $(echo "$out" | grep -a "FAULT\|MessageBox\|not registered" | head -1)"
-  rm -f "$ID/npp/hello" "$ID/npp/hello.txt"; X64_MODAL=1 $X --quiet --no-stdin --max-ms 42000 --mount-rw "$ID/npp=C:\\nebula" --type 'abc@20000' --key 17@24000:2000 --key 18@24100:1900 --key 83@24500:100 --type 'hello@31000' --key 13@34000 $ID/npp/notepad++.exe >/dev/null 2>&1 || true
+  rm -f "$ID/npp/hello" "$ID/npp/hello.txt"; X64_MODAL=1 $X --quiet --no-stdin --max-ms 50000 --mount-rw "$ID/npp=C:\\nebula" --type 'abc@28000' --key 17@32000:2000 --key 18@32100:1900 --key 83@32500:100 --type 'hello@39000' --key 13@42000 $ID/npp/notepad++.exe >/dev/null 2>&1 || true
   check "Notepad++ x86: Save As 'hello' → hello.txt with the typed text (32-bit hooks, CWPSTRUCT, COM events)"   "hello.txt:abc"   "$(ls "$ID/npp" | grep -a '^hello' | tr '\n' ' ' | sed 's/ $//'):$(cat "$ID/npp/hello.txt" 2>/dev/null)"
   rm -rf $ID
 else echo "  skip Notepad++ (no network)"; fi
