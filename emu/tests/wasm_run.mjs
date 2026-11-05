@@ -8,12 +8,13 @@ import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 
 const argv = process.argv.slice(2);
-let maxMs = 60000, jit = 1, wasmPath = new URL('../../public/x64/nebula_x64.wasm', import.meta.url).pathname, exe = '', verbose = 0;
+let jitskip = null; let maxMs = 60000, jit = 1, wasmPath = new URL('../../public/x64/nebula_x64.wasm', import.meta.url).pathname, exe = '', verbose = 0;
 const mounts = [];
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === '--max-ms') maxMs = +argv[++i];
   else if (a === '--jit') jit = +argv[++i];
+  else if (a === '--jitskip') jitskip = argv[++i].split(':').map(Number);
   else if (a === '--wasm') wasmPath = argv[++i];
   else if (a === '--mount') mounts.push(argv[++i]);
   else if (a === '-v') verbose = 1;
@@ -72,6 +73,7 @@ table = ex.__indirect_function_table || null;
 if (needsJit) {
   for (const [k, v] of Object.entries(ex)) if (k.startsWith('jit_') && typeof v === 'function') jitImports[k] = v;
   if (ex.x64_set_jit) ex.x64_set_jit(jit && table ? jit : 0);   // --jit N>1: hot threshold
+  if (jitskip && ex.x64_jit_skip) ex.x64_jit_skip(jitskip[0], jitskip[1]);
 }
 for (const m of mounts) {
   const [host, guest] = m.split('=');
@@ -101,7 +103,7 @@ for (;;) {
     continue;
   }
   if (r === RUN_EXIT) { status = 'exit ' + ex.x64_exit_code(); break; }
-  if (r === RUN_FAULT) { status = 'FAULT ' + cstr(ex.x64_error()) + ' rip=' + ex.x64_error_rip().toString(16); break; }
+  if (r === RUN_FAULT) { status = 'FAULT ' + cstr(ex.x64_error()) + ' rip=' + ex.x64_error_rip().toString(16); if (verbose && ex.x64_history_raw) { console.error('[wasm_run] history (last 4096 block starts, >x = JIT region exit, !x = hw exception): ' + cstr(ex.x64_history_raw(4096, 0)).trim()); console.error('[wasm_run] history at the last hw exception: ' + cstr(ex.x64_history_raw(4096, 1)).trim()); if (ex.x64_last_exc_rip && ex.x64_mem_copy) { const r = ex.x64_last_exc_rip(); const buf = ex.x64_alloc(64n); const ok = ex.x64_mem_copy(r, buf, 48); console.error('[wasm_run] bytes at last hw exception rip ' + r.toString(16) + ': ' + (ok ? Array.from(bytesAt(buf, 48)).map((b) => b.toString(16).padStart(2, '0')).join(' ') : '(unmapped)')); } if (ex.x64_regs) console.error('[wasm_run] regs: ' + cstr(ex.x64_regs())); } break; }
   if (r === RUN_BREAK) { status = 'break'; break; }
   if (performance.now() - tRun > maxMs) { status = 'timeout'; break; }
 }

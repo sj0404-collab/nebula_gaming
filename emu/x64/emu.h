@@ -105,6 +105,9 @@ u8  *mem_map(Mem *m, u64 base, u64 size, const char *name);   /* add region (hos
 u8  *mem_ptr(Mem *m, u64 addr, u64 size, int write);          /* NULL on fault */
 /* inline fast path: hit in the last-used region (the common case inside a loop), otherwise the full lookup */
 static inline u8 *mem_ptr_fast(Mem *m, u64 addr, u64 size, int write) {
+#ifdef X64_WWATCH
+  if (write) return mem_ptr(m, addr, size, write);
+#endif
   u64 pg = addr >> 12; Tlb *t = &m->tlb[pg & (TLB_N - 1)];
   if (t->tag == pg + 1) { u64 o = addr & 4095; if (o + size <= 4096) return t->host + o; }
   return mem_ptr(m, addr, size, write);

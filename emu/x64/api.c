@@ -155,6 +155,8 @@ static int run_one(Proc *p, u64 budget) {
 }
 EXPORT(x64_set_jit) void x64_set_jit(int on) { g_jit_on = on != 0; if (on > 1) g_jit_hot = on; }   /* host has a wasm engine and provided host_jit_compile */
 EXPORT(x64_jit_stats) const char *x64_jit_stats(void) { return jit_stats_text(); }
+extern int g_jit_skip_lo, g_jit_skip_hi;
+EXPORT(x64_jit_skip) void x64_jit_skip(int lo, int hi) { g_jit_skip_lo = lo; g_jit_skip_hi = hi; }
 EXPORT(x64_run) int x64_run(u64 budget) {
   if (!g_loaded) return RUN_FAULT;
   g_want_stdin = 0;
@@ -235,15 +237,19 @@ EXPORT(x64_exit_code) int x64_exit_code(void) { return g_cpu.exit_code; }
 EXPORT(x64_error) const char *x64_error(void) { return g_cpu.err; }
 EXPORT(x64_error_rip) u64 x64_error_rip(void) { return g_cpu.err_rip; }
 static char g_regs[512];
-static char g_hist[4096 * 12];
+static char g_hist[4096 * 20];
+u64 g_hist_snap[4096], g_hist_snap_rip; u32 g_hist_snap_i;
+EXPORT(x64_last_exc_rip) u64 x64_last_exc_rip(void) { return g_hist_snap_rip; }   /* copy taken at the last hardware exception (seh.inc) */
 /* the last executed instruction addresses, oldest first, runs of sequential code collapsed to "start..end" */
 EXPORT(x64_history) const char *x64_history(void) { int o = 0; u64 run0 = 0, last = 0; int n = 0;
-  for (u32 i = 0; i < 4096; i++) { u64 a = g_cpu.hist[(g_cpu.hist_i + i) & 4095]; if (!a) continue;
+  for (u32 i = 0; i < 4096; i++) { u64 a = g_cpu.hist[(g_cpu.hist_i + i) & 4095] & ~(3ull << 62); if (!a) continue;
     if (run0 && a > last && a - last < 16) { last = a; continue; }
     if (run0) { o += e_snprintf(g_hist + o, sizeof g_hist - o, run0 == last ? "%llx " : "%llx..%llx ", (unsigned long long)run0, (unsigned long long)last); n++; }
     run0 = last = a; if (o > (int)sizeof g_hist - 48) break; }
   if (run0) o += e_snprintf(g_hist + o, sizeof g_hist - o, run0 == last ? "%llx " : "%llx..%llx ", (unsigned long long)run0, (unsigned long long)last);
   (void)n; return g_hist; }
+/* raw history: the last n block starts, oldest first (">x" = JIT region exit target, "!x" = hardware exception at x); at_exc: as of the last hardware exception */
+EXPORT(x64_history_raw) const char *x64_history_raw(int n, int at_exc) { int o = 0; if (n > 4096) n = 4096; const u64 *H = at_exc ? g_hist_snap : g_cpu.hist; u32 HI = at_exc ? g_hist_snap_i : g_cpu.hist_i; for (int i = 4096 - n; i < 4096; i++) { u64 a = H[(HI + i) & 4095]; if (!a) continue; o += e_snprintf(g_hist + o, sizeof g_hist - o, "%s%llx ", (a >> 63) ? ">" : (a >> 62) ? "!" : "", (unsigned long long)(a & ~(3ull << 62))); if (o > (int)sizeof g_hist - 48) break; } return g_hist; }
 EXPORT(x64_mem_copy) int x64_mem_copy(u64 addr, u8 *dst, u32 n) { const u8 *p = mem_ptr(&g_mem, addr, n, 0); if (!p) return 0; e_memcpy(dst, p, n); return 1; }
 EXPORT(x64_regs) const char *x64_regs(void) { static const char *nm[16] = {"rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi","r8","r9","r10","r11","r12","r13","r14","r15"}; int o = 0; for (int i = 0; i < 16; i++) o += e_snprintf(g_regs + o, sizeof g_regs - o, "%s=%llx ", nm[i], (unsigned long long)g_cpu.r[i]); u64 sp = g_cpu.r[4]; const u8 *st = mem_ptr(&g_mem, sp, 32, 0); if (st) for (int k = 0; k < 4; k++) { u64 v = 0; for (int b = 7; b >= 0; b--) v = (v << 8) | st[k * 8 + b]; o += e_snprintf(g_regs + o, sizeof g_regs - o, "[rsp+%d]=%llx ", k * 8, (unsigned long long)v); } return g_regs; }
 EXPORT(x64_rip) u64 x64_rip(void) { return g_cpu.rip; }

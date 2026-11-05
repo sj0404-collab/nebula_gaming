@@ -31,6 +31,12 @@ static inline Jb *jb_lookup(u64 rip, void *mem, int m32) {
   if (v->fn) jit_drop(v);
   v->rip = 0; v->fn = 0; v->count = 0; return v;
 }
+static inline Jb *jb_find(u64 rip, void *mem, int m32) {   /* lookup without eviction: NULL when absent */
+  Jb *b = JB_SLOT(rip);
+  if (b->rip == rip && b->mem == mem && b->m32 == m32) return b;
+  if (b[1].rip == rip && b[1].mem == mem && b[1].m32 == m32) return b + 1;
+  return 0;
+}
 int g_jit_on = 0;
 static u32 g_jit_free[4096]; static int g_jit_nfree;
 #define JIT_MAX_FN 65536
@@ -345,8 +351,9 @@ static void e_xmm_fsrc(Buf *B, const Dc *e, int off, int dbl) { if (e->mod == 3)
 static void e_xmm_dst(Buf *B, const Dc *e, int off) { (void)off; e_lget(B, e->mod == 3 ? L_C : L_HOST); }
 static void e_xmm_dst_store(Buf *B, const Dc *e, int off, int bytes) { if (e->mod == 3) e_st(B, bytes == 4 ? 0x3E : 0x37, bytes == 4 ? 2 : 3, CO_X(e->rm) + off); else e_st(B, bytes == 4 ? 0x3E : 0x37, 0, off); }
 /* returns 0 if the item could not be emitted inline (caller falls back to a step) */
+int g_jit_skip_lo = -1, g_jit_skip_hi = -1;   /* diagnostics: instruction kinds in [lo,hi) are stepped instead of translated (x64_jit_skip) */
 static int e_insn(Buf *B, const JItem *it, const u8 *code, int m32, int k) {
-  const Dc *e = it->e; u64 start = it->rip, next = start + e->len; int sz = it->sz, psz = m32 ? 4 : 8, need = it->need, isz = sz == 2 ? 2 : 4;   /* isz: "imm32" is imm16 with 66 */
+  const Dc *e = it->e; if (it->fk >= g_jit_skip_lo && it->fk < g_jit_skip_hi) return 0; u64 start = it->rip, next = start + e->len; int sz = it->sz, psz = m32 ? 4 : 8, need = it->need, isz = sz == 2 ? 2 : 4;   /* isz: "imm32" is imm16 with 66 */
   if (m32) next = (u32)next;
   Src src = { -1, 0 };
   switch (it->fk) {
@@ -567,7 +574,7 @@ static int jit_translate(Cpu *c, Jb *b0) {
     for (u64 off = blk[i].start; off < blk[i].end; off += 8) {
       u32 nbyt = blk[i].end - off < 8 ? (u32)(blk[i].end - off) : 8; u64 w = 0; __builtin_memcpy(&w, rbase + (off - lo), nbyt); u64 msk = nbyt == 8 ? ~0ull : (1ull << (nbyt * 8)) - 1;
       e_lget(B, L_CODE); e_ld(B, 0x29, 0, off - lo); if (nbyt < 8) { e_i64c(B, msk); OP(I64_AND); } e_i64c(B, w); OP(I64_NE);
-      e_if(B, 0); e_i64c(B, 1); OP(RETURN); e_end(B);
+      e_if(B, 0); e_lget(B, L_C); e_i64c(B, blk[i].start); e_st(B, 0x37, 3, CO_RIP); e_i64c(B, 1); OP(RETURN); e_end(B);   /* stale: c->rip = this block (earlier blocks of this run already executed) */
     }
     for (int q = blk[i].first; q < blk[i].first + blk[i].n; q++) {
       const Dc *e = it[q].e; u64 next = it[q].rip + e->len; if (m32) next = (u32)next;
@@ -612,14 +619,21 @@ static int jit_translate(Cpu *c, Jb *b0) {
   u32 reuse = g_jit_nfree ? g_jit_free[--g_jit_nfree] : 0;
   u32 fn = host_jit_compile(mod.b, mod.n, reuse);
   if (!fn || fn >= JIT_MAX_FN) { g_jit_st.fails++; if (reuse) g_jit_free[g_jit_nfree++] = reuse; return 0; }
-  /* publish every block start as an entry (the hot one first so b0 is certainly set) */
+  /* publish every block start as an entry; the hot one (rip) LAST: jb_lookup evicts 2-way set neighbours, so publishing another
+     block of this region could otherwise evict b0's slot and leave it describing a different block (wrong pc -> wrong code run) */
+  int hot = -1; g_fnref[fn] = 1;   /* hold: publishing may evict (jit_drop) a block of this very region; the count must not hit 0 and free the slot */
   for (int i = 0; i < nb; i++) {
+    if (blk[i].start == rip) { hot = i; continue; }
     Jb *b = jb_lookup(blk[i].start, m, m32);
-    if (b != b0) { if (b->rip == blk[i].start && b->fn && b->gen == gen) continue; if (b->fn) jit_drop(b); }
+    if (b->rip == blk[i].start && b->fn && b->gen == gen) continue;
+    if (b->fn) jit_drop(b);
     b->rip = blk[i].start; b->mem = m; b->m32 = m32; b->fn = fn; b->pc = (u16)i; b->code = rbase; b->gen = gen; b->count = JIT_HOT; g_fnref[fn]++;
   }
   g_jit_st.blocks++; g_jit_st.insns += nit; g_jit_st.steps += steps; g_jit_st.bytes += mod.n;
-  return b0->fn != 0;
+  if (hot >= 0) { Jb *b = jb_lookup(rip, m, m32); if (b->fn) jit_drop(b);
+    b->rip = rip; b->mem = m; b->m32 = m32; b->fn = fn; b->pc = (u16)hot; b->code = rbase; b->gen = gen; b->count = JIT_HOT; g_fnref[fn]++; }
+  if (--g_fnref[fn] == 0) { if (g_jit_nfree < 4096) g_jit_free[g_jit_nfree++] = fn; return 0; }   /* release the hold */
+  return hot >= 0;
 }
 static void jit_drop(Jb *b) { if (b->fn && g_fnref[b->fn] && --g_fnref[b->fn] == 0 && g_jit_nfree < 4096) g_jit_free[g_jit_nfree++] = b->fn; b->fn = 0; b->rip = 0; b->count = 0; }
 typedef u64 (*JitFn)(Cpu *c, const u8 *code, int pc, u64 limit);
@@ -632,12 +646,17 @@ static inline int jit_enter(Cpu *c, u64 budget) {
     if (!b->fn) {
       if (++b->count < JIT_HOT) return ran;
       if (!jit_translate(c, b)) { b->count = -2000000; g_jit_st.nodc++; return ran; }
+      b = jb_lookup(c->rip, c->mem, c->mode32);   /* the entry for rip (publishing may have moved it within its set) */
+      if (b->rip != c->rip || !b->fn) return ran;
     } else if (b->gen != mem_gen(c->mem)) { jit_drop(b); return ran; }
-    c->hist[c->hist_i++ & 4095] = c->rip;
+    u64 entry = c->rip; c->hist[c->hist_i++ & 4095] = entry;
     u64 nx = ((JitFn)(size_t)b->fn)(c, b->code, b->pc, ic0 + budget);
-    if (nx == 1) { g_jit_st.stale++; jit_drop(b); return ran; }
+    if (nx == 1) {   /* a block's code bytes changed (runtime-patched stubs, regenerated code): c->rip = that block; blocks before it in this run did execute */
+      g_jit_st.stale++; jit_drop(b);
+      if (c->rip != entry) { Jb *sb = jb_find(c->rip, c->mem, c->mode32); if (sb) jit_drop(sb); c->hist[c->hist_i++ & 4095] = c->rip | (1ull << 63); return 1; }
+      return ran; }
     g_jit_st.exec++; ran = 1;
-    c->rip = nx;
+    c->rip = nx; c->hist[c->hist_i++ & 4095] = nx | (1ull << 63);   /* region exit target (bit 63 marks it in the history dump) */
     if (c->status != RUN_OK || c->icount - ic0 >= budget || nx - G_SHIM_BASE < G_SHIM_SIZE) return 1;
   }
 }

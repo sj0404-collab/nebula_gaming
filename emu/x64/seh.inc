@@ -233,6 +233,8 @@ int w32_hw_exception(Cpu *c) {
   c->exc_code = 0; c->status = RUN_OK; c->err[0] = 0;
   u64 args[2] = { c->exc_info, c->exc_addr };
   if (c->mode32) { raise_exception32(c, code, 0, code == 0xC0000005u ? 2 : 0, args, c->rip); return c->status == RUN_OK; }
+  c->hist[c->hist_i++ & 4095] = c->rip | (1ull << 62);
+  { extern u64 g_hist_snap[4096], g_hist_snap_rip; extern u32 g_hist_snap_i; e_memcpy(g_hist_snap, c->hist, sizeof g_hist_snap); g_hist_snap_i = c->hist_i; g_hist_snap_rip = c->rip; }   /* history as of the last hardware exception (x64_history_raw(n, 1)) */
   seh_log("[x64] hw exception 0x%08x tid=%u rip=0x%llx addr=0x%llx rsp=0x%llx [rsp]=0x%llx rcx=0x%llx rdx=0x%llx rax=0x%llx r10=0x%llx\n", code, (unsigned)cur_tid(w), (unsigned long long)c->rip, (unsigned long long)c->exc_addr, (unsigned long long)c->r[RSP], (unsigned long long)rd64(c, c->r[RSP]), (unsigned long long)c->r[RCX], (unsigned long long)c->r[RDX], (unsigned long long)c->r[RAX], (unsigned long long)c->r[R10]);
   raise_exception(c, code, 0, code == 0xC0000005u ? 2 : 0, args, c->rip);
   return c->status == RUN_OK;
