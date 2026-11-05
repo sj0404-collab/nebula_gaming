@@ -108,6 +108,11 @@ for (let k = 0; k < actions.length; k++) {
 const acT0 = await page.evaluate(() => (window.__acs[0] ? window.__acs[0].currentTime : 0));
 const pcmStartIdx = await page.evaluate(() => window.__pcm.length);
 await page.evaluate(() => { window.__pcmKeep = window.__pcm.length; }); // blocks before this index may be trimmed by the ring; we only read from here on
+// in-page capture of the canvas itself (MediaRecorder, every composited frame) in parallel with the screenshots
+const recOk = await screen.evaluate((c, fps) => { try {
+  const stream = c.captureStream(fps); const rec = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp8', videoBitsPerSecond: 8_000_000 });
+  window.__recChunks = []; rec.ondataavailable = (e) => { if (e.data && e.data.size) window.__recChunks.push(e.data); }; rec.start(500); window.__rec = rec; return true;
+} catch (e) { console.log('MediaRecorder unavailable: ' + e); return false; } }, 30).catch(() => false);
 const tStart = Date.now(); const stamps = []; let n = 0;
 while (Date.now() - tStart < seconds * 1000) {
   const t = Date.now() - tStart;
@@ -119,6 +124,12 @@ while (Date.now() - tStart < seconds * 1000) {
 }
 const acT1 = await page.evaluate(() => (window.__acs[0] ? window.__acs[0].currentTime : 0));
 const wallSec = (Date.now() - tStart) / 1000;
+if (recOk) {
+  const b64 = await page.evaluate(() => new Promise((res) => { const rec = window.__rec; rec.onstop = async () => {
+    const buf = await new Blob(window.__recChunks, { type: 'video/webm' }).arrayBuffer(); const u = new Uint8Array(buf); let s = '';
+    for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); res(btoa(s)); }; rec.stop(); })).catch(() => '');
+  if (b64) { writeFileSync(resolve(OUT, 'screen.webm'), Buffer.from(b64, 'base64')); console.log(`screen.webm: ${Math.round(b64.length * 3 / 4 / 1024)} KB from the canvas MediaRecorder`); }
+}
 // per-frame durations for ffmpeg's concat demuxer
 let concat = 'ffconcat version 1.0\n';
 for (let i = 0; i < stamps.length; i++) { const d = ((i + 1 < stamps.length ? stamps[i + 1].t : wallSec * 1000) - stamps[i].t) / 1000; concat += `file 'frames/${stamps[i].name}'\nduration ${Math.max(d, 0.01).toFixed(3)}\n`; }

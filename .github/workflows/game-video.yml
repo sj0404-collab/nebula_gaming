@@ -59,6 +59,8 @@ jobs:
         run: |
           cd e2e/video
           ffmpeg -loglevel error -y -f concat -safe 0 -i concat.txt -i audio.wav -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=25" -c:a aac -b:a 160k -shortest game.mp4
+          # the in-page MediaRecorder capture of the screen canvas (every composited frame, not just the ~2-8 screenshots/s)
+          if [ -s screen.webm ]; then ffmpeg -loglevel error -y -i screen.webm -i audio.wav -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=30" -c:a aac -b:a 160k -shortest game-smooth.mp4 && ffprobe -v error -show_entries stream=codec_type,codec_name,duration,nb_frames -of compact game-smooth.mp4; fi
           ffprobe -v error -show_entries stream=codec_type,codec_name,duration -of compact game.mp4
           ls -la
       - uses: actions/upload-artifact@v4
