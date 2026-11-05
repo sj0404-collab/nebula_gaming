@@ -711,6 +711,20 @@ await test('x64: d3d11tri.exe — Direct3D 11 draw calls rendered by WebGL2 (DXB
   await closeAll();
 });
 
+for (const exe of ['glff.exe', 'glff32.exe']) await test(`x64: ${exe} — OpenGL 1.x fixed-function + GLU on WebGL2: immediate mode, display lists, lighting, textures, fog, alpha test, clip planes, raster ops, vertex arrays, GLU quadrics (pixel-verified)`, async () => {
+  const w = await x64Open();
+  await w.locator(`[data-x64-exe="${exe}"]`).click();
+  await w.locator('[data-x64-run]').click();
+  const exited = await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout: 90_000 }).then(() => true, () => false);
+  await w.locator('[data-x64-tab="console"]').click();
+  const con = await w.locator('[data-x64-console]').innerText();
+  if (!exited) { await w.locator('[data-x64-tab="report"]').click(); const rep = await w.locator('[data-x64-report]').innerText().catch(() => ''); expect(false, `${exe} did not exit within 90 s; console: ${con.slice(-1500)} report: ${rep.slice(-2500)}`); }
+  const fails = con.split('\n').filter((l) => l.startsWith('FAIL'));
+  expect(/ALL OK \d+\/\d+/.test(con), `${exe}: ${fails.length} failed checks: ` + fails.join(' | ').slice(0, 1500) + ' tail: ' + con.slice(-300));
+  await w.locator('[data-x64-tab="screen"]').click(); await sleep(300);
+  await page.screenshot({ path: resolve(SHOTS, `x64-${exe.replace('.exe', '')}.png`) });
+  await closeAll();
+});
 for (const exe of ['gltri.exe', 'gltri32.exe']) await test(`x64: ${exe} — OpenGL (opengl32.dll) on the device WebGL2: WGL context, GLSL 330 triangle + GLSL 120 GL_QUADS quad, glReadPixels, SwapBuffers`, async () => {
   const w = await x64Open();
   await w.locator(`[data-x64-exe="${exe}"]`).click();
@@ -721,7 +735,7 @@ for (const exe of ['gltri.exe', 'gltri32.exe']) await test(`x64: ${exe} — Open
   if (!exited) { await w.locator('[data-x64-tab="report"]').click(); const rep = await w.locator('[data-x64-report]').innerText().catch(() => ''); expect(false, `${exe} did not exit within 60 s; console: ${con.slice(-1500)} report: ${rep.slice(-2500)}`); }
   expect(/GL_VERSION=3\.3\.0 NebulaGL/.test(con), 'GL_VERSION missing: ' + con.slice(-500));
   expect(/program 330 linked=1/.test(con) && /program 120 linked=1/.test(con), 'shader programs did not link: ' + con.slice(-500));
-  expect(/glBegin\/glEnd error=0x502/.test(con), 'legacy glBegin must report GL_INVALID_OPERATION: ' + con.slice(-300));
+  expect(/glBegin\/glEnd error=0x0 /.test(con), 'glBegin/glEnd (fixed-function layer) must succeed: ' + con.slice(-300));
   expect(/frame 0: triangle \+ GL_QUADS quad drawn and presented/.test(con) && /gltri ok/.test(con), `${exe} did not finish: ` + con.slice(-500));
   await w.locator('[data-x64-tab="screen"]').click(); await sleep(500);
   const hist = await w.locator('[data-x64-screen]').evaluate((c) => {

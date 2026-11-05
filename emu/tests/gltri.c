@@ -62,7 +62,7 @@ int main(void) {
   GetProgramiv(prog2, GL_LINK_STATUS, &linked); printf("program 120 linked=%d\n", linked); GLint posLoc = GetAttribLocation(prog2, "pos"); printf("attrib pos=%d\n", posLoc);
   GLuint vao2 = 0; GenVertexArrays(1, &vao2); BindVertexArray(vao2); BindBuffer(GL_ARRAY_BUFFER, 0);
   static const float quad[] = { 0.55f, 0.55f,  0.95f, 0.55f,  0.95f, 0.95f,  0.55f, 0.95f }; EnableVertexAttribArray(posLoc); VertexAttribPointer(posLoc, 2, GL_FLOAT, GL_FALSE, 0, quad);
-  glBegin(GL_TRIANGLES); glEnd(); printf("glBegin/glEnd error=0x%x (core profile: 0x502)\n", glGetError());
+  glBegin(GL_TRIANGLES); glEnd(); printf("glBegin/glEnd error=0x%x (fixed-function layer: 0x0)\n", glGetError());
   glViewport(0, 0, 640, 480);
   for (int frame = 0; frame < 3; frame++) {
     glClearColor(0.1f, 0.1f, 0.3f, 1); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);

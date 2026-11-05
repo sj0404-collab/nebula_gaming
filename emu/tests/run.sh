@@ -62,6 +62,10 @@ check "x64 GL null driver: context + GLSL + loop"   "gltri ok" "$out"
 check "x64 GL null driver: program linked"          "program 330 linked=1" "$out"
 out=$(X64_GL_NULL=1 X64_LOG=1 $X --quiet --no-stdin --max-ms 20000 tests/gltri32.exe 2>&1 || true)
 check "x86 GL null driver: context + GLSL + loop (GLsizeiptr marshalling)"   "gltri ok" "$out"
+out=$(X64_GL_NULL=1 X64_LOG=1 $X --quiet --no-stdin --max-ms 30000 tests/glff.exe 2>&1 || true)
+check "x64 GL 1.x + glu32 self-check runs to the end on the null driver (96 checks dispatched)"   "/96" "$out"
+out=$(X64_GL_NULL=1 X64_LOG=1 $X --quiet --no-stdin --max-ms 30000 tests/glff32.exe 2>&1 || true)
+check "x86 GL 1.x + glu32 self-check runs to the end on the null driver (doubles on the x86 stack)"   "/96" "$out"
 check "x86 GL null driver: program linked"          "program 330 linked=1" "$out"
 echo "[1g] uvpipe.exe (libuv-style child stdout: named pipe + IOCP zero-read + CreateProcess)"
 out=$($X --quiet --no-stdin --max-ms 20000 tests/uvpipe.exe 2>&1 || true)

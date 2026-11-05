@@ -232,7 +232,7 @@ export class FixedFunction {
   register() {
     const h = this.h, d = (n: string, f: Impl) => h.def(n, f);
     // -- matrices --
-    d('glMatrixMode', (a) => { const m = U(a[0]); if (m === E.MODELVIEW || m === E.PROJECTION || m === E.TEXTURE) this.mode = m; else if (m === E.COLOR) this.warn('colormatrix', 'glMatrixMode(GL_COLOR): the color matrix is not applied'); else this.err(E.INVALID_ENUM); });
+    d('glMatrixMode', (a) => { if (this.inBegin) { this.err(E.INVALID_OPERATION); return; } const m = U(a[0]); if (m === E.MODELVIEW || m === E.PROJECTION || m === E.TEXTURE) this.mode = m; else if (m === E.COLOR) this.warn('colormatrix', 'glMatrixMode(GL_COLOR): the color matrix is not applied'); else this.err(E.INVALID_ENUM); });
     d('glLoadIdentity', () => this.setTop(identity()));
     d('glLoadMatrixf', (a) => { const m = h.f32(a[0], 16); if (m) this.setTop(new Float32Array(m)); }); d('glLoadMatrixd', (a) => { const m = h.f64(a[0], 16); if (m) this.setTop(Float32Array.from(m)); });
     d('glMultMatrixf', (a) => { const m = h.f32(a[0], 16); if (m) this.mulTop(m); }); d('glMultMatrixd', (a) => { const m = h.f64(a[0], 16); if (m) this.mulTop(Float32Array.from(m)); });
@@ -635,7 +635,13 @@ export class FixedFunction {
       else if (mode === E.TRIANGLE_STRIP) for (let i = 0; i + 2 < count; i++) { if (i & 1) tris.push(src(i + 1), src(i), src(i + 2)); else tris.push(src(i), src(i + 1), src(i + 2)); }
       else if (mode === E.TRIANGLES) for (let i = 0; i + 2 < count; i += 3) tris.push(src(i), src(i + 1), src(i + 2));
       else for (let i = 0; i < count; i++) tris.push(src(i));
-      if (mode >= E.TRIANGLES && polyMode === E.LINE) { const e: number[] = []; for (let i = 0; i + 2 < tris.length; i += 3) e.push(tris[i], tris[i + 1], tris[i + 1], tris[i + 2], tris[i + 2], tris[i]); ind = new Uint32Array(e); glMode = E.LINES; }
+      if (mode >= E.TRIANGLES && polyMode === E.LINE) {   // polygon outlines (no diagonals through quads/polygons)
+        const e: number[] = [];
+        if (mode === E.QUADS) for (let q = 0; q + 3 < count; q += 4) e.push(src(q), src(q + 1), src(q + 1), src(q + 2), src(q + 2), src(q + 3), src(q + 3), src(q));
+        else if (mode === E.QUAD_STRIP) for (let q = 0; q + 3 < count; q += 2) e.push(src(q), src(q + 1), src(q + 1), src(q + 3), src(q + 3), src(q + 2), src(q + 2), src(q));
+        else if (mode === E.POLYGON) for (let i = 0; i < count; i++) e.push(src(i), src((i + 1) % count));
+        else for (let i = 0; i + 2 < tris.length; i += 3) e.push(tris[i], tris[i + 1], tris[i + 1], tris[i + 2], tris[i + 2], tris[i]);
+        ind = new Uint32Array(e); glMode = E.LINES; }
       else if (mode >= E.TRIANGLES && polyMode === E.POINT) { ind = new Uint32Array(tris); glMode = E.POINTS; }
       else { ind = new Uint32Array(tris); glMode = mode >= E.TRIANGLES ? E.TRIANGLES : mode; }
       n = ind.length; }
@@ -676,7 +682,7 @@ vec4 texgen(ivec4 g, vec4 tc, vec4 obj[4], vec4 eye[4], vec3 P, vec3 N) { vec4 r
     if (c == 0) r.x = v; else if (c == 1) r.y = v; else if (c == 2) r.z = v; else r.w = v; } return r; }
 void main() {
   vec4 ep = uMV * aPos; vec3 P = ep.xyz / (ep.w == 0.0 ? 1.0 : ep.w); vec3 N = uNM * aNormal; if (uNormalize) N = normalize(N);
-  gl_Position = uP * ep; gl_PointSize = uPointSize; vEye = P; vFog = length(P);
+  gl_Position = uP * ep; gl_PointSize = uPointSize; vEye = P; vFog = abs(P.z);
   ${lit ? `vColor = shade(P, N); ${two ? 'vColorBack = shade(P, -N);' : ''}` : 'vColor = aColor;'}
   vTc0 = uTex0 * texgen(uGen0, aTc0, uGenObj0, uGenEye0, P, N); vTc1 = uTex1 * texgen(uGen1, aTc1, uGenObj1, uGenEye1, P, N);
 }`;
