@@ -312,9 +312,9 @@ await test('x64: on-screen game controller — toggled from the touch bar, press
   const during = await w.locator('[data-x64-pads]').getAttribute('data-x64-pads').catch(() => null);
   await page.mouse.up();
   expect(during !== null && /on-screen pad/.test(during), 'status line does not list the on-screen pad while it is shown: ' + during);
+  await page.screenshot({ path: resolve(SHOTS, 'x64-vpad.png') });
   await w.locator('[data-x64-vpad-hide]').click();
   await page.waitForFunction(() => !document.querySelector('[data-x64-vpad]'), null, { timeout: 5_000 });
-  await page.screenshot({ path: resolve(SHOTS, 'x64-vpad.png') });
   await closeAll();
 });
 await test('x64: runtime pack — the REAL msvcp140.dll (VC++ 2015–2022 Redistributable) is installed into C:\\Windows\\System32 on demand and std::cout works through it', async () => {
