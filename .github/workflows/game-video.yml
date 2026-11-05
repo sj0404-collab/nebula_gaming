@@ -1,0 +1,57 @@
+name: Game video (real game in the x64 emulator, with sound)
+
+# Records a short clip WITH SOUND of a real game running on the browser build of the emulator (JIT on), entirely on the
+# runner: Shattered Pixel Dungeon v4.0.2 — the official open-source (GPL) Windows build from the author's GitHub releases
+# (Java 17 + LWJGL 3 + libGDX, OpenGL through the WebGL2 bridge, music through the audio bridge).
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: 'clip length in seconds'
+        default: '15'
+      settle_frames:
+        description: 'frames the game must have presented before recording starts (title screen)'
+        default: '400'
+
+permissions:
+  contents: read
+
+jobs:
+  record:
+    name: Shattered Pixel Dungeon · title screen + music → mp4
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run build
+      - name: Playwright chromium + ffmpeg
+        run: |
+          npx playwright install --with-deps chromium
+          sudo apt-get install -y -q ffmpeg >/dev/null 2>&1 || true
+          ffmpeg -version | head -1
+      - name: Download the official Shattered Pixel Dungeon v4.0.2 Windows build (GPL, author's GitHub release)
+        run: |
+          curl -sSL -o /tmp/ShatteredPD-v4.0.2-Windows.zip https://github.com/00-Evan/shattered-pixel-dungeon/releases/download/v4.0.2/ShatteredPD-v4.0.2-Windows.zip
+          ls -la /tmp/ShatteredPD-v4.0.2-Windows.zip; unzip -l /tmp/ShatteredPD-v4.0.2-Windows.zip | head -15
+      - name: Run the game in the emulator and record frames + audio
+        run: node e2e/record.mjs /tmp/ShatteredPD-v4.0.2-Windows.zip --seconds "${{ github.event.inputs.seconds || '15' }}" --settle-frames "${{ github.event.inputs.settle_frames || '400' }}" --out e2e/video
+        timeout-minutes: 60
+      - name: Mux with ffmpeg (exact per-frame durations + captured PCM)
+        run: |
+          cd e2e/video
+          ffmpeg -loglevel error -y -f concat -safe 0 -i concat.txt -i audio.wav -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=25" -c:a aac -b:a 160k -shortest game.mp4
+          ffprobe -v error -show_entries stream=codec_type,codec_name,duration -of compact game.mp4
+          ls -la
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: game-video
+          path: |
+            e2e/video/game.mp4
+            e2e/video/title.png
+            e2e/video/title-screen.png
+            e2e/video/audio.wav
+          if-no-files-found: warn
