@@ -157,6 +157,8 @@ export class X64Runtime {
     let pref = '1'; try { pref = localStorage.getItem('nebula_jit') ?? '1'; } catch { /* no storage */ }
     const on = pref !== '0' ? (Number(pref) > 1 ? Number(pref) : 1) : 0;
     ex.x64_set_jit(on); this.jit.enabled = on > 0;
+    // diagnostics: localStorage nebula_jitskip = "lo:hi" → instruction kinds in [lo,hi) are interpreted instead of translated (bisecting a JIT bug)
+    try { const sk = localStorage.getItem('nebula_jitskip'); const f = (ex as unknown as { x64_jit_skip?: (lo: number, hi: number) => void }).x64_jit_skip; if (sk && f) { const [lo, hi] = sk.split(':').map(Number); if (Number.isFinite(lo) && Number.isFinite(hi)) f(lo, hi); } } catch { /* no storage */ }
   }
   private jitCompile(p: bigint, n: number, reuse: number): number {
     const ex = this.ex!; const t = performance.now();

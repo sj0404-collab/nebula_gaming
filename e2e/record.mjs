@@ -45,6 +45,8 @@ await ctx.addInitScript(() => {
   };
 });
 if (opt('--jit', '1') === '0') await ctx.addInitScript(() => { try { localStorage.setItem('nebula_jit', '0'); } catch { /* ignore */ } });
+const jitskip = opt('--jitskip', '');   // "lo:hi" → those instruction kinds stay on the interpreter (JIT bisection, see jit.inc g_jit_skip_lo/hi)
+if (jitskip) await ctx.addInitScript((t) => { try { localStorage.setItem('nebula_jitskip', t); } catch { /* ignore */ } }, jitskip);
 const gltrace = opt('--gltrace', '');   // "<afterFrame>:<calls>" → the GL bridge logs decoded calls into the report (see gl.ts)
 if (gltrace) await ctx.addInitScript((t) => { try { localStorage.setItem('nebula_gltrace', t); } catch { /* ignore */ } }, gltrace);
 const page = await ctx.newPage();
