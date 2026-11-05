@@ -86,11 +86,43 @@ static uint32_t t_packed(void) {
   for (int i = 0; i < N; i += 61) h = hf(h, vc[i]);
   return h32(h32(h, (uint32_t)z), (uint32_t)(z >> 32));
 }
+/* 5. the exact HotSpot / clang instruction forms, hand-written (x86-64 only): xorps-zero + cvtsi2ss/sd of negative ints, cvttss2si,
+ *    cvtss2sd/cvtsd2ss, sqrtss, xorps sign-mask negation from memory, minss/maxss, ucomiss branches */
+#if defined(__x86_64__)
+static const float signmask[4] __attribute__((aligned(16))) = { -0.0f, -0.0f, -0.0f, -0.0f };
+static uint32_t t_asm(void) {
+  uint32_t h = 2166136261u;
+  for (int rep = 0; rep < 3; rep++)
+    for (int i = 0; i < N; i++) {
+      int32_t k = ia[i]; int64_t l = la[i]; float f = fa[i], g = fb[i]; double d = da[i];
+      float r1, r2, r3, r4, r5; double r6, r7; int32_t i1, i2; int64_t l1;
+      __asm__ volatile("xorps %0, %0\n\tcvtsi2ss %1, %0" : "=&x"(r1) : "r"(k));                 /* (float)int, negative half the time */
+      __asm__ volatile("xorps %0, %0\n\tcvtsi2ss %1, %0" : "=&x"(r2) : "r"(l));                 /* (float)long */
+      __asm__ volatile("xorps %0, %0\n\tcvtsi2sd %1, %0" : "=&x"(r6) : "r"(k));                 /* (double)int */
+      __asm__ volatile("xorps %0, %0\n\tcvtsi2ssl %1, %0" : "=&x"(r3) : "m"(ia[i]));            /* memory form */
+      __asm__ volatile("cvttss2si %1, %0" : "=r"(i1) : "x"(f));
+      __asm__ volatile("cvtss2si %1, %0" : "=r"(i2) : "x"(g));
+      __asm__ volatile("cvttsd2si %1, %0" : "=r"(l1) : "x"(d));
+      __asm__ volatile("xorps %0, %0\n\tcvtss2sd %1, %0" : "=&x"(r7) : "x"(f));
+      __asm__ volatile("xorps %0, %0\n\tcvtsd2ss %1, %0" : "=&x"(r4) : "x"(d));
+      __asm__ volatile("xorps %0, %0\n\tsqrtss %1, %0" : "=&x"(r5) : "x"(g));
+      float neg; __asm__ volatile("movaps %1, %0\n\txorps %2, %0" : "=&x"(neg) : "x"(f), "m"(*(const float (*)[4])signmask));
+      float mx, mn; __asm__ volatile("movaps %1, %0\n\tmaxss %2, %0" : "=&x"(mx) : "x"(f), "x"(g)); __asm__ volatile("movaps %1, %0\n\tminss %2, %0" : "=&x"(mn) : "x"(f), "x"(g));
+      int fa_, fb_; __asm__ volatile("xor %0, %0\n\tucomiss %2, %1\n\tseta %b0" : "=&q"(fa_) : "x"(f), "x"(g)); __asm__ volatile("xor %0, %0\n\tucomiss %2, %1\n\tsetb %b0" : "=&q"(fb_) : "x"(f), "x"(g)); int flags = fa_ | (fb_ << 1);
+      h = hf(hf(hf(hf(hf(hd(hd(h, r6), r7), r1), r2), r3), r4), r5);
+      h = h32(h32(h32(h32(hf(hf(hf(h, neg), mx), mn), (uint32_t)i1), (uint32_t)i2), (uint32_t)l1), (uint32_t)flags);
+    }
+  return h;
+}
+#else
+static uint32_t t_asm(void) { return 0; }
+#endif
 int main(void) {
   printf("camera   %08x\n", t_camera());
   printf("scalar   %08x\n", t_scalar());
   printf("cmp      %08x\n", t_cmp());
   printf("packed   %08x\n", t_packed());
+  printf("asm      %08x\n", t_asm());
   printf("jitdiff done\n");
   return 0;
 }

@@ -1,0 +1,48 @@
+name: JIT differential (interpreter vs x86→wasm JIT)
+
+# Fast loop (~5 min) for JIT correctness: builds x64run + the wasm64 module, compiles emu/tests/jitdiff.c for x64 and x86
+# and requires the checksums printed under the native runner, the wasm interpreter and the wasm JIT to be identical.
+# On a mismatch it bisects by instruction kind (x64_jit_skip) and prints which kinds hide the difference.
+on:
+  workflow_dispatch:
+  push:
+    branches: [wip-dotnet, main]
+    paths: ['emu/x64/jit.inc', 'emu/x64/cpu.c', 'emu/tests/jitdiff.c', 'emu/tests/wasm_run.mjs', '.github/workflows/jitdiff.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  jitdiff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - name: Build x64run + wasm64 module
+        run: ZIG=zig ./emu/x64/build.sh
+      - name: jitdiff x64 + x86
+        run: |
+          set -o pipefail
+          zig cc -target x86_64-windows-gnu -O2 -o /tmp/jitdiff.exe emu/tests/jitdiff.c
+          zig cc -target x86-windows-gnu -O2 -o /tmp/jitdiff32.exe emu/tests/jitdiff.c
+          objdump -d -M intel /tmp/jitdiff.exe | grep -c 'cvtsi2ss\|cvttss2si\|xorps' || true
+          fail=0
+          for exe in /tmp/jitdiff.exe /tmp/jitdiff32.exe; do
+            ./emu/x64/x64run --quiet "$exe" | grep -a 'camera\|scalar\|cmp\|packed\|asm\|done' > /tmp/jd_native.txt
+            node emu/tests/wasm_run.mjs --max-ms 600000 --jit 0 "$exe" | grep -a 'camera\|scalar\|cmp\|packed\|asm\|done' > /tmp/jd_interp.txt
+            node emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 "$exe" | grep -a 'camera\|scalar\|cmp\|packed\|asm\|done' > /tmp/jd_jit.txt
+            echo "== $exe (native | wasm interpreter | wasm JIT)"; paste /tmp/jd_native.txt /tmp/jd_interp.txt /tmp/jd_jit.txt
+            grep -q 'jitdiff done' /tmp/jd_native.txt || { echo "::error::$exe did not finish natively"; fail=1; }
+            cmp -s /tmp/jd_native.txt /tmp/jd_interp.txt || { echo "::error::wasm interpreter differs from the native interpreter for $exe"; fail=1; }
+            if ! cmp -s /tmp/jd_jit.txt /tmp/jd_interp.txt; then
+              echo "::error::JIT output differs from the interpreter for $exe — bisecting by instruction kind"; fail=1
+              for r in 1:48 48:49 49:50 50:51 51:52 100:104 104:105 105:106 106:107 107:108 108:112 112:115; do
+                node emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 --jitskip $r "$exe" | grep -a 'camera\|scalar\|cmp\|packed\|asm' > /tmp/jd_skip.txt
+                if cmp -s /tmp/jd_skip.txt <(grep -a 'camera\|scalar\|cmp\|packed\|asm' /tmp/jd_interp.txt); then echo "skip $r: MATCH (the difference is inside kinds $r)"; else echo "skip $r: still differs"; fi
+              done
+            fi
+          done
+          exit $fail

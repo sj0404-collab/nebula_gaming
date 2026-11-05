@@ -81,7 +81,7 @@ enum { L_C = 0, L_CODE = 1, L_PC = 2, L_LIMIT = 3, L_EA = 4, L_HOST = 5, L_T0 = 
 #define CO_GS     ((u64)__builtin_offsetof(Cpu, gs_base))
 enum { F64_LOAD = 0x2B, F32_LOAD = 0x2A, F64_STORE = 0x39, F32_STORE = 0x38, F64_ADD = 0xA0, F64_SUB = 0xA1, F64_MUL = 0xA2, F64_DIV = 0xA3, F64_SQRT = 0x9F, F64_NEAREST = 0x9E,
        F32_ADD = 0x92, F32_SUB = 0x93, F32_MUL = 0x94, F32_DIV = 0x95, F32_SQRT = 0x91, F64_EQ = 0x61, F64_NE = 0x62, F64_LT = 0x63, F64_GT = 0x64, F64_GE = 0x66, F32_LT = 0x5D, F32_GT = 0x5E,
-       F64_PROMOTE = 0xBB, F32_DEMOTE = 0xB6, F64_CVT_I64S = 0xB9, F32_CVT_I64S = 0xB5, I32_TRUNC_F64S = 0xAA, I64_TRUNC_F64S = 0xB0, I64_EXT32_U = 0xAD };
+       F64_PROMOTE = 0xBB, F32_DEMOTE = 0xB6, F64_CVT_I64S = 0xB9, F32_CVT_I64S = 0xB4,   /* 0xB4 = f32.convert_i64_s (0xB5 is the UNSIGNED form: negative ints became huge positive floats — Shattered Pixel Dungeon's camera matrix) */ I32_TRUNC_F64S = 0xAA, I64_TRUNC_F64S = 0xB0, I64_EXT32_U = 0xAD };
 static void e_f64c(Buf *B, double v) { OP(0x44); bbytes(B, &v, 8); }
 enum { FN_STEP = 0, FN_MEM = 1, FN_ALU = 2, FN_SHIFT = 3, FN_BLOCK = 4, FN_TLB = 5 };
 enum { BR = 0x0C, BR_TABLE = 0x0E };

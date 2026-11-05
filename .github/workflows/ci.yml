@@ -116,9 +116,9 @@ jobs:
           zig cc -target x86_64-windows-gnu -O2 -o /tmp/jitdiff.exe emu/tests/jitdiff.c
           zig cc -target x86-windows-gnu -O2 -o /tmp/jitdiff32.exe emu/tests/jitdiff.c
           for exe in /tmp/jitdiff.exe /tmp/jitdiff32.exe; do
-            ./emu/x64/x64run --quiet "$exe" | grep -a 'camera\|scalar\|cmp\|packed\|done' > /tmp/jd_native.txt
-            node emu/tests/wasm_run.mjs --max-ms 600000 --jit 0 "$exe" | grep -a 'camera\|scalar\|cmp\|packed\|done' > /tmp/jd_interp.txt
-            node emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 "$exe" | grep -a 'camera\|scalar\|cmp\|packed\|done' > /tmp/jd_jit.txt
+            ./emu/x64/x64run --quiet "$exe" | grep -a 'camera\|scalar\|cmp\|packed\|asm\|done' > /tmp/jd_native.txt
+            node emu/tests/wasm_run.mjs --max-ms 600000 --jit 0 "$exe" | grep -a 'camera\|scalar\|cmp\|packed\|asm\|done' > /tmp/jd_interp.txt
+            node emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 "$exe" | grep -a 'camera\|scalar\|cmp\|packed\|asm\|done' > /tmp/jd_jit.txt
             echo "== $exe"; paste /tmp/jd_native.txt /tmp/jd_interp.txt /tmp/jd_jit.txt
             grep -q 'jitdiff done' /tmp/jd_native.txt
             cmp /tmp/jd_native.txt /tmp/jd_interp.txt
