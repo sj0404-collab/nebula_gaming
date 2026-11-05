@@ -1,3 +1,62 @@
+# v1.38.0 — x86→wasm JIT: hot code runs as WebAssembly (Android)
+
+**The emulator now compiles hot x86/x86-64 code to WebAssembly at run time** (`emu/x64/jit.inc`, 900 lines) instead of
+interpreting every instruction. It is a *region translator*: when a basic block has been entered 300 times the translator
+collects the blocks reachable from it through direct branches, `call`s and their returns (up to 160 blocks / 2400
+instructions inside one code mapping), and emits one small wasm module for the region — a single function with a
+`br_table` dispatch loop, so loops, `call`/`ret` pairs and `jcc` chains inside the region stay in compiled code. The page
+compiles the module with `new WebAssembly.Module` (synchronously, typically 0.1–0.4 ms), instantiates it against the
+emulator's memory64 and publishes its entry in the main module's exported function table (`table.grow`/`set` — table64);
+the interpreter calls it through a 2-way set-associative block table (64 K entries). Nothing is trusted blindly: every block
+re-checks its own code bytes on entry (self-modifying / regenerated code → the region is dropped and re-translated, exactly
+what the decode cache already did per instruction), the time slice (`icount` budget) is honoured on backward branches, page
+faults leave the region with the precise `rip`, and anything the translator does not handle is executed by the interpreter
+through a per-instruction call-out (`jit_step`) without leaving the region.
+
+**What is translated inline:** integer moves/ALU/shifts/test/cmp/lea/movzx/movsx/cmov/imul/push/pop/call/ret/jcc/jmp with
+**flags computed only when a later instruction reads them** (per-block liveness), the 16-bit (`66`) forms, `fs:`/`gs:`
+segment forms (TEB/TLS access, `__readgsqword`), 8-bit immediates/tests, and the SSE scalar and packed subset games lean on:
+`movss/movsd/movaps/movups/movdqa/movdqu/movd/movq`, `add/sub/mul/div ss/sd/ps/pd`, `sqrt`, `min/max` (unordered/equal →
+source operand, like the interpreter), `and/andn/or/xor` (`ps` and `pd` and the integer `pand/pandn/por/pxor`), `comiss/ucomiss/
+comisd/ucomisd` (`ZF|PF|CF` on unordered), `cvtsi2ss/sd`, `cvtss2sd/cvtsd2ss`, `cvt(t)ss2si/sd2si` with the exact x86 overflow
+result (`INT_MIN`), bit-identical to the interpreter (f32 arithmetic performed in f64 then rounded, as before). Memory
+accesses go through a module-local TLB probe (4 K pages, same table as the interpreter).
+
+**Measured in the sandbox (Node 24 V8, same engine as Chrome):**
+
+| | interpreter (v1.37) | JIT (v1.38) |
+|---|---|---|
+| `bench.exe` sieve 2 M | 1002 ms | **81–87 ms** |
+| `bench.exe` mandelbrot 200×100×200 (SSE2) | 454 ms | **20–30 ms** |
+| `bench.exe` memcpy 128 MB + 1 M random reads | 410 ms | **82–119 ms** |
+| `bench.exe` total | 35 MIPS | **245–320 MIPS** |
+| CPython 3.12 `demo.py` (270 M instructions, 2300 regions) | 10.3–10.8 s | **5.2 s** |
+
+CPython is the hard case — a 2.5 MB interpreter with computed-goto dispatch, i.e. an indirect jump after every bytecode,
+which ends a region; those exits (6.4 M) and the remaining 15 M interpreted instructions in cold code are where the rest of
+its time goes. Tight numeric/game loops get ×7–×12; mixed code ×2. Correctness: all 54 test executables (console, GUI,
+x86 and x64, SEH/C++ EH, .NET, Lua, SQLite, 7-Zip…) produce byte-identical output with the JIT on and off; CPython's
+output is identical to the interpreter's.
+
+**In the app:** nothing to configure — the JIT is on whenever the browser can grow the exported table (Chrome/Android
+WebView 119+). The run report shows `x86→wasm JIT: N regions (KB, compile ms)` plus the counters (`exec` region entries,
+`dsteps` interpreter call-outs, `dinterp` instructions interpreted outside regions, the top stepped opcodes). `localStorage
+nebula_jit = 0` switches it off, a number > 1 sets the hot threshold. New `e2e` check: `bench.exe` in the browser must
+compile regions, print the same results and run the sieve in < 600 ms.
+
+**Also:** the interpreter's decode cache grew from 32 K to 128 K entries (large programs such as CPython and the JVM no longer
+thrash it: `nodc` 1094 → 76); `emu/tests/wasm_run.mjs` runs any test executable through the real wasm64 module under Node
+(`--jit 0|1|N`, `--mount`, `JIT_DUMP=1` for the stats) — the sandbox-side equivalent of the browser run.
+
+**Honest limits.** Still an emulator, not native: ~250–320 MIPS peak on a desktop core in V8, less on a phone (expect
+×3–×8 over v1.37 on game loops, not more). Not translated yet (interpreted through call-outs, correct but slow): x87, the
+packed-integer SSE2 set (`paddd`, `pshufd`, `punpck*`, `cvtdq2ps`, `cmpps` — the top stepped opcodes of NebulaStrike32),
+`bt`/`bts`, `div`/`idiv`, string ops (`rep movs/stos`), `imul` with live flags, `adc`/`sbb`. Indirect jumps/calls
+(function pointers, vtables, computed goto) and `ret` to a caller outside the region end the region. Regions are compiled
+on the main thread (0.1–0.4 ms each, 0.2–1.5 s in total for a big program — visible as a slightly slower first minute).
+V8 runs a region in its baseline tier until it is hot enough for the optimising tier (same policy as for any wasm). No
+D3D9, no gamepad yet — next.
+
 # v1.37.0 — Notepad++ Preferences + Replace, real TrackMouseEvent, PuTTY panels, Q-Dir fonts (Android)
 
 **Notepad++ Settings → Preferences (x64 and x86).** The dialog crashed with `ColourPicker::init : CreateWindowEx() function
