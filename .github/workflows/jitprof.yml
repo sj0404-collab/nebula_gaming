@@ -1,0 +1,50 @@
+name: JIT profile (where the time goes)
+
+# Builds a wasm64 module WITH function names, runs emu/tests/bench.c (bytecode-VM / calls / memcpy / hash / fpu / bits workloads)
+# natively, under the wasm interpreter and under the x86→wasm JIT with node --cpu-prof, and prints the self-time table
+# (emu/tools/profsum.mjs): how much of the run is JIT-generated code vs the dispatcher, TLB misses, interpreter fallbacks.
+on:
+  workflow_dispatch:
+    inputs:
+      exe_args:
+        description: extra arguments for wasm_run.mjs (e.g. --jit 8)
+        default: ''
+  push:
+    branches: [wip-dotnet, main]
+    paths: ['emu/tests/bench.c', 'emu/tools/profsum.mjs', '.github/workflows/jitprof.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - name: Build x64run + wasm64 module (with names)
+        run: |
+          ZIG=zig ./emu/x64/build.sh
+          cd emu/x64
+          zig cc -target wasm64-freestanding -O2 -fno-builtin-memcpy -fno-builtin-memset \
+            -Wl,--no-entry -Wl,--export-memory -Wl,-z,stack-size=1048576 -Wl,--initial-memory=67108864 -Wl,--max-memory=4294901760 \
+            -Wl,--export=__heap_base -Wl,--export-table -Wl,--growable-table \
+            lib.c cpu.c pe.c win32.c gdi.c vfs.c api.c dxbc.c host_wasm.c -o /tmp/nebula_x64.names.wasm
+          ls -la /tmp/nebula_x64.names.wasm
+      - name: bench x64 + x86 — native / interpreter / JIT
+        run: |
+          zig cc -target x86_64-windows-gnu -O2 -o /tmp/bench.exe emu/tests/bench.c
+          zig cc -target x86-windows-gnu -O2 -o /tmp/bench32.exe emu/tests/bench.c
+          mkdir -p /tmp/prof
+          for exe in /tmp/bench.exe /tmp/bench32.exe; do
+            echo "=== $exe native interpreter (x64run)"; ./emu/x64/x64run --quiet --stats "$exe" 2>&1 | tail -12
+            echo "=== $exe wasm interpreter"; node emu/tests/wasm_run.mjs --max-ms 1500000 --jit 0 "$exe" 2>&1 | tail -12
+            echo "=== $exe wasm JIT (profiled)"; node --cpu-prof --cpu-prof-dir=/tmp/prof --cpu-prof-name=$(basename $exe).cpuprofile emu/tests/wasm_run.mjs --wasm /tmp/nebula_x64.names.wasm --max-ms 1500000 --jit 1 ${{ inputs.exe_args }} "$exe" 2>&1 | tail -12
+            echo "=== $exe JIT profile"; node emu/tools/profsum.mjs /tmp/prof/$(basename $exe).cpuprofile 40
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: jit-profile, path: /tmp/prof }
