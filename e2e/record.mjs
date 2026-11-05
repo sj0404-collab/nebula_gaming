@@ -103,6 +103,15 @@ for (let k = 0; k < actions.length; k++) {
   const tA = Date.now(); while (Date.now() - tA < 600000) { const f = await framesNow(); if (f - f0 >= want) break; const stA = await status(); if (stA !== 'running') break; await sleep(1000); }
   console.log(`  → frames ${f0} → ${await framesNow()} in ${((Date.now() - tA) / 1000).toFixed(0)} s, status=${await status()}`);
   await page.screenshot({ path: resolve(OUT, `step-${k}.png`) });
+  if (await status() !== 'running') {   /* the program died on this action: keep its console and report, then stop here */
+    writeFileSync(resolve(OUT, 'console.txt'), await page.evaluate(() => document.querySelector('[data-x64-console]')?.textContent || ''));
+    await page.locator('[data-x64-tab="report"]').click().catch(() => {}); await sleep(500);
+    writeFileSync(resolve(OUT, 'report-stopped.txt'), await page.evaluate(() => document.querySelector('[data-x64-report]')?.textContent || ''));
+    console.log(`program is ${await status()} after action ${k}; console tail:\n` + (await page.evaluate(() => document.querySelector('[data-x64-console]')?.textContent || '')).slice(-3000));
+    const hs = await page.evaluate(() => { const rt = window.__x64; if (!rt) return []; return rt.vfsList().filter(e => !e.dir && /hs_err.*\.log$/i.test(e.path)).map(e => ({ path: e.path, text: new TextDecoder().decode(rt.vfsRead(e.path) || new Uint8Array()) })); }).catch(() => []);
+    for (const f of hs) { writeFileSync(resolve(OUT, f.path.split('\\').pop()), f.text); console.log(`${f.path}:\n` + f.text.slice(0, 8000)); }
+    await browser.close(); process.exit(2);
+  }
 }
 // ---- record ----
 const acT0 = await page.evaluate(() => (window.__acs[0] ? window.__acs[0].currentTime : 0));
