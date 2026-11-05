@@ -74,4 +74,5 @@ jobs:
             e2e/video/report.txt
             e2e/video/gltrace.txt
             e2e/video/step-*.png
+            e2e/video/report-stopped.txt
           if-no-files-found: warn

@@ -150,6 +150,11 @@ await w.locator('[data-x64-tab="report"]').click().catch(() => {}); await sleep(
 const rep = await page.evaluate(() => document.querySelector('[data-x64-report]')?.textContent || '');
 const repLines = rep.split('\n').filter(l => /\[gl\]|\[audio\]|GL_|wgl|fault|exception|not available|ignored|unsupported/i.test(l));
 console.log(`report: ${rep.length} chars; ${repLines.length} interesting lines:\n${repLines.slice(0, 120).join('\n')}\n--- report tail ---\n${rep.slice(-6000)}`);
+// stop the program → the report shows the JIT statistics (regions, steps, per-opcode interpreter fallbacks) and API counters
+await w.locator('[data-x64-stop]').click().catch(() => {}); await sleep(2500);
+const rep2 = await page.evaluate(() => document.querySelector('[data-x64-report]')?.textContent || '');
+const jl = rep2.split('\n').filter(l => /JIT|regions|MIPS|insns|API calls|apitop|steps/i.test(l)); console.log(`after stop: ${jl.slice(0, 12).join('\n').slice(0, 4000)}`);
+writeFileSync(resolve(OUT, 'report-stopped.txt'), rep2);
 const tr = await page.evaluate(() => window.__gltrace || []); if (tr.length) { console.log(`gltrace: ${tr.length} lines\n${tr.slice(0, 400).join('\n')}`); writeFileSync(resolve(OUT, 'gltrace.txt'), tr.join('\n')); }
 writeFileSync(resolve(OUT, 'report.txt'), rep);
 await browser.close();
