@@ -46,7 +46,7 @@ static Wnd g_wnd[MAX_WND]; static int g_zseq, g_cseq;
 static int g_focus = -1, g_capture = -1, g_active = -1;
 static int g_mouse_x, g_mouse_y, g_mouse_btn;
 /* host-input diagnostics for the report (did the click reach a window, which one, was it dispatched to the guest procedure) */
-static struct { int host_ev, lb_posted, lb_dispatched, key_posted, key_dispatched, last_t, last_lx, last_ly, last_pid; } g_instat;
+static struct { int host_ev, lb_posted, lb_dispatched, key_posted, key_dispatched, last_t, last_lx, last_ly, last_pid, last_x, last_y; } g_instat;
 static u64 g_slot_trackbar, g_slot_updown, g_slot_comboex, g_slot_defview, g_slot_tooltip, g_slot_button, g_slot_static, g_slot_edit, g_slot_combo, g_slot_listbox, g_slot_dialog, g_slot_progress, g_slot_unsupported, g_slot_scrollbar, g_slot_msgbox, g_slot_combolist, g_slot_link, g_slot_menu, g_slot_status, g_slot_toolbar, g_slot_tab, g_slot_subclass;
 static u64 g_dlg_font, g_ui_font; static int g_msgbox_auto = 1;
 /* registered window classes */
@@ -202,7 +202,7 @@ void w32_mouse(Win32 *w, int x, int y, int ev) {
   tme_mouse(w, x, y, t);
   if (!wnd_enabled_chain(t)) { /* a disabled window (owner of a modal dialog): mouse input is dropped, like Windows */ if (ev != 0) return; }
   int cx, cy; wnd_client_origin(t, &cx, &cy); int lx = x - cx, ly = y - cy; u64 lp = (u64)(u16)lx | ((u64)(u16)ly << 16);
-  if (ev == 1) { g_instat.lb_posted++; g_instat.last_t = t; g_instat.last_lx = lx; g_instat.last_ly = ly; g_instat.last_pid = g_wnd[t].pid; }
+  if (ev == 1) { g_instat.lb_posted++; g_instat.last_t = t; g_instat.last_lx = lx; g_instat.last_ly = ly; g_instat.last_pid = g_wnd[t].pid; g_instat.last_x = x; g_instat.last_y = y; }
   if (ev == 1 && ly < 0 && mt < 0 && menu_bar_hit(w, t, x, y) != -1) { /* the menu bar: WM_NCLBUTTONDOWN(HTMENU) → DefWindowProc opens the popup */ post_msg_to(w, HWND_OF(t), 0xA1, 5, (u64)(u16)(x + SCREEN_X0) | ((u64)(u16)(y + SCREEN_Y0) << 16)); return; }
   if (ev == 7) { /* wheel: wParam high word = delta, lParam = screen coords; goes to the focus window like Windows */ int kt = wnd_of(key_target()); if (kt >= 0 && mt < 0) t = kt; post_msg_to(w, HWND_OF(t), 0x20A, ((u64)(u16)(s16)wheel << 16) | (u64)g_mouse_btn, (u64)(u16)(x + SCREEN_X0) | ((u64)(u16)(y + SCREEN_Y0) << 16)); return; }
   if (ev == 1 || ev == 3) { /* double clicks: a second press within GetDoubleClickTime (500 ms) and 4 px on the same window becomes WM_xBUTTONDBLCLK when the class has CS_DBLCLKS (all built-in controls do) */ static double dc_t; static int dc_x, dc_y, dc_t_wnd, dc_ev; double now = host_now_ms(); int dbl = dc_t_wnd == t + 1 && dc_ev == ev && now - dc_t < 500 && x - dc_x <= 4 && dc_x - x <= 4 && y - dc_y <= 4 && dc_y - y <= 4 && (g_wnd[t].builtin || (g_wnd[t].cls_style & 8));
@@ -212,8 +212,10 @@ void w32_mouse(Win32 *w, int x, int y, int ev) {
 int w32_input_stats(char *buf, int cap) {
   int t = g_instat.last_t; const char *txt = (g_instat.lb_posted && t >= 0 && t < MAX_WND && g_wnd[t].used && g_wnd[t].text) ? g_wnd[t].text : "";
   char tx[40]; int n = 0; for (const char *p = txt; *p && n < 39; p++) tx[n++] = (*p >= '0' && *p <= '9') || (*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ? *p : '_'; tx[n] = 0;
-  return e_snprintf(buf, cap, "input!mouse_events:%d,input!lbdown_posted:%d,input!lbdown_dispatched:%d,input!keys_posted:%d,input!keydown_dispatched:%d,input!last_target_wnd%d_pid%d_%s_at_%d_%d:1",
-    g_instat.host_ev, g_instat.lb_posted, g_instat.lb_dispatched, g_instat.key_posted, g_instat.key_dispatched, t, g_instat.last_pid, tx, g_instat.last_lx, g_instat.last_ly);
+  int ok = g_instat.lb_posted && t >= 0 && t < MAX_WND && g_wnd[t].used;
+  return e_snprintf(buf, cap, "input!mouse_events:%d,input!lbdown_posted:%d,input!lbdown_dispatched:%d,input!keys_posted:%d,input!keydown_dispatched:%d,input!last_target_wnd%d_pid%d_%s_screen_%d_%d_client_%d_%d:1,input!wnd%d_rect_%d_%d_%dx%d_nc_%d_%d_parent%d_style%x:1",
+    g_instat.host_ev, g_instat.lb_posted, g_instat.lb_dispatched, g_instat.key_posted, g_instat.key_dispatched, t, g_instat.last_pid, tx, g_instat.last_x, g_instat.last_y, g_instat.last_lx, g_instat.last_ly,
+    t, ok ? g_wnd[t].x : 0, ok ? g_wnd[t].y : 0, ok ? g_wnd[t].w : 0, ok ? g_wnd[t].h : 0, ok ? g_wnd[t].ncx : 0, ok ? g_wnd[t].ncy : 0, ok ? g_wnd[t].parent : -2, ok ? (unsigned)g_wnd[t].style : 0u);
 }
 void w32_wheel(Win32 *w, int delta) { di_mouse(w, 0, 0, 0, delta); if (raw_mouse(w, 0, 0, 7, delta)) return; int t = wnd_alive(g_focus) ? g_focus : hit_test(g_mouse_x, g_mouse_y); if (t < 0) return; post_msg_to(w, HWND_OF(t), 0x20A, ((u64)(u16)(s16)delta << 16) | (u64)g_mouse_btn, (u64)(u16)(g_mouse_x + SCREEN_X0) | ((u64)(u16)(g_mouse_y + SCREEN_Y0) << 16)); }
 void w32_tick(Win32 *w) { (void)w; }

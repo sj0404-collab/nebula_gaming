@@ -94,6 +94,7 @@ const actions = (opt('--actions', '') || '').split(';').map(a => a.trim()).filte
 for (let k = 0; k < actions.length; k++) {
   const a = actions[k]; const m = /^(click|dblclick|key|wait|type):?([^@]*)(?:@(\d+))?$/.exec(a); if (!m) { console.log(`bad action: ${a}`); continue; }
   const want = Number(m[3] || 60); const f0 = await framesNow(); const box = await screen.boundingBox();
+  if (k === 0) console.log(`screen element ${JSON.stringify(box)}, canvas ${JSON.stringify(await screen.evaluate(c => ({ w: c.width, h: c.height, cw: c.clientWidth, ch: c.clientHeight })))}`);
   if ((m[1] === 'click' || m[1] === 'dblclick') && box) { const [fx, fy] = m[2].split(',').map(Number); const x = box.x + box.width * fx, y = box.y + box.height * fy;
     await page.mouse.move(x, y); await sleep(150); await page.mouse.down(); await sleep(120); await page.mouse.up(); if (m[1] === 'dblclick') { await sleep(80); await page.mouse.down(); await sleep(80); await page.mouse.up(); } console.log(`action ${k}: ${m[1]} at ${Math.round(x)},${Math.round(y)} (${fx},${fy})`); }
   else if (m[1] === 'key') { await page.keyboard.press(m[2]); console.log(`action ${k}: key ${m[2]}`); }
