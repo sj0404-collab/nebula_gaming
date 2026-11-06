@@ -54,8 +54,13 @@ const firstFrameMs = Date.now() - tRun;
 let tKeys = 0;
 for (const kv of keys.split(';').map(x => x.trim()).filter(Boolean)) {
   const [key, atRaw] = kv.split('@'); const at = Number(atRaw || 0); if (at > tKeys) await sleep(Math.min(at - tKeys, 900000)); tKeys = Math.max(tKeys, at);
-  await w.locator('[data-x64-tab="screen"]').click().catch(() => {}); const scr = w.locator('[data-x64-screen]').first(); await scr.focus().catch(() => {}); await scr.press(key).catch(e => console.log('key failed:', e.message));
-  await sleep(1500); await page.screenshot({ path: resolve(SHOTS, `site-${tag}-key-${key}-${at}.png`) }); console.log(`key ${key} @${at} → status=${await status()} bar=${await bar()}`);
+  await w.locator('[data-x64-tab="screen"]').click().catch(() => {}); const scr = w.locator('[data-x64-screen]').first();
+  if (key.startsWith('click:')) {   /* click:0.5,0.6 — fraction of the guest screen */
+    const [fx, fy] = key.slice(6).split(',').map(Number); const bb = await scr.boundingBox(); if (bb) await page.mouse.click(bb.x + bb.width * fx, bb.y + bb.height * fy); else console.log('click failed: no screen box');
+  } else {   /* the canvas is not focusable: focus its keyboard host (the parent div with tabIndex=0), then type */
+    await scr.locator('xpath=..').focus().catch(e => console.log('focus failed:', e.message)); await page.keyboard.press(key).catch(e => console.log('key failed:', e.message));
+  }
+  await sleep(1500); await page.screenshot({ path: resolve(SHOTS, `site-${tag}-key-${key.replace(/[^a-z0-9]+/gi, '_')}-${at}.png`) }); console.log(`key ${key} @${at} → status=${await status()} bar=${await bar()}`);
 }
 await sleep(Math.max(0, Math.min(wait, 900000) - tKeys));
 const st = await status();
