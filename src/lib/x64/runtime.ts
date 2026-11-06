@@ -133,7 +133,9 @@ export class X64Runtime {
         host_gl_call: (id: number, args: bigint, n: number) => this.glb.call(id, new BigUint64Array(this.ex!.memory.buffer, Number(args), n)),
         host_gl_present: (p: bigint, w: number, h: number, sx: number, sy: number): number => {
           const cv = this.glb.surface();
-          if (cv && this.onGlPresent && this.onGlPresent(cv, sx, sy, w, h)) { this.lastGl = { canvas: cv, x: sx, y: sy, w, h }; return 1; }   // GPU composition (no readPixels)
+          if (cv && this.onGlPresent) {
+            if (!this.glb.swapReady()) return 2;   // the GPU still owes two frames: the guest's SwapBuffers waits (bounded latency, like a real swap chain)
+            if (this.onGlPresent(cv, sx, sy, w, h)) { this.glb.swapFence(); this.lastGl = { canvas: cv, x: sx, y: sy, w, h }; return 1; } }   // GPU composition (no readPixels)
           this.lastGl = null; this.glb.present(new Uint32Array(this.ex!.memory.buffer, Number(p), w * h), w, h); return 0; },
         host_gl_flip: () => { this.frames++; this.onGlFlip?.(); },
         // sound → the device's audio output (src/lib/x64/audio.ts)

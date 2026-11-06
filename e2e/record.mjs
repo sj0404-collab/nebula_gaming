@@ -6,7 +6,7 @@
 // out/audio.wav, out/concat.txt (exact per-frame durations), out/title.png. ffmpeg muxes them into out/game.mp4 (workflow).
 import { chromium } from 'playwright';
 import { spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { resolve, basename } from 'node:path';
 
 const argv = process.argv.slice(2); const file = argv[0];
@@ -189,4 +189,4 @@ const tr = await page.evaluate(() => window.__gltrace || []); if (tr.length) { c
 writeFileSync(resolve(OUT, 'report.txt'), rep);
 await browser.close();
 if (server) { try { process.kill(-server.pid); } catch { /* ignore */ } }
-process.exit(stamps.length > 0 ? 0 : 1);
+process.exit(stamps.length > 0 || (recOk && existsSync(resolve(OUT, 'screen.webm'))) ? 0 : 1);   // the MediaRecorder video is the deliverable; screenshots are a fallback

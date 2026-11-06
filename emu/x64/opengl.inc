@@ -110,12 +110,13 @@ static void s_wglChoosePixelFormatARB(Cpu *c) {
   u32 n = 0; for (int f = 1; f <= GL_NFORMATS && n < maxf; f++) if (ok[f]) wr32(c, outf + 4ull * n++, (u32)f);
   wr32(c, outn, n); RET(1); }
 /* ---- SwapBuffers: WebGL surface → window client area; with a swap interval the call paces the loop like vsync (16.7 ms per frame) ---- */
-static void gl_present_window(Win32 *w, int wnd) {
-  if (!w->screen || g_gl_host != 1) return; int cw = g_gl_surf_w, ch = g_gl_surf_h; size_t need = (size_t)cw * ch;
+static int g_gl_wait_gpu;   /* SwapBuffers is waiting for the GPU to finish earlier frames (not the vsync pacing sleep) */
+static int gl_present_window(Win32 *w, int wnd) {   /* 0 = the GPU still owes frames: call again in a moment */
+  if (!w->screen || g_gl_host != 1) return 1; int cw = g_gl_surf_w, ch = g_gl_surf_h; size_t need = (size_t)cw * ch;
   if (need > g_gl_present_cap) { if (g_gl_present) emu_free(g_gl_present); g_gl_present = emu_alloc(need * 4); g_gl_present_cap = g_gl_present ? need : 0; }
-  if (!g_gl_present) return;
+  if (!g_gl_present) return 1;
   int ox = 0, oy = 0; if (wnd >= 0) wnd_client_origin(wnd, &ox, &oy);
-  int gpu = host_gl_present(g_gl_present, cw, ch, ox, oy);   /* 1: the browser composites the WebGL surface on the GPU — no readback; the client area becomes a key-colour hole */
+  int gpu = host_gl_present(g_gl_present, cw, ch, ox, oy); if (gpu == 2) return 0;   /* 1: the browser composites the WebGL surface on the GPU — no readback; the client area becomes a key-colour hole */
   int x0 = ox < 0 ? -ox : 0, y0 = oy < 0 ? -oy : 0, x1 = cw, y1 = ch; if (ox + x1 > w->screen_w) x1 = w->screen_w - ox; if (oy + y1 > w->screen_h) y1 = w->screen_h - oy;
   /* top-level windows and popups above the GL window keep their pixels (SwapBuffers never paints over a dialog or a menu, as on Windows) */
   int R[16][4]; int nr = 0; { int r = wnd >= 0 ? wnd_root(wnd) : -1; int rz = r >= 0 ? g_wnd[r].zseq : 0;
@@ -136,11 +137,13 @@ static void gl_present_window(Win32 *w, int wnd) {
         else { e_memcpy(row + x, src + x, (size_t)(next - x) * 4); changed = 1; } }
       x = next; } }
   if (changed || !gpu) w->dirty = 1; else if (!w->dirty) host_gl_flip();   /* only the GL image changed: the presenter redraws with the new surface, no framebuffer upload */
-  w->blits_since_yield++; }
+  w->blits_since_yield++; return 1; }
 static void s_SwapBuffers(Cpu *c) {
   Win32 *w = W; int wnd = gl_dc_wnd(w, ARG(0)); if (wnd < 0) { w->last_error = 6; RET(0); return; }
   double now = host_now_ms();
-  if (!w->sleeping) { gl_host_ok(w, wnd); gl_present_window(w, wnd);
+  if (w->sleeping && g_gl_wait_gpu) { if (now < w->sleep_until_ms) { w->block = BLOCK_SLEEP; w32_retry_yield(c); return; } w->sleeping = 0; g_gl_wait_gpu = 0; }
+  if (!w->sleeping) { gl_host_ok(w, wnd);
+    if (!gl_present_window(w, wnd)) { g_gl_wait_gpu = 1; w->sleeping = 1; w->sleep_until_ms = now + 1.0; w->block = BLOCK_SLEEP; w32_retry_yield(c); return; }   /* swap chain full: wait ~1 ms and present again */
     double period = g_gl_swap_interval ? 16.6667 * g_gl_swap_interval : 0, until = g_gl_last_swap_ms + period; if (until < now) until = now; g_gl_last_swap_ms = until;
     if (period > 0 && until > now + 0.5) { w->sleeping = 1; w->sleep_until_ms = until; w->block = BLOCK_SLEEP; w32_retry_yield(c); return; }
     RET(1); return; }

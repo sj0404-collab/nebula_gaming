@@ -215,6 +215,14 @@ export class GLBridge {
       this.warn('exc:' + this.names[id], `${this.names[id]}: ${(e as Error).message}`); this.setErr(GL.INVALID_OPERATION); return 0n;
     }
   }
+  /** swap-chain pacing: at most two presented frames may still be in flight on the GPU (fences polled without blocking) */
+  private fences: WebGLSync[] = [];
+  swapReady(maxInFlight = 2): boolean {
+    const gl = this.gl; if (!gl) return true;
+    while (this.fences.length && gl.getSyncParameter(this.fences[0], gl.SYNC_STATUS) === gl.SIGNALED) { gl.deleteSync(this.fences[0]); this.fences.shift(); }
+    return this.fences.length < maxInFlight;
+  }
+  swapFence(): void { const gl = this.gl; if (!gl) return; const f = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); if (f) this.fences.push(f); gl.flush(); }
   /** the WebGL drawing surface (null until the program created a context) — composited on the GPU by present.ts */
   surface(): OffscreenCanvas | HTMLCanvasElement | null { return this.gl ? this.canvas : null; }
   /** host_gl_present fallback (no presenter on screen): default framebuffer → BGRA rows (top first) at dst (wasm offset) */

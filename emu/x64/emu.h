@@ -76,7 +76,7 @@ void   host_gfx_free(int id);
 int    host_gl_init(int w, int h);                                         /* (re)size the drawing surface; 1 = WebGL2 available, 0 = none on this host */
 int    host_gl_probe(int id);                                              /* 1 if the host implements entry point id (wglGetProcAddress is honest) */
 u64    host_gl_call(int id, const u64 *args, int n);                       /* one GL call: raw 64-bit argument words (float/double bit patterns, guest pointers) */
-int    host_gl_present(u32 *bgra, int w, int h, int sx, int sy);           /* SwapBuffers: 0 = drawing surface copied to bgra (top row first); 1 = the host composites the surface itself at screen (sx,sy) — the caller fills that rectangle with GL_KEY_COLOR */
+int    host_gl_present(u32 *bgra, int w, int h, int sx, int sy);           /* SwapBuffers: 0 = drawing surface copied to bgra (top row first); 1 = the host composites the surface itself at screen (sx,sy) — the caller fills that rectangle with GL_KEY_COLOR; 2 = GPU busy, present again later */
 void   host_gl_flip(void);                                                 /* GPU-composited SwapBuffers with an unchanged software screen: redraw only */
 #define GL_KEY_COLOR 0x01FE01FDu                                            /* screen pixels of this value are replaced by the live GL surface on the GPU (present.ts) */
 extern struct Cpu *g_gl_cpu;                                               /* CPU whose guest memory the host reads during host_gl_call (api.c: x64_gl_ptr) */
