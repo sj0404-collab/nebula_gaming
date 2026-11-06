@@ -5,7 +5,7 @@ export class FramePresenter {
   readonly renderer: string;
   private tex: WebGLTexture; private prog: WebGLProgram; private quad: WebGLBuffer; private uScale: WebGLUniformLocation | null;
   private glTex: WebGLTexture; private uSize: WebGLUniformLocation | null; private uGlRect: WebGLUniformLocation | null; private uHasGl: WebGLUniformLocation | null; private uGl: WebGLUniformLocation | null;
-  private glRect: [number, number, number, number] | null = null;
+  private glRect: [number, number, number, number] | null = null; private glChecks = 0;
   private texW = 0; private texH = 0;
   frames = 0;
 
@@ -80,7 +80,7 @@ void main(){
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false); gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src as TexImageSource);
       gl.activeTexture(gl.TEXTURE0);
-      if (gl.getError()) { this.glRect = null; return false; }
+      if (this.glChecks < 3) { this.glChecks++; if (gl.getError()) { this.glRect = null; return false; } }   // validate the first uploads only: getError is a synchronous GPU-process round trip
       this.glRect = [x, y, w, h]; return true;
     } catch { gl.activeTexture(gl.TEXTURE0); this.glRect = null; return false; }
   }
