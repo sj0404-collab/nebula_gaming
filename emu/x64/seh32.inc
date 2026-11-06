@@ -69,7 +69,7 @@ static void raise_exception32(Cpu *c, u32 code, u32 flags, u32 nargs, const u64 
   if (code == 0xc0000005u) seh_log("[x64]   eax=%llx ecx=%llx edx=%llx ebx=%llx esp=%llx ebp=%llx esi=%llx edi=%llx [esp]=%x [esp+4]=%x [esp+8]=%x [esp+c]=%x\n", (unsigned long long)c->r[RAX], (unsigned long long)c->r[RCX], (unsigned long long)c->r[RDX], (unsigned long long)c->r[RBX], (unsigned long long)c->r[RSP], (unsigned long long)c->r[RBP], (unsigned long long)c->r[RSI], (unsigned long long)c->r[RDI], rd32(c, c->r[RSP]), rd32(c, c->r[RSP] + 4), rd32(c, c->r[RSP] + 8), rd32(c, c->r[RSP] + 12));
   if (code == 0xc0000005u) { u64 bp = c->r[RBP]; for (int k = 0; k < 8 && bp; k++) { seh_log("[x64]   frame ebp=%llx ret=%x args %x %x %x %x\n", (unsigned long long)bp, rd32(c, bp + 4), rd32(c, bp + 8), rd32(c, bp + 12), rd32(c, bp + 16), rd32(c, bp + 20)); bp = rd32(c, bp); } }
   if (address == 0 && code == 0xC0000005) seh_log("[x64]   call to NULL from 0x%x (esp 0x%llx)\n", rd32(c, c->r[RSP]), (unsigned long long)c->r[RSP]);
-  if (address == 0 && code == 0xC0000005) { char hb[600]; int n = 0; for (int k = 24; k >= 1; k--) n += e_snprintf(hb + n, sizeof hb - n, " %llx", (unsigned long long)(c->hist[(c->hist_i - k) & 4095] & ~(3ull << 62))); seh_log("[x64]   last blocks:%s\n", hb); }
+  if (code == 0xC0000005) { char hb[1200]; int n = 0; for (int k = 96; k >= 1; k--) { n += e_snprintf(hb + n, sizeof hb - n, " %llx", (unsigned long long)(c->hist[(c->hist_i - k) & 4095] & ~(3ull << 62))); if (k == 49) { seh_log("[x64]   last blocks:%s\n", hb); n = 0; } } seh_log("[x64]   last blocks:%s\n", hb); }
   if (w->nveh) { w->cont[ci].data[5] = 1; w->cont[ci].idx = 1; guest_call(c, w->veh[0], ptrs, 0, 0, 0); return; }
   dispatch32_step(c, ci);
 }
