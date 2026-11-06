@@ -1409,6 +1409,7 @@ static void s_dsign(Cpu *c) { RET(c->x[0].f64[0] < 0 ? 1 : 0); }
 #include "win32_clr.inc"
 #include "win32_acl.inc"
 #include "win32_bcrypt.inc"
+#include "win32_msi.inc"
 #include "win32_x86.inc"
 /* ---------- table ---------- */
 #define S(n) { "", #n, s_##n }
