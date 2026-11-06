@@ -274,7 +274,7 @@ export class X64Runtime {
     this.raf = requestAnimationFrame(() => this.frame());
   }
   /** one host slice: run guest code for up to ~12 ms. A guest that only pauses briefly (a JVM parks its threads for a
-   *  millisecond at a time) is waited for inside the slice instead of handing the time to a 4-16 ms host timer. */
+   *  millisecond at a time, SwapBuffers waits for the GPU) is re-polled through a MessageChannel hop instead of a 4-16 ms host timer. */
   private frame() {
     if (!this.running || !this.ex) return;
     const ex = this.ex; const start = performance.now(); let r = RUN_OK, more = false;
@@ -285,7 +285,7 @@ export class X64Runtime {
         if (ex.x64_wants_stdin()) { this.waitingStdin = true; this.status = 'waiting-stdin'; this.onStdinWait?.(true); return; }
         const s = ex.x64_sleep_ms();
         if (s < 0 || s > 1.5) break;                     /* waiting for input, or a real sleep: come back on the next host frame */
-        if (s > 0) { const until = performance.now() + s; while (performance.now() < until) { /* shorter than any host timer */ } }
+        if (s > 0) { more = true; break; }                /* a sub-millisecond pause: come back after one MessageChannel hop (~0.05 ms) instead of spinning on performance.now() — rendering and input get the gap, and the GPU process gets the core */
       } else if (r !== RUN_OK) break;
       if (performance.now() - start > 12) { more = true; break; }
     }
