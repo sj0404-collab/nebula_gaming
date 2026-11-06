@@ -17,6 +17,9 @@ on:
       jit:
         description: 'JIT on (1) / off (0)'
         default: '1'
+      apitrace:
+        description: 'native pass with --apitrace (every Win32 call into native.txt)'
+        default: '0'
 run-name: "sitecheck · ${{ inputs.filename || inputs.url }} · jit=${{ inputs.jit }}"
 permissions:
   contents: read
@@ -46,7 +49,7 @@ jobs:
           cd emu/x64 && cc -O2 -Wall -Wno-unused-function -Wno-unused-parameter -Wno-misleading-indentation -o x64run lib.c cpu.c pe.c win32.c gdi.c vfs.c api.c dxbc.c host_native.c main_native.c -lm && cd ../..
           cp "/tmp/sc/$NAME" /tmp/sc/native_copy.exe
           mkdir -p /tmp/sc/guest_tmp
-          rc=0; X64_LOG=1 timeout 120 ./emu/x64/x64run --quiet --no-stdin --max-ms 25000 --stats --mount-rw "/tmp/sc/guest_tmp=C:\\tmp" "/tmp/sc/$NAME" > /tmp/sc/native.txt 2>&1 || rc=$?
+          AT=""; [ "${{ inputs.apitrace }}" = "1" ] && AT="--apitrace"; rc=0; X64_LOG=1 timeout 120 ./emu/x64/x64run --quiet --no-stdin $AT --max-ms 25000 --stats --mount-rw "/tmp/sc/guest_tmp=C:\\tmp" "/tmp/sc/$NAME" > /tmp/sc/native.txt 2>&1 || rc=$?
           echo "native rc=$rc"; grep -a -v "^\[wnd\]" /tmp/sc/native.txt | tail -60 | cut -c1-300
           find /tmp/sc/guest_tmp -type f | head -20; find /tmp/sc/guest_tmp -type f \( -name "*.tmp" -o -name "*.exe" -o -name "*.dll" \) -size +20k -exec cp {} /tmp/sc/ \; 2>/dev/null || true
       - name: Open it through the Programs UI
