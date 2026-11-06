@@ -115,13 +115,28 @@ static void gl_present_window(Win32 *w, int wnd) {
   if (need > g_gl_present_cap) { if (g_gl_present) emu_free(g_gl_present); g_gl_present = emu_alloc(need * 4); g_gl_present_cap = g_gl_present ? need : 0; }
   if (!g_gl_present) return;
   int ox = 0, oy = 0; if (wnd >= 0) wnd_client_origin(wnd, &ox, &oy);
-  int gpu = host_gl_present(g_gl_present, cw, ch, ox, oy);   /* 1: the browser composites the WebGL surface on the GPU — no readback; the client area becomes a key-colour hole that later paints (dialogs, menus, children) cover normally */
+  int gpu = host_gl_present(g_gl_present, cw, ch, ox, oy);   /* 1: the browser composites the WebGL surface on the GPU — no readback; the client area becomes a key-colour hole */
   int x0 = ox < 0 ? -ox : 0, y0 = oy < 0 ? -oy : 0, x1 = cw, y1 = ch; if (ox + x1 > w->screen_w) x1 = w->screen_w - ox; if (oy + y1 > w->screen_h) y1 = w->screen_h - oy;
+  /* top-level windows and popups above the GL window keep their pixels (SwapBuffers never paints over a dialog or a menu, as on Windows) */
+  int R[16][4]; int nr = 0; { int r = wnd >= 0 ? wnd_root(wnd) : -1; int rz = r >= 0 ? g_wnd[r].zseq : 0;
+    for (int k = 1; k < MAX_WND && nr < 16; k++) { Wnd *q = &g_wnd[k]; if (!q->used || q->destroyed || !q->visible || q->parent >= 0 || k == r) continue;
+      int popup = q->builtin == BI_MENU || q->builtin == BI_COMBOLIST; if (!popup && q->zseq <= rz) continue;
+      if (q->x >= ox + x1 || q->x + q->w <= ox + x0 || q->y >= oy + y1 || q->y + q->h <= oy + y0) continue;
+      R[nr][0] = q->x; R[nr][1] = q->y; R[nr][2] = q->x + q->w; R[nr][3] = q->y + q->h; nr++; } }
+  int changed = 0;
   for (int y = y0; y < y1; y++) {
-    u32 *dst = w->screen + (size_t)(oy + y) * w->screen_w + ox + x0;
-    if (gpu) { for (int x = x0; x < x1; x++) dst[x - x0] = GL_KEY_COLOR; }
-    else e_memcpy(dst, g_gl_present + (size_t)y * cw + x0, (size_t)(x1 - x0) * 4); }
-  w->dirty = 1; w->blits_since_yield++; }
+    int sy = oy + y; u32 *row = w->screen + (size_t)sy * w->screen_w + ox; const u32 *src = g_gl_present + (size_t)y * cw;
+    int x = x0;
+    while (x < x1) {
+      int next = x1, covered = 0;
+      for (int i = 0; i < nr; i++) { if (sy < R[i][1] || sy >= R[i][3]) continue; int a = R[i][0] - ox, b = R[i][2] - ox;
+        if (x >= a && x < b) { covered = 1; if (b < next) next = b; } else if (x < a && a < next) next = a; }
+      if (!covered) {
+        if (gpu) { int k = x; while (k < next && row[k] == GL_KEY_COLOR) k++; if (k < next) { changed = 1; for (; k < next; k++) row[k] = GL_KEY_COLOR; } }   /* still a clean hole → nothing to upload */
+        else { e_memcpy(row + x, src + x, (size_t)(next - x) * 4); changed = 1; } }
+      x = next; } }
+  if (changed || !gpu) w->dirty = 1; else if (!w->dirty) host_gl_flip();   /* only the GL image changed: the presenter redraws with the new surface, no framebuffer upload */
+  w->blits_since_yield++; }
 static void s_SwapBuffers(Cpu *c) {
   Win32 *w = W; int wnd = gl_dc_wnd(w, ARG(0)); if (wnd < 0) { w->last_error = 6; RET(0); return; }
   double now = host_now_ms();

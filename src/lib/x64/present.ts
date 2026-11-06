@@ -53,7 +53,8 @@ void main(){
   }
 
   /** upload a BGRA framebuffer (a view straight into wasm64 memory) and draw it aspect-fitted */
-  present(px: Uint8Array, w: number, h: number) {
+  present(px: Uint8Array, w: number, h: number, upload = true) {
+    if (upload) this.lastPx = { px, w, h };
     const gl = this.gl; const c = this.canvas;
     const cw = c.clientWidth || w, ch = c.clientHeight || h; const dpr = Math.min(2, window.devicePixelRatio || 1);
     const pw = Math.max(1, Math.round(cw * dpr)), ph = Math.max(1, Math.round(ch * dpr));
@@ -61,7 +62,7 @@ void main(){
     gl.viewport(0, 0, pw, ph);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.tex);
     if (w !== this.texW || h !== this.texH) { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, px); this.texW = w; this.texH = h; }
-    else gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    else if (upload) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
     const s = Math.min(pw / w, ph / h); const sx = (w * s) / pw, sy = (h * s) / ph;
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.useProgram(this.prog); gl.uniform2f(this.uScale, sx, sy); gl.uniform2f(this.uSize, w, h); gl.uniform1i(this.uGl, 1);
@@ -71,6 +72,10 @@ void main(){
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     this.frames++;
   }
+
+  /** redraw the last uploaded framebuffer (used when only the composited GL surface changed) */
+  redraw() { const f = this.lastPx; if (f) this.present(f.px, f.w, f.h, false); }
+  private lastPx: { px: Uint8Array; w: number; h: number } | null = null;
 
   /** SwapBuffers: copy the program's WebGL surface into a texture on the GPU (no readPixels) for composition at screen rect (x,y,w,h); false = fall back to the CPU path */
   setGl(src: OffscreenCanvas | HTMLCanvasElement, x: number, y: number, w: number, h: number): boolean {

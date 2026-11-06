@@ -93,6 +93,8 @@ int host_gl_init(int w, int h) { return js_gl_init(w, h); }
 int host_gl_probe(int id) { return js_gl_probe(id); }
 u64 host_gl_call(int id, const u64 *args, int n) { return js_gl_call(id, args, n); }
 int host_gl_present(u32 *bgra, int w, int h, int sx, int sy) { return js_gl_present(bgra, w, h, sx, sy); }
+__attribute__((import_module("env"), import_name("host_gl_flip"))) void js_gl_flip(void);
+void host_gl_flip(void) { js_gl_flip(); }
 
 __attribute__((import_module("env"), import_name("host_audio_open"))) int js_audio_open(int rate);
 __attribute__((import_module("env"), import_name("host_audio_write"))) void js_audio_write(const float *lr, int frames);

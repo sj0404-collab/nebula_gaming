@@ -208,6 +208,7 @@ export default function X64App() {
     rt.onStdinWait = (w) => { setWaitingStdin(w); if (w) { setTab('console'); setTimeout(() => stdinRef.current?.focus(), 30); } };
     rt.onPresent = (px, w, h) => { presenterRef.current?.present(px, w, h); setFrames(f => { if (f === 0 && autoTabRef.current) setTab('screen'); return f + 1; }); };
     rt.onGlPresent = (cv, x, y, w, h) => presenterRef.current?.setGl(cv, x, y, w, h) ?? false;
+    rt.onGlFlip = () => { presenterRef.current?.redraw(); setFrames(f => f + 1); };
     rt.onStop = (s) => { setStats(s); setApiStats(rt.apiStats()); setJitInfo(rt.jitStats()); setFiles(rt.vfsList()); rescanRef.current(true); if (s.status !== 'exited' || !s.hasWindow) setTab(t => (s.hasWindow && s.status === 'exited') ? t : (s.status === 'fault' ? 'report' : t === 'screen' && !s.hasWindow ? 'console' : t)); };
     rt.onDisk = () => setDisk({ files: rt.diskFiles, writes: rt.disk.writes, bytes: rt.disk.bytes, queued: rt.disk.queued() });
     rt.init().then(async () => {

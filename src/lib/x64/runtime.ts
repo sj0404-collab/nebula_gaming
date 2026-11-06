@@ -81,6 +81,8 @@ export class X64Runtime {
   onPresent: ((px: Uint8Array, w: number, h: number) => void) | null = null;
   /** SwapBuffers: snapshot the live WebGL surface for GPU-side composition at screen rect (x,y,w,h); return false to fall back to the CPU readback */
   onGlPresent: ((canvas: OffscreenCanvas | HTMLCanvasElement, x: number, y: number, w: number, h: number) => boolean) | null = null;
+  /** SwapBuffers changed only the GL image: redraw the presenter (no framebuffer upload) */
+  onGlFlip: (() => void) | null = null;
   private lastGl: { canvas: OffscreenCanvas | HTMLCanvasElement; x: number; y: number; w: number; h: number } | null = null;
   /** the last GPU-composited GL surface (re-upload after the screen canvas was re-created) */
   lastGlSurface() { return this.lastGl; }
@@ -133,6 +135,7 @@ export class X64Runtime {
           const cv = this.glb.surface();
           if (cv && this.onGlPresent && this.onGlPresent(cv, sx, sy, w, h)) { this.lastGl = { canvas: cv, x: sx, y: sy, w, h }; return 1; }   // GPU composition (no readPixels)
           this.lastGl = null; this.glb.present(new Uint32Array(this.ex!.memory.buffer, Number(p), w * h), w, h); return 0; },
+        host_gl_flip: () => { this.frames++; this.onGlFlip?.(); },
         // sound → the device's audio output (src/lib/x64/audio.ts)
         host_audio_open: (rate: number) => { this.audio.log = (t) => this.onLog?.(t); return this.audio.open(rate); },
         host_audio_write: (lr: bigint, frames: number) => this.audio.write(new Float32Array(this.ex!.memory.buffer, Number(lr), frames * 2)),

@@ -162,6 +162,7 @@ u64 host_gl_call(int id, const u64 *args, int n) {
   if (IS("glGetUniformBlockIndex")) return 0xFFFFFFFFu;
   #undef IS
   return 0; }
+void host_gl_flip(void) {}
 int host_gl_present(u32 *bgra, int w, int h, int sx, int sy) { (void)sx; (void)sy; if (gl_null() && bgra) e_memset(bgra, 0x40, (size_t)w * h * 4); return 0; }
 
 /* ---- audio: no device in the test runner; a wall-clock "player" keeps the timing honest; X64_AUDIO_WAV=<file> dumps the mix ---- */
