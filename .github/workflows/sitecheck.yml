@@ -1,0 +1,55 @@
+name: sitecheck (open a real exe/zip through the Programs UI in the browser)
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'download URL of the .exe / .zip'
+        default: 'https://github.com/jrsoftware/issrc/releases/download/is-6_5_4/innosetup-6.5.4.exe'
+      filename:
+        description: 'file name to open it under (spaces / Cyrillic allowed) — empty = name from the URL'
+        default: ''
+      args:
+        description: 'command line for a second run (empty = none)'
+        default: ''
+      wait:
+        description: 'ms to let it run'
+        default: '40000'
+      jit:
+        description: 'JIT on (1) / off (0)'
+        default: '1'
+run-name: "sitecheck · ${{ inputs.filename || inputs.url }} · jit=${{ inputs.jit }}"
+permissions:
+  contents: read
+jobs:
+  check:
+    name: open in the browser (Playwright) and keep screenshots + report
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - uses: mlugg/setup-zig@v2
+      - name: Build the wasm64 module from the current source
+        run: ZIG=zig ./emu/x64/build.sh
+      - run: npm ci
+      - run: npm run build
+      - name: Playwright chromium
+        run: npx playwright install --with-deps chromium
+      - name: Download the file
+        run: |
+          mkdir -p /tmp/sc; cd /tmp/sc
+          NAME="${{ github.event.inputs.filename }}"; [ -n "$NAME" ] || NAME=$(basename "${{ github.event.inputs.url }}")
+          curl -sSL --retry 3 -o "$NAME" "${{ github.event.inputs.url }}"; ls -la /tmp/sc; echo "NAME=$NAME" >> $GITHUB_ENV
+      - name: Open it through the Programs UI
+        env:
+          X64_JIT: ${{ github.event.inputs.jit }}
+        run: node e2e/sitecheck.mjs "/tmp/sc/$NAME" --wait "${{ github.event.inputs.wait }}" --args "${{ github.event.inputs.args }}" 2>&1 | tee /tmp/sc/sitecheck.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sitecheck
+          path: |
+            e2e/shots/site-*.png
+            /tmp/sc/sitecheck.txt
+          if-no-files-found: warn
