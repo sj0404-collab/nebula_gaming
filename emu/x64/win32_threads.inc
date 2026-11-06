@@ -26,7 +26,10 @@ int w32_thread_count(Win32 *w) { int n = 0; for (int i = 0; i < THREAD_MAX; i++)
 /* ---- wait bookkeeping (timed waits survive shim retries) ---- */
 static double wait_begin(Cpu *c, u32 ms) { Win32 *w = W; if (w->wait_active && w->wait_rip == c->rip) return w->wait_deadline; w->wait_active = 1; w->wait_rip = c->rip; w->wait_deadline = ms == 0xffffffffu ? -1 : host_now_ms() + (double)ms; return w->wait_deadline; }
 static void wait_end(Win32 *w) { w->wait_active = 0; w->block = BLOCK_NONE; }
-static int deadline_passed(double dl) { return dl >= 0 && host_now_ms() >= dl; }
+/* one clock read per scheduler sweep: ctx_runnable runs for every thread (20+ in a JVM) on every pick and every summary */
+static double g_sched_now;
+static double sched_now(void) { return g_sched_now > 0 ? g_sched_now : host_now_ms(); }
+static int deadline_passed(double dl) { return dl >= 0 && sched_now() >= dl; }
 static void park(Cpu *c, int block) { W->block = block; retry_and_yield(c, g_cur_slot); }
 
 /* ---- kernel objects ---- */
@@ -82,7 +85,7 @@ static int ctx_runnable(Win32 *w, ThreadCtx *x, int tid) {
     case BLOCK_PROC: { if (!x->nblock_pids) return 1; for (int i = 0; i < x->nblock_pids; i++) { int code; if (proc_state(x->block_pids[i], &code) != 1) return 1; } return 0; }
     case BLOCK_PIPE_R: return !vfs_pipe_would_block(x->block_pipe, 0);
     case BLOCK_PIPE_W: return !vfs_pipe_would_block(x->block_pipe, 1);
-    case BLOCK_SLEEP: return !(x->sleeping && x->sleep_until_ms > host_now_ms());
+    case BLOCK_SLEEP: return !(x->sleeping && x->sleep_until_ms > sched_now());
     case BLOCK_OBJ: { if (x->wait_granted || deadline_passed(x->wait_deadline)) return 1; int which; return wait_check(w->pid, tid, x->wobj_kind, x->wobj_idx, x->nwobj, x->wait_all, 0, &which); }
     case BLOCK_CS: { if (deadline_passed(x->wait_deadline)) return 1; u64 owner = w->mode32 ? gm_rd(w, x->block_addr + 12, 4) : gm_rd(w, x->block_addr + 16, 8); return owner == 0 || owner == (u64)(u32)tid; }
     case BLOCK_SRW: { if (deadline_passed(x->wait_deadline)) return 1; u64 v = gm_rd(w, x->block_addr, w->mode32 ? 4 : 8); return x->block_flag ? v == 0 : !(v & 1); }
@@ -91,7 +94,7 @@ static int ctx_runnable(Win32 *w, ThreadCtx *x, int tid) {
   }
   return 1;
 }
-int w32_thread_pick(Win32 *w) {
+static int thread_pick_inner(Win32 *w) {
   for (int k = 1; k <= THREAD_MAX; k++) {
     int i = (w->cur_th + k) % THREAD_MAX; Thread *t = &w->th[i];
     if (!t->used || t->state != 1 || t->suspend > 0) continue;
@@ -100,8 +103,9 @@ int w32_thread_pick(Win32 *w) {
   }
   return 0;
 }
+int w32_thread_pick(Win32 *w) { g_sched_now = host_now_ms(); int r = thread_pick_inner(w); g_sched_now = 0; return r; }
 void w32_threads_summary(Win32 *w, int *stdin_wait, int *sleeping, double *best_ms) {
-  double now = host_now_ms();
+  double now = host_now_ms(); g_sched_now = now;
   for (int i = 0; i < THREAD_MAX; i++) {
     Thread *t = &w->th[i]; if (!t->used || t->state != 1 || t->suspend > 0) continue;
     ThreadCtx *x = i == w->cur_th ? &w->tctx : &t->ctx; double rem = -1;
@@ -115,6 +119,7 @@ void w32_threads_summary(Win32 *w, int *stdin_wait, int *sleeping, double *best_
     }
     if (rem >= 0) { if (rem < 0) rem = 0; if (*best_ms < 0 || rem < *best_ms) *best_ms = rem; }
   }
+  g_sched_now = 0;
 }
 
 /* ---- thread life cycle ---- */

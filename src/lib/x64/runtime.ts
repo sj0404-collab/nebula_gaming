@@ -65,6 +65,7 @@ const MATH = [Math.sin, Math.cos, Math.tan, Math.exp, Math.log, Math.pow, Math.a
 export class X64Runtime {
   private ex: Exports | null = null;
   private dec = new TextDecoder(); private enc = new TextEncoder();
+  private padsPolled = 0;
   private t0 = 0; private frames = 0; private raf = 0; private timer = 0; private running = false;
   /** zero-delay continuation for a busy guest: a MessageChannel task is not clamped to 4 ms like nested timers and still
    *  lets input events and painting run between slices (rAF alone would cap a 12 ms slice at ~70% of the CPU) */
@@ -278,7 +279,7 @@ export class X64Runtime {
   private frame() {
     if (!this.running || !this.ex) return;
     const ex = this.ex; const start = performance.now(); let r = RUN_OK, more = false;
-    this.pads.poll();
+    if (start - this.padsPolled > 4) { this.padsPolled = start; this.pads.poll(); }   /* navigator.getGamepads() is not free: not on every MessageChannel hop */
     for (;;) {
       r = ex.x64_run(400_000n);
       if (r === RUN_YIELD) {
