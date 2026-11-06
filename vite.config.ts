@@ -30,7 +30,7 @@ export default defineConfig(async ({ mode }) => {
       workbox: {
         globPatterns: ['**/*.{js,css,html,svg,png,jpg,wasm,woff2,ttf}'],
         globIgnores: ['downloads/**'],
-        maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
+        maximumFileSizeToCacheInBytes: (process.env.WASM_NAMES ? 16 : 6) * 1024 * 1024,   // WASM_NAMES=1 builds (profiling) keep the name section
         navigateFallbackDenylist: [/^\/api\//, /^\/downloads\//],
         runtimeCaching: [{ urlPattern: /\/api\/opencode\//, handler: 'NetworkOnly' }],
       },

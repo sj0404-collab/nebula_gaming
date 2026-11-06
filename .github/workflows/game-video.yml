@@ -45,7 +45,7 @@ jobs:
       - name: Build the wasm64 module from the current source (the committed public/x64/nebula_x64.wasm may lag behind emu/x64)
         run: WASM_NAMES=1 ZIG=zig ./emu/x64/build.sh   # keep function names: the browser profile (--profile) is readable
       - run: npm ci
-      - run: npm run build
+      - run: WASM_NAMES=1 npm run build
       - name: Playwright chromium + ffmpeg
         run: |
           npx playwright install --with-deps chromium
