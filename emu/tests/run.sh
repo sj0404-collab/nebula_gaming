@@ -541,4 +541,13 @@ if command -v zig >/dev/null 2>&1; then
   zig cc -target x86-windows-gnu -O1 -o /tmp/x87copy32.exe tests/x87copy.c && out=$($X --quiet /tmp/x87copy32.exe 2>&1) || out="build/run failed: $out"
   check "x87 copies bit-exact (x86)"   "x87 roundtrip ok 3/3"   "$out"
 else echo "  skip x87copy (no zig)"; fi
+echo "[version] version.dll over a real file (Inno Setup's own exe)"
+if command -v zig >/dev/null 2>&1 && [ -f tests/inst/inno.exe ]; then
+  zig cc -target x86-windows-gnu -O1 -o /tmp/verinfo32.exe tests/verinfo.c -lversion && out=$($X --quiet --mount "tests/inst=C:\\inst" /tmp/verinfo32.exe "C:\\inst\\inno.exe" 2>&1) || out="build/run failed: $out"
+  check "GetFileVersionInfo/VerQueryValueA fixed version (x86)"   "fixed=6.5.4.0 sig=feef04bd"   "$out"
+  check "VerQueryValueA FileVersion string (x86)"   "FileVersion=6.5.4"   "$out"
+  check "VerQueryValueW FileVersion string (x86)"   "FileVersionW=6.5.4"   "$out"
+  zig cc -target x86_64-windows-gnu -O1 -o /tmp/verinfo64.exe tests/verinfo.c -lversion && out=$($X --quiet --mount "tests/inst=C:\\inst" /tmp/verinfo64.exe "C:\\inst\\inno.exe" 2>&1) || out="build/run failed: $out"
+  check "version.dll (x64)"   "FileVersion=6.5.4"   "$out"
+else echo "  skip verinfo (no zig or no inno.exe)"; fi
 [ $fail = 0 ] && echo "ALL OK" || { echo "FAILURES"; exit 1; }

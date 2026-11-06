@@ -147,6 +147,8 @@ static void s_WNetEnumResourceW(Cpu *c) { RET(259); }
 static void s_WNetCloseEnum(Cpu *c) { RET(0); }
 static void s_WNetGetConnectionW(Cpu *c) { RET(2250); }   /* ERROR_NOT_CONNECTED */
 static void s_WNetGetUniversalNameW(Cpu *c) { RET(2250); }
+static void s_WNetGetUniversalNameA(Cpu *c) { RET(2250); }
+static void s_WNetEnumResourceA(Cpu *c) { RET(259); }
 static void s_WNetOpenEnumA(Cpu *c) { RET(1222); }
 static void s_WNetGetConnectionA(Cpu *c) { RET(2250); }
 static void s_WTSRegisterSessionNotification(Cpu *c) { RET(1); }
@@ -213,7 +215,7 @@ static void s_EqualRect(Cpu *c) { u64 a = ARG(0), b = ARG(1); if (!a || !b) { RE
   S(AddFontResourceW), S(AddFontResourceA), S(RemoveFontResourceW), S(RemoveFontResourceA), S(CreateHalftonePalette), S(GetEnhMetaFileHeader), S(GetEnhMetaFileBits), S(SetEnhMetaFileBits), S(GetWinMetaFileBits), S(SetWinMetaFileBits), S(PlayEnhMetaFile), S(DeleteEnhMetaFile), S(CopyEnhMetaFileW), S(GetEnhMetaFileDescriptionW), S(GetEnhMetaFilePaletteEntries), S(CreateEnhMetaFileW), S(CloseEnhMetaFile), \
   S(InitializeFlatSB), S(UninitializeFlatSB), S(FlatSB_SetScrollInfo), S(FlatSB_GetScrollInfo), S(FlatSB_SetScrollPos), S(FlatSB_GetScrollPos), S(FlatSB_SetScrollProp), S(FlatSB_SetScrollRange), S(FlatSB_ShowScrollBar), S(FlatSB_EnableScrollBar), SA("_TrackMouseEvent", TrackMouseEvent_), SA("TrackMouseEvent", TrackMouseEvent_), \
   \
-  S(TransactNamedPipe), S(WNetOpenEnumW), S(WNetEnumResourceW), S(WNetCloseEnum), S(WNetGetConnectionW), S(WNetGetUniversalNameW), S(WNetOpenEnumA), S(WNetGetConnectionA), \
+  S(TransactNamedPipe), S(WNetOpenEnumW), S(WNetEnumResourceW), S(WNetCloseEnum), S(WNetGetConnectionW), S(WNetGetUniversalNameW), S(WNetGetUniversalNameA), S(WNetEnumResourceA), S(WNetOpenEnumA), S(WNetGetConnectionA), \
   S(WTSRegisterSessionNotification), S(WTSUnRegisterSessionNotification), S(WinHttpQueryAuthSchemes), S(WinHttpSetCredentials), S(CommDlgExtendedError), S(InternetCrackUrlW), S(InternetCrackUrlA), S(AssocQueryStringW), S(AssocQueryStringA), \
   S(IsEqualGUID), S(StringFromGUID2), S(StringFromCLSID), S(CoFreeUnusedLibraries), S(CoDisconnectObject), S(StgCreateDocfileOnILockBytes), S(CreateILockBytesOnHGlobal), S(LoadTypeLib), S(LoadTypeLibEx), S(RegisterTypeLib), S(GetErrorInfo), S(SetErrorInfo), S(GetActiveObject)
 /* ---- uxtheme: visual styles are OFF (classic look). Every query says "no theme", every draw call fails cleanly so the

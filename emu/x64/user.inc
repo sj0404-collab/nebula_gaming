@@ -361,7 +361,11 @@ static void send_message_ansi(Cpu *c, u64 hwnd, u32 msg, u64 wp, u64 lp) { int i
   dispatch_to_wndproc(c, hwnd, msg, wp, lp); }
 static void s_SendMessageA(Cpu *c) { send_message_ansi(c, ARG(0), (u32)ARG(1), ARG(2), ARG(3)); }
 static void s_SendMessageTimeoutW(Cpu *c) { if (ARG(6)) wrp(c, ARG(6), 0); dispatch_to_wndproc(c, ARG(0), (u32)ARG(1), ARG(2), ARG(3)); }
-static void s_SendNotifyMessageW(Cpu *c) { dispatch_to_wndproc(c, ARG(0), (u32)ARG(1), ARG(2), ARG(3)); }
+static void s_SendNotifyMessageW(Cpu *c) { u64 h = ARG(0); if (h == 0xffff || h == 0xffffffffull || h == ~0ull) { RET(1); return; } dispatch_to_wndproc(c, h, (u32)ARG(1), ARG(2), ARG(3)); }   /* HWND_BROADCAST: nobody else listens */
+static void s_SendNotifyMessageA(Cpu *c) { u64 h = ARG(0); if (h == 0xffff || h == 0xffffffffull || h == ~0ull) { RET(1); return; } send_message_ansi(c, h, (u32)ARG(1), ARG(2), ARG(3)); }
+static void s_SendMessageTimeoutA(Cpu *c) { u64 h = ARG(0); if (ARG(6)) wrp(c, ARG(6), 0); if (h == 0xffff || h == 0xffffffffull || h == ~0ull) { RET(1); return; } send_message_ansi(c, h, (u32)ARG(1), ARG(2), ARG(3)); }
+static void s_WinHelpA(Cpu *c) { RET(1); }   /* .hlp viewers do not exist on modern Windows either */
+static void s_WinHelpW(Cpu *c) { RET(1); }
 static void s_PostMessageA(Cpu *c) { u64 h = ARG(0); if (h == 0xffff || h == 0xffffffffull || h == ~0ull) { RET(1); return; } if (h && wnd_of(h) < 0) { W->last_error = 1400; RET(0); return; } post_msg_to(W, h, (u32)ARG(1), ARG(2), ARG(3)); RET(1); }
 static void s_PostThreadMessageW(Cpu *c) { post_msg_to(W, 0, (u32)ARG(1), ARG(2), ARG(3)); RET(1); }
 static void s_PostQuitMessage(Cpu *c) { W->quit_posted = 1; c->exit_code = (int)ARG(0); }
@@ -1698,8 +1702,9 @@ static void s_NebulaBrowseProc(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RE
     if (id == 100 && code == 1) { int lb = dlg_find_id(i, 100), ed = dlg_find_id(i, 101); if (lb >= 0 && ed >= 0 && g_wnd[lb].cursel >= 0) { const char *it = g_wnd[lb].items[g_wnd[lb].cursel]; if (e_strcmp(it, "[..]")) { char nm[140]; e_snprintf(nm, sizeof nm, "%s", it + 1); size_t l = e_strlen(nm); if (l) nm[l - 1] = 0; if (n->text[e_strlen(n->text) - 1] == '\\') { char pth[1024]; e_snprintf(pth, sizeof pth, "%s%s", n->text, nm); wnd_set_text(&g_wnd[ed], pth); } else { char pth[1024]; e_snprintf(pth, sizeof pth, "%s\\%s", n->text, nm); wnd_set_text(&g_wnd[ed], pth); } } else wnd_set_text(&g_wnd[ed], n->text); wnd_invalidate(ed, 1); } RET(1); return; }
     if (id == 1) { int ed = dlg_find_id(i, 101); if (ed >= 0) wnd_set_text(n, g_wnd[ed].text); n->ended = 1; n->result = 1; RET(1); return; } if (id == 2) { n->ended = 1; n->result = 0; RET(1); return; } if (id == 102) { /* new folder */ int ed = dlg_find_id(i, 101); if (ed >= 0) { char p[600]; e_snprintf(p, sizeof p, "%s", g_wnd[ed].text); shell_mkdirs(p); wnd_set_text(n, p); call_shim_tail(c, s_NebulaBrowseProc, HWND_OF(i), 0x110, 0, 0); } RET(1); return; } RET(0); return; }
   (void)w; RET(0); }
+static int g_bff_ansi;   /* SHBrowseForFolderA: lpszTitle is an ANSI string */
 static void s_SHBrowseForFolderW(Cpu *c) { Win32 *w = W; int m; if (modal_reentry(c)) { modal_loop(c, g_modal[g_nmodal - 1].wnd); return; }
-  u64 bi = ARG(0); u64 P = PSZ_OF(c); char title[256]; text_in(c, rdp(c, bi + 2 * P), 1, title, sizeof title); if (!title[0]) e_snprintf(title, sizeof title, "Browse For Folder"); const char *start = "C:\\"; u64 root = rdp(c, bi + P); char sroot[520]; if (root) { e_snprintf(sroot, sizeof sroot, "%s", pidl_path(c, root)); if (sroot[0]) start = sroot; }
+  u64 bi = ARG(0); u64 P = PSZ_OF(c); char title[256]; text_in(c, rdp(c, bi + 2 * P), !g_bff_ansi, title, sizeof title); if (!title[0]) e_snprintf(title, sizeof title, "Browse For Folder"); const char *start = "C:\\"; u64 root = rdp(c, bi + P); char sroot[520]; if (root) { e_snprintf(sroot, sizeof sroot, "%s", pidl_path(c, root)); if (sroot[0]) start = sroot; }
   if (g_msgbox_auto) { /* headless: pick the start folder */ u64 pidl = pidl_make(w, start); w32_report(w, "SHBrowseForFolder: headless run — returned %s", start); RET(pidl); return; }
   size_t n = 0; mb_put32(&n, 0x80C800C0u | 0x40 | 0x04); mb_put32(&n, 0); mb_put16(&n, 6); mb_put16(&n, 0); mb_put16(&n, 0); mb_put16(&n, 220); mb_put16(&n, 180); mb_put16(&n, 0); mb_put16(&n, 0); mb_puts(&n, title); mb_put16(&n, 8); mb_puts(&n, "MS Shell Dlg");
   mb_item(&n, 0, 8, 6, 200, 10, 0xFFFF, 0x82, "Double-click a folder to open it; select it and press OK:"); mb_item(&n, 0x1 | 0x800000 /* WS_BORDER */ | 0x10000 | 0x200000, 8, 18, 204, 110, 100, 0x83, ""); mb_item(&n, 0x80 | 0x10000 | 0x800000, 8, 132, 204, 13, 101, 0x81, "");
@@ -1707,7 +1712,7 @@ static void s_SHBrowseForFolderW(Cpu *c) { Win32 *w = W; int m; if (modal_reentr
   u64 tmpl = w32_heap_alloc(w, n * 2 + 16, 1); u8 *p = mem_ptr(w->mem, tmpl, n * 2, 1); if (!p) { RET(0); return; } e_memcpy(p, g_mb_tmpl, n * 2);
   if (g_nmodal >= 8) { RET(0); return; } u64 proc = w32_shim_slot(w, "user32", "NebulaBrowseProc"); int i = dlg_begin(c, 0, tmpl, rdp(c, bi), proc, 0, 1); if (i < 0) { RET(0); return; } wnd_set_text(&g_wnd[i], start); g_wnd[i].builtin = BI_MSGBOX;
   m = g_nmodal++; g_modal[m].rip = c->rip; g_modal[m].rsp = c->r[RSP]; g_modal[m].slot = w32_cur_slot(); g_modal[m].wnd = i; g_modal[m].phase = 1; dlg_create_next(c); }
-static void s_SHBrowseForFolderA(Cpu *c) { s_SHBrowseForFolderW(c); }
+static void s_SHBrowseForFolderA(Cpu *c) { g_bff_ansi = 1; s_SHBrowseForFolderW(c); g_bff_ansi = 0; }
 
 /* ---------- comdlg32: GetOpenFileName / GetSaveFileName — a real modal file dialog over the virtual disk ----------
    Layout: "Look in" path label, a list of [folders] and files matching the active filter, a "File name" edit, a "Files of type" combo
@@ -1862,7 +1867,7 @@ void gdi_cont_resume(Cpu *c, int kind, u64 rax) {
 void gdi_set_msgbox_auto(int on) { g_msgbox_auto = on; }
 
 #define USER_SHIMS \
-  S(SendMessageTimeoutW), S(SendNotifyMessageW), S(PostThreadMessageW), S(MsgWaitForMultipleObjectsEx), S(GetQueueStatus), S(GetInputState), S(InSendMessage), S(ReplyMessage), S(GetMessagePos), S(GetMessageTime), S(GetMessageExtraInfo), \
+  S(SendMessageTimeoutW), S(SendNotifyMessageW), S(SendMessageTimeoutA), S(SendNotifyMessageA), S(WinHelpA), S(WinHelpW), SA("SHBrowseForFolder", SHBrowseForFolderA), S(PostThreadMessageW), S(MsgWaitForMultipleObjectsEx), S(GetQueueStatus), S(GetInputState), S(InSendMessage), S(ReplyMessage), S(GetMessagePos), S(GetMessageTime), S(GetMessageExtraInfo), \
   S(UnregisterClassW), S(GetClassInfoExW), S(GetClassInfoW), S(GetClassInfoA), S(GetClassNameW), S(RealGetWindowClassW), S(GetClassLongPtrW), SA("GetClassLongPtrA", GetClassLongPtrW), S(GetClassLongA), SA("GetClassLongW", GetClassLongA), S(SetClassLongPtrW), SA("SetClassLongPtrA", SetClassLongPtrW), SA("SetClassLongW", SetClassLongPtrW), SA("SetClassLongA", SetClassLongPtrW), S(AdjustWindowRectExForDpi), \
   S(CallWindowProcW), S(CallWindowProcA), S(ShowWindowAsync), S(ValidateRgn), S(GetWindowInfo), S(GetComboBoxInfo), S(BeginDeferWindowPos), S(DeferWindowPos), S(EndDeferWindowPos), S(GetWindowPlacement), S(SetWindowPlacement), S(IsWindowEnabled), S(IsChild), S(GetShellWindow), S(GetAncestor), S(SetParent), S(GetWindow), S(GetTopWindow), S(GetNextWindow), S(GetLastActivePopup), \
   S(EnumChildWindows), S(EnumWindows), S(EnumThreadWindows), S(FindWindowW), S(FindWindowExW), S(FindWindowExA), S(WindowFromPoint), S(ChildWindowFromPoint), S(ChildWindowFromPointEx), S(RealChildWindowFromPoint), S(GetWindowThreadProcessId), S(IsHungAppWindow), S(IsWindowUnicode), S(IsGUIThread), S(FlashWindowEx), S(FlashWindow), S(SetLayeredWindowAttributes), S(UpdateLayeredWindow), S(AnimateWindow), S(SetWindowRgn), S(GetWindowRgn), S(LockWindowUpdate), S(SetWindowDisplayAffinity), S(GetWindowDisplayAffinity), \

@@ -254,6 +254,7 @@ static void s_GetFinalPathNameByHandleW(Cpu *c) { final_path(c, 1); }
 static void s_GetLongPathNameW(Cpu *c) { char tmp[1024]; e_snprintf(tmp, sizeof tmp, "%s", name_w(c, ARG(0))); size_t l = e_strlen(tmp); if ((u32)ARG(2) <= l) { RET(l + 1); return; } put_w(c, ARG(1), tmp, 0); RET(l); }
 static void s_GetLongPathNameA(Cpu *c) { char tmp[1024]; e_snprintf(tmp, sizeof tmp, "%s", name_a(c, ARG(0))); size_t l = e_strlen(tmp); if ((u32)ARG(2) <= l) { RET(l + 1); return; } put_a(c, ARG(1), tmp, 0); RET(l); }
 static void s_GetShortPathNameW(Cpu *c) { s_GetLongPathNameW(c); }
+static void s_GetShortPathNameA(Cpu *c) { s_GetLongPathNameA(c); }   /* no 8.3 aliases on this disk: the long name is the short name */
 /* GetVolumePathNameW(path, out, cap): everything lives on C:\ */
 static void s_GetVolumePathNameW(Cpu *c) { if ((u32)ARG(2) < 4) { W->last_error = 122; RET(0); return; } put_w(c, ARG(1), "C:\\", 0); RET(1); }
 /* collapse "\.\" and "x\..\" segments in place (keeps the root) */

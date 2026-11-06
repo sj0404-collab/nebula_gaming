@@ -145,7 +145,6 @@ static void s_WinHttpGetProxyForUrl(Cpu *c) { W->last_error = 12180; RET(0); }  
 static void s_WinHttpCloseHandle(Cpu *c) { RET(1); }
 static void s_WinHttpFail(Cpu *c) { W->last_error = 12029; RET(0); }   /* ERROR_WINHTTP_CANNOT_CONNECT */
 /* version.dll: no version resources are readable here */
-static void s_GetFileVersionInfoSizeExW(Cpu *c) { if (ARG(2)) wr32(c, ARG(2), 0); W->last_error = 1813; RET(0); }
 /* combase / WinRT: no Windows Runtime here */
 static void s_RoInitialize(Cpu *c) { RET(0); }
 static void s_RoGetActivationFactory(Cpu *c) { if (ARG(2)) wrp(c, ARG(2), 0); RET(0x80040154); }   /* REGDB_E_CLASSNOTREG */
@@ -164,6 +163,6 @@ static void s_GetThreadIOPendingFlag(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), 0); R
   S(CoTaskMemAlloc), S(CoTaskMemRealloc), S(CoCreateGuid), S(CoGetContextToken), S(CoGetObjectContext), S(CoRegisterInitializeSpy), S(CoRevokeInitializeSpy), S(CoWaitForMultipleHandles), \
   SA("CoCreateFreeThreadedMarshaler", CoNotImpl), SA("CoGetClassObject", CoNotImpl), SA("CoUnmarshalInterface", CoNotImpl), SA("CoMarshalInterface", CoNotImpl), SA("CoGetMarshalSizeMax", CoNotImpl), SA("CLSIDFromProgID", CoNotImpl), SA("CoReleaseMarshalData", CoNotImpl), \
   S(WinHttpGetIEProxyConfigForCurrentUser), S(WinHttpGetDefaultProxyConfiguration), S(WinHttpOpen), S(WinHttpGetProxyForUrl), S(WinHttpCloseHandle), SA("WinHttpConnect", WinHttpFail), SA("WinHttpOpenRequest", WinHttpFail), SA("WinHttpSendRequest", WinHttpFail), SA("WinHttpReceiveResponse", WinHttpFail), SA("WinHttpSetOption", ret1), SA("WinHttpQueryOption", WinHttpFail), SA("WinHttpSetStatusCallback", ret0), SA("WinHttpSetTimeouts", ret1), SA("WinHttpQueryHeaders", WinHttpFail), SA("WinHttpQueryDataAvailable", WinHttpFail), SA("WinHttpReadData", WinHttpFail), SA("WinHttpWriteData", WinHttpFail), SA("WinHttpAddRequestHeaders", WinHttpFail), SA("WinHttpCrackUrl", WinHttpFail), SA("WinHttpCreateUrl", WinHttpFail), SA("WinHttpResetAutoProxy", ret0), SA("WinHttpGetProxyForUrlEx", WinHttpFail), SA("WinHttpCreateProxyResolver", WinHttpFail), SA("WinHttpFreeProxyResult", ret0), \
-  S(GetFileVersionInfoSizeExW), SA("GetFileVersionInfoSizeW", GetFileVersionInfoSizeExW), SA("GetFileVersionInfoExW", ret0), SA("GetFileVersionInfoW", ret0), SA("VerQueryValueW", ret0), \
+  VERSION_SHIMS, SA("GetFileVersionInfoExW", ret0), SA("GetFileVersionInfoW", ret0), SA("VerQueryValueW", ret0), \
   S(RoInitialize), SA("RoUninitialize", ret0), S(RoGetActivationFactory), SA("RoOriginateLanguageException", ret0), SA("RoOriginateError", ret0), SA("RoOriginateErrorW", ret0), SA("SetRestrictedErrorInfo", ret0), SA("GetRestrictedErrorInfo", ret1), SA("RoGetErrorReportingFlags", ret0), SA("RoSetErrorReportingFlags", ret0), SA("RoReportUnhandledError", ret0), \
   S(GetThreadIOPendingFlag),
