@@ -577,7 +577,7 @@ if command -v zig >/dev/null 2>&1 && [ -f tests/inst/putty.exe ]; then
   check "MsiGetProductInfoW → ERROR_UNKNOWN_PRODUCT (x86)"   "info=1605"   "$out"
   check "MsiSetInternalUI returns previous level (x86)"   "ui=1->2 hwnd=0"   "$out"
   check "MsiGetFileVersionW real version + language (x86)"   "fileversionW rc=0 ver=0."   "$out"
-  check "MsiGetFileVersionW language 1033 (x86)"   "lang=1033 (4)"   "$out"
+  check "MsiGetFileVersionW language 2057 = en-GB of putty.exe (x86)"   "lang=2057 (4)"   "$out"
   check "MsiGetFileVersionA (x86)"   "fileversionA rc=0 ver=0."   "$out"
   check "MsiGetFileVersion ERROR_MORE_DATA (x86)"   "small rc=234 need="   "$out"
   check "MsiGetFileVersion ERROR_FILE_NOT_FOUND (x86)"   "missing rc=2"   "$out"
