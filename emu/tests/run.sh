@@ -548,6 +548,9 @@ if command -v zig >/dev/null 2>&1; then
   check "upath (x64)"   "UPATH OK"   "$out"
   zig cc -target x86-windows-gnu -O1 -o "$UD/Папка тест/Установка Inno 5 (1).exe" tests/upath.c && out=$($X --quiet --no-stdin --mount "$UD=C:\\nebula" "$UD/Папка тест/Установка Inno 5 (1).exe" 2>&1) || out="build/run failed: $out"
   check "upath (x86)"   "UPATH OK"   "$out"
+  LN="Setup_Shattered_Pixel_Dungeon_v4.0.0_(64bit)_(93711)_RUS-Установка_длинное_имя.exe"   # 70+ characters like a GOG / repack setup: used to be cut at 63 bytes
+  cp "$UD/Папка тест/Установка Inno 5 (1).exe" "$UD/$LN" && out=$($X --quiet --no-stdin --mount "$UD=C:\\nebula" "$UD/$LN" 2>&1) || out="run failed: $out"
+  check "upath: 70+ character exe name (x86)"   "UPATH OK"   "$out"
 else echo "  skip upath (no zig)"; fi
 echo "[ansisub] ANSI app subclassing an EDIT: CallWindowProcA converts string messages for the built-in control"
 if command -v zig >/dev/null 2>&1; then

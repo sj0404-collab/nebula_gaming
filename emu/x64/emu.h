@@ -305,7 +305,7 @@ typedef struct Thread {
 } Thread;
 
 #define MAX_MODULES 256
-typedef struct { char name[64]; char dir[300]; u64 base, size, entry; u32 exp_rva, exp_size, pdata_rva, pdata_size; int attached; } GuestModule;   /* dir: where it was found (LoadLibrary searches the directories of loaded modules, like LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR) */   /* a DLL loaded from the virtual disk */
+typedef struct { char name[260]; char dir[300]; u64 base, size, entry; u32 exp_rva, exp_size, pdata_rva, pdata_size; int attached; } GuestModule;   /* dir: where it was found (LoadLibrary searches the directories of loaded modules, like LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR) */   /* a DLL loaded from the virtual disk */
 struct Win32 {
   Cpu *cpu;                              /* the CURRENT thread's cpu */
   Mem *mem;

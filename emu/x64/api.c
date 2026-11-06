@@ -5,7 +5,7 @@
 
 /* ---------- process table ---------- */
 #define PROC_MAX 32
-typedef struct { int used, pid, ppid, state, exit_code, handles; Mem mem; Cpu cpu; Win32 w32; char name[64]; double wake_ms; int lastc[MAX_SHIMS]; } Proc;
+typedef struct { int used, pid, ppid, state, exit_code, handles; Mem mem; Cpu cpu; Win32 w32; char name[260]; double wake_ms;   /* a GOG/repack setup name is 70+ characters: a 64-byte buffer truncated it, the loader could not reopen itself */ int lastc[MAX_SHIMS]; } Proc;
 static Proc *g_procs[PROC_MAX]; static int g_nprocs; static int g_cur; static int g_next_pid = 4242;
 static Proc *g_root; static int g_loaded;
 #define g_cpu (g_root->cpu)
