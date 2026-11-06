@@ -577,7 +577,8 @@ check "JPEG restart markers"   "rst.jpg: 53x37 mean=0.5"   "$out"
 check "JPEG all variants"   "JPEG OK"   "$out"
 echo "[msi] msi.dll via LoadLibrary/GetProcAddress (Inno [Code] imports): empty product database, MsiSetInternalUI, MsiGetFileVersion/MsiGetFileHash over putty.exe"
 if command -v zig >/dev/null 2>&1 && [ -f tests/inst/putty.exe ]; then
-  zig cc -target x86-windows-gnu -O1 -o /tmp/msi32.exe tests/msi.c && out=$($X --quiet --no-stdin --mount "tests/inst=C:\\inst" /tmp/msi32.exe "C:\\inst\\putty.exe" 2>&1) || out="build/run failed: $out"
+  mrc=0; zig cc -target x86-windows-gnu -O1 -o /tmp/msi32.exe tests/msi.c && out=$($X --quiet --no-stdin --mount "tests/inst=C:\\inst" /tmp/msi32.exe "C:\\inst\\putty.exe" 2>&1) || { mrc=$?; out="build/run failed: $out"; }
+  check "msi x86 caller exits cleanly (every Msi* shim pops its stdcall arguments)"   "rc=0"   "rc=$mrc"
   check "MsiQueryProductStateW → INSTALLSTATE_UNKNOWN (x86)"   "state=-1"   "$out"
   check "MsiEnumRelatedProductsW → ERROR_NO_MORE_ITEMS (x86)"   "related=259"   "$out"
   check "MsiGetProductInfoW → ERROR_UNKNOWN_PRODUCT (x86)"   "info=1605"   "$out"
@@ -589,7 +590,8 @@ if command -v zig >/dev/null 2>&1 && [ -f tests/inst/putty.exe ]; then
   check "MsiGetFileVersion ERROR_FILE_NOT_FOUND (x86)"   "missing rc=2"   "$out"
   check "MsiGetFileHashA MD5 (x86)"   "hash rc=0 $(md5sum tests/inst/putty.exe | python3 -c "import sys;h=bytes.fromhex(sys.stdin.read().split()[0]);print(''.join('%08x'%int.from_bytes(h[i:i+4],'little') for i in range(0,16,4)))")"   "$out"
   check "msi (x86)"   "MSI OK"   "$out"
-  zig cc -target x86_64-windows-gnu -O1 -o /tmp/msi64.exe tests/msi.c && out=$($X --quiet --no-stdin --mount "tests/inst=C:\\inst" /tmp/msi64.exe "C:\\inst\\putty.exe" 2>&1) || out="build/run failed: $out"
+  mrc=0; zig cc -target x86_64-windows-gnu -O1 -o /tmp/msi64.exe tests/msi.c && out=$($X --quiet --no-stdin --mount "tests/inst=C:\\inst" /tmp/msi64.exe "C:\\inst\\putty.exe" 2>&1) || { mrc=$?; out="build/run failed: $out"; }
+  check "msi x64 caller exits cleanly"   "rc=0"   "rc=$mrc"
   check "msi state/related/info (x64)"   "related=259"   "$out"
   check "MsiGetFileVersionW (x64)"   "fileversionW rc=0 ver=0."   "$out"
   check "msi (x64)"   "MSI OK"   "$out"
