@@ -1,3 +1,18 @@
+# v1.43.1 — the APK finally ships the emulator that was tested; exe names up to 259 characters
+
+**Why v1.42.0 / v1.43.0 behaved differently on the phone than on the runner.** The CI job that built the APK (and the e2e
+job before it) used the *committed* `public/x64/nebula_x64.wasm` from 5 November instead of the module the emulator job
+had just built and tested — so neither the Cyrillic/space name fix nor the x87 text fix ever reached the phone (the mangled
+"The syttem cannot hind the fild spdcihied" box in the user's screenshots is that old module). Both jobs now download the
+`nebula_x64-wasm64` artifact of the same run, and the Android job unpacks the signed APK and fails if the sha256 of the
+embedded wasm differs from the one built in the run.
+
+**Long names.** `Setup_Shattered_Pixel_Dungeon_v4.0.0_(64bit)_(93711)_RUS-….exe` (70 characters) hit a 64-byte process
+name buffer: the file landed on C:\nebula under a truncated name while the command line kept the full one, so the Inno
+loader could not reopen itself → "The system cannot find the file specified" after 0.1 M instructions. Process and module
+names are 259 characters now; `run.sh` runs the upath test under a 70+ character Cyrillic name on x86 and x64, and the
+sitecheck under the exact GOG-style name reaches the language dialog (682 M instructions).
+
 # v1.43.0 — any file name works (Cyrillic, spaces), ANSI programs stop corrupting their heap, text is no longer mangled, OpenGL on the GPU, Inno Setup 5 runs, real version.dll
 
 **"File not found" on every exe (phone report).** v1.42.0's `…W` path writers emitted one byte per UTF-16 unit, so a program
