@@ -152,6 +152,7 @@ struct Cpu {
   u16  fpu_cw;                        /* x87 control word */
   u16  fsw; u8 ftop, ftag;            /* x87 status word (C0-C3), stack top, tag bits (1 = valid) */
   double fp[8];                       /* x87 stack as doubles (53-bit precision, see x87.inc) */
+  u64  fxm[8]; u16 fxse[8]; u8 fxk[8]; /* exact shadow of fp[]: 1 = the i64 of fild m64, 2 = the 80-bit image of fld m80 — so fild/fistp and fld/fstp m80 copies (Delphi Move, mingw long double) round-trip bit-exactly */
   /* run control */
   u64  icount;                        /* instructions executed */
   int  status;                        /* RUN_* */

@@ -9,8 +9,18 @@
 #define F_C1 0x0200
 #define F_C2 0x0400
 #define F_C3 0x4000
-static inline void fpush(Cpu *c, double v) { c->ftop = (c->ftop - 1) & 7; c->fp[c->ftop] = v; c->ftag |= 1u << c->ftop; }
-static inline double fpop(Cpu *c) { double v = c->fp[c->ftop]; c->ftag &= ~(1u << c->ftop); c->ftop = (c->ftop + 1) & 7; return v; }
+static inline void fpush(Cpu *c, double v) { c->ftop = (c->ftop - 1) & 7; c->fp[c->ftop] = v; c->ftag |= 1u << c->ftop; c->fxk[c->ftop] = 0; }
+static inline double fpop(Cpu *c) { double v = c->fp[c->ftop]; c->ftag &= ~(1u << c->ftop); c->fxk[c->ftop] = 0; c->ftop = (c->ftop + 1) & 7; return v; }
+/* exact-copy shadow: fild m64 → fistp m64 and fld m80 → fstp m80 must reproduce every bit (Delphi's Move copies 8-byte blocks through
+   fild/fistp; a 53-bit double would round the low bits of ASCII text into neighbouring letters). Any arithmetic drops the shadow. */
+#define FXI(n) ((c->ftop + (n)) & 7)
+static inline void fx_clear_all(Cpu *c) { for (int k = 0; k < 8; k++) c->fxk[k] = 0; }
+static inline void fx_copy(Cpu *c, int dst, int src) { c->fxk[dst] = c->fxk[src]; c->fxm[dst] = c->fxm[src]; c->fxse[dst] = c->fxse[src]; }
+static inline void fx_swap(Cpu *c, int a, int b) { u8 k = c->fxk[a]; u64 m = c->fxm[a]; u16 s = c->fxse[a]; fx_copy(c, a, b); c->fxk[b] = k; c->fxm[b] = m; c->fxse[b] = s; }
+static void i64_to_f80(s64 v, u64 *mant, u16 *se) { if (!v) { *mant = 0; *se = 0; return; } int sign = v < 0; u64 m = sign ? (u64)(-(v + 1)) + 1 : (u64)v; int e = 63; while (!(m >> 63)) { m <<= 1; e--; } *mant = m; *se = (u16)((sign << 15) | (e + 16383)); }
+static int f80_is_i64(u64 mant, u16 se, s64 *out) {   /* an 80-bit value that is exactly a 64-bit integer */
+  int e = (se & 0x7fff) - 16383; if (!(mant >> 63) || e < 0 || e > 63) return (mant == 0 && (se & 0x7fff) == 0) ? (*out = 0, 1) : 0;
+  int sh = 63 - e; if (sh && (mant << (64 - sh))) return 0; u64 v = mant >> sh; if (se & 0x8000) { if (v > 0x8000000000000000ull) return 0; *out = (s64)(0 - v); return 1; } if (v >> 63) return 0; *out = (s64)v; return 1; }
 static double pow2d(int e) { double r = 1.0; while (e > 1000) { r *= 1.0715086071862673e301; e -= 1000; } while (e < -1000) { r *= 9.332636185032189e-302; e += 1000; } u64 bits = (u64)(e + 1023) << 52; double s; e_memcpy(&s, &bits, 8); return r * s; }
 static double f80_to_double(u64 mant, u16 se) {
   int sign = se >> 15, e = se & 0x7fff;
@@ -69,6 +79,9 @@ static int x87_cmov_ok(Cpu *c, int cc) {   /* DA: b, e, be, u ; DB: nb, ne, nbe,
 }
 static void exec_x87(Ins *i, Cpu *c, u8 op) {
   decode_modrm(i); int sub = i->reg & 7; int sti = i->rm & 7;
+  { int keep = i->mod != 3 ? ((op == 0xDF && (sub == 5 || sub == 7)) || (op == 0xDB && (sub == 5 || sub == 7)) || (op == 0xDD && (sub == 0 || sub == 2 || sub == 3)) || (op == 0xD9 && (sub == 0 || sub == 2 || sub == 3 || sub == 5 || sub == 7)))
+                           : ((op == 0xD9 && sub < 2) || (op == 0xDD && (sub == 2 || sub == 3)) || (op == 0xDF && sub == 4));   /* fld st / fxch / fst(p) st / fnstsw ax */
+    if (!keep) fx_clear_all(c); }
   if (i->mod != 3) {
     u64 a = EA(i);
     switch (op) {
@@ -90,8 +103,8 @@ static void exec_x87(Ins *i, Cpu *c, u8 op) {
         case 1: x87_st(c, a, 7, fpop(c)); return;                  /* fisttp m32 */
         case 2: x87_st(c, a, 3, ST(0)); return;                    /* fist m32 */
         case 3: x87_st(c, a, 3, fpop(c)); return;                  /* fistp m32 */
-        case 5: fpush(c, x87_ld(c, a, 5)); return;                 /* fld m80 */
-        case 7: x87_st(c, a, 5, fpop(c)); return;                  /* fstp m80 */
+        case 5: { u64 m = rd64(c, a); u16 se = rd16(c, a + 8); fpush(c, f80_to_double(m, se)); c->fxk[FXI(0)] = 2; c->fxm[FXI(0)] = m; c->fxse[FXI(0)] = se; return; }   /* fld m80 (exact image kept) */
+        case 7: { int k = c->fxk[FXI(0)]; u64 m = c->fxm[FXI(0)]; u16 se = c->fxse[FXI(0)]; double v = fpop(c); if (k == 1) i64_to_f80((s64)m, &m, &se); if (k) { wr64(c, a, m); wr16(c, a + 8, se); return; } x87_st(c, a, 5, v); return; }   /* fstp m80 */
         default: break; } break;
       case 0xDD: switch (sub) {
         case 0: fpush(c, x87_ld(c, a, 1)); return;                 /* fld m64 */
@@ -110,8 +123,9 @@ static void exec_x87(Ins *i, Cpu *c, u8 op) {
         case 4: { /* fbld m80bcd */ u64 v = 0, m = 1; for (int k = 0; k < 9; k++) { u8 b = rd8(c, a + k); v += (u64)(b & 15) * m; m *= 10; v += (u64)(b >> 4) * m; m *= 10; } double d = (double)v; if (rd8(c, a + 9) & 0x80) d = -d; fpush(c, d); return; }
         case 6: { /* fbstp m80bcd: round to integer (current rounding mode), 18 packed digits + sign */ double d = fpop(c); double r = x87_round(c, d);
           int neg = r < 0; if (neg) r = -r; u64 v = r >= 1e18 ? 999999999999999999ull : (u64)r; for (int k = 0; k < 9; k++) { u8 lo = (u8)(v % 10); v /= 10; u8 hi = (u8)(v % 10); v /= 10; wr8(c, a + k, (u8)(lo | hi << 4)); } wr8(c, a + 9, neg ? 0x80 : 0); return; }
-        case 5: fpush(c, x87_ld(c, a, 4)); return;                 /* fild m64 */
-        case 7: x87_st(c, a, 4, fpop(c)); return;                  /* fistp m64 */
+        case 5: { u64 m = rd64(c, a); fpush(c, (double)(s64)m); c->fxk[FXI(0)] = 1; c->fxm[FXI(0)] = m; return; }   /* fild m64 (exact i64 kept) */
+        case 7: { int k = c->fxk[FXI(0)]; u64 m = c->fxm[FXI(0)]; u16 se = c->fxse[FXI(0)]; double v = fpop(c); s64 iv;
+          if (k == 1) { wr64(c, a, m); return; } if (k == 2 && f80_is_i64(m, se, &iv)) { wr64(c, a, (u64)iv); return; } x87_st(c, a, 4, v); return; }   /* fistp m64 */
         default: break; } break;
     }
     UNSUP("x87 instruction %02X /%d (memory form)", op, sub);
@@ -123,8 +137,8 @@ static void exec_x87(Ins *i, Cpu *c, u8 op) {
     case 0xDE: if (sub == 3) { if (sti == 1) { x87_compare(c, ST(0), ST(1), 0); fpop(c); fpop(c); return; } break; }   /* fcompp */
       { int s2 = sub == 4 ? 5 : sub == 5 ? 4 : sub == 6 ? 7 : sub == 7 ? 6 : sub; ST(sti) = x87_arith(s2, ST(sti), ST(0)); fpop(c); return; }   /* faddp/fmulp/fsubrp/fsubp/fdivrp/fdivp */
     case 0xD9: switch (sub) {
-      case 0: fpush(c, ST(sti)); return;                           /* fld st(i) */
-      case 1: { double t = ST(0); ST(0) = ST(sti); ST(sti) = t; return; }   /* fxch */
+      case 0: { int src = FXI(sti); fpush(c, ST(sti)); fx_copy(c, FXI(0), src); return; }   /* fld st(i) */
+      case 1: { double t = ST(0); ST(0) = ST(sti); ST(sti) = t; fx_swap(c, FXI(0), FXI(sti)); return; }   /* fxch */
       case 2: if (sti == 0) return; break;                         /* fnop */
       case 3: ST(sti) = ST(0); fpop(c); return;                    /* fstp st(i) (undocumented alias) */
       case 4: switch (sti) {
@@ -163,8 +177,8 @@ static void exec_x87(Ins *i, Cpu *c, u8 op) {
       break;
     case 0xDD: switch (sub) {
       case 0: c->ftag &= ~(1u << ((c->ftop + sti) & 7)); return;   /* ffree */
-      case 2: ST(sti) = ST(0); return;                             /* fst st(i) */
-      case 3: ST(sti) = ST(0); fpop(c); return;                    /* fstp st(i) */
+      case 2: ST(sti) = ST(0); fx_copy(c, FXI(sti), FXI(0)); return;   /* fst st(i) */
+      case 3: ST(sti) = ST(0); fx_copy(c, FXI(sti), FXI(0)); fpop(c); return;   /* fstp st(i) */
       case 4: x87_compare(c, ST(0), ST(sti), 0); return;           /* fucom */
       case 5: x87_compare(c, ST(0), ST(sti), 0); fpop(c); return;  /* fucomp */
       default: break; } break;

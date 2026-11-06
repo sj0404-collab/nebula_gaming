@@ -6,8 +6,8 @@
  * Everything else is shared with the x64 path: ARG(n) reads 4-byte stack slots, RET() sets eax (edx = high half). */
 
 #include "stdcall32.inc"
-static inline void fpush(Cpu *c, double v) { c->ftop = (c->ftop - 1) & 7; c->fp[c->ftop] = v; c->ftag |= 1u << c->ftop; }
-static inline double fpop(Cpu *c) { double v = c->fp[c->ftop]; c->ftag &= ~(1u << c->ftop); c->ftop = (c->ftop + 1) & 7; return v; }
+static inline void fpush(Cpu *c, double v) { c->ftop = (c->ftop - 1) & 7; c->fp[c->ftop] = v; c->ftag |= 1u << c->ftop; c->fxk[c->ftop] = 0; }
+static inline double fpop(Cpu *c) { double v = c->fp[c->ftop]; c->ftag &= ~(1u << c->ftop); c->fxk[c->ftop] = 0; c->ftop = (c->ftop + 1) & 7; return v; }
 
 /* signature letters: i 32-bit int/pointer, q 64-bit int (two slots), d double, f float; "ret:args" */
 static const struct { const char *n; const char *sig; } sig32_tab[] = {

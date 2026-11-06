@@ -534,4 +534,11 @@ if [ -f $PT ]; then
   check "putty.exe: clicking Terminal then Appearance in the category tree switches the panel (TVN_SELCHANGEDA to the ANSI dialog; winspool EnumPrinters for the Terminal panel; no fault)"   "Cursor appearance:"   "$out"
   check "putty.exe: the Session panel controls were destroyed by the switch"   "session_controls=0"   "session_controls=$(printf '%s' "$out" | grep -c 'Sav&ed Sessions')"
 else echo "  skip putty.exe (no network)"; fi
+echo "[x87] exact fild/fistp m64 and fld/fstp m80 copies (Delphi Move, mingw long double)"
+if command -v zig >/dev/null 2>&1; then
+  zig cc -target x86_64-windows-gnu -O1 -o /tmp/x87copy64.exe tests/x87copy.c && out=$($X --quiet /tmp/x87copy64.exe 2>&1) || out="build/run failed: $out"
+  check "x87 copies bit-exact (x64)"   "x87 roundtrip ok 3/3"   "$out"
+  zig cc -target x86-windows-gnu -O1 -o /tmp/x87copy32.exe tests/x87copy.c && out=$($X --quiet /tmp/x87copy32.exe 2>&1) || out="build/run failed: $out"
+  check "x87 copies bit-exact (x86)"   "x87 roundtrip ok 3/3"   "$out"
+else echo "  skip x87copy (no zig)"; fi
 [ $fail = 0 ] && echo "ALL OK" || { echo "FAILURES"; exit 1; }

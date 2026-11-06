@@ -35,7 +35,7 @@ u64 cpu_pop(Cpu *c) { if (c->mode32) { u32 v = rd32(c, c->r[RSP]); c->r[RSP] = (
 
 void cpu_reset(Cpu *c) {
   for (int i = 0; i < 16; i++) { c->r[i] = 0; c->x[i].q[0] = c->x[i].q[1] = 0; }
-  c->rflags = 0x202; c->mxcsr = 0x1f80; c->fpu_cw = 0x27f; c->fsw = 0; c->ftop = 0; c->ftag = 0; for (int i = 0; i < 8; i++) c->fp[i] = 0; c->status = RUN_OK; c->icount = 0; c->err[0] = 0;
+  c->rflags = 0x202; c->mxcsr = 0x1f80; c->fpu_cw = 0x27f; c->fsw = 0; c->ftop = 0; c->ftag = 0; for (int i = 0; i < 8; i++) { c->fp[i] = 0; c->fxk[i] = 0; } c->status = RUN_OK; c->icount = 0; c->err[0] = 0;
   c->mode32 = 0;   /* a Proc slot is reused across sessions and children: a 64-bit exe started after a 32-bit one must not inherit IA-32 mode (pe_load re-enters it for PE32 images) */
 }
 
