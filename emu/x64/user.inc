@@ -265,9 +265,13 @@ static void s_PeekMessageA(Cpu *c) {
   if (w->blits_since_yield || w->yield_frames++ > 20000) { w->blits_since_yield = 0; w->yield_frames = 0; w32_retry_yield(c); return; }
   RET(0);
 }
+/* a thread blocked in GetMessage / MsgWaitForMultipleObjects is re-polled by the scheduler; without a pause an idle message
+   loop (a launcher waiting for its child) was re-entered ~100k times per second and ate 16% of the host thread */
+static void msg_wait_pause(Win32 *w, double until) { w->sleeping = 1; w->sleep_until_ms = until; w->block = BLOCK_SLEEP; }
 static void s_GetMessageA(Cpu *c) {
+  Win32 *w = W; w->sleeping = 0;
   GuestMsg m; if (next_message(c, &m, 1, ARG(1))) { if (kbd_hook_needed(c, &m)) { kbd_hook_start(c, &m, 1, ARG(0)); return; } write_msg(c, ARG(0), &m); RET(m.msg == 0x12 ? 0 : 1); return; }
-  W->blits_since_yield = 0; w32_retry_yield(c);
+  w->blits_since_yield = 0; msg_wait_pause(w, host_now_ms() + 1.0); w32_retry_yield(c);
 }
 /* text typed on the host (Android soft keyboard / IME, hardware keyboards of other layouts, --type in the native runner):
    characters the US layout can produce go through a real WM_KEYDOWN / WM_CHAR / WM_KEYUP sequence (apps that drive on WM_KEYDOWN —
@@ -368,12 +372,13 @@ static void s_KillTimer(Cpu *c) { int wi = wnd_of(ARG(0)); for (int i = 0; i < g
 static void kill_timers_of(int wi) { for (int i = 0; i < g_timers_n;) { if (g_timers[i].wnd == wi) g_timers[i] = g_timers[--g_timers_n]; else i++; } }
 /* MsgWaitForMultipleObjects(n, handles, all, ms, mask): handles are polled like WaitForMultipleObjects (a child process
    ending, an event, a thread), a pending message returns n, the timeout returns WAIT_TIMEOUT; otherwise the shim is retried */
-static void msgwait_common(Cpu *c, u32 n, u64 arr, int all, u32 ms) { Win32 *w = W; GuestMsg m; int which = 0;
+static void msgwait_common(Cpu *c, u32 n, u64 arr, int all, u32 ms) { Win32 *w = W; GuestMsg m; int which = 0; w->sleeping = 0;
   int r = w32_wait_poll(c, n, arr, all, &which); if (r < 0) { w->last_error = 6; w->msgwait_rip = 0; RET(0xffffffffu); return; }
   if (r > 0) { w->msgwait_rip = 0; RET((u32)which); return; }
   if (next_message(c, &m, 0, 0) || w->quit_posted) { w->msgwait_rip = 0; RET(n); return; }
-  if (ms != 0xffffffffu) { double now = host_now_ms(); if (w->msgwait_rip != c->rip) { w->msgwait_rip = c->rip; w->msgwait_dl = now + ms; } if (now >= w->msgwait_dl) { w->msgwait_rip = 0; RET(258); return; } }
-  w->blits_since_yield = 0; w32_retry_yield(c); }
+  double now = host_now_ms(), until = now + 1.0;
+  if (ms != 0xffffffffu) { if (w->msgwait_rip != c->rip) { w->msgwait_rip = c->rip; w->msgwait_dl = now + ms; } if (now >= w->msgwait_dl) { w->msgwait_rip = 0; RET(258); return; } if (w->msgwait_dl < until) until = w->msgwait_dl; }
+  w->blits_since_yield = 0; msg_wait_pause(w, until); w32_retry_yield(c); }
 static void s_MsgWaitForMultipleObjects(Cpu *c) { msgwait_common(c, (u32)ARG(0), ARG(1), (u32)ARG(2) != 0, (u32)ARG(3)); }
 static void s_MsgWaitForMultipleObjectsEx(Cpu *c) { msgwait_common(c, (u32)ARG(0), ARG(1), (ARG(4) & 1) != 0, (u32)ARG(3)); }
 static void s_WaitMessage(Cpu *c) { msgwait_common(c, 0, 0, 0, 0xffffffffu); }   /* no arguments: wait for any message (was reading garbage as n/handles/timeout) */
