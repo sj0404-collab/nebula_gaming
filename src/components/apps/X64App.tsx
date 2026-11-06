@@ -263,7 +263,7 @@ export default function X64App() {
     const c = canvasRef.current; if (!c) return;
     if (presenterRef.current?.canvas === c) return;   // the canvas is re-created whenever the Screen tab is left and re-entered
     try { const p = new FramePresenter(c); presenterRef.current = p; setGlInfo(`${p.api.toUpperCase()} · ${p.renderer}`); } catch (e) { setGlInfo('WebGL unavailable: ' + String(e)); return; }
-    const g = rtRef.current?.lastGlSurface(); if (g) p.setGl(g.canvas, g.x, g.y, g.w, g.h);   // the GL surface outlives the canvas: re-upload it for the new presenter
+    const g = rtRef.current?.lastGlSurface(); if (g) presenterRef.current.setGl(g.canvas, g.x, g.y, g.w, g.h);   // the GL surface outlives the canvas: re-upload it for the new presenter
     const last = rtRef.current?.lastPresented(); if (last) presenterRef.current.present(last.px, last.w, last.h);   // show the final frame of a finished program
   }, [ready, tab]);
 
