@@ -71,6 +71,7 @@ jobs:
             e2e/shots/site-*.png
             /tmp/sc/sitecheck.txt
             /tmp/sc/native.txt
+            /tmp/sc/browser_log.txt
             /tmp/sc/*.tmp
             /tmp/sc/*.dll
           if-no-files-found: warn
