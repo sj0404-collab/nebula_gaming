@@ -58,7 +58,7 @@ jobs:
           MS="${{ github.event.inputs.wait }}"; [ "$MS" -gt 25000 ] 2>/dev/null || MS=25000; echo "native: --max-ms $MS $KEYS"
           rc=0; X64_LOG=1 timeout $((MS / 1000 + 90)) ./emu/x64/x64run --quiet --no-stdin $AT --max-ms $MS $KEYS --stats --mount-rw "/tmp/sc/guest_tmp=C:\\tmp" "/tmp/sc/$NAME" > /tmp/sc/native.txt 2>&1 || rc=$?
           echo "native rc=$rc"; grep -a -v "^\[wnd\]" /tmp/sc/native.txt | tail -60 | cut -c1-300
-          find /tmp/sc/guest_tmp -type f | head -20; find /tmp/sc/guest_tmp -maxdepth 1 -name "Setup Log*" -exec sh -c 'echo "--- $1"; sed "1s/^\xEF\xBB\xBF//" "$1" | head -120 | cut -c1-240' _ {} \; ; find /tmp/sc/guest_tmp -type f \( -name "*.tmp" -o -name "*.exe" -o -name "*.dll" \) -size +20k -exec cp {} /tmp/sc/ \; 2>/dev/null || true
+          find /tmp/sc/guest_tmp -type f | head -20; find /tmp/sc/guest_tmp -maxdepth 1 -name "Setup Log*" -exec sh -c 'echo "--- $1"; sed "1s/^\xEF\xBB\xBF//" "$1" | grep -v "DLL function import\|Function name:\|DLL name:\|Dest DLL name:\|Importing the DLL\|imported the DLL\|Failed to import" | head -60 | cut -c1-240; echo "--- tail"; tail -40 "$1" | cut -c1-240' _ {} \; ; find /tmp/sc/guest_tmp -type f \( -name "*.tmp" -o -name "*.exe" -o -name "*.dll" \) -size +20k -exec cp {} /tmp/sc/ \; 2>/dev/null || true
       - name: Open it through the Programs UI
         env:
           X64_JIT: ${{ github.event.inputs.jit }}

@@ -83,6 +83,7 @@ if (st === 'fault' || st === 'exited') {
   await page.evaluate(() => document.querySelectorAll('[data-x64-report] details').forEach(d => { d.open = true; })).catch(() => {});   // emulator log + API table are collapsed by default
   const rep = await w.locator('[data-x64-report]').innerText().catch(() => '');
   console.log('report (running):', rep.replace(/What this is:[\s\S]*$/, '').replace(/\s+/g, ' ').slice(0, 6000));
+  { const m = rep.match(/Emulator log[\s\S]*?(?=What this is:|$)/); if (m) { const { writeFileSync } = await import('node:fs'); writeFileSync('/tmp/sc/browser_log.txt', m[0]); console.log('browser emulator log tail:'); console.log(m[0].split('\n').slice(-80).join('\n')); } }
   await page.screenshot({ path: resolve(SHOTS, `site-${tag}-4-report.png`) }); }
 if (st === 'running') {   // still running: where is it? (console tail + the emulator's own inspector)
   await w.locator('[data-x64-tab="console"]').click().catch(() => {}); await sleep(200);
