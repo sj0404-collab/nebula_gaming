@@ -52,9 +52,13 @@ jobs:
           cd emu/x64 && cc -O2 -Wall -Wno-unused-function -Wno-unused-parameter -Wno-misleading-indentation -o x64run lib.c cpu.c pe.c win32.c gdi.c vfs.c api.c dxbc.c host_native.c main_native.c -lm && cd ../..
           cp "/tmp/sc/$NAME" /tmp/sc/native_copy.exe
           mkdir -p /tmp/sc/guest_tmp
-          AT=""; [ "${{ inputs.apitrace }}" = "1" ] && AT="--apitrace"; rc=0; X64_LOG=1 timeout 120 ./emu/x64/x64run --quiet --no-stdin $AT --max-ms 25000 --stats --mount-rw "/tmp/sc/guest_tmp=C:\\tmp" "/tmp/sc/$NAME" > /tmp/sc/native.txt 2>&1 || rc=$?
+          AT=""; [ "${{ inputs.apitrace }}" = "1" ] && AT="--apitrace"
+          # the same keys as in the browser pass, as x64run --key VK@ms (Enter/Escape/Tab/Space/Down/Up/letters); mouse clicks are browser-only
+          KEYS=""; IFS=';' read -ra KV <<< "${{ github.event.inputs.keys }}"; for kv in "${KV[@]}"; do k="${kv%%@*}"; at="${kv#*@}"; [ -n "$k" ] || continue; case "$k" in Enter) vk=0x0d;; Escape) vk=0x1b;; Tab) vk=0x09;; Space) vk=0x20;; ArrowDown) vk=0x28;; ArrowUp) vk=0x26;; click:*) continue;; *) vk=$(printf '0x%02x' "'${k:0:1}");; esac; KEYS="$KEYS --key $vk@$at"; done
+          MS="${{ github.event.inputs.wait }}"; [ "$MS" -gt 25000 ] 2>/dev/null || MS=25000; echo "native: --max-ms $MS $KEYS"
+          rc=0; X64_LOG=1 timeout $((MS / 1000 + 90)) ./emu/x64/x64run --quiet --no-stdin $AT --max-ms $MS $KEYS --stats --mount-rw "/tmp/sc/guest_tmp=C:\\tmp" "/tmp/sc/$NAME" > /tmp/sc/native.txt 2>&1 || rc=$?
           echo "native rc=$rc"; grep -a -v "^\[wnd\]" /tmp/sc/native.txt | tail -60 | cut -c1-300
-          find /tmp/sc/guest_tmp -type f | head -20; find /tmp/sc/guest_tmp -type f \( -name "*.tmp" -o -name "*.exe" -o -name "*.dll" \) -size +20k -exec cp {} /tmp/sc/ \; 2>/dev/null || true
+          find /tmp/sc/guest_tmp -type f | head -20; find /tmp/sc/guest_tmp -maxdepth 1 -name "Setup Log*" -exec sh -c 'echo "--- $1"; iconv -f UTF-16 -t UTF-8 "$1" 2>/dev/null | head -80 || head -80 "$1"' _ {} \; ; find /tmp/sc/guest_tmp -type f \( -name "*.tmp" -o -name "*.exe" -o -name "*.dll" \) -size +20k -exec cp {} /tmp/sc/ \; 2>/dev/null || true
       - name: Open it through the Programs UI
         env:
           X64_JIT: ${{ github.event.inputs.jit }}
