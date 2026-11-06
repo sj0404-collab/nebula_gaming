@@ -41,6 +41,12 @@ jobs:
           mkdir -p /tmp/sc; cd /tmp/sc
           NAME="${{ github.event.inputs.filename }}"; [ -n "$NAME" ] || NAME=$(basename "${{ github.event.inputs.url }}")
           curl -sSL --retry 3 -o "$NAME" "${{ github.event.inputs.url }}"; ls -la /tmp/sc; echo "NAME=$NAME" >> $GITHUB_ENV
+      - name: Native run first (x64run, 25 s budget, X64_LOG=1) — the fault address / API trace without the browser
+        run: |
+          cd emu/x64 && cc -O2 -Wall -Wno-unused-function -Wno-unused-parameter -Wno-misleading-indentation -o x64run lib.c cpu.c pe.c win32.c gdi.c vfs.c api.c dxbc.c host_native.c main_native.c -lm && cd ../..
+          cp "/tmp/sc/$NAME" /tmp/sc/native_copy.exe
+          rc=0; X64_LOG=1 timeout 120 ./emu/x64/x64run --quiet --no-stdin --max-ms 25000 --stats "/tmp/sc/$NAME" > /tmp/sc/native.txt 2>&1 || rc=$?
+          echo "native rc=$rc"; grep -a -v "^\[wnd\]" /tmp/sc/native.txt | tail -60 | cut -c1-300
       - name: Open it through the Programs UI
         env:
           X64_JIT: ${{ github.event.inputs.jit }}
@@ -52,4 +58,5 @@ jobs:
           path: |
             e2e/shots/site-*.png
             /tmp/sc/sitecheck.txt
+            /tmp/sc/native.txt
           if-no-files-found: warn

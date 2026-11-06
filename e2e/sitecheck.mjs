@@ -68,8 +68,9 @@ if (st === 'fault' || st === 'exited') {
 }
 { // the Report tab always: MessageBox texts, the emulator log and the API summary are the first thing to read when something is off
   await w.locator('[data-x64-tab="report"]').click().catch(() => {}); await sleep(300);
+  await page.evaluate(() => document.querySelectorAll('[data-x64-report] details').forEach(d => { d.open = true; })).catch(() => {});   // emulator log + API table are collapsed by default
   const rep = await w.locator('[data-x64-report]').innerText().catch(() => '');
-  console.log('report (running):', rep.replace(/\s+/g, ' ').slice(0, 2500));
+  console.log('report (running):', rep.replace(/What this is:[\s\S]*$/, '').replace(/\s+/g, ' ').slice(0, 6000));
   await page.screenshot({ path: resolve(SHOTS, `site-${tag}-4-report.png`) }); }
 if (st === 'running') {   // still running: where is it? (console tail + the emulator's own inspector)
   await w.locator('[data-x64-tab="console"]').click().catch(() => {}); await sleep(200);
