@@ -20,7 +20,9 @@ if (!process.env.E2E_URL) {
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
-const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } }); const page = await ctx.newPage();
+const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+if (process.env.X64_JIT === '0') await ctx.addInitScript(() => { try { localStorage.setItem('nebula_jit', '0'); } catch { /* ignore */ } });
+const page = await ctx.newPage();
 const errors = []; page.on('pageerror', e => errors.push(e.message));
 await page.goto(url); await page.waitForSelector('[aria-label="Start"]');
 await page.locator('[data-desktop-icon="x64"]').dblclick(); await sleep(300);
@@ -64,6 +66,11 @@ if (st === 'fault' || st === 'exited') {
   await w.locator('[data-x64-tab="console"]').click().catch(() => {}); await sleep(200);
   const con = await w.locator('[data-x64-console]').innerText().catch(() => ''); if (con.trim()) console.log('console:', con.replace(/\s+/g, ' ').slice(-800));
 }
+{ // the Report tab always: MessageBox texts, the emulator log and the API summary are the first thing to read when something is off
+  await w.locator('[data-x64-tab="report"]').click().catch(() => {}); await sleep(300);
+  const rep = await w.locator('[data-x64-report]').innerText().catch(() => '');
+  console.log('report (running):', rep.replace(/\s+/g, ' ').slice(0, 2500));
+  await page.screenshot({ path: resolve(SHOTS, `site-${tag}-4-report.png`) }); }
 if (st === 'running') {   // still running: where is it? (console tail + the emulator's own inspector)
   await w.locator('[data-x64-tab="console"]').click().catch(() => {}); await sleep(200);
   const con = await w.locator('[data-x64-console]').innerText().catch(() => ''); if (con.trim()) console.log('console:', con.replace(/\s+/g, ' ').slice(-800));
