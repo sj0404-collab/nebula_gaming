@@ -117,10 +117,23 @@ static void s_RmRegisterResources(Cpu *c) { RET(0); }
 static void s_RmGetList(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), 0); if (ARG(2)) wr32(c, ARG(2), 0); if (ARG(4)) wr32(c, ARG(4), 0); RET(0); }
 static void s_RmShutdown(Cpu *c) { RET(0); }
 static void s_RmRestart(Cpu *c) { RET(0); }
+/* OEM <-> ANSI character-set conversions (Inno Setup 5 / Delphi AnsiStrings): our ANSI code page is UTF-8 and the console is the
+   same UTF-8 stream, so both directions copy bytes; the Buff forms take a length, the plain forms copy to the NUL, W forms widen/narrow */
+static void oem_copy(Cpu *c, u64 src, u64 dst, u32 n, int srcw, int dstw) {
+  for (u32 i = 0; i < n; i++) { u32 ch = srcw ? rd16(c, src + 2 * i) : rd8(c, src + i); if (dstw) wr16(c, dst + 2 * i, (u16)ch); else wr8(c, dst + i, (u8)(ch < 256 ? ch : '?')); } }
+static u32 oem_len(Cpu *c, u64 src, int wide) { u32 n = 0; while (n < (1u << 20) && (wide ? rd16(c, src + 2 * n) : rd8(c, src + n))) n++; return n + 1; }   /* including the NUL */
+static void s_OemToCharA(Cpu *c) { if (ARG(0) && ARG(1)) oem_copy(c, ARG(0), ARG(1), oem_len(c, ARG(0), 0), 0, 0); RET(1); }
+static void s_CharToOemA(Cpu *c) { if (ARG(0) && ARG(1)) oem_copy(c, ARG(0), ARG(1), oem_len(c, ARG(0), 0), 0, 0); RET(1); }
+static void s_OemToCharBuffA(Cpu *c) { if (ARG(0) && ARG(1)) oem_copy(c, ARG(0), ARG(1), (u32)ARG(2), 0, 0); RET(1); }
+static void s_CharToOemBuffA(Cpu *c) { if (ARG(0) && ARG(1)) oem_copy(c, ARG(0), ARG(1), (u32)ARG(2), 0, 0); RET(1); }
+static void s_OemToCharW(Cpu *c) { if (ARG(0) && ARG(1)) oem_copy(c, ARG(0), ARG(1), oem_len(c, ARG(0), 0), 0, 1); RET(1); }
+static void s_CharToOemW(Cpu *c) { if (ARG(0) && ARG(1)) oem_copy(c, ARG(0), ARG(1), oem_len(c, ARG(0), 1), 1, 0); RET(1); }
+static void s_OemToCharBuffW(Cpu *c) { if (ARG(0) && ARG(1)) oem_copy(c, ARG(0), ARG(1), (u32)ARG(2), 0, 1); RET(1); }
+static void s_CharToOemBuffW(Cpu *c) { if (ARG(0) && ARG(1)) oem_copy(c, ARG(0), ARG(1), (u32)ARG(2), 1, 0); RET(1); }
 static void s_RmEndSession(Cpu *c) { RET(0); }
 static void s_RmJoinSession(Cpu *c) { RET(0); }
 static void s_RmCancelCurrentTask(Cpu *c) { RET(0); }
-#define INNO_SHIMS S(RmStartSession), S(RmRegisterResources), S(RmGetList), S(RmShutdown), S(RmRestart), S(RmEndSession), S(RmJoinSession), S(RmCancelCurrentTask), S(VariantCopyInd), S(SafeArrayCreate), S(SafeArrayCreateVector), S(SafeArrayDestroy), S(SafeArrayGetDim), S(SafeArrayGetElemsize), S(SafeArrayGetLBound), S(SafeArrayGetUBound), S(SafeArrayAccessData), S(SafeArrayUnaccessData), \
+#define INNO_SHIMS S(OemToCharA), S(CharToOemA), S(OemToCharBuffA), S(CharToOemBuffA), S(OemToCharW), S(CharToOemW), S(OemToCharBuffW), S(CharToOemBuffW), S(RmStartSession), S(RmRegisterResources), S(RmGetList), S(RmShutdown), S(RmRestart), S(RmEndSession), S(RmJoinSession), S(RmCancelCurrentTask), S(VariantCopyInd), S(SafeArrayCreate), S(SafeArrayCreateVector), S(SafeArrayDestroy), S(SafeArrayGetDim), S(SafeArrayGetElemsize), S(SafeArrayGetLBound), S(SafeArrayGetUBound), S(SafeArrayAccessData), S(SafeArrayUnaccessData), \
   S(SafeArrayLock), S(SafeArrayUnlock), S(SafeArrayPtrOfIndex), S(SafeArrayPutElement), S(SafeArrayGetElement), S(SafeArrayCopy), S(SafeArrayRedim), S(SafeArrayGetVartype), S(SafeArrayAllocDescriptorEx), S(SafeArrayAllocDescriptor), S(SafeArrayAllocData), S(SafeArrayDestroyData), S(SafeArrayDestroyDescriptor), \
   S(VariantChangeType), S(VariantChangeTypeEx), S(SetThreadLocale), S(GetSystemDefaultUILanguage), S(GetThreadUILanguage), S(SetThreadUILanguage), S(EnumCalendarInfoW), S(EnumCalendarInfoA), S(EnumCalendarInfoExW), \
   S(GetSystemWindowsDirectoryW), S(GetSystemWindowsDirectoryA), S(GetVolumeInformationW), S(GetVolumeInformationA), S(GetVolumeInformationByHandleW), S(ConvertSidToStringSidW), S(ConvertSidToStringSidA), S(CharUpperBuffW), S(CharLowerBuffW), S(CharUpperBuffA), S(CharLowerBuffA)
