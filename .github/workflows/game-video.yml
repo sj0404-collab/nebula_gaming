@@ -24,6 +24,9 @@ on:
       actions:
         description: 'scripted input before recording, e.g. "click:0.5,0.83@80;key:Enter@40" (fractions of the game screen, @frames to wait)'
         default: ''
+      gpu:
+        description: 'browser GPU backend: swiftshader | mesa-vk (lavapipe) | mesa-gl (llvmpipe)'
+        default: 'swiftshader'
       record_clicks:
         description: clicks during the recording, "fx,fy;fx,fy" (one every ~3 s)
         default: ''
@@ -50,13 +53,22 @@ jobs:
         run: |
           npx playwright install --with-deps chromium
           sudo apt-get install -y -q ffmpeg >/dev/null 2>&1 || true
+          if [ "${{ github.event.inputs.gpu || 'swiftshader' }}" != "swiftshader" ]; then sudo apt-get install -y -q mesa-vulkan-drivers libgl1-mesa-dri libegl1 libgles2 mesa-utils vulkan-tools xvfb >/dev/null 2>&1; ls /usr/share/vulkan/icd.d/ || true; fi
           ffmpeg -version | head -1
       - name: Download the official Shattered Pixel Dungeon v4.0.2 Windows build (GPL, author's GitHub release)
         run: |
           curl -sSL -o /tmp/ShatteredPD-v4.0.2-Windows.zip https://github.com/00-Evan/shattered-pixel-dungeon/releases/download/v4.0.2/ShatteredPD-v4.0.2-Windows.zip
           ls -la /tmp/ShatteredPD-v4.0.2-Windows.zip; unzip -l /tmp/ShatteredPD-v4.0.2-Windows.zip | head -15
       - name: Run the game in the emulator and record frames + audio
-        run: node e2e/record.mjs /tmp/ShatteredPD-v4.0.2-Windows.zip --seconds "${{ github.event.inputs.seconds || '15' }}" --settle-frames "${{ github.event.inputs.settle_frames || '400' }}" --jit "${{ github.event.inputs.jit || '1' }}" --gltrace "${{ github.event.inputs.gltrace }}" --jitskip "${{ github.event.inputs.jitskip }}" --actions "${{ github.event.inputs.actions }}" --record-clicks "${{ github.event.inputs.record_clicks }}" --profile --out e2e/video
+        env:
+          GPU: ${{ github.event.inputs.gpu || 'swiftshader' }}
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          GALLIUM_DRIVER: llvmpipe
+          LP_NUM_THREADS: '4'
+        run: |
+          RUN="node"; if [ "$GPU" != "swiftshader" ]; then RUN="xvfb-run -a node"; fi
+          $RUN e2e/record.mjs /tmp/ShatteredPD-v4.0.2-Windows.zip --seconds "${{ github.event.inputs.seconds || '15' }}" --settle-frames "${{ github.event.inputs.settle_frames || '400' }}" --jit "${{ github.event.inputs.jit || '1' }}" --gltrace "${{ github.event.inputs.gltrace }}" --jitskip "${{ github.event.inputs.jitskip }}" --actions "${{ github.event.inputs.actions }}" --record-clicks "${{ github.event.inputs.record_clicks }}" --profile --out e2e/video
         timeout-minutes: 60
       - name: Mux with ffmpeg (exact per-frame durations + captured PCM)
         run: |

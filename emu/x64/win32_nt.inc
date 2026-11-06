@@ -41,8 +41,10 @@ static void s_NtQueryInformationFile(Cpu *c) {
   case 8:  /* FileAccessInformation */ if (len < 4) { st = NT_BUFFER_TOO_SMALL; break; } wr32(c, buf, 0x12019f); info = 4; break;
   case 9:  /* FileNameInformation: Length @0, Name @4 */ {
     const char *p = kind == FD_FILE ? vfs_fd_path(fd) : "\\Device\\NamedPipe\\nebula"; char tmp[600]; if (p && p[1] == ':') { e_snprintf(tmp, sizeof tmp, "%s", p + 2); p = tmp; } if (!p) p = "\\";
-    u32 bl = (u32)e_strlen(p) * 2; if (len < 4) { st = NT_BUFFER_TOO_SMALL; break; } wr32(c, buf, bl); u32 room = len - 4, wrote = 0;
-    for (u32 i = 0; p[i] && wrote + 2 <= room; i++, wrote += 2) wr16(c, buf + 4 + wrote, (u8)p[i]); if (wrote < bl) st = NT_BUFFER_OVERFLOW; info = 4 + wrote; break; }
+    u32 bl = utf8_u16len(p) * 2; if (len < 4) { st = NT_BUFFER_TOO_SMALL; break; } wr32(c, buf, bl); u32 room = len - 4, wrote = bl <= room ? bl : room & ~1u;
+    if (wrote) { u16 tmp[600]; u32 k = 0; for (const u8 *q = (const u8 *)p; *q && k < 599;) { u32 b = *q++, cp = b; int extra = b >= 0xF0 ? 3 : b >= 0xE0 ? 2 : b >= 0xC0 ? 1 : 0; if (extra) cp = b & (0x3f >> extra); for (int e = 0; e < extra && (*q & 0xC0) == 0x80; e++) cp = (cp << 6) | (*q++ & 0x3f); if (cp >= 0x10000) { cp -= 0x10000; tmp[k++] = (u16)(0xD800 | (cp >> 10)); if (k < 599) tmp[k++] = (u16)(0xDC00 | (cp & 0x3ff)); } else tmp[k++] = (u16)cp; }
+      for (u32 i = 0; i < wrote / 2 && i < k; i++) wr16(c, buf + 4 + 2 * i, tmp[i]); }
+    if (wrote < bl) st = NT_BUFFER_OVERFLOW; info = 4 + wrote; break; }
   case 14: /* FilePositionInformation */ if (len < 8) { st = NT_BUFFER_TOO_SMALL; break; } wr64(c, buf, kind == FD_FILE ? (u64)vfs_tell(fd) : 0); info = 8; break;
   case 16: /* FileModeInformation */ if (len < 4) { st = NT_BUFFER_TOO_SMALL; break; } wr32(c, buf, 0x20 /* FILE_SYNCHRONOUS_IO_NONALERT */); info = 4; break;
   case 17: /* FileAlignmentInformation */ if (len < 4) { st = NT_BUFFER_TOO_SMALL; break; } wr32(c, buf, 0); info = 4; break;
@@ -52,8 +54,10 @@ static void s_NtQueryInformationFile(Cpu *c) {
     nt_basic_info(c, buf, fd); nt_standard_info(c, buf + 40, fd); wr64(c, buf + 64, nt_file_id(fd)); wr32(c, buf + 72, 0); wr32(c, buf + 76, 0x12019f);
     wr64(c, buf + 80, kind == FD_FILE ? (u64)vfs_tell(fd) : 0); wr32(c, buf + 88, 0x20); wr32(c, buf + 92, 0);
     const char *p = kind == FD_FILE ? vfs_fd_path(fd) : "\\nebula"; char tmp[600]; if (p && p[1] == ':') { e_snprintf(tmp, sizeof tmp, "%s", p + 2); p = tmp; } if (!p) p = "\\";
-    u32 bl = (u32)e_strlen(p) * 2; wr32(c, buf + 96, bl); u32 room = len > 100 ? len - 100 : 0, wrote = 0;
-    for (u32 i = 0; p[i] && wrote + 2 <= room; i++, wrote += 2) wr16(c, buf + 100 + wrote, (u8)p[i]); if (wrote < bl) st = NT_BUFFER_OVERFLOW; info = 100 + wrote; break; }
+    u32 bl = utf8_u16len(p) * 2; wr32(c, buf + 96, bl); u32 room = len > 100 ? len - 100 : 0, wrote = bl <= room ? bl : room & ~1u;
+    if (wrote) { u16 tmp[600]; u32 k = 0; for (const u8 *q = (const u8 *)p; *q && k < 599;) { u32 b = *q++, cp = b; int extra = b >= 0xF0 ? 3 : b >= 0xE0 ? 2 : b >= 0xC0 ? 1 : 0; if (extra) cp = b & (0x3f >> extra); for (int e = 0; e < extra && (*q & 0xC0) == 0x80; e++) cp = (cp << 6) | (*q++ & 0x3f); if (cp >= 0x10000) { cp -= 0x10000; tmp[k++] = (u16)(0xD800 | (cp >> 10)); if (k < 599) tmp[k++] = (u16)(0xDC00 | (cp & 0x3ff)); } else tmp[k++] = (u16)cp; }
+      for (u32 i = 0; i < wrote / 2 && i < k; i++) wr16(c, buf + 100 + 2 * i, tmp[i]); }
+    if (wrote < bl) st = NT_BUFFER_OVERFLOW; info = 100 + wrote; break; }
   case 24: /* FilePipeLocalInformation: NamedPipeType, Configuration, MaximumInstances, CurrentInstances, InboundQuota, ReadDataAvailable, OutboundQuota, WriteQuotaAvailable, NamedPipeState, NamedPipeEnd (10 u32) */
     if (len < 40) { st = NT_BUFFER_TOO_SMALL; break; }
     wr32(c, buf, 0); wr32(c, buf + 4, 0); wr32(c, buf + 8, 1); wr32(c, buf + 12, 1); wr32(c, buf + 16, 65536); wr32(c, buf + 20, kind == FD_PIPE ? (u32)vfs_pipe_avail(fd) : 0); wr32(c, buf + 24, 65536); wr32(c, buf + 28, 65536); wr32(c, buf + 32, 3); wr32(c, buf + 36, 0); info = 40; break;

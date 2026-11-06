@@ -687,7 +687,10 @@ static void s_GetProcAddress(Cpu *c) {
 static const char *mod_file_name(Win32 *w, u64 h) { int m = h ? mod_by_base(w, h) : -1; return m >= 0 ? w->mods[m].name : w->exe_name; }
 static void mod_full_path(Win32 *w, u64 h, char *p, size_t cap) { int m = h ? mod_by_base(w, h) : -1; if (m < 0 && w->exe_path[0]) e_snprintf(p, cap, "%s", w->exe_path); else if (m >= 0 && w->mods[m].dir[0]) e_snprintf(p, cap, "%s\\%s", w->mods[m].dir, mod_file_name(w, h)); else e_snprintf(p, cap, "C:\\nebula\\%s", mod_file_name(w, h)); }
 static void s_GetModuleFileNameA(Cpu *c) { char p[600]; mod_full_path(W, ARG(0), p, sizeof p); size_t l = e_strlen(p); u32 n = (u32)ARG(2); if (l + 1 > n) l = n ? n - 1 : 0; u8 *d = mem_ptr(c->mem, ARG(1), l + 1, 1); if (d) { e_memcpy(d, p, l); d[l] = 0; } RET(l); }
-static void s_GetModuleFileNameW(Cpu *c) { char p[600]; mod_full_path(W, ARG(0), p, sizeof p); size_t l = e_strlen(p); u32 n = (u32)ARG(2); if (l + 1 > n) l = n ? n - 1 : 0; for (size_t i = 0; i < l; i++) wr16(c, ARG(1) + i * 2, (u8)p[i]); wr16(c, ARG(1) + l * 2, 0); RET(l); }
+static void s_GetModuleFileNameW(Cpu *c) { char p[600]; mod_full_path(W, ARG(0), p, sizeof p); u32 n = (u32)ARG(2); if (!n || !ARG(1)) { RET(0); return; }
+  u32 need = utf8_u16len(p);   /* a Cyrillic / CJK program name used to come out byte-per-UTF-16-unit: the program could not reopen its own file */
+  if (need + 1 > n) { put_w8(c, ARG(1), p, n); W->last_error = 122; RET(n); return; }   /* truncated: nSize + ERROR_INSUFFICIENT_BUFFER, as on Windows */
+  put_w8(c, ARG(1), p, 0); RET(need); }
 static void s_GetSystemDirectoryA(Cpu *c) { const char *d = "C:\\Windows\\System32"; size_t l = e_strlen(d); if ((u32)ARG(1) > l) { u8 *p = mem_ptr(c->mem, ARG(0), l + 1, 1); if (p) e_memcpy(p, d, l + 1); } RET(l); }
 static void s_GetWindowsDirectoryA(Cpu *c) { const char *d = "C:\\Windows"; size_t l = e_strlen(d); if ((u32)ARG(1) > l) { u8 *p = mem_ptr(c->mem, ARG(0), l + 1, 1); if (p) e_memcpy(p, d, l + 1); } RET(l); }
 static void s_GetVersion(Cpu *c) { RET(0x23f00206); }

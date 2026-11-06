@@ -430,7 +430,7 @@ export default function X64App() {
       setLog(l => [...l, `${current.name} is a .NET program (${current.info.dotnet}): the .NET runtime pack could not be installed, so it cannot run here`]); setStats(rt.stats()); setTab('report'); return;
     }
     const base = current.name.split('\\').pop() || current.name;
-    const argv0 = current.path && current.path.includes(' ') ? `"${current.path}"` : current.path ?? base;
+    const a0 = current.path ?? base; const argv0 = a0.includes(' ') ? `"${a0}"` : a0;   // a name with spaces is quoted as argv[0] (an opened "Setup (1).exe" used to be split into two parameters)
     const err = rt.start(current.bytes, current.path ?? base, args.trim() ? `${argv0} ${args.trim()}` : argv0, current.cwd);
     if (err) { setLog(l => [...l, 'LOADER: ' + err]); setStats(rt.stats()); setTab('report'); return; }
     setStats(rt.stats()); setFiles(rt.vfsList()); setFrames(0);

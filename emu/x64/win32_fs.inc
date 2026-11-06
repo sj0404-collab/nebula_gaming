@@ -18,7 +18,7 @@ static void block_on(Cpu *c, int reason, int arg) { W->block = reason; W->nblock
 static int file_fd(Cpu *c, u64 f) { u64 iob = W->ubuf, st = IOB_STRIDE; if (f == iob + st) return 1; if (f == iob + 2 * st) return 2; if (f == iob) return -1; if (f < 0x10000) return 0; if (rd32(c, f + 32) == FILE_MAGIC) { int fd = (int)rd32(c, f + 28); return vfs_is_open(fd) ? fd : 0; } return 0; }
 static u64 make_file(Cpu *c, int fd) { u64 f = w32_heap_alloc(W, 48, 1); wr32(c, f + 28, (u32)fd); wr32(c, f + 32, FILE_MAGIC); wr32(c, f + 24, 1); return f; }
 static void put_a(Cpu *c, u64 dst, const char *s, u32 cap) { size_t l = e_strlen(s); if (cap && l + 1 > cap) l = cap - 1; u8 *p = mem_ptr(c->mem, dst, l + 1, 1); if (p) { e_memcpy(p, s, l); p[l] = 0; } }
-static void put_w(Cpu *c, u64 dst, const char *s, u32 cap) { size_t l = e_strlen(s); if (cap && l + 1 > cap) l = cap - 1; for (size_t i = 0; i < l; i++) wr16(c, dst + i * 2, (u8)s[i]); wr16(c, dst + l * 2, 0); }
+static void put_w(Cpu *c, u64 dst, const char *s, u32 cap) { put_w8(c, dst, s, cap); }   /* UTF-8 → UTF-16 (non-ASCII file names survive the round trip) */
 static const char *gstr(Cpu *c, u64 a) { const char *s = rd_str(c, a, 1 << 30); return s ? s : ""; }
 static const char *name_a(Cpu *c, u64 a) { const char *s = rd_str(c, a, 1024); return s ? s : ""; }
 static char g_wname[1024];

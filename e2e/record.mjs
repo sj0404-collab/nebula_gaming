@@ -22,8 +22,15 @@ if (!process.env.E2E_URL) {
   const t0 = Date.now(); while (Date.now() - t0 < 30000) { try { const r = await fetch(url); if (r.ok) break; } catch { /* wait */ } await new Promise(r => setTimeout(r, 300)); }
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'] });
+// GPU=swiftshader (default) | mesa-vk (ANGLE on Mesa lavapipe) | mesa-gl (ANGLE on Mesa llvmpipe through EGL) — the last two need the Mesa packages and run headed under Xvfb
+const GPU = process.env.GPU || 'swiftshader';
+const gpuArgs = GPU === 'mesa-vk' ? ['--use-gl=angle', '--use-angle=vulkan', '--use-vulkan=native', '--enable-features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan', '--disable-vulkan-surface', '--ignore-gpu-blocklist', '--enable-gpu-rasterization']
+  : GPU === 'mesa-gl' ? ['--use-gl=angle', '--use-angle=gl', '--ignore-gpu-blocklist', '--enable-gpu-rasterization']
+  : ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'];
+const browser = await chromium.launch({ headless: GPU === 'swiftshader', args: ['--autoplay-policy=no-user-gesture-required', ...gpuArgs] });
+console.log(`GPU backend requested: ${GPU}`);
 const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+{ const probe = await ctx.newPage(); const r = await probe.evaluate(() => { const c = document.createElement('canvas'); const gl = c.getContext('webgl2'); if (!gl) return 'no WebGL2'; const d = gl.getExtension('WEBGL_debug_renderer_info'); return d ? String(gl.getParameter(d.UNMASKED_RENDERER_WEBGL)) : String(gl.getParameter(gl.RENDERER)); }); console.log(`WebGL2 renderer: ${r}`); await probe.close(); }
 // audio capture: every AudioBuffer the emulator schedules, with its start time on the context clock
 await ctx.addInitScript(() => {
   const W = window;

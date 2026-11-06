@@ -551,7 +551,7 @@ static void dsn_SetNotificationPositions(Cpu *c) {
 #define E_NOTFOUND_ 0x80070490u
 #define E_NOTIMPL_ 0x80004001u
 static const char *AUD_RENDER_ID = "{0.0.0.00000000}.{6f1a3c5e-4b2d-4e8a-9c1f-2e7d5a6b8c90}";
-static u64 aud_wstr_cotask(Cpu *c, const char *s) { size_t n = e_strlen(s); u64 p = w32_heap_alloc(W, (n + 1) * 2, 1); if (p) for (size_t i = 0; i <= n; i++) wr16(c, p + 2 * i, (u16)(u8)s[i]); return p; }
+static u64 aud_wstr_cotask(Cpu *c, const char *s) { size_t n = e_strlen(s); u64 p = w32_heap_alloc(W, (n + 1) * 2, 1); if (p) put_w8(c, p, s, 0); return p; }
 static void mme_create_enum(Cpu *c, u64 ppv) { u64 a; AObj *o = aobj_new(c, AK_ENUM, &a); if (!o) { RET(E_OUTOFMEMORY_); return; } wrp(c, ppv, a); RET(0); }
 static void mme_EnumAudioEndpoints(Cpu *c) {   /* (dataFlow, stateMask, ppDevices): eRender 0, eCapture 1, eAll 2 */
   u32 flow = (u32)ARG(1), mask = (u32)ARG(2); u64 pp = ARG(3); if (!pp) { RET(E_INVALIDARG_); return; }

@@ -22,7 +22,7 @@ static const char *const rt_days = ":Sun:Sunday:Mon:Monday:Tue:Tuesday:Wed:Wedne
 static const char *const rt_months = ":Jan:January:Feb:February:Mar:March:Apr:April:May:May:Jun:June:Jul:July:Aug:August:Sep:September:Oct:October:Nov:November:Dec:December";
 static void s_Getdays(Cpu *c) { RET(w32_guest_strdup(W, rt_days)); }
 static void s_Getmonths(Cpu *c) { RET(w32_guest_strdup(W, rt_months)); }
-static u64 rt_wide_dup(Cpu *c, const char *s) { size_t n = e_strlen(s); u64 a = w32_heap_alloc(W, (n + 1) * 2, 0); for (size_t i = 0; i <= n; i++) wr16(c, a + i * 2, (u8)s[i]); return a; }
+static u64 rt_wide_dup(Cpu *c, const char *s) { size_t n = e_strlen(s); u64 a = w32_heap_alloc(W, (n + 1) * 2, 0); if (a) put_w8(c, a, s, 0); return a; }
 static void s_W_Getdays(Cpu *c) { RET(rt_wide_dup(c, rt_days)); }
 static void s_W_Getmonths(Cpu *c) { RET(rt_wide_dup(c, rt_months)); }
 /* <fenv.h> over the emulated MXCSR (MSVC's FE_* flag bits equal the MXCSR exception bits; rounding = MXCSR.RC << 5 → 0x000/0x100/0x200/0x300).
