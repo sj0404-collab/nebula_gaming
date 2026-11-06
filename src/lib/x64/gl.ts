@@ -90,6 +90,10 @@ function pixelBytes(format: number, type: number): number { const tb = typeBytes
 
 import { FixedFunction, type FFHost } from './glff';
 
+/** glEnable/glDisable capabilities WebGL2 accepts — validated here instead of with a synchronous gl.getError() per call */
+const WEBGL_CAPS = new Set<number>([0x0BE2, 0x0B44, 0x0B71, 0x0BD0, 0x8037, 0x809E, 0x80A0, 0x0C11, 0x0B90, 0x8C89]);   // BLEND CULL_FACE DEPTH_TEST DITHER POLYGON_OFFSET_FILL SAMPLE_ALPHA_TO_COVERAGE SAMPLE_COVERAGE SCISSOR_TEST STENCIL_TEST RASTERIZER_DISCARD
+/** glPixelStorei parameters WebGL2 accepts */
+const WEBGL_PIXELSTORE = new Set<number>([0x0D05, 0x0CF5, 0x0CF2, 0x0CF3, 0x0CF4, 0x806E, 0x806D, 0x0D02, 0x0D03, 0x0D04]);   // PACK_ALIGNMENT UNPACK_ALIGNMENT UNPACK_ROW_LENGTH UNPACK_SKIP_ROWS UNPACK_SKIP_PIXELS UNPACK_IMAGE_HEIGHT UNPACK_SKIP_IMAGES PACK_ROW_LENGTH PACK_SKIP_ROWS PACK_SKIP_PIXELS
 export class GLBridge {
   private ff: FixedFunction;
   gl: WebGL2RenderingContext | null = null;
@@ -211,7 +215,9 @@ export class GLBridge {
       this.warn('exc:' + this.names[id], `${this.names[id]}: ${(e as Error).message}`); this.setErr(GL.INVALID_OPERATION); return 0n;
     }
   }
-  /** host_gl_present: default framebuffer → BGRA rows (top first) at dst (wasm offset) */
+  /** the WebGL drawing surface (null until the program created a context) — composited on the GPU by present.ts */
+  surface(): OffscreenCanvas | HTMLCanvasElement | null { return this.gl ? this.canvas : null; }
+  /** host_gl_present fallback (no presenter on screen): default framebuffer → BGRA rows (top first) at dst (wasm offset) */
   present(dst: Uint32Array, w: number, h: number): void {
     const gl = this.gl; if (!gl) return;
     this.frameNo++; const gt = globalThis as unknown as { __gltrace?: string[] };
@@ -354,7 +360,7 @@ export class GLBridge {
       idxArr = v as Uint32Array;
     }
     if (needClient) {
-      if (indices) { if (!idxArr) { const bytes = indices.count * typeBytes(indices.type); const tmp = new Uint8Array(bytes); gl.getBufferSubData(gl.ELEMENT_ARRAY_BUFFER, Number(indices.ptr), tmp); idxArr = indices.type === GL.UNSIGNED_INT ? new Uint32Array(tmp.buffer) : indices.type === GL.UNSIGNED_SHORT ? new Uint16Array(tmp.buffer) : tmp; }
+      if (indices) { if (!idxArr) { const bytes = indices.count * typeBytes(indices.type); const tmp = this.elementData(Number(indices.ptr), bytes); if (!tmp) return { ok: false, indexOffset: 0 }; idxArr = indices.type === GL.UNSIGNED_INT ? new Uint32Array(tmp.buffer) : indices.type === GL.UNSIGNED_SHORT ? new Uint16Array(tmp.buffer) : tmp; }
         for (let i = 0; i < idxArr.length; i++) if (idxArr[i] > maxIndex) maxIndex = idxArr[i]; }
       else maxIndex = first + count - 1;
       if (!this.scratchVbo) this.scratchVbo = gl.createBuffer();
@@ -496,7 +502,7 @@ export class GLBridge {
       if (!a[2]) g().bufferData(target, size, usage); else { const d = this.u8(a[2], size); if (d) g().bufferData(target, d, usage); } }); this.alias('glBufferDataARB', 'glBufferData');
     this.def('glBufferSubData', (a) => { const target = U(a[0]), off = Q(a[1]), size = Q(a[2]); const id = this.bufTargetId(target); if (!id) { this.setErr(GL.INVALID_OPERATION); return; } const info = this.bufInfo.get(id); if (info) { info.version++; info.shadow = null; } const d = this.u8(a[3], size); if (d) g().bufferSubData(target, off, d); }); this.alias('glBufferSubDataARB', 'glBufferSubData');
     this.def('glGetBufferSubData', (a) => { const d = this.u8(a[3], Q(a[2]), true); if (d) g().getBufferSubData(U(a[0]), Q(a[1]), d); });
-    this.def('glCopyBufferSubData', (a) => g().copyBufferSubData(U(a[0]), U(a[1]), Q(a[2]), Q(a[3]), Q(a[4])));
+    this.def('glCopyBufferSubData', (a) => { g().copyBufferSubData(U(a[0]), U(a[1]), Q(a[2]), Q(a[3]), Q(a[4])); const info = this.bufInfo.get(this.bufTargetId(U(a[1]))); if (info) { info.version++; info.shadow = null; } });
     this.def('glGetBufferParameteriv', (a) => { const target = U(a[0]), p = U(a[1]); const id = this.bufTargetId(target); const info = this.bufInfo.get(id); if (p === GL.BUFFER_MAPPED) { this.wr32(a[2], this.maps.some((m) => m.buffer === id) ? 1 : 0); return; } if (p === GL.BUFFER_ACCESS) { const m = this.maps.find((m) => m.buffer === id); this.wr32(a[2], m ? (m.access & 1 && m.access & 2 ? GL.READ_WRITE : m.access & 1 ? GL.READ_ONLY : GL.WRITE_ONLY) : GL.READ_WRITE); return; } if (p === GL.BUFFER_SIZE && info) { this.wr32(a[2], info.size); return; } this.wr32(a[2], (g().getBufferParameter(target, p) as number) | 0); });
     this.def('glGetBufferParameteri64v', (a) => { const info = this.bufInfo.get(this.bufTargetId(U(a[0]))); this.wr64(a[2], BigInt(U(a[1]) === GL.BUFFER_SIZE && info ? info.size : (g().getBufferParameter(U(a[0]), U(a[1])) as number) | 0)); });
     this.def('glGetBufferPointerv', (a) => { const m = this.maps.find((m) => m.buffer === this.bufTargetId(U(a[0]))); this.wrp(a[2], m ? m.ptr : 0n); });
@@ -671,13 +677,16 @@ export class GLBridge {
       case GL.LIGHTING: case GL.COLOR_MATERIAL: case GL.NORMALIZE: case GL.FOG: case GL.TEXTURE_GEN_S: case GL.TEXTURE_GEN_T: case GL.TEXTURE_GEN_R: case GL.TEXTURE_GEN_Q: case GL.COLOR_SUM: case GL.LINE_STIPPLE: case GL.POLYGON_STIPPLE: case GL.COLOR_LOGIC_OP: case GL.INDEX_LOGIC_OP: if (on) this.legacy(`glEnable(0x${cap.toString(16)})`); return;
     }
     if (cap >= GL.CLIP_PLANE0 && cap < GL.CLIP_PLANE0 + 8) { if (on) this.legacy('glEnable(GL_CLIP_PLANEi)'); return; }
+    if (WEBGL_CAPS.has(cap)) { if (on) gl.enable(cap); else gl.disable(cap); return; }   // no getError round trip (a synchronous GPU-process query) on the hot path
+    if (this.badCaps.has(cap)) { this.setErr(GL.INVALID_ENUM); return; }
     if (on) gl.enable(cap); else gl.disable(cap);
-    if (gl.getError() === GL.INVALID_ENUM) { this.setErr(GL.INVALID_ENUM); this.warn('cap:' + cap, `glEnable/glDisable(0x${cap.toString(16)}): unknown capability → GL_INVALID_ENUM`); } }
+    if (gl.getError() === GL.INVALID_ENUM) { this.badCaps.add(cap); this.setErr(GL.INVALID_ENUM); this.warn('cap:' + cap, `glEnable/glDisable(0x${cap.toString(16)}): unknown capability → GL_INVALID_ENUM`); } }
+  private badCaps = new Set<number>();
   private pixelStore(p: number, v: number) {
     const gl = this.gl!;
     switch (p) { case GL.UNPACK_ALIGNMENT: this.unpackAlign = v; break; case GL.PACK_ALIGNMENT: this.packAlign = v; break; case GL.UNPACK_ROW_LENGTH: this.unpackRowLength = v; break; case GL.UNPACK_SKIP_ROWS: this.unpackSkipRows = v; break; case GL.UNPACK_SKIP_PIXELS: this.unpackSkipPixels = v; break; case GL.UNPACK_IMAGE_HEIGHT: this.unpackImageHeight = v; break; case GL.PACK_ROW_LENGTH: this.packRowLength = v; break;
       case GL.UNPACK_SWAP_BYTES: case GL.UNPACK_LSB_FIRST: case GL.PACK_SWAP_BYTES: case GL.PACK_LSB_FIRST: if (v) this.warn('pixelstore:' + p, `glPixelStore(0x${p.toString(16)}): byte swapping is not available in WebGL2 — ignored`); return; }
-    gl.pixelStorei(p, v); if (gl.getError() === GL.INVALID_ENUM) this.setErr(GL.INVALID_ENUM); }
+    if (WEBGL_PIXELSTORE.has(p)) gl.pixelStorei(p, v); else this.setErr(GL.INVALID_ENUM); }
   private getString(name: number): bigint {
     const gl = this.gl!;
     switch (name) { case GL.VENDOR: return this.gstr('Nebula OS'); case GL.RENDERER: return this.gstr(`WebGL2 bridge (${this.describeRenderer()})`); case GL.VERSION: return this.gstr('3.3.0 NebulaGL (WebGL2 bridge)'); case GL.SHADING_LANGUAGE_VERSION: return this.gstr('3.30 NebulaGL (GLSL ES 3.00)'); case GL.EXTENSIONS: return this.gstr(this.extList.join(' '));
@@ -685,6 +694,12 @@ export class GLBridge {
   private texLevelParam(target: number, level: number, p: number): number { const ti = this.texInfo.get(this.curTex(target)); const l = ti?.levels.get(level); if (!l) return 0; switch (p) { case GL.TEXTURE_WIDTH: return l.w; case GL.TEXTURE_HEIGHT: return l.h; case GL.TEXTURE_DEPTH: return l.d; case GL.TEXTURE_INTERNAL_FORMAT: return l.ifmt; case GL.TEXTURE_RED_SIZE: case GL.TEXTURE_GREEN_SIZE: case GL.TEXTURE_BLUE_SIZE: case GL.TEXTURE_ALPHA_SIZE: return 8; case GL.TEXTURE_DEPTH_SIZE: return l.ifmt === GL.DEPTH_COMPONENT16 ? 16 : l.ifmt === GL.DEPTH_COMPONENT24 || l.ifmt === GL.DEPTH24_STENCIL8 ? 24 : l.ifmt === GL.DEPTH_COMPONENT32F ? 32 : 0; case GL.TEXTURE_COMPRESSED: return l.ifmt >= 0x83F0 && l.ifmt <= 0x83F3 ? 1 : 0; default: return 0; } }
   private compressedOk(fmt: number): boolean { if (fmt >= GL.COMPRESSED_RGB_S3TC_DXT1_EXT && fmt <= GL.COMPRESSED_RGBA_S3TC_DXT5_EXT) { if (this.s3tc) return true; this.setErr(GL.INVALID_ENUM); this.warn('s3tc', 'S3TC/DXT compressed textures are not supported by this device\'s WebGL2 (WEBGL_compressed_texture_s3tc missing)'); return false; } return true; }
   private vertexAttribParam(i: number, p: number): number { if (i >= this.maxAttribs) { this.setErr(GL.INVALID_VALUE); return 0; } const s = this.curAttribs()[i]; switch (p) { case GL.VERTEX_ATTRIB_ARRAY_ENABLED: return s.enabled ? 1 : 0; case GL.VERTEX_ATTRIB_ARRAY_SIZE: return s.size; case GL.VERTEX_ATTRIB_ARRAY_STRIDE: return s.stride; case GL.VERTEX_ATTRIB_ARRAY_TYPE: return s.type; case GL.VERTEX_ATTRIB_ARRAY_NORMALIZED: return s.normalized ? 1 : 0; case GL.VERTEX_ATTRIB_ARRAY_BUFFER_BINDING: return s.buffer; case GL.VERTEX_ATTRIB_ARRAY_DIVISOR: return s.divisor; case GL.VERTEX_ATTRIB_ARRAY_INTEGER: return s.integer ? 1 : 0; default: { const v = this.gl!.getVertexAttrib(i, p); return typeof v === 'number' ? v : typeof v === 'boolean' ? (v ? 1 : 0) : 0; } } }
+  /** bytes of the bound element array buffer from a CPU mirror (filled once per buffer version) — avoids a synchronous getBufferSubData per draw call */
+  private elementData(offset: number, bytes: number): Uint8Array | null {
+    const gl = this.gl!; const info = this.bufInfo.get(this.bound.element); if (!info || offset < 0 || offset + bytes > info.size) return null;
+    if (!info.shadow || info.shadow.length !== info.size) { info.shadow = new Uint8Array(info.size); gl.getBufferSubData(gl.ELEMENT_ARRAY_BUFFER, 0, info.shadow); }
+    return info.shadow.slice(offset, offset + bytes);   // a fresh, 0-based copy so typed-array views over it are aligned
+  }
   private bufObj(id: number): WebGLBuffer { let b = this.buf.get(id); if (!b) { b = this.gl!.createBuffer()!; this.buf.set(id, b); this.bufIds.set(b, id); this.bufInfo.set(id, { size: 0, usage: GL.STATIC_DRAW, version: 0, shadow: null }); } return b; }
   private setBound(target: number, id: number) { switch (target) { case GL.ARRAY_BUFFER: this.bound.array = id; break; case GL.ELEMENT_ARRAY_BUFFER: this.bound.element = id; break; case GL.PIXEL_PACK_BUFFER: this.bound.pack = id; break; case GL.PIXEL_UNPACK_BUFFER: this.bound.unpack = id; break; case GL.UNIFORM_BUFFER: this.bound.uniform = id; break; case GL.COPY_READ_BUFFER: this.bound.copyRead = id; break; case GL.COPY_WRITE_BUFFER: this.bound.copyWrite = id; break; case GL.TRANSFORM_FEEDBACK_BUFFER: this.bound.tfb = id; break; } }
   private bindBuffer(target: number, id: number) { const gl = this.gl!; if (target === GL.ARRAY_BUFFER || target === GL.ELEMENT_ARRAY_BUFFER || target === GL.PIXEL_PACK_BUFFER || target === GL.PIXEL_UNPACK_BUFFER || target === GL.UNIFORM_BUFFER || target === GL.COPY_READ_BUFFER || target === GL.COPY_WRITE_BUFFER || target === GL.TRANSFORM_FEEDBACK_BUFFER) { gl.bindBuffer(target, id ? this.bufObj(id) : null); this.setBound(target, id); } else { this.setErr(GL.INVALID_ENUM); this.warn('buftarget:' + target, `glBindBuffer(0x${target.toString(16)}): this buffer target does not exist in WebGL2 → GL_INVALID_ENUM`); } }
@@ -716,7 +731,7 @@ export class GLBridge {
     if (baseVertex) { this.setErr(GL.INVALID_OPERATION); this.warn('basevertex', 'glDrawElementsBaseVertex with a non-zero base vertex: not available in WebGL2 → GL_INVALID_OPERATION'); return; }
     if (mode === GL.QUADS) {   // expand the quad index list into triangles (index data read back from the element buffer when needed)
       const bytes = count * typeBytes(type); let src: Uint8Array | null;
-      if (this.bound.element) { src = new Uint8Array(bytes); gl.getBufferSubData(gl.ELEMENT_ARRAY_BUFFER, Number(indices), src); } else src = this.u8(indices, bytes);
+      if (this.bound.element) src = this.elementData(Number(indices), bytes); else src = this.u8(indices, bytes);
       if (!src) return; const raw = type === GL.UNSIGNED_INT ? new Uint32Array(src.buffer, src.byteOffset, count) : type === GL.UNSIGNED_SHORT ? new Uint16Array(src.buffer, src.byteOffset, count) : src;
       const nq = count >> 2; const idx = new Uint32Array(nq * 6); for (let i = 0; i < nq; i++) { idx[i * 6] = raw[i * 4]; idx[i * 6 + 1] = raw[i * 4 + 1]; idx[i * 6 + 2] = raw[i * 4 + 2]; idx[i * 6 + 3] = raw[i * 4]; idx[i * 6 + 4] = raw[i * 4 + 2]; idx[i * 6 + 5] = raw[i * 4 + 3]; }
       const prep = this.prepareDraw(0, 0, { type: GL.UNSIGNED_INT, ptr: 0n, count: 0 }); void prep;

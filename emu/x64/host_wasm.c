@@ -88,11 +88,11 @@ void host_gfx_free(int id) { js_gfx_free(id); }
 __attribute__((import_module("env"), import_name("host_gl_init"))) int js_gl_init(int w, int h);
 __attribute__((import_module("env"), import_name("host_gl_probe"))) int js_gl_probe(int id);
 __attribute__((import_module("env"), import_name("host_gl_call"))) u64 js_gl_call(int id, const u64 *args, int n);
-__attribute__((import_module("env"), import_name("host_gl_present"))) void js_gl_present(u32 *bgra, int w, int h);
+__attribute__((import_module("env"), import_name("host_gl_present"))) int js_gl_present(u32 *bgra, int w, int h, int sx, int sy);
 int host_gl_init(int w, int h) { return js_gl_init(w, h); }
 int host_gl_probe(int id) { return js_gl_probe(id); }
 u64 host_gl_call(int id, const u64 *args, int n) { return js_gl_call(id, args, n); }
-void host_gl_present(u32 *bgra, int w, int h) { js_gl_present(bgra, w, h); }
+int host_gl_present(u32 *bgra, int w, int h, int sx, int sy) { return js_gl_present(bgra, w, h, sx, sy); }
 
 __attribute__((import_module("env"), import_name("host_audio_open"))) int js_audio_open(int rate);
 __attribute__((import_module("env"), import_name("host_audio_write"))) void js_audio_write(const float *lr, int frames);

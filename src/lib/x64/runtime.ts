@@ -79,6 +79,11 @@ export class X64Runtime {
   pads = new PadBridge((i, p) => this.ex?.x64_pad?.(i, p.connected ? 1 : 0, p.buttons, p.lt, p.rt, p.lx, p.ly, p.rx, p.ry));
   onConsole: ((fd: number, text: string) => void) | null = null;
   onPresent: ((px: Uint8Array, w: number, h: number) => void) | null = null;
+  /** SwapBuffers: snapshot the live WebGL surface for GPU-side composition at screen rect (x,y,w,h); return false to fall back to the CPU readback */
+  onGlPresent: ((canvas: OffscreenCanvas | HTMLCanvasElement, x: number, y: number, w: number, h: number) => boolean) | null = null;
+  private lastGl: { canvas: OffscreenCanvas | HTMLCanvasElement; x: number; y: number; w: number; h: number } | null = null;
+  /** the last GPU-composited GL surface (re-upload after the screen canvas was re-created) */
+  lastGlSurface() { return this.lastGl; }
   onStop: ((stats: RunStats) => void) | null = null;
   onLog: ((text: string) => void) | null = null;
   onStdinWait: ((waiting: boolean) => void) | null = null;
@@ -124,7 +129,10 @@ export class X64Runtime {
         host_gl_init: (w: number, h: number) => { this.glb.log = (t) => this.onLog?.(t); this.glb.mem = this.glMem(); return this.glb.init(w, h); },
         host_gl_probe: (id: number) => this.glb.probe(id),
         host_gl_call: (id: number, args: bigint, n: number) => this.glb.call(id, new BigUint64Array(this.ex!.memory.buffer, Number(args), n)),
-        host_gl_present: (p: bigint, w: number, h: number) => this.glb.present(new Uint32Array(this.ex!.memory.buffer, Number(p), w * h), w, h),
+        host_gl_present: (p: bigint, w: number, h: number, sx: number, sy: number): number => {
+          const cv = this.glb.surface();
+          if (cv && this.onGlPresent && this.onGlPresent(cv, sx, sy, w, h)) { this.lastGl = { canvas: cv, x: sx, y: sy, w, h }; return 1; }   // GPU composition (no readPixels)
+          this.lastGl = null; this.glb.present(new Uint32Array(this.ex!.memory.buffer, Number(p), w * h), w, h); return 0; },
         // sound → the device's audio output (src/lib/x64/audio.ts)
         host_audio_open: (rate: number) => { this.audio.log = (t) => this.onLog?.(t); return this.audio.open(rate); },
         host_audio_write: (lr: bigint, frames: number) => this.audio.write(new Float32Array(this.ex!.memory.buffer, Number(lr), frames * 2)),

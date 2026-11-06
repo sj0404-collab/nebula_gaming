@@ -207,6 +207,7 @@ export default function X64App() {
     rt.onLog = (text) => setLog(l => [...l.slice(-199), text.trimEnd()]);
     rt.onStdinWait = (w) => { setWaitingStdin(w); if (w) { setTab('console'); setTimeout(() => stdinRef.current?.focus(), 30); } };
     rt.onPresent = (px, w, h) => { presenterRef.current?.present(px, w, h); setFrames(f => { if (f === 0 && autoTabRef.current) setTab('screen'); return f + 1; }); };
+    rt.onGlPresent = (cv, x, y, w, h) => presenterRef.current?.setGl(cv, x, y, w, h) ?? false;
     rt.onStop = (s) => { setStats(s); setApiStats(rt.apiStats()); setJitInfo(rt.jitStats()); setFiles(rt.vfsList()); rescanRef.current(true); if (s.status !== 'exited' || !s.hasWindow) setTab(t => (s.hasWindow && s.status === 'exited') ? t : (s.status === 'fault' ? 'report' : t === 'screen' && !s.hasWindow ? 'console' : t)); };
     rt.onDisk = () => setDisk({ files: rt.diskFiles, writes: rt.disk.writes, bytes: rt.disk.bytes, queued: rt.disk.queued() });
     rt.init().then(async () => {
@@ -262,6 +263,7 @@ export default function X64App() {
     const c = canvasRef.current; if (!c) return;
     if (presenterRef.current?.canvas === c) return;   // the canvas is re-created whenever the Screen tab is left and re-entered
     try { const p = new FramePresenter(c); presenterRef.current = p; setGlInfo(`${p.api.toUpperCase()} · ${p.renderer}`); } catch (e) { setGlInfo('WebGL unavailable: ' + String(e)); return; }
+    const g = rtRef.current?.lastGlSurface(); if (g) p.setGl(g.canvas, g.x, g.y, g.w, g.h);   // the GL surface outlives the canvas: re-upload it for the new presenter
     const last = rtRef.current?.lastPresented(); if (last) presenterRef.current.present(last.px, last.w, last.h);   // show the final frame of a finished program
   }, [ready, tab]);
 

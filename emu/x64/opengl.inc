@@ -113,10 +113,14 @@ static void s_wglChoosePixelFormatARB(Cpu *c) {
 static void gl_present_window(Win32 *w, int wnd) {
   if (!w->screen || g_gl_host != 1) return; int cw = g_gl_surf_w, ch = g_gl_surf_h; size_t need = (size_t)cw * ch;
   if (need > g_gl_present_cap) { if (g_gl_present) emu_free(g_gl_present); g_gl_present = emu_alloc(need * 4); g_gl_present_cap = g_gl_present ? need : 0; }
-  if (!g_gl_present) return; host_gl_present(g_gl_present, cw, ch);
+  if (!g_gl_present) return;
   int ox = 0, oy = 0; if (wnd >= 0) wnd_client_origin(wnd, &ox, &oy);
+  int gpu = host_gl_present(g_gl_present, cw, ch, ox, oy);   /* 1: the browser composites the WebGL surface on the GPU — no readback; the client area becomes a key-colour hole that later paints (dialogs, menus, children) cover normally */
   int x0 = ox < 0 ? -ox : 0, y0 = oy < 0 ? -oy : 0, x1 = cw, y1 = ch; if (ox + x1 > w->screen_w) x1 = w->screen_w - ox; if (oy + y1 > w->screen_h) y1 = w->screen_h - oy;
-  for (int y = y0; y < y1; y++) e_memcpy(w->screen + (size_t)(oy + y) * w->screen_w + ox + x0, g_gl_present + (size_t)y * cw + x0, (size_t)(x1 - x0) * 4);
+  for (int y = y0; y < y1; y++) {
+    u32 *dst = w->screen + (size_t)(oy + y) * w->screen_w + ox + x0;
+    if (gpu) { for (int x = x0; x < x1; x++) dst[x - x0] = GL_KEY_COLOR; }
+    else e_memcpy(dst, g_gl_present + (size_t)y * cw + x0, (size_t)(x1 - x0) * 4); }
   w->dirty = 1; w->blits_since_yield++; }
 static void s_SwapBuffers(Cpu *c) {
   Win32 *w = W; int wnd = gl_dc_wnd(w, ARG(0)); if (wnd < 0) { w->last_error = 6; RET(0); return; }
