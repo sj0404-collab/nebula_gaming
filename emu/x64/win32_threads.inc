@@ -215,7 +215,7 @@ static void s_TerminateThread(Cpu *c) { Thread *t = ARG(0) == ~1ull ? cur_thread
 static void s_SwitchToThread(Cpu *c) { call_shim(c, s_Sleep, 0, 0, 0, 0); if (c->status != RUN_YIELD) RET(1); }
 static void s_SetThreadDescription(Cpu *c) { RET(0); }
 static void s_GetThreadDescription(Cpu *c) { RET(0x80070057u); }
-static void s_GetCurrentThreadStackLimits(Cpu *c) { Thread *t = cur_thread(W); u64 lo = t->stack ? t->stack : G_STACK_BASE, hi = t->stack ? t->stack + t->stack_size : G_STACK_BASE + G_STACK_SIZE; if (ARG(0)) wr64(c, ARG(0), lo); if (ARG(1)) wr64(c, ARG(1), hi); }
+static void s_GetCurrentThreadStackLimits(Cpu *c) { Thread *t = cur_thread(W); u64 lo = t->stack ? t->stack : G_STACK_BASE, hi = t->stack ? t->stack + t->stack_size : G_STACK_BASE + G_STACK_SIZE; if (ARG(0)) wrp(c, ARG(0), lo); if (ARG(1)) wrp(c, ARG(1), hi); }
 static void s_SetThreadStackGuarantee(Cpu *c) { if (ARG(0)) wr32(c, ARG(0), 0); RET(1); }
 
 /* TLS: slot bitmap is per process, values live in each thread's TEB (TlsSlots at +0x1480) */

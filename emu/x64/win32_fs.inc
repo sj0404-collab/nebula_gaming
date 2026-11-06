@@ -348,7 +348,7 @@ static int parse_mode(const char *m, int *acc, int *disp, int *append) {
 static u64 crt_fopen(Cpu *c, const char *n, const char *m) { int acc, disp, app; if (!parse_mode(m, &acc, &disp, &app)) { set_errno(c, 22); return 0; } int fd = vfs_open(n, acc, disp, app); if (fd < 0) { set_errno(c, errno_of(fd)); return 0; } return make_file(c, fd); }
 static void s_fopen(Cpu *c) { char n[1024]; e_snprintf(n, sizeof n, "%s", name_a(c, ARG(0))); RET(crt_fopen(c, n, name_a(c, ARG(1)))); }
 static void s_wfopen(Cpu *c) { char n[1024]; e_snprintf(n, sizeof n, "%s", name_w(c, ARG(0))); RET(crt_fopen(c, n, name_w(c, ARG(1)))); }
-static void s_fopen_s(Cpu *c) { char n[1024]; e_snprintf(n, sizeof n, "%s", name_a(c, ARG(1))); u64 f = crt_fopen(c, n, name_a(c, ARG(2))); wr64(c, ARG(0), f); RET(f ? 0 : rd32(c, ERRNO_ADDR)); }
+static void s_fopen_s(Cpu *c) { char n[1024]; e_snprintf(n, sizeof n, "%s", name_a(c, ARG(1))); u64 f = crt_fopen(c, n, name_a(c, ARG(2))); wrp(c, ARG(0), f); RET(f ? 0 : rd32(c, ERRNO_ADDR)); }
 static void s_wfopen_s(Cpu *c) { char n[1024]; e_snprintf(n, sizeof n, "%s", name_w(c, ARG(1))); u64 f = crt_fopen(c, n, name_w(c, ARG(2))); wr64(c, ARG(0), f); RET(f ? 0 : rd32(c, ERRNO_ADDR)); }
 static void s_fsopen(Cpu *c) { s_fopen(c); }
 static void s_freopen(Cpu *c) { /* redirect only supported for files → new FILE*, std streams unchanged */ int old = file_fd(c, ARG(2)); if (old >= 3) vfs_close(old); char n[1024]; e_snprintf(n, sizeof n, "%s", name_a(c, ARG(0))); int acc, disp, app; if (!parse_mode(name_a(c, ARG(1)), &acc, &disp, &app)) { RET(0); return; } int fd = vfs_open(n, acc, disp, app); if (fd < 0) { set_errno(c, errno_of(fd)); RET(0); return; } if (old >= 3) { wr32(c, ARG(2) + 28, (u32)fd); RET(ARG(2)); } else RET(make_file(c, fd)); }
@@ -463,9 +463,9 @@ static void s_GetExitCodeProcess(Cpu *c) { int pid; if (!wait_proc_handle(ARG(0)
 static void s_GetProcessId(Cpu *c) { int pid; if (ARG(0) == ~0ull) { RET((u64)W->pid); return; } RET(wait_proc_handle(ARG(0), &pid) ? (u64)pid : 0); }
 static void s_TerminateProcess(Cpu *c) { int pid; if (ARG(0) == ~0ull || !wait_proc_handle(ARG(0), &pid)) { do_exit(c, (int)ARG(1)); return; } proc_kill(pid, (int)ARG(1)); RET(1); }
 static void s_OpenProcess(Cpu *c) { int pid = (int)ARG(2); int code; if (!proc_state(pid, &code)) { W->last_error = 87; RET(0); return; } int h = vfs_proc_handle(pid); RET(h >= 0 ? H_OF(h) : 0); }
-static void s_CreatePipe(Cpu *c) { int r, wfd; if (vfs_pipe(&r, &wfd)) { W->last_error = 8; RET(0); return; } int inh = sa_inherit(c, ARG(2)); vfs_set_inherit(r, inh); vfs_set_inherit(wfd, inh); wr64(c, ARG(0), H_OF(r)); wr64(c, ARG(1), H_OF(wfd)); RET(1); }
+static void s_CreatePipe(Cpu *c) { int r, wfd; if (vfs_pipe(&r, &wfd)) { W->last_error = 8; RET(0); return; } int inh = sa_inherit(c, ARG(2)); vfs_set_inherit(r, inh); vfs_set_inherit(wfd, inh); wrp(c, ARG(0), H_OF(r)); wrp(c, ARG(1), H_OF(wfd)); RET(1); }
 static void s_PeekNamedPipe(Cpu *c) { int fd = handle_fd(ARG(0)); int avail = fd >= 3 ? vfs_pipe_avail(fd) : -1; if (avail < 0) { W->last_error = 6; RET(0); return; } if (ARG(3)) wr32(c, ARG(3), 0); if (ARG(4)) wr32(c, ARG(4), (u32)avail); if (ARG(5)) wr32(c, ARG(5), (u32)avail); RET(1); }
-static void s_DuplicateHandle(Cpu *c) { u64 h = ARG(1); int fd = handle_fd(h); u64 out; if (h == ~1ull) { int tf = vfs_kobj_handle(W->th[W->cur_th].kobj); out = tf >= 0 ? H_OF(tf) : 0; } else if (h == ~0ull || h == 0x10 || h == 0x11 || h == 0x12 || fd < 3) out = h; else { int d = vfs_dup(fd); if (d >= 0) vfs_set_inherit(d, (u32)ARG(5) != 0);   /* bInheritHandle is the 6th argument */ out = d >= 0 ? H_OF(d) : 0; } if (ARG(3)) wr64(c, ARG(3), out); if (ARG(6) & 1) vfs_close(fd); RET(out != 0); }
+static void s_DuplicateHandle(Cpu *c) { u64 h = ARG(1); int fd = handle_fd(h); u64 out; if (h == ~1ull) { int tf = vfs_kobj_handle(W->th[W->cur_th].kobj); out = tf >= 0 ? H_OF(tf) : 0; } else if (h == ~0ull || h == 0x10 || h == 0x11 || h == 0x12 || fd < 3) out = h; else { int d = vfs_dup(fd); if (d >= 0) vfs_set_inherit(d, (u32)ARG(5) != 0);   /* bInheritHandle is the 6th argument */ out = d >= 0 ? H_OF(d) : 0; } if (ARG(3)) wrp(c, ARG(3), out); if (ARG(6) & 1) vfs_close(fd); RET(out != 0); }
 static void s_GetCurrentProcessId(Cpu *c) { RET((u64)W->pid); }
 static void s_getpid(Cpu *c) { RET((u64)W->pid); }
 static void env_put(const char *kv);
@@ -545,7 +545,7 @@ static void s_GetProcessImageFileNameA(Cpu *c) { int pid = pid_of_handle(c, ARG(
 static void s_GetProcessImageFileNameW(Cpu *c) { int pid = pid_of_handle(c, ARG(0)); if (pid < 0) { W->last_error = 6; RET(0); return; } char p[320]; proc_image_path(pid, p, sizeof p, 1); u32 cap = (u32)ARG(2); size_t l = olen(p, 1); if (l + 1 > cap) { W->last_error = 122; RET(0); return; } put_w(c, ARG(1), p, cap); RET(l); }
 static void s_QueryFullProcessImageNameA(Cpu *c) { int pid = pid_of_handle(c, ARG(0)); if (pid < 0) { W->last_error = 6; RET(0); return; } char p[320]; proc_image_path(pid, p, sizeof p, (u32)ARG(1) & 1); u32 cap = rd32(c, ARG(3)); size_t l = e_strlen(p); if (l + 1 > cap) { W->last_error = 122; RET(0); return; } put_a(c, ARG(2), p, cap); wr32(c, ARG(3), (u32)l); RET(1); }
 static void s_QueryFullProcessImageNameW(Cpu *c) { int pid = pid_of_handle(c, ARG(0)); if (pid < 0) { W->last_error = 6; RET(0); return; } char p[320]; proc_image_path(pid, p, sizeof p, (u32)ARG(1) & 1); u32 cap = rd32(c, ARG(3)); size_t l = olen(p, 1); if (l + 1 > cap) { W->last_error = 122; RET(0); return; } put_w(c, ARG(2), p, cap); wr32(c, ARG(3), (u32)l); RET(1); }
-static void s_EnumProcessModules(Cpu *c) { int pid = pid_of_handle(c, ARG(0)); if (pid < 0) { W->last_error = 6; RET(0); return; } u64 base = proc_image_base(pid, 0); if ((u32)ARG(2) >= 8 && ARG(1)) wr64(c, ARG(1), base); if (ARG(3)) wr32(c, ARG(3), 8); RET(1); }
+static void s_EnumProcessModules(Cpu *c) { int pid = pid_of_handle(c, ARG(0)); if (pid < 0) { W->last_error = 6; RET(0); return; } u64 base = proc_image_base(pid, 0); if ((u32)ARG(2) >= PSZ && ARG(1)) wrp(c, ARG(1), base); if (ARG(3)) wr32(c, ARG(3), PSZ); RET(1); }
 static void s_EnumProcessModulesEx(Cpu *c) { s_EnumProcessModules(c); }
 static void s_GetModuleFileNameExA(Cpu *c) { int pid = pid_of_handle(c, ARG(0)); if (pid < 0) { W->last_error = 6; RET(0); return; } char p[320]; proc_image_path(pid, p, sizeof p, 0); u32 cap = (u32)ARG(3); size_t l = e_strlen(p); if (l + 1 > cap) l = cap ? cap - 1 : 0; put_a(c, ARG(2), p, cap); RET(l); }
 static void s_GetModuleFileNameExW(Cpu *c) { int pid = pid_of_handle(c, ARG(0)); if (pid < 0) { W->last_error = 6; RET(0); return; } char p[320]; proc_image_path(pid, p, sizeof p, 0); u32 cap = (u32)ARG(3); size_t l = olen(p, 1); if (l + 1 > cap) l = cap ? cap - 1 : 0; put_w(c, ARG(2), p, cap); RET(l); }
@@ -686,8 +686,8 @@ static void env_sync(Cpu *c) {   /* rebuild guest envp[], narrow block and wide 
 }
 static void s_getenv(Cpu *c) { const char *v = env_get(gstr(c, ARG(0))); if (!v) { RET(0); return; } env_sync(c); /* return pointer inside the guest block so it stays valid */ u64 blk = W->env_a; const char *n = gstr(c, ARG(0)); size_t nl = e_strlen(n); u64 p = blk; for (int i = 0; i < g_nenv; i++) { size_t l = e_strlen(g_env[i]) + 1; if (env_find(n, nl) == i) { RET(p + nl + 1); return; } p += l; } RET(0); }
 static void s_wgetenv(Cpu *c) { const char *v = env_get(name_w(c, ARG(0))); if (!v) { RET(0); return; } u64 p = w32_heap_alloc(W, (e_strlen(v) + 1) * 2, 0); put_w(c, p, v, 0); RET(p); }
-static void s_getenv_s(Cpu *c) { const char *v = env_get(gstr(c, ARG(3))); size_t l = v ? e_strlen(v) + 1 : 0; if (ARG(0)) wr64(c, ARG(0), l); if (!v) { RET(0); return; } if (ARG(2) < l) { RET(34); return; } put_a(c, ARG(1), v, 0); RET(0); }
-static void s_dupenv_s(Cpu *c) { const char *v = env_get(gstr(c, ARG(2))); if (!v) { wr64(c, ARG(0), 0); if (ARG(1)) wr64(c, ARG(1), 0); RET(0); return; } wr64(c, ARG(0), w32_guest_strdup(W, v)); if (ARG(1)) wr64(c, ARG(1), e_strlen(v) + 1); RET(0); }
+static void s_getenv_s(Cpu *c) { const char *v = env_get(gstr(c, ARG(3))); size_t l = v ? e_strlen(v) + 1 : 0; if (ARG(0)) wrp(c, ARG(0), l); if (!v) { RET(0); return; } if (ARG(2) < l) { RET(34); return; } put_a(c, ARG(1), v, 0); RET(0); }
+static void s_dupenv_s(Cpu *c) { const char *v = env_get(gstr(c, ARG(2))); if (!v) { wrp(c, ARG(0), 0); if (ARG(1)) wrp(c, ARG(1), 0); RET(0); return; } wrp(c, ARG(0), w32_guest_strdup(W, v)); if (ARG(1)) wrp(c, ARG(1), e_strlen(v) + 1); RET(0); }
 static void s_putenv(Cpu *c) { env_put(gstr(c, ARG(0))); env_sync(c); RET(0); }   /* msvcrt rebuilds _environ at once; clearenv() loops on environ[0] */
 static void s_wputenv(Cpu *c) { env_put(name_w(c, ARG(0))); env_sync(c); RET(0); }
 static void s_wputenv_s(Cpu *c) { char n[1024]; e_snprintf(n, sizeof n, "%s", name_w(c, ARG(0))); env_set(n, name_w(c, ARG(1))); env_sync(c); RET(0); }
@@ -721,7 +721,7 @@ static void strtok_impl(Cpu *c, u64 str, u64 delim, u64 *state) {
   RET(str + start);
 }
 static void s_strtok(Cpu *c) { strtok_impl(c, ARG(0), ARG(1), &g_strtok_next); }
-static void s_strtok_s(Cpu *c) { u64 st = rd64(c, ARG(2)); strtok_impl(c, ARG(0), ARG(1), &st); wr64(c, ARG(2), st); }
+static void s_strtok_s(Cpu *c) { u64 st = rdp(c, ARG(2)); strtok_impl(c, ARG(0), ARG(1), &st); wrp(c, ARG(2), st); }
 static void s_strlwr(Cpu *c) { u64 a = ARG(0); for (u64 i = 0;; i++) { u8 ch = rd8(c, a + i); if (!ch) break; if (ch >= 'A' && ch <= 'Z') wr8(c, a + i, ch + 32); } RET(a); }
 static void s_strupr(Cpu *c) { u64 a = ARG(0); for (u64 i = 0;; i++) { u8 ch = rd8(c, a + i); if (!ch) break; if (ch >= 'a' && ch <= 'z') wr8(c, a + i, ch - 32); } RET(a); }
 static void s_strrev(Cpu *c) { u64 a = ARG(0); u64 l = e_strlen(gstr(c, a)); for (u64 i = 0; i + 1 < l - i && l; i++) { u8 x = rd8(c, a + i), y = rd8(c, a + l - 1 - i); wr8(c, a + i, y); wr8(c, a + l - 1 - i, x); } RET(a); }

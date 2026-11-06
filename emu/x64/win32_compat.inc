@@ -53,7 +53,7 @@ static void s_SysAllocStringByteLen(Cpu *c) { u32 bytes = (u32)ARG(1); u64 b = w
 static void s_SysFreeString(Cpu *c) { if (ARG(0)) w32_heap_free(W, ARG(0) - 4); }
 static void s_SysStringLen(Cpu *c) { RET(ARG(0) ? rd32(c, ARG(0) - 4) / 2 : 0); }
 static void s_SysStringByteLen(Cpu *c) { RET(ARG(0) ? rd32(c, ARG(0) - 4) : 0); }
-static void s_SysReAllocStringLen(Cpu *c) { u64 pb = ARG(0); u64 nb = bstr_alloc(c, 0, ARG(1), (u32)ARG(2)); if (!nb) { RET(0); return; } u64 old = rd64(c, pb); if (old) w32_heap_free(W, old - 4); wr64(c, pb, nb); RET(1); }
+static void s_SysReAllocStringLen(Cpu *c) { u64 pb = ARG(0); u64 nb = bstr_alloc(c, 0, ARG(1), (u32)ARG(2)); if (!nb) { RET(0); return; } u64 old = rdp(c, pb); if (old) w32_heap_free(W, old - 4); wrp(c, pb, nb); RET(1); }
 #define VARSZ(c) ((c)->mode32 ? 16u : 24u)   /* VARIANT/PROPVARIANT: 16 bytes on x86, 24 on x64 (union at +8 in both) */
 static void s_VariantInit(Cpu *c) { u8 *p = mem_ptr(c->mem, ARG(0), VARSZ(c), 1); if (p) e_memset(p, 0, VARSZ(c)); }
 static void s_VariantClear(Cpu *c) { u64 v = ARG(0); u16 vt = rd16(c, v); if (vt == 8) { u64 b = rdp(c, v + 8); if (b) w32_heap_free(W, b - 4); } u8 *p = mem_ptr(c->mem, v, VARSZ(c), 1); if (p) e_memset(p, 0, VARSZ(c)); RET(0); }

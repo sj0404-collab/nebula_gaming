@@ -559,6 +559,13 @@ if command -v zig >/dev/null 2>&1; then
   zig cc -target x86_64-windows-gnu -O1 -o /tmp/ansisub64.exe tests/ansisub.c && out=$($X --quiet --no-stdin /tmp/ansisub64.exe 2>&1) || out="build/run failed: $out"
   check "ansisub (x64)"   "ANSISUB OK"   "$out"
 else echo "  skip ansisub (no zig)"; fi
+echo "[ptrout] pointer-sized out-parameters (BSTR*/HANDLE*/char**/ULONG_PTR*) are written with the guest pointer size"
+if command -v zig >/dev/null 2>&1; then
+  zig cc -target x86-windows-gnu -O1 -o /tmp/ptrout32.exe tests/ptrout.c -loleaut32 && out=$($X --quiet --no-stdin /tmp/ptrout32.exe 2>&1) || out="build/run failed: $out"
+  check "ptrout (x86)"   "PTROUT OK"   "$out"
+  zig cc -target x86_64-windows-gnu -O1 -o /tmp/ptrout64.exe tests/ptrout.c -loleaut32 && out=$($X --quiet --no-stdin /tmp/ptrout64.exe 2>&1) || out="build/run failed: $out"
+  check "ptrout (x64)"   "PTROUT OK"   "$out"
+else echo "  skip ptrout (no zig)"; fi
 echo "[version] version.dll over a real file (putty.exe: VS_FIXEDFILEINFO + StringFileInfo, A and W)"
 if command -v zig >/dev/null 2>&1 && [ -f tests/inst/putty.exe ]; then
   zig cc -target x86-windows-gnu -O1 -o /tmp/verinfo32.exe tests/verinfo.c -lversion && out=$($X --quiet --no-stdin --mount "tests/inst=C:\\inst" /tmp/verinfo32.exe "C:\\inst\\putty.exe" 2>&1) || out="build/run failed: $out"
