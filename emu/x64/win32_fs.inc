@@ -222,10 +222,13 @@ static void copy_file(Cpu *c, const char *from, const char *to, int fail_exists)
 static void s_CopyFileA(Cpu *c) { char from[1024]; e_snprintf(from, sizeof from, "%s", name_a(c, ARG(0))); copy_file(c, from, name_a(c, ARG(1)), (int)ARG(2)); }
 static void s_CopyFileW(Cpu *c) { char from[1024]; e_snprintf(from, sizeof from, "%s", name_w(c, ARG(0))); copy_file(c, from, name_w(c, ARG(1)), (int)ARG(2)); }
 static void s_GetCurrentDirectoryA(Cpu *c) { const char *d = vfs_cwd(); size_t l = e_strlen(d); if ((u32)ARG(0) > l) put_a(c, ARG(1), d, 0); RET((u32)ARG(0) > l ? l : l + 1); }
-static void s_GetCurrentDirectoryW(Cpu *c) { const char *d = vfs_cwd(); size_t l = e_strlen(d); if ((u32)ARG(0) > l) put_w(c, ARG(1), d, 0); RET((u32)ARG(0) > l ? l : l + 1); }
+/* lengths returned by the W path APIs are UTF-16 units, not UTF-8 bytes (a Cyrillic path used to come back with junk after the NUL) */
+static size_t olen(const char *s, int wide) { return wide ? utf8_u16len(s) : e_strlen(s); }
+static size_t olen_n(const char *s, size_t bytes, int wide) { if (!wide) return bytes; size_t n = 0; for (size_t i = 0; i < bytes; i++) { u8 b = (u8)s[i]; if ((b & 0xC0) != 0x80) n += b >= 0xF0 ? 2 : 1; } return n; }
+static void s_GetCurrentDirectoryW(Cpu *c) { const char *d = vfs_cwd(); size_t l = olen(d, 1); if ((u32)ARG(0) > l) put_w(c, ARG(1), d, 0); RET((u32)ARG(0) > l ? l : l + 1); }
 static void s_SetCurrentDirectoryA(Cpu *c) { if (vfs_chdir(name_a(c, ARG(0)))) RET(1); else { W->last_error = 2; RET(0); } }
 static void s_SetCurrentDirectoryW(Cpu *c) { if (vfs_chdir(name_w(c, ARG(0)))) RET(1); else { W->last_error = 2; RET(0); } }
-static void full_path(Cpu *c, const char *n, int wide) { char out[1024]; vfs_normalize(n, out, sizeof out); size_t l = e_strlen(out); u32 cap = (u32)ARG(1); if (cap <= l) { RET(l + 1); return; } if (wide) put_w(c, ARG(2), out, 0); else put_a(c, ARG(2), out, 0); if (ARG(3)) { size_t b = l; while (b > 0 && out[b - 1] != '\\') b--; wrp(c, ARG(3), ARG(2) + (wide ? b * 2 : b)); } RET(l); }
+static void full_path(Cpu *c, const char *n, int wide) { char out[1024]; vfs_normalize(n, out, sizeof out); size_t l = olen(out, wide); u32 cap = (u32)ARG(1); if (cap <= l) { RET(l + 1); return; } if (wide) put_w(c, ARG(2), out, 0); else put_a(c, ARG(2), out, 0); if (ARG(3)) { size_t b = e_strlen(out); while (b > 0 && out[b - 1] != '\\') b--; b = olen_n(out, b, wide); wrp(c, ARG(3), ARG(2) + (wide ? b * 2 : b)); } RET(l); }
 /* SearchPath(path, file, ext, cap, buf, &filepart): path = ';'-separated directories, or NULL → directory of the exe, current directory, System32, Windows */
 static void search_path(Cpu *c, int wide) { char path[2048], file[520], ext[32]; path[0] = file[0] = ext[0] = 0;
   if (wide) { if (ARG(0)) wstr_to_utf8(c, ARG(0), path, sizeof path, -1); if (ARG(1)) wstr_to_utf8(c, ARG(1), file, sizeof file, -1); if (ARG(2)) wstr_to_utf8(c, ARG(2), ext, sizeof ext, -1); }
@@ -237,21 +240,21 @@ static void search_path(Cpu *c, int wide) { char path[2048], file[520], ext[32];
   else { char dirs[2600]; if (ARG(0)) e_snprintf(dirs, sizeof dirs, "%s", path); else { char ed[600]; e_snprintf(ed, sizeof ed, "%s", W->exe_path); size_t k = e_strlen(ed); while (k && ed[k - 1] != '\\' && ed[k - 1] != '/') k--; ed[k] = 0; e_snprintf(dirs, sizeof dirs, "%s;%s;C:\\Windows\\System32;C:\\Windows", ed, vfs_cwd()); }
     char *d = dirs; while (*d && !found[0]) { char *e = d; while (*e && *e != ';') e++; char save = *e; *e = 0; if (*d) { size_t dl = e_strlen(d); e_snprintf(cand, sizeof cand, "%s%s%s", d, (d[dl - 1] == '\\' || d[dl - 1] == '/') ? "" : "\\", file); if (vfs_stat(cand, &sz)) vfs_normalize(cand, found, sizeof found); } if (!save) break; d = e + 1; } }
   if (!found[0]) { W->last_error = 2; RET(0); return; }
-  size_t l = e_strlen(found); u32 cap = (u32)ARG(3); if (cap <= l) { RET(l + 1); return; } if (wide) put_w(c, ARG(4), found, 0); else put_a(c, ARG(4), found, 0);
-  if (ARG(5)) { size_t b = l; while (b && found[b - 1] != '\\') b--; wrp(c, ARG(5), ARG(4) + (wide ? b * 2 : b)); } RET(l); }
+  size_t l = olen(found, wide); u32 cap = (u32)ARG(3); if (cap <= l) { RET(l + 1); return; } if (wide) put_w(c, ARG(4), found, 0); else put_a(c, ARG(4), found, 0);
+  if (ARG(5)) { size_t b = e_strlen(found); while (b && found[b - 1] != '\\') b--; b = olen_n(found, b, wide); wrp(c, ARG(5), ARG(4) + (wide ? b * 2 : b)); } RET(l); }
 static void s_SearchPathW(Cpu *c) { search_path(c, 1); }
 static void s_SearchPathA(Cpu *c) { search_path(c, 0); }
 /* GetFinalPathNameByHandle(h, buf, cap, flags): the normalised path of the open file; VOLUME_NAME_DOS (0) gets the \\?\ prefix */
 static void final_path(Cpu *c, int wide) {
   int fd = handle_fd(ARG(0)); if (fd < 3) { W->last_error = 6; RET(0); return; }
   char out[1100]; u32 fl = (u32)ARG(3) & 0xF; e_snprintf(out, sizeof out, "%s%s", fl == 0 ? "\\\\?\\" : "", vfs_fd_path(fd));
-  size_t l = e_strlen(out); u32 cap = (u32)ARG(2); if (cap <= l) { RET(l + 1); return; }
+  size_t l = olen(out, wide); u32 cap = (u32)ARG(2); if (cap <= l) { RET(l + 1); return; }
   if (wide) put_w(c, ARG(1), out, 0); else put_a(c, ARG(1), out, 0); RET(l);
 }
 static void s_GetFinalPathNameByHandleA(Cpu *c) { final_path(c, 0); }
 static void s_GetFinalPathNameByHandleW(Cpu *c) { final_path(c, 1); }
 /* GetLongPathNameW(src, dst, cap): names are already long on the virtual disk → copy */
-static void s_GetLongPathNameW(Cpu *c) { char tmp[1024]; e_snprintf(tmp, sizeof tmp, "%s", name_w(c, ARG(0))); size_t l = e_strlen(tmp); if ((u32)ARG(2) <= l) { RET(l + 1); return; } put_w(c, ARG(1), tmp, 0); RET(l); }
+static void s_GetLongPathNameW(Cpu *c) { char tmp[1024]; e_snprintf(tmp, sizeof tmp, "%s", name_w(c, ARG(0))); size_t l = olen(tmp, 1); if ((u32)ARG(2) <= l) { RET(l + 1); return; } put_w(c, ARG(1), tmp, 0); RET(l); }
 static void s_GetLongPathNameA(Cpu *c) { char tmp[1024]; e_snprintf(tmp, sizeof tmp, "%s", name_a(c, ARG(0))); size_t l = e_strlen(tmp); if ((u32)ARG(2) <= l) { RET(l + 1); return; } put_a(c, ARG(1), tmp, 0); RET(l); }
 static void s_GetShortPathNameW(Cpu *c) { s_GetLongPathNameW(c); }
 static void s_GetShortPathNameA(Cpu *c) { s_GetLongPathNameA(c); }   /* no 8.3 aliases on this disk: the long name is the short name */
@@ -281,10 +284,10 @@ static void s_PathCchCombineEx(Cpu *c) {
   if (b_abs || !a[0]) { if (b[0] == '\\' && b[1] != '\\' && a[0] && a[1] == ':') e_snprintf(r, sizeof r, "%c:%s", a[0], b); else e_snprintf(r, sizeof r, "%s", b); }
   else if (!b[0]) e_snprintf(r, sizeof r, "%s", a);
   else e_snprintf(r, sizeof r, "%s%s%s", a, a[e_strlen(a) - 1] == '\\' ? "" : "\\", b);
-  path_collapse(r); size_t l = e_strlen(r); if (l + 1 > ARG(1)) { RET(0x8007007Au); return; }   /* ERROR_INSUFFICIENT_BUFFER */
+  path_collapse(r); size_t l = olen(r, 1); if (l + 1 > ARG(1)) { RET(0x8007007Au); return; }   /* ERROR_INSUFFICIENT_BUFFER */
   put_w(c, ARG(0), r, 0); RET(0);
 }
-static void s_PathCchCanonicalizeEx(Cpu *c) { char r[1100]; e_snprintf(r, sizeof r, "%s", ARG(2) ? name_w(c, ARG(2)) : ""); path_collapse(r); size_t l = e_strlen(r); if (l + 1 > ARG(1)) { RET(0x8007007Au); return; } put_w(c, ARG(0), r, 0); RET(0); }
+static void s_PathCchCanonicalizeEx(Cpu *c) { char r[1100]; e_snprintf(r, sizeof r, "%s", ARG(2) ? name_w(c, ARG(2)) : ""); path_collapse(r); size_t l = olen(r, 1); if (l + 1 > ARG(1)) { RET(0x8007007Au); return; } put_w(c, ARG(0), r, 0); RET(0); }
 /* PathCchSkipRoot(path, &rest): skip "C:\", "\\?\C:\", "\\server\share\" */
 static void s_PathCchSkipRoot(Cpu *c) { u64 p = ARG(0), i = 0; u16 a = rd16(c, p), b = rd16(c, p + 2);
   if (a == '\\' && b == '\\') { u16 q = rd16(c, p + 4); i = 2; int segs = (q == '?' || q == '.') ? 1 : 2; if (segs == 1 && rd16(c, p + 6) == '\\') { i = 4; if (rd16(c, p + 10) == ':') { i = 6; if (rd16(c, p + 12) == '\\') i = 7; } else segs = 2; }
@@ -539,13 +542,13 @@ static void s_cwait(Cpu *c) { int pid; if (!wait_proc_handle(ARG(1), &pid)) { se
 static int pid_of_handle(Cpu *c, u64 h) { int pid; if (h == ~0ull) return W->pid; return wait_proc_handle(h, &pid) ? pid : -1; }
 static void proc_image_path(int pid, char *out, size_t cap, int devform) { const char *name = 0; proc_image_base(pid, &name); e_snprintf(out, cap, devform ? "\\Device\\HarddiskVolume1\\nebula\\%s" : "C:\\nebula\\%s", name ? name : "unknown.exe"); }
 static void s_GetProcessImageFileNameA(Cpu *c) { int pid = pid_of_handle(c, ARG(0)); if (pid < 0) { W->last_error = 6; RET(0); return; } char p[320]; proc_image_path(pid, p, sizeof p, 1); u32 cap = (u32)ARG(2); size_t l = e_strlen(p); if (l + 1 > cap) { W->last_error = 122; RET(0); return; } put_a(c, ARG(1), p, cap); RET(l); }
-static void s_GetProcessImageFileNameW(Cpu *c) { int pid = pid_of_handle(c, ARG(0)); if (pid < 0) { W->last_error = 6; RET(0); return; } char p[320]; proc_image_path(pid, p, sizeof p, 1); u32 cap = (u32)ARG(2); size_t l = e_strlen(p); if (l + 1 > cap) { W->last_error = 122; RET(0); return; } put_w(c, ARG(1), p, cap); RET(l); }
+static void s_GetProcessImageFileNameW(Cpu *c) { int pid = pid_of_handle(c, ARG(0)); if (pid < 0) { W->last_error = 6; RET(0); return; } char p[320]; proc_image_path(pid, p, sizeof p, 1); u32 cap = (u32)ARG(2); size_t l = olen(p, 1); if (l + 1 > cap) { W->last_error = 122; RET(0); return; } put_w(c, ARG(1), p, cap); RET(l); }
 static void s_QueryFullProcessImageNameA(Cpu *c) { int pid = pid_of_handle(c, ARG(0)); if (pid < 0) { W->last_error = 6; RET(0); return; } char p[320]; proc_image_path(pid, p, sizeof p, (u32)ARG(1) & 1); u32 cap = rd32(c, ARG(3)); size_t l = e_strlen(p); if (l + 1 > cap) { W->last_error = 122; RET(0); return; } put_a(c, ARG(2), p, cap); wr32(c, ARG(3), (u32)l); RET(1); }
-static void s_QueryFullProcessImageNameW(Cpu *c) { int pid = pid_of_handle(c, ARG(0)); if (pid < 0) { W->last_error = 6; RET(0); return; } char p[320]; proc_image_path(pid, p, sizeof p, (u32)ARG(1) & 1); u32 cap = rd32(c, ARG(3)); size_t l = e_strlen(p); if (l + 1 > cap) { W->last_error = 122; RET(0); return; } put_w(c, ARG(2), p, cap); wr32(c, ARG(3), (u32)l); RET(1); }
+static void s_QueryFullProcessImageNameW(Cpu *c) { int pid = pid_of_handle(c, ARG(0)); if (pid < 0) { W->last_error = 6; RET(0); return; } char p[320]; proc_image_path(pid, p, sizeof p, (u32)ARG(1) & 1); u32 cap = rd32(c, ARG(3)); size_t l = olen(p, 1); if (l + 1 > cap) { W->last_error = 122; RET(0); return; } put_w(c, ARG(2), p, cap); wr32(c, ARG(3), (u32)l); RET(1); }
 static void s_EnumProcessModules(Cpu *c) { int pid = pid_of_handle(c, ARG(0)); if (pid < 0) { W->last_error = 6; RET(0); return; } u64 base = proc_image_base(pid, 0); if ((u32)ARG(2) >= 8 && ARG(1)) wr64(c, ARG(1), base); if (ARG(3)) wr32(c, ARG(3), 8); RET(1); }
 static void s_EnumProcessModulesEx(Cpu *c) { s_EnumProcessModules(c); }
 static void s_GetModuleFileNameExA(Cpu *c) { int pid = pid_of_handle(c, ARG(0)); if (pid < 0) { W->last_error = 6; RET(0); return; } char p[320]; proc_image_path(pid, p, sizeof p, 0); u32 cap = (u32)ARG(3); size_t l = e_strlen(p); if (l + 1 > cap) l = cap ? cap - 1 : 0; put_a(c, ARG(2), p, cap); RET(l); }
-static void s_GetModuleFileNameExW(Cpu *c) { int pid = pid_of_handle(c, ARG(0)); if (pid < 0) { W->last_error = 6; RET(0); return; } char p[320]; proc_image_path(pid, p, sizeof p, 0); u32 cap = (u32)ARG(3); size_t l = e_strlen(p); if (l + 1 > cap) l = cap ? cap - 1 : 0; put_w(c, ARG(2), p, cap); RET(l); }
+static void s_GetModuleFileNameExW(Cpu *c) { int pid = pid_of_handle(c, ARG(0)); if (pid < 0) { W->last_error = 6; RET(0); return; } char p[320]; proc_image_path(pid, p, sizeof p, 0); u32 cap = (u32)ARG(3); size_t l = olen(p, 1); if (l + 1 > cap) l = cap ? cap - 1 : 0; put_w(c, ARG(2), p, cap); RET(l); }
 static void s_GetModuleBaseNameA(Cpu *c) { int pid = pid_of_handle(c, ARG(0)); const char *name = 0; if (pid < 0 || !proc_image_base(pid, &name)) { W->last_error = 6; RET(0); return; } u32 cap = (u32)ARG(3); size_t l = e_strlen(name); if (l + 1 > cap) l = cap ? cap - 1 : 0; put_a(c, ARG(2), name, cap); RET(l); }
 static void s_ReadProcessMemory(Cpu *c) {
   int pid = pid_of_handle(c, ARG(0)); u64 n = ARG(3); if (pid < 0 || n > (1u << 24)) { W->last_error = 6; RET(0); return; }
@@ -594,11 +597,11 @@ static void s_rmdir(Cpu *c) { RET(vfs_remove(name_a(c, ARG(0))) ? 0 : ~0ull); }
 static void s_rename(Cpu *c) { char from[1024]; e_snprintf(from, sizeof from, "%s", name_a(c, ARG(0))); RET(vfs_rename(from, name_a(c, ARG(1))) ? 0 : ~0ull); }
 static void s_wrename(Cpu *c) { char from[1024]; e_snprintf(from, sizeof from, "%s", name_w(c, ARG(0))); RET(vfs_rename(from, name_w(c, ARG(1))) ? 0 : ~0ull); }
 static void s_getcwd(Cpu *c) { const char *d = vfs_cwd(); size_t l = e_strlen(d); u64 buf = ARG(0); u32 n = (u32)ARG(1); if (!buf) { buf = w32_heap_alloc(W, l + 1, 0); n = (u32)l + 1; } if (n <= l) { set_errno(c, 34); RET(0); return; } put_a(c, buf, d, 0); RET(buf); }
-static void s_wgetcwd(Cpu *c) { const char *d = vfs_cwd(); size_t l = e_strlen(d); u64 buf = ARG(0); u32 n = (u32)ARG(1); if (!buf) { buf = w32_heap_alloc(W, (l + 1) * 2, 0); n = (u32)l + 1; } if (n <= l) { set_errno(c, 34); RET(0); return; } put_w(c, buf, d, 0); RET(buf); }
+static void s_wgetcwd(Cpu *c) { const char *d = vfs_cwd(); size_t l = olen(d, 1); u64 buf = ARG(0); u32 n = (u32)ARG(1); if (!buf) { buf = w32_heap_alloc(W, (l + 1) * 2, 0); n = (u32)l + 1; } if (n <= l) { set_errno(c, 34); RET(0); return; } put_w(c, buf, d, 0); RET(buf); }
 static void s_chdir(Cpu *c) { if (vfs_chdir(name_a(c, ARG(0)))) RET(0); else { set_errno(c, 2); RET(~0ull); } }
 static void s_wchdir(Cpu *c) { if (vfs_chdir(name_w(c, ARG(0)))) RET(0); else { set_errno(c, 2); RET(~0ull); } }
 static void s_fullpath(Cpu *c) { char out[1024]; vfs_normalize(ARG(1) ? name_a(c, ARG(1)) : ".", out, sizeof out); size_t l = e_strlen(out) + 1; u64 dst = ARG(0); if (!dst) dst = w32_heap_alloc(W, l, 0); else if (ARG(2) < l) { RET(0); return; } put_a(c, dst, out, 0); RET(dst); }
-static void s_wfullpath(Cpu *c) { char out[1024]; vfs_normalize(ARG(1) ? name_w(c, ARG(1)) : ".", out, sizeof out); size_t l = e_strlen(out) + 1; u64 dst = ARG(0); if (!dst) dst = w32_heap_alloc(W, l * 2, 0); else if (ARG(2) < l) { RET(0); return; } put_w(c, dst, out, 0); RET(dst); }
+static void s_wfullpath(Cpu *c) { char out[1024]; vfs_normalize(ARG(1) ? name_w(c, ARG(1)) : ".", out, sizeof out); size_t l = olen(out, 1) + 1; u64 dst = ARG(0); if (!dst) dst = w32_heap_alloc(W, l * 2, 0); else if (ARG(2) < l) { RET(0); return; } put_w(c, dst, out, 0); RET(dst); }
 /* _findfirst64 family (struct _finddata64_t: attrib(4) pad(4) ctime(8) atime(8) wtime(8) size(8) name[260]) */
 static void s_findfirst64(Cpu *c) { int h = vfs_find_first(name_a(c, ARG(0))); char nm[260]; u64 sz; int dir; if (h < 0 || !vfs_find_next(h, nm, sizeof nm, &sz, &dir)) { if (h >= 0) vfs_find_close(h); set_errno(c, 2); RET(~0ull); return; } u64 a = ARG(1); u64 t = unix_time(); wr32(c, a, dir ? 0x10 : 0x80); wr64(c, a + 8, t); wr64(c, a + 16, t); wr64(c, a + 24, t); wr64(c, a + 32, sz); put_a(c, a + 40, nm, 260); RET(H_FIND_BASE + h); }
 static void s_findnext64(Cpu *c) { u64 h = ARG(0); char nm[260]; u64 sz; int dir; if (h < H_FIND_BASE || !vfs_find_next((int)(h - H_FIND_BASE), nm, sizeof nm, &sz, &dir)) { set_errno(c, 2); RET(~0ull); return; } u64 a = ARG(1); u64 t = unix_time(); wr32(c, a, dir ? 0x10 : 0x80); wr64(c, a + 8, t); wr64(c, a + 16, t); wr64(c, a + 24, t); wr64(c, a + 32, sz); put_a(c, a + 40, nm, 260); RET(0); }
@@ -690,12 +693,12 @@ static void s_wputenv(Cpu *c) { env_put(name_w(c, ARG(0))); env_sync(c); RET(0);
 static void s_wputenv_s(Cpu *c) { char n[1024]; e_snprintf(n, sizeof n, "%s", name_w(c, ARG(0))); env_set(n, name_w(c, ARG(1))); env_sync(c); RET(0); }
 static void s_putenv_s(Cpu *c) { char n[1024]; e_snprintf(n, sizeof n, "%s", gstr(c, ARG(0))); env_set(n, gstr(c, ARG(1))); env_sync(c); RET(0); }
 static void s_GetEnvironmentVariableA(Cpu *c) { const char *v = env_get(gstr(c, ARG(0))); if (!v) { W->last_error = 203; RET(0); return; } size_t l = e_strlen(v); if ((u32)ARG(2) <= l) { RET(l + 1); return; } put_a(c, ARG(1), v, 0); RET(l); }
-static void s_GetEnvironmentVariableW(Cpu *c) { const char *v = env_get(name_w(c, ARG(0))); if (!v) { W->last_error = 203; RET(0); return; } size_t l = e_strlen(v); if ((u32)ARG(2) <= l) { RET(l + 1); return; } put_w(c, ARG(1), v, 0); RET(l); }
+static void s_GetEnvironmentVariableW(Cpu *c) { const char *v = env_get(name_w(c, ARG(0))); if (!v) { W->last_error = 203; RET(0); return; } size_t l = olen(v, 1); if ((u32)ARG(2) <= l) { RET(l + 1); return; } put_w(c, ARG(1), v, 0); RET(l); }
 static void s_SetEnvironmentVariableA(Cpu *c) { char n[1024]; e_snprintf(n, sizeof n, "%s", gstr(c, ARG(0))); if (ARG(1)) env_set(n, gstr(c, ARG(1))); else env_set(n, ""); RET(1); }
 static void s_SetEnvironmentVariableW(Cpu *c) { char n[1024]; e_snprintf(n, sizeof n, "%s", name_w(c, ARG(0))); if (ARG(1)) env_set(n, name_w(c, ARG(1))); else env_set(n, ""); RET(1); }
 static size_t expand_env(const char *s, char *out, size_t cap) { size_t o = 0; while (*s) { if (*s == '%') { const char *e = e_strchr(s + 1, '%'); if (e) { char n[256]; size_t nl = (size_t)(e - s - 1); if (nl < sizeof n) { e_memcpy(n, s + 1, nl); n[nl] = 0; const char *v = env_get(n); if (v) { size_t vl = e_strlen(v); if (o + vl < cap) e_memcpy(out + o, v, vl); o += vl; s = e + 1; continue; } } } } if (o + 1 < cap) out[o] = *s; o++; s++; } if (o < cap) out[o] = 0; else out[cap - 1] = 0; return o + 1; }
 static void s_ExpandEnvironmentStringsA(Cpu *c) { char out[4096]; size_t n = expand_env(gstr(c, ARG(0)), out, sizeof out); if (ARG(1) && (u32)ARG(2) >= n) put_a(c, ARG(1), out, 0); RET(n); }
-static void s_ExpandEnvironmentStringsW(Cpu *c) { char out[4096]; size_t n = expand_env(name_w(c, ARG(0)), out, sizeof out); if (ARG(1) && (u32)ARG(2) >= n) put_w(c, ARG(1), out, 0); RET(n); }
+static void s_ExpandEnvironmentStringsW(Cpu *c) { char out[4096]; expand_env(name_w(c, ARG(0)), out, sizeof out); size_t n = olen(out, 1) + 1; if (ARG(1) && (u32)ARG(2) >= n) put_w(c, ARG(1), out, 0); RET(n); }
 static void s_GetEnvironmentStrings(Cpu *c) { env_sync(c); RET(W->env_a); }
 static void s_GetEnvironmentStringsW(Cpu *c) { env_sync(c); RET(W->env_w); }
 static void s_p__environ(Cpu *c) { env_sync(c); RET(W->ubuf + 0x228); }
