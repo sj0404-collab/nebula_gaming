@@ -1,3 +1,49 @@
+# v1.43.0 — any file name works (Cyrillic, spaces), ANSI programs stop corrupting their heap, text is no longer mangled, OpenGL on the GPU, Inno Setup 5 runs, real version.dll
+
+**"File not found" on every exe (phone report).** v1.42.0's `…W` path writers emitted one byte per UTF-16 unit, so a program
+whose name contained a non-ASCII character or a space (`Установка Inno (1).exe`) could not reopen its own file: Inno's
+SetupLdr stopped after 147 k instructions with an error box. Fixed at the root (`put_w8` / `utf8_u16len` everywhere a path
+goes out), and every W path API now returns **UTF-16 unit counts**, not UTF-8 byte counts (`GetFullPathNameW`, `SearchPathW`,
+`GetLongPathNameW`, `GetCurrentDirectoryW`, `GetEnvironmentVariableW`, `ExpandEnvironmentStringsW`, `GetFinalPathNameByHandleW`,
+`PathCch*`, `_wgetcwd`, `_wfullpath`, process image names) with file-part pointers in units. `WideCharToMultiByte(CP_ACP /
+CP_OEMCP / CP_THREAD_ACP)` is UTF-8 like `MultiByteToWideChar` already was (GetACP = 65001). New `tests/upath.c` runs an exe
+named `Папка тест\Установка Inno 5 (1).exe` on x86 and x64 and checks all of it. Verified on the runner: the same Inno 6.5.4
+file under that name goes from the error box to the language dialog (682 M instructions).
+
+**Mangled letters in message boxes (s→t, f→h, e→d).** Not the font: Delphi's `Move` copies 8-byte chunks through the x87
+(`fild/fistp m64`), and the emulator's 53-bit x87 rounded values ≥ 2^53 — every fourth UTF-16 character pair came out ±1–4.
+The x87 now keeps an exact 64-bit shadow for `fild/fistp m64` and `fld/fstp m80` (`tests/x87copy.c`, x86 + x64, bit-exact).
+
+**ANSI programs (Delphi VCL, MFC) corrupted their heap.** `CallWindowProcA` to a built-in control (an app subclassing an
+EDIT, which every VCL program does) passed the caller's ANSI buffer to a control that speaks UTF-16: `WM_GETTEXT` wrote twice
+the bytes into an 8-byte Delphi string → random "Access violation at address 00410711" later. Conversion is now keyed on the
+*receiving procedure* (built-in = convert, application proc = pass through), so SendMessageA → app proc → CallWindowProcA
+converts exactly once. `tests/ansisub.c` covers it with guard bytes. Inno Setup **5.6.1** (ANSI build, Delphi 2 era) now
+shows its wizard under a Cyrillic name — it also needed `OemToChar/CharToOem`, `CharLowerA`, `SendNotifyMessageA` /
+`SendMessageTimeoutA` (HWND_BROADCAST), `WinHelp`, `GetShortPathNameA`, `WNetGetUniversalNameA/WNetEnumResourceA`,
+suffix-less `SHBrowseForFolder` / `SHGetPathFromIDList` exports.
+
+**version.dll for real.** `GetFileVersionInfoSize/GetFileVersionInfo/VerQueryValue` (A and W) parse the file's own
+`RT_VERSION` resource on the virtual disk and walk `VS_VERSIONINFO` (`\`, `\VarFileInfo\Translation`,
+`\StringFileInfo\<lang>\<key>`); the A variants hand out 8-bit copies in the slack `GetFileVersionInfoSize` reserves.
+Tested over putty.exe on x86 and x64 (`tests/verinfo.c`).
+
+**A launcher waiting for its child no longer burns the CPU.** `PeekMessage` synthesised `WM_PAINT` for *any* invalid window,
+so Inno's SetupLdr received its child's paint messages 2.6 million times in 25 s and re-posted every one of them. Paint
+messages are now synthesised only for the pumping process.
+
+**OpenGL on the GPU, swap-chain pacing.** The GL present path composites with a key colour on the GPU instead of
+`readPixels + getError` per frame, the GL-only flip skips `texSubImage2D`, the swap chain is paced; `next_invalid` is O(1)
+when nothing is invalid, `GetMessage`/`MsgWaitForMultipleObjects` pauses are capped at 1 ms, the frame loop continues through
+a `MessageChannel` hop, the gamepad is polled at ≤4 ms. Shattered Pixel Dungeon on the runner: 1915 frames / 30 s at
+106 MIPS with Mesa llvmpipe (`game-video.yml` `gpu=mesa-gl`, the default now) vs 1200 with SwiftShader.
+
+**Tooling.** `sitecheck.yml` (download any URL, run it under a chosen file name natively with `X64_LOG=1` — which now lists
+every import without a shim at load time — and in the browser; optional `--apitrace`; the loader's extracted child exe is
+kept as an artifact), `argv[0]` quoting as Explorer does.
+
+Honest limits: Inno 5's 32-bit code is mostly interpreted (JIT coverage of 32-bit mode is the next step); no D3D9/DirectDraw yet.
+
 # v1.42.0 — 3.5× faster in the browser (28 → 100+ MIPS in Shattered Pixel Dungeon), mouse clicks land where the picture is, a new game actually starts; x86 JIT 3×
 
 **Speed — where the time really went.** A profile of the real JVM under the emulator (new `jitprof.yml` *jvm* job: the
