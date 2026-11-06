@@ -549,6 +549,13 @@ if command -v zig >/dev/null 2>&1; then
   zig cc -target x86-windows-gnu -O1 -o "$UD/Папка тест/Установка Inno 5 (1).exe" tests/upath.c && out=$($X --quiet --no-stdin --mount "$UD=C:\\nebula" "$UD/Папка тест/Установка Inno 5 (1).exe" 2>&1) || out="build/run failed: $out"
   check "upath (x86)"   "UPATH OK"   "$out"
 else echo "  skip upath (no zig)"; fi
+echo "[ansisub] ANSI app subclassing an EDIT: CallWindowProcA converts string messages for the built-in control"
+if command -v zig >/dev/null 2>&1; then
+  zig cc -target x86-windows-gnu -O1 -o /tmp/ansisub32.exe tests/ansisub.c && out=$($X --quiet --no-stdin /tmp/ansisub32.exe 2>&1) || out="build/run failed: $out"
+  check "ansisub (x86)"   "ANSISUB OK"   "$out"
+  zig cc -target x86_64-windows-gnu -O1 -o /tmp/ansisub64.exe tests/ansisub.c && out=$($X --quiet --no-stdin /tmp/ansisub64.exe 2>&1) || out="build/run failed: $out"
+  check "ansisub (x64)"   "ANSISUB OK"   "$out"
+else echo "  skip ansisub (no zig)"; fi
 echo "[version] version.dll over a real file (Inno Setup's own exe)"
 if command -v zig >/dev/null 2>&1 && [ -f tests/inst/inno.exe ]; then
   zig cc -target x86-windows-gnu -O1 -o /tmp/verinfo32.exe tests/verinfo.c -lversion && out=$($X --quiet --mount "tests/inst=C:\\inst" /tmp/verinfo32.exe "C:\\inst\\inno.exe" 2>&1) || out="build/run failed: $out"

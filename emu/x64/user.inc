@@ -238,14 +238,15 @@ static int wnd_siblings_topdown(int parent, int skip, int *order);
    subtrees skipped.  One pass over the table builds the parent → children lists; the common case (nothing invalid, a polling
    message loop) costs that single pass and nothing else. */
 static int wnd_shown_chain(int i) { int d = 0; while (i >= 0 && d++ < 64) { if (!g_wnd[i].visible) return 0; i = g_wnd[i].parent; } return 1; }
+static int g_inv_pid;   /* WM_PAINT is synthesised only for windows of the process that is pumping messages — a launcher polling PeekMessage used to receive (and re-post forever) its child's paint messages */
 static int next_invalid_in(int i, const int *head, const int *next) {
-  if (!g_wnd[i].visible) return -1; if (g_wnd[i].invalid) return i;
+  if (!g_wnd[i].visible) return -1; if (g_wnd[i].invalid && g_wnd[i].pid == g_inv_pid) return i;
   int order[MAX_WND], n = 0; for (int k = head[i + 1]; k >= 0; k = next[k]) order[n++] = k;
   for (int a = 1; a < n; a++) { int v = order[a], b = a - 1; while (b >= 0 && g_wnd[order[b]].zseq < g_wnd[v].zseq) { order[b + 1] = order[b]; b--; } order[b + 1] = v; }
   for (int a = 0; a < n; a++) { int r = next_invalid_in(order[a], head, next); if (r >= 0) return r; } return -1; }
-static int next_invalid(void) {
-  int head[MAX_WND + 1], next[MAX_WND], any = 0; for (int k = 0; k <= MAX_WND; k++) head[k] = -1;
-  for (int k = MAX_WND - 1; k >= 0; k--) { Wnd *n = &g_wnd[k]; if (!n->used || n->destroyed) continue; int p = n->parent >= 0 && n->parent < MAX_WND ? n->parent + 1 : 0; next[k] = head[p]; head[p] = k; if (n->invalid && !any && wnd_shown_chain(k)) any = 1; }
+static int next_invalid(int pid) {
+  int head[MAX_WND + 1], next[MAX_WND], any = 0; g_inv_pid = pid; for (int k = 0; k <= MAX_WND; k++) head[k] = -1;
+  for (int k = MAX_WND - 1; k >= 0; k--) { Wnd *n = &g_wnd[k]; if (!n->used || n->destroyed) continue; int p = n->parent >= 0 && n->parent < MAX_WND ? n->parent + 1 : 0; next[k] = head[p]; head[p] = k; if (n->invalid && n->pid == pid && !any && wnd_shown_chain(k)) any = 1; }
   if (!any) return -1;
   int order[MAX_WND], n = 0; for (int k = head[0]; k >= 0; k = next[k]) order[n++] = k;
   for (int a = 1; a < n; a++) { int v = order[a], b = a - 1; while (b >= 0 && g_wnd[order[b]].zseq > g_wnd[v].zseq) { order[b + 1] = order[b]; b--; } order[b + 1] = v; }
@@ -256,7 +257,7 @@ static int next_message(Cpu *c, GuestMsg *out, int remove, u64 filter_hwnd) {
     if (filter_hwnd) { int fi = wnd_of(filter_hwnd); for (int q = w->msg_head; q != w->msg_tail; q = (q + 1) % MAX_MSGS) { int mi = wnd_of(w->msgs[q].hwnd); if (w->msgs[q].hwnd == filter_hwnd || (mi >= 0 && fi >= 0 && wnd_is_child_of(mi, fi))) { *out = w->msgs[q]; if (remove) { for (int r = q; r != w->msg_head; r = (r + MAX_MSGS - 1) % MAX_MSGS) w->msgs[r] = w->msgs[(r + MAX_MSGS - 1) % MAX_MSGS]; w->msg_head = (w->msg_head + 1) % MAX_MSGS; } return 1; } } }
     else { *out = w->msgs[w->msg_head]; if (remove) w->msg_head = (w->msg_head + 1) % MAX_MSGS; return 1; } }
   if (w->quit_posted && !filter_hwnd) { out->hwnd = 0; out->msg = 0x12; out->wparam = (u64)(u32)c->exit_code; out->lparam = 0; out->time = 0; if (remove) w->quit_posted = 0; return 1; }
-  int inv = next_invalid(); if (inv >= 0 && (!filter_hwnd || HWND_OF(inv) == filter_hwnd || wnd_is_child_of(inv, wnd_of(filter_hwnd)))) { out->hwnd = HWND_OF(inv); out->msg = 0xF; out->wparam = out->lparam = 0; out->time = 0; return 1; }
+  int inv = next_invalid(w->pid); if (inv >= 0 && (!filter_hwnd || HWND_OF(inv) == filter_hwnd || wnd_is_child_of(inv, wnd_of(filter_hwnd)))) { out->hwnd = HWND_OF(inv); out->msg = 0xF; out->wparam = out->lparam = 0; out->time = 0; return 1; }
   return 0;
 }
 static void s_PeekMessageA(Cpu *c) {
@@ -354,11 +355,18 @@ static struct { Win32 *w; u64 buf[4]; int rr; } g_ansi;
 static u64 ansi_scratch(Win32 *w) { if (g_ansi.w != w) { g_ansi.w = w; for (int k = 0; k < 4; k++) g_ansi.buf[k] = 0; } int k = g_ansi.rr++ & 3; if (!g_ansi.buf[k]) g_ansi.buf[k] = w32_heap_alloc(w, 4096, 1); return g_ansi.buf[k]; }
 static int ansi_in_msg(u32 m) { return m == 0x0C || m == 0x180 || m == 0x181 || m == 0x18C || m == 0x18F || m == 0x1A2 || m == 0x143 || m == 0x14A || m == 0x14C || m == 0x14D || m == 0x158 || m == 0xC2; }
 static void ansiout_resume(Cpu *c, u64 rax) { Win32 *w = W; int ci = w->ncont - 1; u64 dst = w->cont[ci].data[0]; u32 cap = (u32)w->cont[ci].data[1]; u64 scratch = w->cont[ci].data[2]; if ((s32)(u32)rax < 0) { w32_cont_finish(c, rax); return; } char t[2048]; wstr_to_utf8(c, scratch, t, sizeof t, (int)(u32)rax); u32 n = text_out_cap(c, dst, t, cap, 0); w32_cont_finish(c, n); }
-static void send_message_ansi(Cpu *c, u64 hwnd, u32 msg, u64 wp, u64 lp) { int i = wnd_of(hwnd); Win32 *w = W;
-  if (i >= 0 && g_wnd[i].builtin && g_wnd[i].builtin != BI_DIALOG && !g_wnd[i].destroyed && g_wnd[i].pid == w->pid) {
-    if (ansi_in_msg(msg) && lp >= 0x10000 && !((msg == 0x180 || msg == 0x181) && (g_wnd[i].style & 0x10) && !(g_wnd[i].style & 0x40))) { char t[2048]; text_in(c, lp, 0, t, sizeof t); u64 sc = ansi_scratch(w); put_w8(c, sc, t, 2048); dispatch_to_wndproc(c, hwnd, msg, wp, sc); return; }
-    if ((msg == 0x0D || msg == 0x189 || msg == 0x148) && lp >= 0x10000) { u64 sc = ansi_scratch(w); u32 cap = msg == 0x0D ? (u32)wp : 2048; if (cap > 2048) cap = 2048; w32_push_cont(c, CONT_ANSIOUT, lp); w->cont[w->ncont - 1].data[1] = cap; w->cont[w->ncont - 1].data[2] = sc; w32_guest_call(c, g_wnd[i].wndproc, hwnd, msg, msg == 0x0D ? (u64)cap : wp, sc); return; } }
-  dispatch_to_wndproc(c, hwnd, msg, wp, lp); }
+/* ANSI-ness belongs to the RECEIVING procedure: a built-in control procedure (shim slot) speaks UTF-16, an application procedure
+   reached through SendMessageA / CallWindowProcA speaks ANSI and is passed the caller's buffer untouched. When an ANSI application
+   subclasses an EDIT (Delphi VCL, MFC) the text goes app proc -> CallWindowProcA(built-in) and the conversion happens there — not twice. */
+static int proc_is_builtin(Win32 *w, u64 proc) { return proc >= G_SHIM_BASE && proc < G_SHIM_BASE + (u64)w->nslots * SHIM_SLOT_SIZE; }
+static void ansi_call(Cpu *c, u64 proc, u64 hwnd, u32 msg, u64 wp, u64 lp) { if (proc) { w32_push_cont(c, CONT_RET_RAX, 0); w32_guest_call(c, proc, hwnd, msg, wp, lp); } else dispatch_to_wndproc(c, hwnd, msg, wp, lp); }
+static void send_message_ansi_to(Cpu *c, u64 hwnd, u32 msg, u64 wp, u64 lp, u64 proc) { int i = wnd_of(hwnd); Win32 *w = W;
+  u64 target = proc ? proc : (i >= 0 ? g_wnd[i].wndproc : 0);
+  if (i >= 0 && g_wnd[i].builtin && g_wnd[i].builtin != BI_DIALOG && !g_wnd[i].destroyed && g_wnd[i].pid == w->pid && proc_is_builtin(w, target)) {
+    if (ansi_in_msg(msg) && lp >= 0x10000 && !((msg == 0x180 || msg == 0x181) && (g_wnd[i].style & 0x10) && !(g_wnd[i].style & 0x40))) { char t[2048]; text_in(c, lp, 0, t, sizeof t); u64 sc = ansi_scratch(w); put_w8(c, sc, t, 2048); ansi_call(c, proc, hwnd, msg, wp, sc); return; }
+    if ((msg == 0x0D || msg == 0x189 || msg == 0x148) && lp >= 0x10000) { u64 sc = ansi_scratch(w); u32 cap = msg == 0x0D ? (u32)wp : 2048; if (cap > 2048) cap = 2048; w32_push_cont(c, CONT_ANSIOUT, lp); w->cont[w->ncont - 1].data[1] = cap; w->cont[w->ncont - 1].data[2] = sc; w32_guest_call(c, target, hwnd, msg, msg == 0x0D ? (u64)cap : wp, sc); return; } }
+  ansi_call(c, proc, hwnd, msg, wp, lp); }
+static void send_message_ansi(Cpu *c, u64 hwnd, u32 msg, u64 wp, u64 lp) { send_message_ansi_to(c, hwnd, msg, wp, lp, 0); }
 static void s_SendMessageA(Cpu *c) { send_message_ansi(c, ARG(0), (u32)ARG(1), ARG(2), ARG(3)); }
 static void s_SendMessageTimeoutW(Cpu *c) { if (ARG(6)) wrp(c, ARG(6), 0); dispatch_to_wndproc(c, ARG(0), (u32)ARG(1), ARG(2), ARG(3)); }
 static void s_SendNotifyMessageW(Cpu *c) { u64 h = ARG(0); if (h == 0xffff || h == 0xffffffffull || h == ~0ull) { RET(1); return; } dispatch_to_wndproc(c, h, (u32)ARG(1), ARG(2), ARG(3)); }   /* HWND_BROADCAST: nobody else listens */
@@ -629,7 +637,7 @@ static void s_DefWindowProcA(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(
   def_window_proc(c, i, msg, ARG(2), ARG(3)); }
 static void s_DefWindowProcW(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } def_window_proc(c, i, (u32)ARG(1), ARG(2), ARG(3)); }
 static void s_CallWindowProcW(Cpu *c) { u64 proc = ARG(0); if (!proc) { RET(0); return; } w32_push_cont(c, CONT_RET_RAX, 0); w32_guest_call(c, proc, ARG(1), ARG(2), ARG(3), ARG(4)); }
-static void s_CallWindowProcA(Cpu *c) { s_CallWindowProcW(c); }
+static void s_CallWindowProcA(Cpu *c) { u64 proc = ARG(0); if (!proc) { RET(0); return; } if (proc_is_builtin(W, proc)) { send_message_ansi_to(c, ARG(1), (u32)ARG(2), ARG(3), ARG(4), proc); return; } s_CallWindowProcW(c); }
 
 /* ---------- show / move / size / enable ---------- */
 static void s_ShowWindow(Cpu *c) { Win32 *w = W; int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } int cmd = (int)ARG(1); int prev = g_wnd[i].visible;
