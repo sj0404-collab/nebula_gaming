@@ -358,12 +358,14 @@ static void ansiout_resume(Cpu *c, u64 rax) { Win32 *w = W; int ci = w->ncont - 
 /* ANSI-ness belongs to the RECEIVING procedure: a built-in control procedure (shim slot) speaks UTF-16, an application procedure
    reached through SendMessageA / CallWindowProcA speaks ANSI and is passed the caller's buffer untouched. When an ANSI application
    subclasses an EDIT (Delphi VCL, MFC) the text goes app proc -> CallWindowProcA(built-in) and the conversion happens there — not twice. */
+static const char *wnd_text_eff(int i);
 static int proc_is_builtin(Win32 *w, u64 proc) { return proc >= G_SHIM_BASE && proc < G_SHIM_BASE + (u64)w->nslots * SHIM_SLOT_SIZE; }
 static void ansi_call(Cpu *c, u64 proc, u64 hwnd, u32 msg, u64 wp, u64 lp) { if (proc) { w32_push_cont(c, CONT_RET_RAX, 0); w32_guest_call(c, proc, hwnd, msg, wp, lp); } else dispatch_to_wndproc(c, hwnd, msg, wp, lp); }
 static void send_message_ansi_to(Cpu *c, u64 hwnd, u32 msg, u64 wp, u64 lp, u64 proc) { int i = wnd_of(hwnd); Win32 *w = W;
   u64 target = proc ? proc : (i >= 0 ? g_wnd[i].wndproc : 0);
   if (i >= 0 && g_wnd[i].builtin && g_wnd[i].builtin != BI_DIALOG && !g_wnd[i].destroyed && g_wnd[i].pid == w->pid && proc_is_builtin(w, target)) {
     if (ansi_in_msg(msg) && lp >= 0x10000 && !((msg == 0x180 || msg == 0x181) && (g_wnd[i].style & 0x10) && !(g_wnd[i].style & 0x40))) { char t[2048]; text_in(c, lp, 0, t, sizeof t); u64 sc = ansi_scratch(w); put_w8(c, sc, t, 2048); ansi_call(c, proc, hwnd, msg, wp, sc); return; }
+    if (msg == 0x0E && g_wnd[i].builtin != BI_LISTBOX && g_wnd[i].builtin != BI_COMBO && g_wnd[i].builtin != BI_COMBOEX) { RET(e_strlen(wnd_text_eff(i))); return; }   /* WM_GETTEXTLENGTH in bytes of the ANSI (UTF-8) form */
     if ((msg == 0x0D || msg == 0x189 || msg == 0x148) && lp >= 0x10000) { u64 sc = ansi_scratch(w); u32 cap = msg == 0x0D ? (u32)wp : 2048; if (cap > 2048) cap = 2048; w32_push_cont(c, CONT_ANSIOUT, lp); w->cont[w->ncont - 1].data[1] = cap; w->cont[w->ncont - 1].data[2] = sc; w32_guest_call(c, target, hwnd, msg, msg == 0x0D ? (u64)cap : wp, sc); return; } }
   ansi_call(c, proc, hwnd, msg, wp, lp); }
 static void send_message_ansi(Cpu *c, u64 hwnd, u32 msg, u64 wp, u64 lp) { send_message_ansi_to(c, hwnd, msg, wp, lp, 0); }

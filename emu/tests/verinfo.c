@@ -13,6 +13,10 @@ int main(int argc, char **argv) {
   if (VerQueryValueA(blk, sub, (void **)&fv, &n)) printf("FileVersion=%s\n", fv);
   sprintf(sub, "\\StringFileInfo\\%04x%04x\\ProductName", tr ? tr[0] : 0x409, tr ? tr[1] : 0x4e4); if (VerQueryValueA(blk, sub, (void **)&fv, &n)) printf("ProductName=%s\n", fv);
   WCHAR wpath[MAX_PATH]; MultiByteToWideChar(CP_ACP, 0, path, -1, wpath, MAX_PATH); DWORD szw = GetFileVersionInfoSizeW(wpath, &h); void *blkw = malloc(szw);
-  if (szw && GetFileVersionInfoW(wpath, 0, szw, blkw)) { WCHAR subw[128]; wsprintfW(subw, L"\\StringFileInfo\\%04x%04x\\FileVersion", tr ? tr[0] : 0x409, tr ? tr[1] : 0x4e4); if (VerQueryValueW(blkw, subw, (void **)&fvw, &n)) printf("FileVersionW=%ls\n", fvw); }
+  printf("W: size=%lu\n", szw);
+  if (szw && GetFileVersionInfoW(wpath, 0, szw, blkw)) { WCHAR subw[128]; wsprintfW(subw, L"\\StringFileInfo\\%04x%04x\\FileVersion", tr ? tr[0] : 0x409, tr ? tr[1] : 0x4e4);
+    char subn[128]; WideCharToMultiByte(CP_ACP, 0, subw, -1, subn, sizeof subn, 0, 0); printf("W: query %s\n", subn);
+    if (VerQueryValueW(blkw, subw, (void **)&fvw, &n)) { char fvn[128]; WideCharToMultiByte(CP_ACP, 0, fvw, -1, fvn, sizeof fvn, 0, 0); printf("FileVersionW=%s (%u units)\n", fvn, n); } else printf("W: VerQueryValueW failed\n"); }
+  else printf("W: GetFileVersionInfoW failed err %lu\n", GetLastError());
   printf("verinfo done\n"); return 0;
 }
