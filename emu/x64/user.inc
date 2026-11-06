@@ -234,14 +234,22 @@ static void write_msg(Cpu *c, u64 a, GuestMsg *m) {
 static int wnd_siblings_topdown(int parent, int skip, int *order);
 /* paint order: top-level windows bottom-up; the children of a window top-down like Windows dispatches WM_PAINT (a lower sibling without WS_CLIPSIBLINGS overwrites a higher one — dialog
    controls; with WS_CLIPSIBLINGS the DcSnap clip keeps the higher siblings intact — Notepad++'s Scintilla over its tab bar); returns the first invalid visible window */
-static int next_invalid_in(int i) { if (!g_wnd[i].visible) return -1; if (g_wnd[i].invalid) return i; int order[MAX_WND]; int n = wnd_siblings_topdown(i, -1, order);
-  for (int a = 0; a < n; a++) { int r = next_invalid_in(order[a]); if (r >= 0) return r; } return -1; }
-static int next_invalid(void) { int order[MAX_WND]; int n = 0, any = 0;
-  for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].invalid) { any = 1; break; }
-  if (!any) return -1;   /* the common case of a polling message loop: nothing to paint, no z-order walk */
-  for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].parent < 0) order[n++] = k;
+/* the next window that needs WM_PAINT, in z-order (top-level bottom-up, children top-down), parents before children, hidden
+   subtrees skipped.  One pass over the table builds the parent → children lists; the common case (nothing invalid, a polling
+   message loop) costs that single pass and nothing else. */
+static int wnd_shown_chain(int i) { int d = 0; while (i >= 0 && d++ < 64) { if (!g_wnd[i].visible) return 0; i = g_wnd[i].parent; } return 1; }
+static int next_invalid_in(int i, const int *head, const int *next) {
+  if (!g_wnd[i].visible) return -1; if (g_wnd[i].invalid) return i;
+  int order[MAX_WND], n = 0; for (int k = head[i + 1]; k >= 0; k = next[k]) order[n++] = k;
+  for (int a = 1; a < n; a++) { int v = order[a], b = a - 1; while (b >= 0 && g_wnd[order[b]].zseq < g_wnd[v].zseq) { order[b + 1] = order[b]; b--; } order[b + 1] = v; }
+  for (int a = 0; a < n; a++) { int r = next_invalid_in(order[a], head, next); if (r >= 0) return r; } return -1; }
+static int next_invalid(void) {
+  int head[MAX_WND + 1], next[MAX_WND], any = 0; for (int k = 0; k <= MAX_WND; k++) head[k] = -1;
+  for (int k = MAX_WND - 1; k >= 0; k--) { Wnd *n = &g_wnd[k]; if (!n->used || n->destroyed) continue; int p = n->parent >= 0 && n->parent < MAX_WND ? n->parent + 1 : 0; next[k] = head[p]; head[p] = k; if (n->invalid && !any && wnd_shown_chain(k)) any = 1; }
+  if (!any) return -1;
+  int order[MAX_WND], n = 0; for (int k = head[0]; k >= 0; k = next[k]) order[n++] = k;
   for (int a = 1; a < n; a++) { int v = order[a], b = a - 1; while (b >= 0 && g_wnd[order[b]].zseq > g_wnd[v].zseq) { order[b + 1] = order[b]; b--; } order[b + 1] = v; }
-  for (int a = 0; a < n; a++) { int r = next_invalid_in(order[a]); if (r >= 0) return r; } return -1; }
+  for (int a = 0; a < n; a++) { int r = next_invalid_in(order[a], head, next); if (r >= 0) return r; } return -1; }
 static int next_message(Cpu *c, GuestMsg *out, int remove, u64 filter_hwnd) {
   Win32 *w = W; check_timers(w);
   if (w->msg_head != w->msg_tail) {
