@@ -134,6 +134,7 @@ static const struct { const char *n; unsigned short bytes; } stdcall32_tab[] = {
   { "ChangeDisplaySettingsW", 8 },
   { "ChangeWindowMessageFilter", 8 },
   { "ChangeWindowMessageFilterEx", 16 },
+  { "CharLowerA", 4 },
   { "CharLowerBuffA", 8 },
   { "CharLowerBuffW", 8 },
   { "CharLowerBuffWrapW", 8 },
