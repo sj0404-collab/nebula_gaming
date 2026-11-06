@@ -25,8 +25,8 @@ on:
         description: 'scripted input before recording, e.g. "click:0.5,0.83@80;key:Enter@40" (fractions of the game screen, @frames to wait)'
         default: ''
       gpu:
-        description: 'browser GPU backend: swiftshader | mesa-vk (lavapipe) | mesa-gl (llvmpipe)'
-        default: 'swiftshader'
+        description: 'browser GPU backend: mesa-gl (Mesa llvmpipe, ~3x SwiftShader) | swiftshader | mesa-vk'
+        default: 'mesa-gl'
       record_clicks:
         description: clicks during the recording, "fx,fy;fx,fy" (one every ~3 s)
         default: ''
@@ -53,7 +53,7 @@ jobs:
         run: |
           npx playwright install --with-deps chromium
           sudo apt-get install -y -q ffmpeg >/dev/null 2>&1 || true
-          if [ "${{ github.event.inputs.gpu || 'swiftshader' }}" != "swiftshader" ]; then sudo apt-get install -y -q mesa-vulkan-drivers libgl1-mesa-dri libegl1 libgles2 mesa-utils vulkan-tools xvfb >/dev/null 2>&1; ls /usr/share/vulkan/icd.d/ || true; fi
+          if [ "${{ github.event.inputs.gpu || 'mesa-gl' }}" != "swiftshader" ]; then sudo apt-get install -y -q mesa-vulkan-drivers libgl1-mesa-dri libegl1 libgles2 mesa-utils vulkan-tools xvfb >/dev/null 2>&1; ls /usr/share/vulkan/icd.d/ || true; fi
           ffmpeg -version | head -1
       - name: Download the official Shattered Pixel Dungeon v4.0.2 Windows build (GPL, author's GitHub release)
         run: |
@@ -61,7 +61,7 @@ jobs:
           ls -la /tmp/ShatteredPD-v4.0.2-Windows.zip; unzip -l /tmp/ShatteredPD-v4.0.2-Windows.zip | head -15
       - name: Run the game in the emulator and record frames + audio
         env:
-          GPU: ${{ github.event.inputs.gpu || 'swiftshader' }}
+          GPU: ${{ github.event.inputs.gpu || 'mesa-gl' }}
           VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
           LIBGL_ALWAYS_SOFTWARE: '1'
           GALLIUM_DRIVER: llvmpipe
