@@ -123,6 +123,9 @@ const recOk = await screen.evaluate((c, fps) => { try {
   window.__recChunks = []; rec.ondataavailable = (e) => { if (e.data && e.data.size) window.__recChunks.push(e.data); }; rec.start(500); window.__rec = rec; return true;
 } catch (e) { console.log('MediaRecorder unavailable: ' + e); return false; } }, 30).catch(() => false);
 const recClicks = (opt('--record-clicks', '') || '').split(';').map(a => a.trim()).filter(Boolean); let recIdx = 0, lastRecClick = Date.now();
+// --profile: V8 sampling profile of the page's main thread over the recording (CDP Profiler) → out/browser.cpuprofile (emu/tools/profsum.mjs)
+const wantProfile = process.argv.includes('--profile'); let cdp = null;
+if (wantProfile) { try { cdp = await page.context().newCDPSession(page); await cdp.send('Profiler.enable'); await cdp.send('Profiler.setSamplingInterval', { interval: 500 }); await cdp.send('Profiler.start'); console.log('profiler started'); } catch (e) { console.log('profiler unavailable: ' + e); cdp = null; } }
 const tStart = Date.now(); const stamps = []; let n = 0;
 while (Date.now() - tStart < seconds * 1000) {
   const t = Date.now() - tStart;
@@ -138,6 +141,7 @@ while (Date.now() - tStart < seconds * 1000) {
 }
 const acT1 = await page.evaluate(() => (window.__acs[0] ? window.__acs[0].currentTime : 0));
 const wallSec = (Date.now() - tStart) / 1000;
+if (cdp) { try { const { profile } = await cdp.send('Profiler.stop'); writeFileSync(resolve(OUT, 'browser.cpuprofile'), JSON.stringify(profile)); console.log(`browser.cpuprofile: ${profile.samples.length} samples`); } catch (e) { console.log('profiler stop failed: ' + e); } }
 if (recOk) {
   const b64 = await page.evaluate(() => new Promise((res) => { const rec = window.__rec; rec.onstop = async () => {
     const buf = await new Blob(window.__recChunks, { type: 'video/webm' }).arrayBuffer(); const u = new Uint8Array(buf); let s = '';

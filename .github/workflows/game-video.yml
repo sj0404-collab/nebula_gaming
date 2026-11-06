@@ -43,7 +43,7 @@ jobs:
         with: { node-version: 22, cache: npm }
       - uses: mlugg/setup-zig@v2
       - name: Build the wasm64 module from the current source (the committed public/x64/nebula_x64.wasm may lag behind emu/x64)
-        run: ZIG=zig ./emu/x64/build.sh
+        run: WASM_NAMES=1 ZIG=zig ./emu/x64/build.sh   # keep function names: the browser profile (--profile) is readable
       - run: npm ci
       - run: npm run build
       - name: Playwright chromium + ffmpeg
@@ -56,7 +56,7 @@ jobs:
           curl -sSL -o /tmp/ShatteredPD-v4.0.2-Windows.zip https://github.com/00-Evan/shattered-pixel-dungeon/releases/download/v4.0.2/ShatteredPD-v4.0.2-Windows.zip
           ls -la /tmp/ShatteredPD-v4.0.2-Windows.zip; unzip -l /tmp/ShatteredPD-v4.0.2-Windows.zip | head -15
       - name: Run the game in the emulator and record frames + audio
-        run: node e2e/record.mjs /tmp/ShatteredPD-v4.0.2-Windows.zip --seconds "${{ github.event.inputs.seconds || '15' }}" --settle-frames "${{ github.event.inputs.settle_frames || '400' }}" --jit "${{ github.event.inputs.jit || '1' }}" --gltrace "${{ github.event.inputs.gltrace }}" --jitskip "${{ github.event.inputs.jitskip }}" --actions "${{ github.event.inputs.actions }}" --record-clicks "${{ github.event.inputs.record_clicks }}" --out e2e/video
+        run: node e2e/record.mjs /tmp/ShatteredPD-v4.0.2-Windows.zip --seconds "${{ github.event.inputs.seconds || '15' }}" --settle-frames "${{ github.event.inputs.settle_frames || '400' }}" --jit "${{ github.event.inputs.jit || '1' }}" --gltrace "${{ github.event.inputs.gltrace }}" --jitskip "${{ github.event.inputs.jitskip }}" --actions "${{ github.event.inputs.actions }}" --record-clicks "${{ github.event.inputs.record_clicks }}" --profile --out e2e/video
         timeout-minutes: 60
       - name: Mux with ffmpeg (exact per-frame durations + captured PCM)
         run: |
@@ -65,6 +65,7 @@ jobs:
           # the in-page MediaRecorder capture of the screen canvas (every composited frame, not just the ~2-8 screenshots/s)
           if [ -s screen.webm ]; then ffmpeg -loglevel error -y -i screen.webm -i audio.wav -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=30" -c:a aac -b:a 160k -shortest game-smooth.mp4 && ffprobe -v error -show_entries stream=codec_type,codec_name,duration,nb_frames -of compact game-smooth.mp4; fi
           ffprobe -v error -show_entries stream=codec_type,codec_name,duration -of compact game.mp4
+          if [ -s browser.cpuprofile ]; then echo "== browser main-thread profile over the recording"; node ../../emu/tools/profsum.mjs browser.cpuprofile 40; fi
           ls -la
       - uses: actions/upload-artifact@v4
         if: always()
@@ -73,6 +74,7 @@ jobs:
           path: |
             e2e/video/game.mp4
             e2e/video/game-smooth.mp4
+            e2e/video/browser.cpuprofile
             e2e/video/screen.webm
             e2e/video/step-*.png
             e2e/video/title.png
