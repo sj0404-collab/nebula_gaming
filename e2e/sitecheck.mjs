@@ -10,7 +10,7 @@ import { resolve, basename } from 'node:path';
 
 const argv = process.argv.slice(2); const file = argv[0]; if (!file) { console.error('usage: node e2e/sitecheck.mjs <file> [--tile Name] [--args A] [--wait ms] [--tag t]'); process.exit(2); }
 const opt = (k, d) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : d; };
-const tile = opt('--tile', null), args = opt('--args', ''), wait = Number(opt('--wait', '20000')), tag = opt('--tag', basename(file).replace(/\.[^.]+$/, '').replace(/[^a-z0-9]+/gi, '_').toLowerCase());
+const tile = opt('--tile', null), args = opt('--args', ''), keys = opt('--keys', ''), wait = Number(opt('--wait', '20000')), tag = opt('--tag', basename(file).replace(/\.[^.]+$/, '').replace(/[^a-z0-9]+/gi, '_').toLowerCase());
 const ROOT = resolve(import.meta.dirname, '..'); const SHOTS = resolve(ROOT, 'e2e', 'shots'); mkdirSync(SHOTS, { recursive: true });
 const PORT = 4181; const url = process.env.E2E_URL || `http://127.0.0.1:${PORT}`;
 let server = null;
@@ -50,7 +50,14 @@ if (isZip) {
 const tRun = Date.now();
 await page.waitForFunction(() => { const s = document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status'); const fr = Number(document.querySelector('[data-x64-screen]')?.getAttribute('data-frames')) || 0; return fr > 0 || s === 'exited' || s === 'fault' || s === 'stopped'; }, null, { timeout: 300000 }).catch(() => {});
 const firstFrameMs = Date.now() - tRun;
-await sleep(Math.min(wait, 900000));
+// --keys "Enter@25000;Escape@40000": press keys in the guest screen at the given ms after the first frame (walks wizard pages); a shot is taken after each
+let tKeys = 0;
+for (const kv of keys.split(';').map(x => x.trim()).filter(Boolean)) {
+  const [key, atRaw] = kv.split('@'); const at = Number(atRaw || 0); if (at > tKeys) await sleep(Math.min(at - tKeys, 900000)); tKeys = Math.max(tKeys, at);
+  await w.locator('[data-x64-tab="screen"]').click().catch(() => {}); const scr = w.locator('[data-x64-screen]').first(); await scr.focus().catch(() => {}); await scr.press(key).catch(e => console.log('key failed:', e.message));
+  await sleep(1500); await page.screenshot({ path: resolve(SHOTS, `site-${tag}-key-${key}-${at}.png`) }); console.log(`key ${key} @${at} → status=${await status()} bar=${await bar()}`);
+}
+await sleep(Math.max(0, Math.min(wait, 900000) - tKeys));
 const st = await status();
 const frames = await page.evaluate(() => Number(document.querySelector('[data-x64-screen]')?.getAttribute('data-frames')) || 0);
 if (frames > 0) await w.locator('[data-x64-tab="screen"]').click().catch(() => {});

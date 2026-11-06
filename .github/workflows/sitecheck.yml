@@ -14,6 +14,9 @@ on:
       wait:
         description: 'ms to let it run'
         default: '40000'
+      keys:
+        description: 'keys to press in the guest screen, "Enter@25000;Enter@35000" (ms after first frame)'
+        default: ''
       jit:
         description: 'JIT on (1) / off (0)'
         default: '1'
@@ -55,7 +58,7 @@ jobs:
       - name: Open it through the Programs UI
         env:
           X64_JIT: ${{ github.event.inputs.jit }}
-        run: node e2e/sitecheck.mjs "/tmp/sc/$NAME" --wait "${{ github.event.inputs.wait }}" --args "${{ github.event.inputs.args }}" 2>&1 | tee /tmp/sc/sitecheck.txt
+        run: node e2e/sitecheck.mjs "/tmp/sc/$NAME" --wait "${{ github.event.inputs.wait }}" --args "${{ github.event.inputs.args }}" --keys "${{ github.event.inputs.keys }}" 2>&1 | tee /tmp/sc/sitecheck.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
