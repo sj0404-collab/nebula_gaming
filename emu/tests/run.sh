@@ -569,6 +569,12 @@ if command -v zig >/dev/null 2>&1 && [ -f tests/inst/putty.exe ]; then
   zig cc -target x86_64-windows-gnu -O1 -o /tmp/verinfo64.exe tests/verinfo.c -lversion && out=$($X --quiet --no-stdin --mount "tests/inst=C:\\inst" /tmp/verinfo64.exe "C:\\inst\\putty.exe" 2>&1) || out="build/run failed: $out"
   check "version.dll (x64)"   "FileVersionW=Release 0."   "$out"
 else echo "  skip verinfo (no zig or no putty.exe)"; fi
+echo "[jpeg] JPEG decoder (GDI+/WIC) against libjpeg references: baseline 4:2:0/4:2:2/4:4:4, progressive, grayscale, restart markers"
+cc -O1 -Wno-unused-function -o /tmp/jpegtest tests/jpegtest.c && out=$(cd tests/jpeg && /tmp/jpegtest b420.jpg b420.jpg.ppm b444.jpg b444.jpg.ppm b422.jpg b422.jpg.ppm prog.jpg prog.jpg.ppm prog444.jpg prog444.jpg.ppm gray.jpg gray.jpg.ppm rst.jpg rst.jpg.ppm 2>&1) || out="build/run failed: $out"
+check "JPEG baseline 4:2:0 within libjpeg tolerance"   "b420.jpg: 53x37 mean=0.5"   "$out"
+check "JPEG progressive"   "prog.jpg: 53x37 mean=0.5"   "$out"
+check "JPEG restart markers"   "rst.jpg: 53x37 mean=0.5"   "$out"
+check "JPEG all variants"   "JPEG OK"   "$out"
 echo "[msi] msi.dll via LoadLibrary/GetProcAddress (Inno [Code] imports): empty product database, MsiSetInternalUI, MsiGetFileVersion/MsiGetFileHash over putty.exe"
 if command -v zig >/dev/null 2>&1 && [ -f tests/inst/putty.exe ]; then
   zig cc -target x86-windows-gnu -O1 -o /tmp/msi32.exe tests/msi.c && out=$($X --quiet --no-stdin --mount "tests/inst=C:\\inst" /tmp/msi32.exe "C:\\inst\\putty.exe" 2>&1) || out="build/run failed: $out"

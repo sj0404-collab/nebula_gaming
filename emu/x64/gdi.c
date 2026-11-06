@@ -451,6 +451,7 @@ static void s_CommandLineToArgvW(Cpu *c) { Win32 *w = W; u64 P = PSZ; char cmd[8
 #include "menu.inc"
 #include "win32_vcl.inc"
 #include "imagelist.inc"
+#include "jpeg.inc"
 #include "win32_wic.inc"
 #include "icon.inc"
 #include "comctl.inc"
