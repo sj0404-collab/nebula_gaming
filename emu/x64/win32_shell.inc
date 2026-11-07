@@ -498,7 +498,7 @@ static int shell_cocreate(Cpu *c, u32 clsid_d1, u64 riid, u64 ppv) {
   S(SHChangeNotifyRegister), S(SHChangeNotifyDeregister), S(SHChangeNotification_Lock), S(SHChangeNotification_Unlock), \
   SHELLLINK_SHIMS \
   SHELLNS_SHIMS \
-  S(lstrcpyW), S(lstrcatW), S(lstrcatA), S(lstrcpynW), S(lstrcpynA), S(lstrcmpiW), \
+  S(lstrcpyW), SA("StrCpyW", lstrcpyW), S(lstrcatW), S(lstrcatA), S(lstrcpynW), S(lstrcpynA), S(lstrcmpiW), \
   S(FindResourceW), S(FindResourceA), S(FindResourceExW), S(FindResourceExA), S(LoadResource), S(LockResource), S(SizeofResource), S(FreeResource), S(LoadStringW), S(LoadStringA), S(EnumResourceNamesW), \
   S(RegOpenKeyExW), S(RegOpenKeyExA), S(RegOpenKeyW), S(RegOpenKeyA), S(RegCreateKeyExW), S(RegCreateKeyExA), S(RegCreateKeyW), S(RegCreateKeyA), S(RegCloseKey), S(RegFlushKey), S(RegSetValueExW), S(RegSetValueExA), S(RegSetValueW), S(RegSetValueA), \
   S(RegQueryValueExW), S(RegQueryValueExA), S(RegQueryValueW), S(RegGetValueW), S(RegGetValueA), S(RegDeleteKeyW), S(RegDeleteKeyA), S(RegDeleteKeyExW), S(RegDeleteKeyExA), S(RegDeleteTreeW), S(RegDeleteValueW), S(RegDeleteValueA), \

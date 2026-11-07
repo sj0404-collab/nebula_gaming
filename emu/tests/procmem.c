@@ -22,6 +22,11 @@ int main(void) {
   BOOL invalid = WriteProcessMemory((HANDLE)(ULONG_PTR)0x123456, target, data, sizeof(data), &result.n);
   ok = ok && !invalid && result.guard == guard;
   ok = ok && EnumSystemLocalesA(locale_a, 0) && EnumSystemLocalesW(locale_w, 0) && count_a == 1 && count_w == 1;
+  typedef LPWSTR (WINAPI *StrCpyWFn)(LPWSTR, LPCWSTR);
+  HMODULE shlwapi = LoadLibraryW(L"shlwapi.dll");
+  StrCpyWFn copy_w = shlwapi ? (StrCpyWFn)GetProcAddress(shlwapi, "StrCpyW") : NULL;
+  WCHAR wbuf[32] = {0};
+  ok = ok && copy_w && copy_w(wbuf, L"Clover Ω") == wbuf && !wcscmp(wbuf, L"Clover Ω");
   printf("procmem: %s\n", ok ? "PASS" : "FAIL");
   return ok ? 0 : 1;
 }

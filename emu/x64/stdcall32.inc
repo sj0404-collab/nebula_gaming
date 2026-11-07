@@ -3565,6 +3565,7 @@ static const struct { const char *n; unsigned short bytes; } stdcall32_tab[] = {
   { "StrCmpW", 8 },
   { "StrCpyNXA", 12 },
   { "StrCpyNXW", 12 },
+  { "StrCpyW", 8 },
   { "StrFormatByteSize64A", 16 },
   { "StrFormatByteSizeW", 16 },
   { "StrFormatKBSizeA", 16 },

@@ -28,6 +28,7 @@ jobs:
       - name: Convert diagnostic frames
         if: always()
         run: |
+          python3 -c "import PIL" 2>/dev/null || pip -q install pillow
           python3 - <<'PY'
           import glob, os
           from PIL import Image
