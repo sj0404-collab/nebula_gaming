@@ -20,6 +20,9 @@ on:
       log:
         description: 'X64_LOG=1'
         default: '0'
+      verbose:
+        description: 'Print the emulator exit or fault details'
+        default: '0'
       nohle:
         description: 'X64_NOHLE=1: keep the guest LZMA decoder (speed comparison)'
         default: '0'
@@ -39,12 +42,12 @@ jobs:
         run: |
           mkdir -p /tmp/np/guest_tmp /tmp/np/frames; cd /tmp/np
           NAME="${{ github.event.inputs.filename }}"; [ -n "$NAME" ] || NAME=$(basename "${{ github.event.inputs.url }}")
-          curl -sSL --retry 3 -o "$NAME" "${{ github.event.inputs.url }}"; ls -la /tmp/np; echo "NAME=$NAME" >> $GITHUB_ENV
+          curl -fsSL --retry 3 -o "$NAME" "${{ github.event.inputs.url }}"; ls -la /tmp/np; echo "NAME=$NAME" >> $GITHUB_ENV
       - name: Run
         run: |
           MS="${{ github.event.inputs.ms }}"; cd /tmp/np/frames
           echo "x64run --max-ms $MS ${{ github.event.inputs.xargs }} $NAME"
-          rc=0; [ "${{ github.event.inputs.nohle }}" = "1" ] && export X64_NOHLE=1; X64_PROF=${{ github.event.inputs.prof }} X64_LOG=${{ github.event.inputs.log }} timeout $((MS / 1000 + 600)) "$GITHUB_WORKSPACE/emu/x64/x64run" --quiet --no-stdin --max-ms $MS --stats --mount-rw "/tmp/np/guest_tmp=C:\\tmp" ${{ github.event.inputs.xargs }} "/tmp/np/$NAME" > /tmp/np/native.txt 2>&1 || rc=$?
+          quiet=--quiet; [ "${{ github.event.inputs.verbose }}" = "1" ] && quiet=; rc=0; [ "${{ github.event.inputs.nohle }}" = "1" ] && export X64_NOHLE=1; X64_PROF=${{ github.event.inputs.prof }} X64_LOG=${{ github.event.inputs.log }} timeout $((MS / 1000 + 600)) "$GITHUB_WORKSPACE/emu/x64/x64run" $quiet --no-stdin --max-ms $MS --stats --mount-rw "/tmp/np/guest_tmp=C:\\tmp" ${{ github.event.inputs.xargs }} "/tmp/np/$NAME" > /tmp/np/native.txt 2>&1 || rc=$?
           echo "native rc=$rc"; grep -a -v "^\[wnd\]" /tmp/np/native.txt | tail -80 | cut -c1-300
           ls /tmp/np/frames | head; find /tmp/np/guest_tmp -type f | head -40
           find /tmp/np/guest_tmp -maxdepth 1 -name "Setup Log*" -exec sh -c 'echo "--- $1"; sed "1s/^\xEF\xBB\xBF//" "$1" | grep -v "DLL function import\|Function name:\|DLL name:\|Dest DLL name:\|Importing the DLL\|imported the DLL\|Failed to import" | tail -80 | cut -c1-240' _ {} \;
