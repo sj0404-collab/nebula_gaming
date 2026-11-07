@@ -47,7 +47,7 @@ jobs:
           files = glob.glob('frame_*.ppm')
           assert files, 'no frames produced'
           found = False
-          for path in files:
+          for path in sorted(files)[-1:]:
               with open(path, 'rb') as f:
                   assert f.readline().strip() == b'P6'
                   w, h = map(int, f.readline().split()); assert f.readline().strip() == b'255'

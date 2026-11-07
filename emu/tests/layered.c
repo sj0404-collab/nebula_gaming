@@ -18,5 +18,8 @@ int main(void) {
   if (!UpdateLayeredWindow(w, NULL, &dst, &size, dc, &src, 0, &blend, ULW_ALPHA)) { printf("layered: FAIL %lu\n", GetLastError()); return 4; }
   /* bitmap must survive destroying the source DC */
   DeleteDC(dc); DeleteObject(bm); ShowWindow(w, SW_SHOW);
+  /* DefWindowProc's WM_PAINT must not erase the shared screen underneath the layer. */
+  InvalidateRect(w, NULL, TRUE);
+  MSG msg; while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
   printf("layered: PASS\n"); Sleep(1000); return 0;
 }

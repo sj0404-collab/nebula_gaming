@@ -593,7 +593,7 @@ static int looks_like_rtf(const char *t); static char *rtf_to_text(const char *r
 static void ilr_resume(Cpu *c, u64 rax); static void wicread_resume(Cpu *c, u64 rax); static int dib_decode(Cpu *c, u64 bmi, u64 bits, u32 *dst, int dw, int dh, int flip_only_rows);
 /* a common control whose message flow the application intercepts (comctl32 subclass chain or a replaced GWLP_WNDPROC): WM_ERASEBKGND / WM_ENABLE must reach that code, as on Windows */
 static int wnd_app_subclassed(Wnd *n) { return n->builtin && !n->superclassed && n->wndproc && (n->nsub > 0 || (n->wndproc != builtin_slot(n->builtin) && n->wndproc != g_slot_subclass)); }
-static void wnd_erase(Cpu *c, int i) { Win32 *w = W; Wnd *n = &g_wnd[i]; u64 hb = n->cls_brush; u32 px = 0xf0f0f0; int skip = 0;
+static void wnd_erase(Cpu *c, int i) { Win32 *w = W; Wnd *n = &g_wnd[i]; if (n->layer_pixels) return; /* UpdateLayeredWindow owns this surface: never erase the windows below it. */ u64 hb = n->cls_brush; u32 px = 0xf0f0f0; int skip = 0;
   if (w->api_trace) e_log("[user] erase #%d \"%s\" brush=%llx vis=%d at %d,%d %dx%d\n", i, n->clsname, (unsigned long long)hb, n->visible, n->x, n->y, n->w, n->h);
   if (n->is_dlg || n->builtin == BI_MSGBOX) px = 0xf0f0f0; else { GdiObj *b = gdi_get(w, hb); if (b) { if (b->kind == K_BRUSH && b->pen_width == -1) skip = 1; px = b->color; } else if (hb >= 1 && hb <= 31) px = g_sys_colors[hb - 1]; else if (!hb) skip = 1; }
   if (!skip) { u64 hdc = wnd_dc(c, i); Surf s; if (hdc && dc_surf(c, hdc, &s)) { fill_rect_px(&s, 0, 0, s.w, s.h, px); mark_screen(w, hdc); } if (hdc) wnd_dc_free(w, hdc); }
