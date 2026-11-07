@@ -5,7 +5,7 @@ static int ini_arg(Cpu *c, u64 a, int wide, char *out, size_t cap) { if (!a) { o
 static void ini_path(const char *name, char *out, size_t cap) { if (!name[0]) { e_snprintf(out, cap, "C:\\Windows\\win.ini"); return; } int abs = (name[0] && name[1] == ':') || name[0] == '\\' || name[0] == '/'; if (abs) e_snprintf(out, cap, "%s", name); else e_snprintf(out, cap, "C:\\Windows\\%s", name); }
 /* whole file as a NUL-terminated, newline-normalised buffer (UTF-16 files are converted to UTF-8) */
 static char *ini_load(const char *path, size_t *len) {
-  u64 sz = 0; if (vfs_stat(path, &sz) != 0 || sz > (64u << 20)) { *len = 0; return 0; } int i = vfs_find_node(path); const u8 *d = i >= 0 ? vfs_node_data(i) : 0; if (!d) { *len = 0; return 0; }
+  u64 sz = 0; if (vfs_stat(path, &sz) != 1 || sz > (64u << 20)) { *len = 0; return 0; } int i = vfs_find_node(path); const u8 *d = i >= 0 ? vfs_node_data(i) : 0; if (!d) { *len = 0; return 0; }
   char *b = emu_alloc((size_t)sz * 3 + 2); size_t o = 0;
   if (sz >= 2 && d[0] == 0xFF && d[1] == 0xFE) { for (u64 k = 2; k + 1 < sz; k += 2) { u32 cp = d[k] | (d[k + 1] << 8); if (cp >= 0xD800 && cp < 0xDC00 && k + 3 < sz) { u32 lo = d[k + 2] | (d[k + 3] << 8); cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00); k += 2; }
       if (cp < 0x80) b[o++] = (char)cp; else if (cp < 0x800) { b[o++] = (char)(0xC0 | (cp >> 6)); b[o++] = (char)(0x80 | (cp & 0x3f)); } else if (cp < 0x10000) { b[o++] = (char)(0xE0 | (cp >> 12)); b[o++] = (char)(0x80 | ((cp >> 6) & 0x3f)); b[o++] = (char)(0x80 | (cp & 0x3f)); } else { b[o++] = (char)(0xF0 | (cp >> 18)); b[o++] = (char)(0x80 | ((cp >> 12) & 0x3f)); b[o++] = (char)(0x80 | ((cp >> 6) & 0x3f)); b[o++] = (char)(0x80 | (cp & 0x3f)); } } }

@@ -27,6 +27,11 @@ int main(void) {
   StrCpyWFn copy_w = shlwapi ? (StrCpyWFn)GetProcAddress(shlwapi, "StrCpyW") : NULL;
   WCHAR wbuf[32] = {0};
   ok = ok && copy_w && copy_w(wbuf, L"Clover Ω") == wbuf && !wcscmp(wbuf, L"Clover Ω");
+  WCHAR profile_value[32] = {0};
+  ok = ok && WritePrivateProfileStringW(L"one", L"first", L"value", L"C:\\test-profile.ini")
+    && WritePrivateProfileStringW(L"one", L"second", L"other", L"C:\\test-profile.ini")
+    && GetPrivateProfileStringW(L"one", L"first", L"", profile_value, 32, L"C:\\test-profile.ini") == 5
+    && !wcscmp(profile_value, L"value");
   BYTE saved[] = {0, 1, 42, 128, 255}, restored[5] = {0};
   ok = ok && WritePrivateProfileStructW(L"binary", L"key", saved, sizeof(saved), L"C:\\test-profile.ini")
     && GetPrivateProfileStructW(L"binary", L"key", restored, sizeof(restored), L"C:\\test-profile.ini")
