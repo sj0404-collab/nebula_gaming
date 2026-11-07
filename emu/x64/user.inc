@@ -115,10 +115,14 @@ static void screen_ensure(Win32 *w, int cw, int ch) {
 void w32_set_desktop(int dw, int dh) { if (dw < 0) dw = 0; if (dh < 0) dh = 0; if (dw > 4096) dw = 4096; if (dh > 4096) dh = 4096; g_desk_w = dw && dh ? dw : 0; g_desk_h = dw && dh ? dh : 0; g_scr_x0 = g_desk_w ? 0 : 64; g_scr_y0 = g_desk_w ? 0 : 64; }
 void w32_desktop_apply(Win32 *w) {
   if (!w->screen) return;
+  int ow = w->screen_w, oh = w->screen_h;
   if (g_desk_w) screen_ensure(w, g_desk_w, g_desk_h); else if (g_wnd[0].used && !g_wnd[0].destroyed) screen_ensure(w, wnd_client_w(0), wnd_client_h(0));   /* back to legacy: the framebuffer follows the main window again */
   int sw = w->screen_w, sh = w->screen_h;
   for (int i = 1; i < MAX_WND; i++) { Wnd *n = &g_wnd[i]; if (!n->used || n->destroyed || n->parent >= 0 || n->w <= 0 || n->h <= 0) continue;
-    int nx = n->x, ny = n->y; if (nx + n->w > sw) nx = sw - n->w; if (ny + n->h > sh) ny = sh - n->h; if (nx < 0) nx = 0; if (ny < 0) ny = 0; n->x = nx; n->y = ny; }
+    int nx = n->x, ny = n->y;
+    if (nx - (ow - n->w) / 2 <= 2 && nx - (ow - n->w) / 2 >= -2 && ny - (oh - n->h) / 2 <= 2 && ny - (oh - n->h) / 2 >= -2) { nx = (sw - n->w) / 2; ny = (sh - n->h) / 2; }   /* a window centred on the old desktop (dialogs, wizards) stays centred */
+    if (nx + n->w > sw) nx = sw - n->w; if (ny + n->h > sh) ny = sh - n->h; if (nx < 0) nx = 0; if (ny < 0) ny = 0; n->x = nx; n->y = ny; }
+  for (size_t k = 0, nn = (size_t)sw * sh; k < nn; k++) w->screen[k] = 0x3b3b3b;   /* the old picture is stale (windows moved, the size changed): desktop colour, every window repaints */
   w->dirty = 1; wnd_invalidate_all();
 }
 /* UTF-16 guest string → UTF-8 host buffer (also accepts the ANSI flavour) */
@@ -1451,7 +1455,7 @@ static void combo_paint(Cpu *c, int i, u64 hdc, u64 hbr) { Win32 *w = W; Wnd *n 
   u32 bg = brush_px(w, hbr, en ? 0xffffff : 0xf0f0f0); fill_rect_px(&s, 0, 0, cw, ch, bg); u32 bc = !en ? 0xcccccc : n->focus_draw || n->dropped ? 0x0078d7 : 0x7a7a7a; edge_rect(&s, 0, 0, cw, ch, bc, bc);
   int bw = 17; fill_rect_px(&s, cw - bw - 1, 1, cw - 1, ch - 1, n->dropped ? 0xcce4f7 : 0xe1e1e1); int ax = cw - bw / 2 - 1, ay = ch / 2 - 1; for (int k = 0; k < 4; k++) hline(&s, ax - 3 + k, ax + 3 - k, ay - 1 + k, en ? 0x404040 : 0xa0a0a0);
   int sel = n->focus_draw && (n->style & 3) == 3 && !n->dropped; if (sel) fill_rect_px(&s, 2, 2, cw - bw - 2, ch - 2, 0x0078d7); int tx0 = 4; if (n->himl && n->cursel >= 0 && n->cursel < n->nitems && n->itemimg) { tx0 += (int)(n->itemimg[n->cursel] >> 16) * 10; combo_icon_draw(c, n->himl, n->itemimg[n->cursel] & 0xffff, hdc, tx0 - 1, 1, ch - 2); tx0 += combo_icon_cx(n->himl); } if (n->edit_wnd > 0 && wnd_alive(n->edit_wnd)) return;   /* the Edit child shows the text */ GdiObj *dc = gdi_get(w, hdc); if (dc) { dc->text_color = px2cr(sel ? 0xffffff : en ? 0 : 0x6d6d6d); dc->bk_mode = 1; GdiObj *fo = fnt_of(w, n->font ? n->font : g_dlg_font); int tw; int lb = fnt_fit(fo, n->text, (int)e_strlen(n->text), cw - bw - 6 - tx0 + 4, &tw); draw_text(&s, dc, w, tx0, (ch - fh) / 2, n->text, lb); if (n->focus_draw && (n->style & 3) == 2 && en) { int cx = tx0 + tw; line_px(&s, cx, (ch - fh) / 2, cx, (ch + fh) / 2 - 1, 0); } } }
-static void combo_drop(Cpu *c, int i) { Win32 *w = W; Wnd *n = &g_wnd[i]; if (n->dropped) { if (n->drop_wnd >= 0 && wnd_alive(n->drop_wnd)) { g_wnd[n->drop_wnd].visible = 0; wnd_free(n->drop_wnd); } n->dropped = 0; n->drop_wnd = -1; g_capture = -1; wnd_invalidate_all(); return; }
+static void combo_drop(Cpu *c, int i) { Win32 *w = W; Wnd *n = &g_wnd[i]; if (n->dropped) { if (n->drop_wnd >= 0 && wnd_alive(n->drop_wnd)) { g_wnd[n->drop_wnd].visible = 0; desktop_clear(w, n->drop_wnd); wnd_free(n->drop_wnd); } n->dropped = 0; n->drop_wnd = -1; g_capture = -1; wnd_invalidate_all(); return; }
   int ox, oy; wnd_window_origin(i, &ox, &oy); int ih = list_item_h(w, n); int rows = n->nitems < 8 ? n->nitems : 8; if (rows < 1) rows = 1; int lh = rows * ih + 2; int li = wnd_create_obj(c, "ComboLBox", "", 0x80000000u | 0x10000000u, 0, ox + SCREEN_X0, oy + n->h + SCREEN_Y0, n->w, lh, HWND_OF(i), 0, n->inst, 0, 1, 0); if (li < 0) return;
   Wnd *l = &g_wnd[li]; l->owner = i; l->font = n->font ? n->font : g_dlg_font; l->zseq = ++g_zseq; if (l->y + l->h > w->screen_h) l->y = oy - lh; if (l->y < 0) l->y = 0;
   /* share the items */ l->items = emu_alloc(sizeof(char[128]) * MAX_ITEMS); l->itemdata = emu_alloc(sizeof(u64) * MAX_ITEMS); l->itemimg = emu_alloc(sizeof(u32) * MAX_ITEMS); l->himl = n->himl; combo_sync_list(c, i); l->cursel = n->cursel; l->top_index = n->cursel > 0 ? n->cursel : 0;
@@ -1648,7 +1652,7 @@ static void modal_loop(Cpu *c, int i) {
   if (!wnd_alive(i)) { u64 res = modal_result(w, m); g_nmodal--; RET(res); return; }
   if (n->ended) {
     int ow = n->owner; if (ow >= 0 && wnd_alive(ow)) { g_wnd[ow].enabled = 1; wnd_invalidate(ow, 1); g_active = ow; if (!wnd_alive(g_focus) || wnd_root(g_focus) == i) g_focus = ow; }
-    g_modal[m].phase = 2; n->visible = 0; wnd_invalidate_all(); w->dirty = 1;
+    g_modal[m].phase = 2; n->visible = 0; desktop_clear(w, g_modal[m].wnd); wnd_invalidate_all(); w->dirty = 1;
     w32_push_cont(c, CONT_MODAL, (u64)i); destroy_window(c, i); return; }   /* destroy finishes → chained CONT_MODAL (phase 2) returns the result */
   GuestMsg msg; if (g_modal_pending_valid) { msg = g_modal_pending; g_modal_pending_valid = 0; } else { if (!next_message(c, &msg, 1, 0)) { w->blits_since_yield = 0; w32_retry_yield(c); return; } if (kbd_hook_needed(c, &msg)) { kbd_hook_start(c, &msg, 0, 0); return; } }
   if (msg.msg == 0x12) { w->quit_posted = 1; n->ended = 1; n->result = 0; modal_loop(c, i); return; }
@@ -1666,7 +1670,7 @@ static void s_DialogBoxIndirectParamW(Cpu *c) { dialog_box(c, ARG(0), ARG(1), AR
 static void s_DialogBoxIndirectParamA(Cpu *c) { if (modal_reentry(c)) { modal_loop(c, g_modal[g_nmodal - 1].wnd); return; } g_dlg_ansi = 1; dialog_box(c, ARG(0), ARG(1), ARG(2), ARG(3), ARG(4)); }
 static void s_DialogBoxParamW(Cpu *c) { if (modal_reentry(c)) { modal_loop(c, g_modal[g_nmodal - 1].wnd); return; } u64 e = rsrc_lookup(c, ARG(0), ARG(1), 5, 1, 0); if (!e) { W->last_error = 1814; RET((u64)-1); return; } u64 base = ARG(0) ? ARG(0) : W->image_base; dialog_box(c, ARG(0), base + rd32(c, e), ARG(2), ARG(3), ARG(4)); }
 static void s_DialogBoxParamA(Cpu *c) { if (modal_reentry(c)) { modal_loop(c, g_modal[g_nmodal - 1].wnd); return; } u64 e = rsrc_lookup(c, ARG(0), ARG(1), 5, 0, 0); if (!e) { W->last_error = 1814; RET((u64)-1); return; } u64 base = ARG(0) ? ARG(0) : W->image_base; g_dlg_ansi = 1; dialog_box(c, ARG(0), base + rd32(c, e), ARG(2), ARG(3), ARG(4)); }
-static void s_EndDialog(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } Wnd *n = &g_wnd[i]; n->ended = 1; n->result = ARG(1); if (!n->modal) { n->visible = 0; wnd_invalidate_all(); } RET(1); }
+static void s_EndDialog(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0) { RET(0); return; } Wnd *n = &g_wnd[i]; n->ended = 1; n->result = ARG(1); if (!n->modal) { n->visible = 0; desktop_clear(W, i); wnd_invalidate_all(); } RET(1); }
 /* IsDialogMessage: Tab / Shift+Tab, Enter (default button or the focused button), Esc (IDCANCEL); other messages for the dialog's windows are translated + dispatched */
 /* after a dialog key was consumed: a modal loop re-executes its shim, IsDialogMessage returns TRUE */
 static int dlg_modal_of(int d) { int m = g_nmodal - 1; return m >= 0 && g_modal[m].wnd == d; }

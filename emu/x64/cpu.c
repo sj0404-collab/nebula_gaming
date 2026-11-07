@@ -889,9 +889,20 @@ static int cpu_step1(Cpu *c) {
   return 0;
 }
 
+/* sampling profiler (x64run --prof): every 1024th interpreted instruction drops its RIP into a 64-byte-bucket histogram; prof_report lists the hottest
+   buckets with module+offset — enough to see what an installer / game spends its time on (LZMA, CRC, blits …) without a trace */
+int g_prof_on = 0; static u64 g_prof_tick; static u64 g_prof_total;
+#define PROF_N 65536
+static struct { u64 key; u64 n; } g_prof_tab[PROF_N];
+static void prof_sample(u64 rip) { u64 k = (rip >> 6) | 1; u32 h = (u32)((k * 0x9E3779B97F4A7C15ull) >> 48) & (PROF_N - 1); for (int t = 0; t < 64; t++) { u32 j = (h + t) & (PROF_N - 1); if (g_prof_tab[j].key == k) { g_prof_tab[j].n++; return; } if (!g_prof_tab[j].key) { g_prof_tab[j].key = k; g_prof_tab[j].n = 1; return; } } }
+int prof_report(char *buf, int cap, int top) { int p = 0; g_prof_total = 0; for (int i = 0; i < PROF_N; i++) g_prof_total += g_prof_tab[i].n; p += e_snprintf(buf + p, cap - p, "[prof] %llu samples x 1024 insns\n", (unsigned long long)g_prof_total);
+  for (int r = 0; r < top && p < cap - 120; r++) { int best = -1; for (int i = 0; i < PROF_N; i++) if (g_prof_tab[i].key && (best < 0 || g_prof_tab[i].n > g_prof_tab[best].n)) best = i; if (best < 0 || !g_prof_tab[best].n) break;
+    u64 rip = (g_prof_tab[best].key & ~1ull) << 6; p += e_snprintf(buf + p, cap - p, "[prof] %3d.%d%%  0x%llx\n", (int)(1000 * g_prof_tab[best].n / (g_prof_total ? g_prof_total : 1)) / 10, (int)(1000 * g_prof_tab[best].n / (g_prof_total ? g_prof_total : 1)) % 10, (unsigned long long)rip); g_prof_tab[best].n = 0; }
+  return p; }
 int cpu_run(Cpu *c, u64 max_insns) {
   c->status = RUN_OK; int bstart = 1;
   for (u64 n = 0; n < max_insns; n++) {
+    if (g_prof_on && (((++g_prof_tick) & 1023) == 0)) prof_sample(c->rip);
     if (bstart && g_jit_on && !c->trace && c->rip - G_SHIM_BASE >= G_SHIM_SIZE) {   /* block start: run / count / translate (jit.inc) */
       u64 ic0 = c->icount;
       if (jit_enter(c, max_insns - n)) { n += c->icount - ic0; if (c->status != RUN_OK) return c->status; continue; }

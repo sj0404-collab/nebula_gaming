@@ -284,7 +284,8 @@ export default function X64App() {
     const cw = el.clientWidth, ch = el.clientHeight; if (cw < 200 || ch < 150) return;
     const dpr = Math.min(2, window.devicePixelRatio || 1); const pw = cw * dpr, ph = ch * dpr;
     const scale = touch ? Math.max(1, Math.min(2, Math.round(Math.min(pw, ph) / 720 * 4) / 4)) : 1;
-    rt.setDesktop(Math.min(1920, Math.round(pw / scale)), Math.min(1200, Math.round(ph / scale)));
+    let dw = pw / scale, dh = ph / scale; const big = Math.max(dw, dh); if (big > 1920) { dw *= 1920 / big; dh *= 1920 / big; }   // same aspect as the view (no bars), long side ≤ 1920
+    rt.setDesktop(Math.round(dw), Math.round(dh));
   }, [deskFit, touch]);
   useEffect(() => { applyDesktopRef.current = applyDesktop; }, [applyDesktop]);
   useEffect(() => {

@@ -1,0 +1,65 @@
+name: native run + profile (x64run on a downloaded exe, no browser)
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'download URL of the .exe'
+        default: ''
+      filename:
+        description: 'file name to run it under — empty = name from the URL'
+        default: ''
+      ms:
+        description: 'budget, ms of guest time'
+        default: '120000'
+      xargs:
+        description: 'extra x64run flags, e.g. "--desktop 1600x720 --key 0x0d@20000 --click 1030,552@45000 --frames 400"'
+        default: '--desktop 1600x720'
+      prof:
+        description: 'X64_PROF=1 sampling profile (hottest code, printed at the end)'
+        default: '1'
+      log:
+        description: 'X64_LOG=1'
+        default: '0'
+run-name: "nativeprof · ${{ inputs.filename || inputs.url }} · ${{ inputs.ms }} ms · ${{ inputs.xargs }}"
+permissions:
+  contents: read
+jobs:
+  run:
+    name: x64run natively, keep the log, profile, frames and the Setup Log
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build x64run
+        run: cd emu/x64 && cc -O2 -Wall -Wno-unused-function -Wno-unused-parameter -Wno-misleading-indentation -o x64run lib.c cpu.c pe.c win32.c gdi.c vfs.c api.c dxbc.c host_native.c main_native.c -lm
+      - name: Download the file
+        run: |
+          mkdir -p /tmp/np/guest_tmp /tmp/np/frames; cd /tmp/np
+          NAME="${{ github.event.inputs.filename }}"; [ -n "$NAME" ] || NAME=$(basename "${{ github.event.inputs.url }}")
+          curl -sSL --retry 3 -o "$NAME" "${{ github.event.inputs.url }}"; ls -la /tmp/np; echo "NAME=$NAME" >> $GITHUB_ENV
+      - name: Run
+        run: |
+          MS="${{ github.event.inputs.ms }}"; cd /tmp/np/frames
+          echo "x64run --max-ms $MS ${{ github.event.inputs.xargs }} $NAME"
+          rc=0; X64_PROF=${{ github.event.inputs.prof }} X64_LOG=${{ github.event.inputs.log }} timeout $((MS / 1000 + 600)) "$GITHUB_WORKSPACE/emu/x64/x64run" --quiet --no-stdin --max-ms $MS --stats --mount-rw "/tmp/np/guest_tmp=C:\\tmp" ${{ github.event.inputs.xargs }} "/tmp/np/$NAME" > /tmp/np/native.txt 2>&1 || rc=$?
+          echo "native rc=$rc"; grep -a -v "^\[wnd\]" /tmp/np/native.txt | tail -80 | cut -c1-300
+          ls /tmp/np/frames | head; find /tmp/np/guest_tmp -type f | head -40
+          find /tmp/np/guest_tmp -maxdepth 1 -name "Setup Log*" -exec sh -c 'echo "--- $1"; sed "1s/^\xEF\xBB\xBF//" "$1" | grep -v "DLL function import\|Function name:\|DLL name:\|Dest DLL name:\|Importing the DLL\|imported the DLL\|Failed to import" | tail -80 | cut -c1-240' _ {} \;
+          # PPM frames → PNG (small enough for the artifact)
+          python3 -c "import PIL" 2>/dev/null || pip -q install pillow
+          python3 - <<'EOF'
+          import glob, os
+          from PIL import Image
+          for f in sorted(glob.glob('/tmp/np/frames/*.ppm')):
+              try: Image.open(f).save(f[:-4] + '.png'); os.remove(f)
+              except Exception as e: print(f, e)
+          EOF
+          ls -la /tmp/np/frames | tail -20
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nativeprof
+          path: |
+            /tmp/np/native.txt
+            /tmp/np/frames/*.png
+            /tmp/np/guest_tmp/Setup Log*
