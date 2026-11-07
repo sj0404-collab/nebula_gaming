@@ -27,6 +27,11 @@ int main(void) {
   StrCpyWFn copy_w = shlwapi ? (StrCpyWFn)GetProcAddress(shlwapi, "StrCpyW") : NULL;
   WCHAR wbuf[32] = {0};
   ok = ok && copy_w && copy_w(wbuf, L"Clover Ω") == wbuf && !wcscmp(wbuf, L"Clover Ω");
+  BYTE saved[] = {0, 1, 42, 128, 255}, restored[5] = {0};
+  ok = ok && WritePrivateProfileStructW(L"binary", L"key", saved, sizeof(saved), L"C:\\test-profile.ini")
+    && GetPrivateProfileStructW(L"binary", L"key", restored, sizeof(restored), L"C:\\test-profile.ini")
+    && !memcmp(saved, restored, sizeof(saved));
+  ok = ok && !GetPrivateProfileStructW(L"binary", L"missing", restored, sizeof(restored), L"C:\\test-profile.ini");
   printf("procmem: %s\n", ok ? "PASS" : "FAIL");
   return ok ? 0 : 1;
 }

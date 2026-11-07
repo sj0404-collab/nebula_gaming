@@ -46,8 +46,7 @@ static void ini_get_int(Cpu *c, int wide, int filearg) {
   size_t len; char *b = ini_load(path, &len); u32 r = (u32)ARG(2); size_t s0, s1, h, l0, l1; const char *v0, *v1;
   if (b && ini_find_section(b, len, sec, &s0, &s1, &h) && ini_find_key(b, s0, s1, key, &l0, &l1, &v0, &v1)) { int neg = 0; const char *p = v0; if (p < v1 && (*p == '-' || *p == '+')) { neg = *p == '-'; p++; } u32 v = 0; int any = 0; while (p < v1 && *p >= '0' && *p <= '9') { v = v * 10 + (u32)(*p - '0'); p++; any = 1; } if (any) r = neg ? (u32)-(s32)v : v; }
   if (b) emu_free(b); RET(r); }
-static void ini_write_string(Cpu *c, int wide, int filearg) {
-  char sec[256], key[256], val[2048], file[1024], path[1200]; ini_arg(c, ARG(0), wide, sec, sizeof sec); int has_key = ini_arg(c, ARG(1), wide, key, sizeof key), has_val = ini_arg(c, ARG(2), wide, val, sizeof val); ini_arg(c, filearg >= 0 ? ARG(filearg) : 0, wide, file, sizeof file); ini_path(file, path, sizeof path);
+static void ini_write_value(Cpu *c, const char *sec, const char *key, const char *val, const char *path, int has_key, int has_val) {
   if (!sec[0]) { W->last_error = 87; RET(0); return; }
   size_t len; char *b = ini_load(path, &len); if (!b) { b = emu_alloc(1); b[0] = 0; len = 0; }
   size_t cap = len + e_strlen(sec) + e_strlen(key) + e_strlen(val) + 16; char *n = emu_alloc(cap); size_t s0, s1, h, on = 0;
@@ -59,6 +58,36 @@ static void ini_write_string(Cpu *c, int wide, int filearg) {
     else if (!has_val) { e_memcpy(n, b, len); on = len; }
     else { /* append at the end of the section (before trailing blank lines) */ size_t ins = s1; while (ins > s0) { size_t ls = ins - 1; while (ls > s0 && b[ls - 1] != '\n') ls--; const char *te; const char *t = ini_trim(b + ls, b + ins - 1, &te); if (t < te) break; ins = ls; } e_memcpy(n, b, ins); on = ins; if (on && n[on - 1] != '\n') n[on++] = '\n'; on += (size_t)e_snprintf(n + on, cap - on, "%s=%s\n", key, val); e_memcpy(n + on, b + ins, len - ins); on += len - ins; } }
   int ok = ini_save(path, n, on); emu_free(n); emu_free(b); if (!ok) W->last_error = 5; RET(ok); }
+static void ini_write_string(Cpu *c, int wide, int filearg) {
+  char sec[256], key[256], val[2048], file[1024], path[1200]; ini_arg(c, ARG(0), wide, sec, sizeof sec); int has_key = ini_arg(c, ARG(1), wide, key, sizeof key), has_val = ini_arg(c, ARG(2), wide, val, sizeof val); ini_arg(c, filearg >= 0 ? ARG(filearg) : 0, wide, file, sizeof file); ini_path(file, path, sizeof path);
+  ini_write_value(c, sec, key, val, path, has_key, has_val);
+}
+/* Binary profile entries are hexadecimal data followed by an 8-bit sum checksum. */
+static int ini_hex(int ch) { if (ch >= '0' && ch <= '9') return ch - '0'; if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10; if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10; return -1; }
+static void ini_struct(Cpu *c, int wide, int write) {
+  char sec[256], key[256], file[1024], path[1200];
+  if (!ini_arg(c, ARG(0), wide, sec, sizeof sec) || !ini_arg(c, ARG(1), wide, key, sizeof key)) { RET(0); return; }
+  ini_arg(c, ARG(4), wide, file, sizeof file); ini_path(file, path, sizeof path);
+  u32 n = (u32)ARG(3); u64 ptr = ARG(2); if (!ptr || n > (1u << 20)) { RET(0); return; }
+  u8 *bytes = mem_ptr(c->mem, ptr, n ? n : 1, !write); if (!bytes) { RET(0); return; }
+  if (write) {
+    static const char hex[] = "0123456789ABCDEF"; char *value = emu_alloc((size_t)n * 2 + 3); u8 sum = 0;
+    for (u32 i = 0; i < n; i++) { u8 b = bytes[i]; sum += b; value[i*2] = hex[b >> 4]; value[i*2+1] = hex[b & 15]; }
+    value[n*2] = hex[sum >> 4]; value[n*2+1] = hex[sum & 15]; value[n*2+2] = 0;
+    ini_write_value(c, sec, key, value, path, 1, 1); emu_free(value); return;
+  }
+  size_t len, s0, s1, h, l0, l1; const char *v0, *v1; char *b = ini_load(path, &len); int ok = 0;
+  if (b && ini_find_section(b, len, sec, &s0, &s1, &h) && ini_find_key(b, s0, s1, key, &l0, &l1, &v0, &v1) && (size_t)(v1-v0) == (size_t)n*2+2) {
+    u8 sum = 0; ok = 1;
+    for (u32 i = 0; i <= n; i++) { int a = ini_hex(v0[i*2]), d = ini_hex(v0[i*2+1]); if (a < 0 || d < 0) { ok = 0; break; } u8 x = (u8)((a << 4) | d); if (i == n) { if (x != sum) ok = 0; } else sum += x; }
+    if (ok) for (u32 i = 0; i < n; i++) bytes[i] = (u8)((ini_hex(v0[i*2]) << 4) | ini_hex(v0[i*2+1]));
+  }
+  if (b) emu_free(b); RET(ok);
+}
+static void s_GetPrivateProfileStructW(Cpu *c) { ini_struct(c, 1, 0); }
+static void s_GetPrivateProfileStructA(Cpu *c) { ini_struct(c, 0, 0); }
+static void s_WritePrivateProfileStructW(Cpu *c) { ini_struct(c, 1, 1); }
+static void s_WritePrivateProfileStructA(Cpu *c) { ini_struct(c, 0, 1); }
 static void s_GetPrivateProfileStringA(Cpu *c) { ini_get_string(c, 0, 5); }
 static void s_GetPrivateProfileStringW(Cpu *c) { ini_get_string(c, 1, 5); }
 static void s_GetPrivateProfileIntA(Cpu *c) { ini_get_int(c, 0, 3); }
@@ -88,7 +117,7 @@ static void s_MulDiv(Cpu *c) { s64 a = (s32)ARG(0), b = (s32)ARG(1), d = (s32)AR
 static void s_CharNextW(Cpu *c) { u64 p = ARG(0); if (!p || !rd16(c, p)) { RET(p); return; } u32 u = rd16(c, p); RET(u >= 0xD800 && u < 0xDC00 && rd16(c, p + 2) >= 0xDC00 && rd16(c, p + 2) < 0xE000 ? p + 4 : p + 2); }
 static void s_CharPrevW(Cpu *c) { u64 start = ARG(0), p = ARG(1); if (p <= start) { RET(start); return; } u64 q = p - 2; u32 u = rd16(c, q); if (u >= 0xDC00 && u < 0xE000 && q - 2 >= start && rd16(c, q - 2) >= 0xD800 && rd16(c, q - 2) < 0xDC00) q -= 2; RET(q); }
 static void s_CharNextExA(Cpu *c) { u64 p = ARG(1); RET(p && rd8(c, p) ? p + 1 : p); }
-#define INI_SHIMS S(GetPrivateProfileStringA), S(GetPrivateProfileStringW), S(GetPrivateProfileIntA), S(GetPrivateProfileIntW), S(WritePrivateProfileStringA), S(WritePrivateProfileStringW), \
+#define INI_SHIMS S(GetPrivateProfileStructA), S(GetPrivateProfileStructW), S(WritePrivateProfileStructA), S(WritePrivateProfileStructW), S(GetPrivateProfileStringA), S(GetPrivateProfileStringW), S(GetPrivateProfileIntA), S(GetPrivateProfileIntW), S(WritePrivateProfileStringA), S(WritePrivateProfileStringW), \
   S(GetPrivateProfileSectionNamesA), S(GetPrivateProfileSectionNamesW), S(GetPrivateProfileSectionA), S(GetPrivateProfileSectionW), S(GetProfileStringA), S(GetProfileStringW), S(GetProfileIntA), S(GetProfileIntW), \
   S(MulDiv), S(CharNextW), S(CharPrevW), S(CharNextExA)
 static void s_WriteProfileStringA(Cpu *c) { ini_write_string(c, 0, -1); }
