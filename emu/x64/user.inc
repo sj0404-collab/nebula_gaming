@@ -12,8 +12,15 @@
 #define HWND_FIRST 0x10042ull
 #define HWND_OF(i) (HWND_FIRST + (u64)(i) * 16)
 #define HWND_DESKTOP 0x10001ull
-#define SCREEN_X0 64
-#define SCREEN_Y0 64
+/* "desktop mode" (x64_set_desktop, the phone / fullscreen view): the framebuffer is a fixed desk_w x desk_h desktop at screen origin 0,0 and
+   GetSystemMetrics / work area / monitor report it.  Legacy mode (0): the framebuffer is the main window's client area (or the union of the
+   top-level windows) presented at screen origin 64,64 of a nominal 1280x720 display. */
+int g_desk_w = 0, g_desk_h = 0; static int g_scr_x0 = 64, g_scr_y0 = 64;
+#define SCREEN_X0 g_scr_x0
+#define SCREEN_Y0 g_scr_y0
+#define DESK_W (g_desk_w ? g_desk_w : 1280)
+#define DESK_H (g_desk_h ? g_desk_h : 720)
+#define WORK_H (g_desk_h ? g_desk_h : 680)
 #define CAPTION_H 24
 #define MENU_H 20
 #define SUPER_ADOPT(i, k) do { if (!g_wnd[i].builtin) { g_wnd[i].builtin = (k); g_wnd[i].superclassed = 1; } } while (0)
@@ -96,11 +103,23 @@ static void desktop_clear(Win32 *w, int i) { Wnd *n = &g_wnd[i]; if (!w->screen 
   for (int y = y0; y < y1; y++) for (int x = x0; x < x1; x++) w->screen[(size_t)y * w->screen_w + x] = 0x3b3b3b; w->dirty = 1; }
 static int any_window(void) { for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed) return 1; return 0; }
 static void screen_ensure(Win32 *w, int cw, int ch) {
+  if (g_desk_w) { cw = g_desk_w; ch = g_desk_h; }   /* desktop mode: the framebuffer never follows the windows */
   if (cw < 16) cw = 16; if (ch < 16) ch = 16; if (cw > 4096) cw = 4096; if (ch > 4096) ch = 4096;
   if (w->screen && w->screen_w == cw && w->screen_h == ch) return;
   u32 *ns = emu_alloc((size_t)cw * ch * 4); for (int y = 0; y < ch; y++) for (int x = 0; x < cw; x++) ns[(size_t)y * cw + x] = 0x3b3b3b;
   if (w->screen) { int mw = cw < w->screen_w ? cw : w->screen_w, mh = ch < w->screen_h ? ch : w->screen_h; for (int y = 0; y < mh; y++) e_memcpy(ns + (size_t)y * cw, w->screen + (size_t)y * w->screen_w, (size_t)mw * 4); emu_free(w->screen); }
   w->screen = ns; w->screen_w = cw; w->screen_h = ch; w->dirty = 1; wnd_invalidate_all();
+}
+/* x64_set_desktop: switch the desktop size (0,0 = legacy window-sized framebuffer); w32_desktop_apply re-sizes a process' framebuffer and pulls its
+   top-level windows back inside (the phone rotated, the view changed) */
+void w32_set_desktop(int dw, int dh) { if (dw < 0) dw = 0; if (dh < 0) dh = 0; if (dw > 4096) dw = 4096; if (dh > 4096) dh = 4096; g_desk_w = dw && dh ? dw : 0; g_desk_h = dw && dh ? dh : 0; g_scr_x0 = g_desk_w ? 0 : 64; g_scr_y0 = g_desk_w ? 0 : 64; }
+void w32_desktop_apply(Win32 *w) {
+  if (!w->screen) return;
+  if (g_desk_w) screen_ensure(w, g_desk_w, g_desk_h); else if (g_wnd[0].used && !g_wnd[0].destroyed) screen_ensure(w, wnd_client_w(0), wnd_client_h(0));   /* back to legacy: the framebuffer follows the main window again */
+  int sw = w->screen_w, sh = w->screen_h;
+  for (int i = 1; i < MAX_WND; i++) { Wnd *n = &g_wnd[i]; if (!n->used || n->destroyed || n->parent >= 0 || n->w <= 0 || n->h <= 0) continue;
+    int nx = n->x, ny = n->y; if (nx + n->w > sw) nx = sw - n->w; if (ny + n->h > sh) ny = sh - n->h; if (nx < 0) nx = 0; if (ny < 0) ny = 0; n->x = nx; n->y = ny; }
+  w->dirty = 1; wnd_invalidate_all();
 }
 /* UTF-16 guest string → UTF-8 host buffer (also accepts the ANSI flavour) */
 static void text_in(Cpu *c, u64 a, int wide, char *out, size_t cap) { out[0] = 0; if (!a || a < 0x10000) return; if (wide) wstr_to_utf8(c, a, out, cap, -1); else { const char *s = rd_str(c, a, cap - 1); if (s) e_snprintf(out, cap, "%s", s); } }
@@ -654,7 +673,7 @@ static void s_ValidateRect(Cpu *c) { int i = wnd_of(ARG(0)); if (i >= 0) { g_wnd
 static void s_ValidateRgn(Cpu *c) { s_ValidateRect(c); }
 static void s_RedrawWindow(Cpu *c) { int i = wnd_of(ARG(0)); u32 fl = (u32)ARG(3); if (i < 0) { wnd_invalidate_all(); RET(1); return; } if (fl & 0x0001 /* RDW_INVALIDATE */) { if (fl & 0x80) wnd_invalidate(i, (fl & 4) != 0); else { g_wnd[i].invalid = 1; if (fl & 4) g_wnd[i].erase = 1; } } if (fl & 0x0008) { g_wnd[i].invalid = 0; } if (i == 0) sync_main(W); RET(1); }
 static void s_GetClientRect(Cpu *c) { int i = wnd_of(ARG(0)); u64 r = ARG(1); int cw = i >= 0 ? wnd_client_w(i) : W->screen_w, ch = i >= 0 ? wnd_client_h(i) : W->screen_h; wr32(c, r, 0); wr32(c, r + 4, 0); wr32(c, r + 8, (u32)cw); wr32(c, r + 12, (u32)ch); RET(i >= 0 || ARG(0) == HWND_DESKTOP); }
-static void s_GetWindowRect(Cpu *c) { int i = wnd_of(ARG(0)); u64 r = ARG(1); if (i < 0) { wr32(c, r, 0); wr32(c, r + 4, 0); wr32(c, r + 8, 1280); wr32(c, r + 12, 720); RET(ARG(0) == HWND_DESKTOP); return; } int sx, sy; wnd_window_origin(i, &sx, &sy); wr32(c, r, (u32)(sx + SCREEN_X0)); wr32(c, r + 4, (u32)(sy + SCREEN_Y0)); wr32(c, r + 8, (u32)(sx + SCREEN_X0 + g_wnd[i].w)); wr32(c, r + 12, (u32)(sy + SCREEN_Y0 + g_wnd[i].h)); RET(1); }
+static void s_GetWindowRect(Cpu *c) { int i = wnd_of(ARG(0)); u64 r = ARG(1); if (i < 0) { wr32(c, r, 0); wr32(c, r + 4, 0); wr32(c, r + 8, DESK_W); wr32(c, r + 12, DESK_H); RET(ARG(0) == HWND_DESKTOP); return; } int sx, sy; wnd_window_origin(i, &sx, &sy); wr32(c, r, (u32)(sx + SCREEN_X0)); wr32(c, r + 4, (u32)(sy + SCREEN_Y0)); wr32(c, r + 8, (u32)(sx + SCREEN_X0 + g_wnd[i].w)); wr32(c, r + 12, (u32)(sy + SCREEN_Y0 + g_wnd[i].h)); RET(1); }
 /* COMBOBOXINFO: cbSize@0, rcItem@4, rcButton@20, stateButton@36, hwndCombo@40, hwndItem@40+P, hwndList@40+2P (client coordinates of the combo; the button is the 17 px arrow strip, the item rectangle the text area) */
 static int combo_fill_info(Cpu *c, int i, u64 p) { Wnd *n = &g_wnd[i]; if (!p) return 0; u32 sz = rd32(c, p); if (sz < 40) return 0; int cw = wnd_client_w(i), ch = wnd_client_h(i); int simple = (n->style & 3) == 1; int bx0 = simple ? cw : cw - 17 - 2; if (bx0 < 0) bx0 = 0;
   int ix = 3; if (n->himl) { if (n->cursel >= 0 && n->cursel < n->nitems && n->itemimg) ix += (int)(n->itemimg[n->cursel] >> 16) * 10; ix += combo_icon_cx(n->himl); }
@@ -833,7 +852,7 @@ static void s_ShowCursor(Cpu *c) { RET(ARG(0) ? 1 : (u64)-1); }
 static void s_SetCursor(Cpu *c) { RET(0x7A001); }
 static void s_GetCursor(Cpu *c) { RET(0x7A001); }
 static void s_ClipCursor(Cpu *c) { RET(1); }
-static void s_GetClipCursor(Cpu *c) { u64 r = ARG(0); wr32(c, r, 0); wr32(c, r + 4, 0); wr32(c, r + 8, 1280); wr32(c, r + 12, 720); RET(1); }
+static void s_GetClipCursor(Cpu *c) { u64 r = ARG(0); wr32(c, r, 0); wr32(c, r + 4, 0); wr32(c, r + 8, DESK_W); wr32(c, r + 12, DESK_H); RET(1); }
 static void s_LoadCursorFromFileW(Cpu *c) { RET(0x7A001); }
 static void s_LoadBitmapW(Cpu *c) { RET(load_image_impl(c, ARG(0), ARG(1), 0, 0, 0, 0, 1)); }
 static void s_LoadBitmapA(Cpu *c) { RET(load_image_impl(c, ARG(0), ARG(1), 0, 0, 0, 0, 0)); }
@@ -855,14 +874,14 @@ static void s_keybd_event(Cpu *c) { w32_key(W, (int)(ARG(0) & 0xff) /* BYTE bVk:
 static void s_mouse_event(Cpu *c) { RET(0); }
 static void s_SendInput(Cpu *c) { Win32 *w = W; u32 n = (u32)ARG(0); u64 p = ARG(1); u32 cb = (u32)ARG(2); if (!p || cb < (u32)(c->mode32 ? 28 : 40)) { RET(0); return; } /* INPUT: type@0, union @8 (x64) / @4 (x86) */ u64 u = c->mode32 ? 4 : 8;
   for (u32 k = 0; k < n; k++, p += cb) { u32 type = rd32(c, p); if (type == 1) { u32 vk = rd16(c, p + u), fl = rd32(c, p + u + 4); if (fl & 4) { /* KEYEVENTF_UNICODE: a character */ u32 ch = rd16(c, p + u + 2); if (!(fl & 2)) post_msg_to(w, key_target(), 0x102, ch, 1); continue; } w32_key(w, (int)(vk & 0xff), !(fl & 2)); }
-    else if (type == 0) { int dx = (int)(s32)rd32(c, p + u), dy = (int)(s32)rd32(c, p + u + 4); u32 fl = rd32(c, p + u + 12); int x = g_mouse_x, y = g_mouse_y; if (fl & 0x8000) { x = (int)((long long)dx * 1280 / 65536) - SCREEN_X0; y = (int)((long long)dy * 720 / 65536) - SCREEN_Y0; } else if (fl & 1) { x += dx; y += dy; }
+    else if (type == 0) { int dx = (int)(s32)rd32(c, p + u), dy = (int)(s32)rd32(c, p + u + 4); u32 fl = rd32(c, p + u + 12); int x = g_mouse_x, y = g_mouse_y; if (fl & 0x8000) { x = (int)((long long)dx * DESK_W / 65536) - SCREEN_X0; y = (int)((long long)dy * DESK_H / 65536) - SCREEN_Y0; } else if (fl & 1) { x += dx; y += dy; }
       if (fl & 1) w32_mouse(w, x, y, 0); if (fl & 2) w32_mouse(w, x, y, 1); if (fl & 4) w32_mouse(w, x, y, 2); if (fl & 8) w32_mouse(w, x, y, 3); if (fl & 0x10) w32_mouse(w, x, y, 4); } }
   RET(n); }
 static void s_BlockInput(Cpu *c) { RET(1); }
 static void s_GetLastInputInfo(Cpu *c) { wr32(c, ARG(0) + 4, (u32)(host_now_ms() - W->start_ms)); RET(1); }
 static void s_GetDoubleClickTime(Cpu *c) { RET(500); }
 static void s_SetDoubleClickTime(Cpu *c) { RET(1); }
-static void s_GetSystemMetrics(Cpu *c) { int i = (int)ARG(0); RET(i == 0 ? 1280 : i == 1 ? 720 : i == 2 ? 17 : i == 3 ? 17 : i == 4 ? 23 : i == 5 ? 1 : i == 6 ? 1 : i == 7 ? 1 : i == 8 ? 1 : i == 11 ? 32 : i == 12 ? 32 : i == 13 ? 32 : i == 14 ? 32 : i == 15 ? 20 : i == 16 ? 1280 : i == 17 ? 720 : i == 20 ? 17 : i == 21 ? 17 : i == 28 ? 16 : i == 29 ? 16 : i == 30 ? 16 : i == 31 ? 16 : i == 32 ? 4 : i == 33 ? 4 : i == 36 ? 4 : i == 37 ? 4 : i == 43 ? 2 : i == 45 ? 2 : i == 46 ? 2 : i == 47 ? 1280 : i == 48 ? 720 : i == 49 ? 2 : i == 50 ? 2 : i == 51 ? 18 : i == 52 ? 18 : i == 61 ? 1280 : i == 62 ? 720 : i == 76 ? 0 : i == 77 ? 0 : i == 78 ? 1280 : i == 79 ? 720 : i == 80 ? 1 : i == 92 ? 1 : 0); }
+static void s_GetSystemMetrics(Cpu *c) { int i = (int)ARG(0); RET(i == 0 ? DESK_W : i == 1 ? DESK_H : i == 2 ? 17 : i == 3 ? 17 : i == 4 ? 23 : i == 5 ? 1 : i == 6 ? 1 : i == 7 ? 1 : i == 8 ? 1 : i == 11 ? 32 : i == 12 ? 32 : i == 13 ? 32 : i == 14 ? 32 : i == 15 ? 20 : i == 16 ? DESK_W : i == 17 ? DESK_H : i == 20 ? 17 : i == 21 ? 17 : i == 28 ? 16 : i == 29 ? 16 : i == 30 ? 16 : i == 31 ? 16 : i == 32 ? 4 : i == 33 ? 4 : i == 36 ? 4 : i == 37 ? 4 : i == 43 ? 2 : i == 45 ? 2 : i == 46 ? 2 : i == 47 ? DESK_W : i == 48 ? DESK_H : i == 49 ? 2 : i == 50 ? 2 : i == 51 ? 18 : i == 52 ? 18 : i == 61 ? DESK_W : i == 62 ? DESK_H : i == 76 ? 0 : i == 77 ? 0 : i == 78 ? DESK_W : i == 79 ? DESK_H : i == 80 ? 1 : i == 92 ? 1 : 0); }
 static void s_GetSystemMetricsForDpi(Cpu *c) { s_GetSystemMetrics(c); }
 static void put_a8(Cpu *c, u64 dst, const char *s, u32 cap); static void spi_rest(Cpu *c, u32 a, u64 p);
 static void spi_logfont(Cpu *c, u64 p, int h, int weight, const char *face, int wide) { u8 *m = mem_ptr(c->mem, p, wide ? 92 : 60, 1); if (m) e_memset(m, 0, wide ? 92 : 60); wr32(c, p, (u32)h); wr32(c, p + 16, (u32)weight); wr8(c, p + 23, 1); wr8(c, p + 26, 5); wr8(c, p + 27, 0x22); if (wide) put_w8(c, p + 28, face, 32); else put_a8(c, p + 28, face, 32); }
@@ -879,7 +898,7 @@ static void spi_common(Cpu *c, int wide) { u32 a = (u32)ARG(0); u64 p = ARG(2);
   if (a == 0x1F && p) { spi_logfont(c, p, -12, 400, "Segoe UI", wide); RET(1); return; }   /* SPI_GETICONTITLELOGFONT */
   spi_rest(c, a, p); }
 static void spi_rest(Cpu *c, u32 a, u64 p) {
-  if (a == 0x30 && p) { wr32(c, p, 0); wr32(c, p + 4, 0); wr32(c, p + 8, 1280); wr32(c, p + 12, 680); RET(1); return; }   /* SPI_GETWORKAREA */
+  if (a == 0x30 && p) { wr32(c, p, 0); wr32(c, p + 4, 0); wr32(c, p + 8, DESK_W); wr32(c, p + 12, WORK_H); RET(1); return; }   /* SPI_GETWORKAREA */
   if ((a == 0x1024 || a == 0x1026 || a == 0x1046 || a == 0x101E || a == 0x1034 || a == 0x1042 || a == 0x1048 || a == 0x1010) && p) { wr32(c, p, 0); RET(1); return; }
   if (a == 0x0F && p) { wr32(c, p, 0); RET(1); return; } if (a == 0x0D && p) { wr32(c, p, 0); RET(1); return; } if (a == 0x10 && p) { wr32(c, p, 0); RET(1); return; } if (a == 0x2002 && p) { wr32(c, p, 0); RET(1); return; } if (a == 0x0068 && p) { wr32(c, p, 3); RET(1); return; } if (a == 0x0062 && p) { wr32(c, p, 100); RET(1); return; } if (a == 0x0073 && p) { wr32(c, p, 1); RET(1); return; }
   RET(0); }
@@ -931,12 +950,12 @@ static void s_ChangeDisplaySettingsExA(Cpu *c) { change_display_settings(c, ARG(
 static void s_GetDisplayConfigBufferSizes(Cpu *c) { RET(50); }   /* ERROR_NOT_SUPPORTED */
 static void s_QueryDisplayConfig(Cpu *c) { RET(50); }
 static void s_DisplayConfigGetDeviceInfo(Cpu *c) { RET(50); }
-static void s_GetMonitorInfoW(Cpu *c) { u64 p = ARG(1); u32 sz = rd32(c, p); wr32(c, p + 4, 0); wr32(c, p + 8, 0); wr32(c, p + 12, 1280); wr32(c, p + 16, 720); wr32(c, p + 20, 0); wr32(c, p + 24, 0); wr32(c, p + 28, 1280); wr32(c, p + 32, 680); wr32(c, p + 36, 1); if (sz >= 40 + 64) put_w8(c, p + 40, "\\\\.\\DISPLAY1", 32); RET(1); }
+static void s_GetMonitorInfoW(Cpu *c) { u64 p = ARG(1); u32 sz = rd32(c, p); wr32(c, p + 4, 0); wr32(c, p + 8, 0); wr32(c, p + 12, DESK_W); wr32(c, p + 16, DESK_H); wr32(c, p + 20, 0); wr32(c, p + 24, 0); wr32(c, p + 28, DESK_W); wr32(c, p + 32, WORK_H); wr32(c, p + 36, 1); if (sz >= 40 + 64) put_w8(c, p + 40, "\\\\.\\DISPLAY1", 32); RET(1); }
 static void s_GetMonitorInfoA(Cpu *c) { s_GetMonitorInfoW(c); }
 static void s_MonitorFromWindow(Cpu *c) { RET(0x6D001); }
 static void s_MonitorFromPoint(Cpu *c) { RET(0x6D001); }
 static void s_MonitorFromRect(Cpu *c) { RET(0x6D001); }
-static void s_EnumDisplayMonitors(Cpu *c) { if (!ARG(2)) { RET(1); return; } u64 rc = w32_heap_alloc(W, 16, 1); wr32(c, rc + 8, 1280); wr32(c, rc + 12, 720); w32_push_cont(c, CONT_RET_VAL_, 1); w32_guest_call(c, ARG(2), 0x6D001, 0, rc, ARG(3)); }
+static void s_EnumDisplayMonitors(Cpu *c) { if (!ARG(2)) { RET(1); return; } u64 rc = w32_heap_alloc(W, 16, 1); wr32(c, rc + 8, DESK_W); wr32(c, rc + 12, DESK_H); w32_push_cont(c, CONT_RET_VAL_, 1); w32_guest_call(c, ARG(2), 0x6D001, 0, rc, ARG(3)); }
 static void s_GetDpiForMonitor(Cpu *c) { if (ARG(2)) wr32(c, ARG(2), 96); if (ARG(3)) wr32(c, ARG(3), 96); RET(0); }
 
 /* ---------- DrawText ---------- */

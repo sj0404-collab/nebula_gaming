@@ -439,6 +439,7 @@ int  vfs_chdir(const char *path);
 int  vfs_stat(const char *path, u64 *size);
 u64  vfs_now_filetime(void); u64 vfs_find_mtime(int h); u64 vfs_mtime_path(const char *path); u64 vfs_mtime_fd(int fd); int vfs_set_mtime_fd(int fd, u64 ft);
 const VNodeInfo *vfs_node_info(int i, VNodeInfo *out);
+void w32_set_desktop(int dw, int dh); void w32_desktop_apply(Win32 *w); extern int g_desk_w, g_desk_h;   /* desktop mode (user.inc): fixed desk_w x desk_h framebuffer / display metrics */
 /* pseudo-handles from a 32-bit caller: GetCurrentProcess() = 0xFFFFFFFF, GetCurrentThread() = 0xFFFFFFFE arrive zero-extended — compare them as the 64-bit -1 / -2 */
 static inline u64 h_norm(u64 h) { return (h >= 0xfffffff0ull && h <= 0xffffffffull) ? (h | 0xffffffff00000000ull) : h; }
 const u8 *vfs_node_data(int i);

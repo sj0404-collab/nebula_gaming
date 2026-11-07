@@ -1126,6 +1126,7 @@ await test('responsive: 390×844 phone viewport still shows taskbar + icons and 
 await test('phone (Android-like 1000×560, touch): Programs — the soft-keyboard field types into a Windows EDIT control (Latin, Cyrillic, punctuation) and a tap on the screen is a click', async () => {
   const c5 = await browser.newContext({ viewport: { width: 1000, height: 560 }, hasTouch: true, isMobile: true });
   const p5 = await c5.newPage();
+  await c5.addInitScript(() => { localStorage.setItem('nebula_x64_touchpad', '0'); localStorage.setItem('nebula_x64_tmouse', '0'); });
   await p5.goto(url, { waitUntil: 'load' });
   await iconOf(p5, 'Programs').tap();
   const w = p5.locator('[data-window][aria-label*="Programs"]');
@@ -1133,7 +1134,7 @@ await test('phone (Android-like 1000×560, touch): Programs — the soft-keyboar
   await w.locator('[data-x64-samples="ready"]').waitFor({ timeout: 120_000 });
   await w.locator('[data-x64-exe="typing.exe"]').tap();
   await w.locator('[data-x64-run]').tap(); await sleep(800);
-  await w.getByRole('button', { name: /^screen$/i }).tap();   // a console-subsystem exe opens on the Console tab; the program's window is on the Screen tab
+  { const st = w.getByRole('button', { name: /^screen$/i }); if (await st.isVisible().catch(() => false)) await st.tap(); }   // a console-subsystem exe opens on the Console tab; on a phone the window view goes fullscreen by itself once a window exists
   await p5.waitForFunction(() => (document.querySelector('[data-x64-screen]')?.getAttribute('data-frames') | 0) > 0, null, { timeout: 60_000 });
   await sleep(400);
   const canvas = w.locator('[data-x64-screen]');
@@ -1150,6 +1151,77 @@ await test('phone (Android-like 1000×560, touch): Programs — the soft-keyboar
   expect(/TYPING OK/.test(con), 'typed text did not reach the EDIT control intact: ' + con.split('\n').filter(l => /text=|TYPING/.test(l)).join(' | ').slice(0, 400));
   await p5.screenshot({ path: resolve(SHOTS, 'phone-x64-typing.png') });
   await c5.close();
+});
+
+await test('phone (landscape 1000×560, touch): Programs — touchpad (relative cursor), on-screen mouse buttons (LMB · ▲ ● ▼ · RMB) and a desktop that fills the screen', async () => {
+  const c6 = await browser.newContext({ viewport: { width: 1000, height: 560 }, hasTouch: true, isMobile: true });
+  const p6 = await c6.newPage();
+  await p6.goto(url, { waitUntil: 'load' });
+  await iconOf(p6, 'Programs').tap();
+  const w = p6.locator('[data-window][aria-label*="Programs"]');
+  await w.locator('[data-x64-tests]').tap();
+  await w.locator('[data-x64-samples="ready"]').waitFor({ timeout: 120_000 });
+  await w.locator('[data-x64-exe="typing.exe"]').tap();
+  await w.locator('[data-x64-run]').tap();
+  await p6.waitForFunction(() => (document.querySelector('[data-x64-screen]')?.getAttribute('data-frames') | 0) > 0, null, { timeout: 60_000 });
+  await p6.waitForSelector('[data-x64-fullscreen="1"]', { timeout: 10_000 });   // a phone goes to game mode by itself
+  await p6.waitForSelector('[data-x64-touchmouse]', { timeout: 10_000 });
+  await p6.waitForSelector('[data-x64-cursor]', { timeout: 10_000 });
+  await sleep(600);
+  // desktop mode: the guest screen is the device screen (1000×560 at dpr 1), not the 340×100 typing window
+  const scr = await p6.evaluate(() => window.__x64.screenSize());
+  expect(scr.w >= 900 && scr.h >= 400, `guest desktop ${scr.w}x${scr.h} does not fill the 1000x560 phone screen`);
+  // record what reaches the emulator
+  await p6.evaluate(() => { const rt = window.__x64; const orig = rt.mouse.bind(rt); window.__mlog = []; rt.mouse = (x, y, ev) => { window.__mlog.push([Math.round(x), Math.round(y), ev]); return orig(x, y, ev); }; });
+  const canvas = w.locator('[data-x64-screen]'); const box = await canvas.boundingBox();
+  const cdp = await c6.newCDPSession(p6);
+  const swipe = async (x0, y0, x1, y1, steps = 8) => {
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: x0, y: y0 }] });
+    for (let i = 1; i <= steps; i++) { await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: x0 + (x1 - x0) * i / steps, y: y0 + (y1 - y0) * i / steps }] }); await sleep(16); }
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  };
+  const cursorAt = () => p6.evaluate(() => { const m = /translate\(([-\d.]+)px, ([-\d.]+)px\)/.exec(document.querySelector('[data-x64-cursor]')?.style.transform || ''); return m ? [+m[1], +m[2]] : null; });
+  const c0 = await cursorAt();
+  await swipe(box.x + 300, box.y + 300, box.x + 420, box.y + 300);   // a finger stroke to the right moves the cursor right — it does not jump to the finger
+  await sleep(200);
+  const c1 = await cursorAt();
+  expect(c0 && c1 && c1[0] > c0[0] + 40 && Math.abs(c1[1] - c0[1]) < 6, `touchpad stroke did not move the cursor: ${JSON.stringify(c0)} → ${JSON.stringify(c1)}`);
+  const moves = await p6.evaluate(() => window.__mlog.filter(m => m[2] === 0).length);
+  expect(moves >= 3, `expected WM_MOUSEMOVE stream from the touchpad, got ${moves}`);
+  await p6.evaluate(() => { window.__mlog = []; });
+  await w.locator('[data-x64-tm-btn="l"]').tap();        // left button: press + release at the cursor
+  await w.locator('[data-x64-tm-btn="r"]').tap();        // right button
+  await w.locator('[data-x64-tm-btn="wu"]').tap();       // wheel up
+  await w.locator('[data-x64-tm-btn="wd"]').tap();       // wheel down
+  await w.locator('[data-x64-tm-btn="m"]').tap();        // middle button
+  await sleep(200);
+  const evs = await p6.evaluate(() => window.__mlog.map(m => m[2]).join(','));
+  expect(/(^|,)1,2(,|$)/.test(evs) && /(^|,)3,4(,|$)/.test(evs) && /(^|,)5,6(,|$)/.test(evs), `mouse buttons did not reach the guest: [${evs}]`);
+  const wheel = await p6.evaluate(() => window.__mlog.filter(m => m[2] === 7).map(m => m[0]).join(','));
+  expect(wheel === '120,-120', `wheel buttons sent [${wheel}] (expected 120,-120)`);
+  const lclick = await p6.evaluate(() => window.__mlog.find(m => m[2] === 1));
+  const g1 = await p6.evaluate(() => { const rt = window.__x64; return rt.screenSize(); });
+  expect(lclick && Math.abs(lclick[0] - g1.w / 2) > 20, `the click should be at the moved cursor, not the centre: ${JSON.stringify(lclick)} of ${g1.w}x${g1.h}`);
+  // tap on the touchpad surface = click at the cursor (not at the finger)
+  await p6.evaluate(() => { window.__mlog = []; });
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: box.x + 150, y: box.y + 400 }] }); await sleep(60);
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] }); await sleep(200);
+  const tap = await p6.evaluate(() => window.__mlog.filter(m => m[2] === 1 || m[2] === 2));
+  expect(tap.length === 2 && tap[0][0] === lclick[0] && tap[0][1] === lclick[1], `a touchpad tap should click at the cursor: ${JSON.stringify(tap)} vs cursor ${JSON.stringify(lclick)}`);
+  // the clusters can be dragged by their grips and remember the position
+  const grip = w.locator('[data-x64-tm-grip="r"]'); const gb = await grip.boundingBox();
+  await swipe(gb.x + gb.width / 2, gb.y + gb.height / 2, gb.x + gb.width / 2 - 200, gb.y + gb.height / 2 + 60, 10); await sleep(200);
+  const gb2 = await grip.boundingBox();
+  expect(gb2.x < gb.x - 120, `right cluster did not follow the grip drag: ${gb.x} → ${gb2.x}`);
+  const saved = await p6.evaluate(() => localStorage.getItem('nebula_x64_touchmouse'));
+  expect(saved && JSON.parse(saved).r.x < 0.8, 'cluster position not remembered');
+  await p6.screenshot({ path: resolve(SHOTS, 'phone-x64-touchmouse.png') });
+  // portrait: the desktop follows the rotation
+  await p6.setViewportSize({ width: 560, height: 1000 }); await sleep(1200);
+  const scr2 = await p6.evaluate(() => window.__x64.screenSize());
+  expect(scr2.h > scr2.w && scr2.h >= 800, `after rotation the guest desktop is ${scr2.w}x${scr2.h}, expected portrait ≥ 560x800`);
+  await p6.screenshot({ path: resolve(SHOTS, 'phone-x64-portrait.png') });
+  await c6.close();
 });
 
 await test('PWA: manifest, icons and service worker are served', async () => {

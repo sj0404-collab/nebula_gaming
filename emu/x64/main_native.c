@@ -8,7 +8,7 @@
 
 int x64_load(const u8 *bytes, size_t len, const char *name, const char *cmdline);
 static int g_apitrace;
-int x64_run(u64 budget); void x64_trace(int on); const char *x64_inspect(const u8 *b, size_t n); const char *x64_error(void); u64 x64_error_rip(void); const char *x64_report(void); u64 x64_icount(void); int x64_exit_code(void); const char *x64_error_bytes(void); const char *x64_regs(void); const char *x64_history(void); int x64_mem_copy(u64 addr, unsigned char *dst, unsigned n); void x64_key(int vk, int down); void x64_mouse(int x, int y, int ev); double x64_sleep_ms(void); const char *x64_api_stats(void); int x64_has_window(void);
+int x64_run(u64 budget); void x64_set_desktop(int dw, int dh); void x64_trace(int on); const char *x64_inspect(const u8 *b, size_t n); const char *x64_error(void); u64 x64_error_rip(void); const char *x64_report(void); u64 x64_icount(void); int x64_exit_code(void); const char *x64_error_bytes(void); const char *x64_regs(void); const char *x64_history(void); int x64_mem_copy(u64 addr, unsigned char *dst, unsigned n); void x64_key(int vk, int down); void x64_mouse(int x, int y, int ev); double x64_sleep_ms(void); const char *x64_api_stats(void); int x64_has_window(void);
 int x64_vfs_add(const char *path, const u8 *data, size_t n); int x64_vfs_mkdir(const char *path); const char *x64_vfs_list(void); void x64_stdin_write(const u8 *data, size_t n); void x64_stdin_eof(void); int x64_wants_stdin(void);
 void host_set_dump(int every, const char *prefix); int host_frames(void); double host_now_ms(void);
 
@@ -54,6 +54,7 @@ int main(int argc, char **argv) {
   for (; ai < argc && argv[ai][0] == '-'; ai++) {
     if (!strcmp(argv[ai], "--inspect")) inspect = 1;
     else if (!strcmp(argv[ai], "--frames") && ai + 1 < argc) dump_every = atoi(argv[++ai]);
+    else if (!strcmp(argv[ai], "--desktop") && ai + 1 < argc) { int dw = 0, dh = 0; if (sscanf(argv[++ai], "%dx%d", &dw, &dh) == 2) x64_set_desktop(dw, dh); }   /* fixed desktop (the phone / fullscreen view) instead of the window-sized framebuffer */
     else if (!strcmp(argv[ai], "--prefix") && ai + 1 < argc) prefix = argv[++ai];
     else if (!strcmp(argv[ai], "--max-ms") && ai + 1 < argc) max_ms = atof(argv[++ai]);
     else if (!strcmp(argv[ai], "--quiet")) quiet = 1;
@@ -72,7 +73,7 @@ int main(int argc, char **argv) {
     else { fprintf(stderr, "unknown option %s\n", argv[ai]); return 2; }
   }
   for (int a1 = 1; a1 < nkeys; a1++) for (int a2 = a1; a2 > 0 && keys[a2 - 1].at > keys[a2].at; a2--) { int tv = keys[a2].vk, td = keys[a2].down; double ta = keys[a2].at; keys[a2].vk = keys[a2 - 1].vk; keys[a2].at = keys[a2 - 1].at; keys[a2].down = keys[a2 - 1].down; keys[a2 - 1].vk = tv; keys[a2 - 1].at = ta; keys[a2 - 1].down = td; }   /* key events in time order (a held modifier may span later keys) */
-  if (ai >= argc) { fprintf(stderr, "usage: x64run [--inspect] [--frames N] [--max-ms T] [--key VK@ms[:dur]] [--click x,y@ms] [--move x,y@ms] [--type text@ms] file.exe [args]\n"); return 2; }
+  if (ai >= argc) { fprintf(stderr, "usage: x64run [--inspect] [--frames N] [--max-ms T] [--desktop WxH] [--key VK@ms[:dur]] [--click x,y@ms] [--move x,y@ms] [--type text@ms] file.exe [args]\n"); return 2; }
   const char *path = argv[ai];
   size_t flen = 0; u8 *bytes = map_file(path, &flen); if (!bytes) { perror(path); return 2; } long len = (long)flen;
   if (inspect) { puts(x64_inspect(bytes, len)); return 0; }

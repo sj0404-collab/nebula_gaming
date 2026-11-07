@@ -1,6 +1,6 @@
 // x64 Runner — runs real Windows x86-64 executables inside Nebula OS through the wasm64 emulator (emu/x64) and presents them with WebGL.
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Cpu, FolderOpen, FolderInput, Play, Square, Terminal as TerminalIcon, Monitor, FileSearch, AlertTriangle, CheckCircle2, HelpCircle, XCircle, Gamepad2, HardDrive, Download, Trash2, SendHorizontal, Keyboard, LayoutGrid, Maximize2, Minimize2, Image as ImageIcon, FlaskConical, Loader2, PackagePlus, X } from 'lucide-react';
+import { Cpu, FolderOpen, FolderInput, Play, Square, Terminal as TerminalIcon, Monitor, FileSearch, AlertTriangle, CheckCircle2, HelpCircle, XCircle, Gamepad2, HardDrive, Download, Trash2, SendHorizontal, Keyboard, LayoutGrid, Maximize2, Minimize2, Image as ImageIcon, FlaskConical, Loader2, PackagePlus, X, Mouse, MousePointerClick, Expand } from 'lucide-react';
 import { scanLibrary, classifyExe, loadPrefs, savePrefs, makeLnk, type LibraryItem, type LibraryPrefs } from '../../lib/x64/library';
 import { peIconDataUrl } from '../../lib/x64/peicon';
 import { zipEntries, zipRead } from '../../lib/x64/zip';
@@ -8,6 +8,7 @@ import { useOS } from '../../lib/os';
 import { X64Runtime, vkFromEvent, wasm64Supported, type JitInfo, type PeInfo, type RunStats, type VfsEntry } from '../../lib/x64/runtime';
 import { FramePresenter } from '../../lib/x64/present';
 import { VirtualPad } from './VirtualPad';
+import { TouchMouse, type MouseBtn } from './TouchMouse';
 import { type PadState } from '../../lib/x64/pad';
 import { takeX64Launch, onX64Launch, type X64Launch } from '../../lib/x64/launch';
 
@@ -73,6 +74,11 @@ const TOUCH_KEYS: { label: string; vk: number; sticky?: boolean }[] = [
 /* Touch on the guest screen (Android): tap = left click, drag = press and move, hold still = right click (released on lift), two fingers = wheel.
    Mouse / pen pointers keep their real buttons. */
 interface TouchState { id: number; sx: number; sy: number; gx: number; gy: number; t0: number; pressed: boolean; done: boolean; timer: number; fingers: number; lastY2: number }
+/* touchpad mode: the finger moves a virtual cursor (relative, like a laptop touchpad) instead of pointing at the spot under it */
+interface PadTouch { id: number; sx: number; sy: number; lx: number; ly: number; t0: number; moved: boolean; drag: boolean; done: boolean; timer: number; fingers: number; lastY2: number }
+const PAD_GAIN = 1.3;
+function boolPref(k: string, d: boolean): boolean { try { const v = localStorage.getItem(k); return v === null ? d : v === '1'; } catch { return d; } }
+function setBoolPref(k: string, v: boolean) { try { localStorage.setItem(k, v ? '1' : '0'); } catch { /* ignore */ } }
 const IME_SENTINEL = '\u200b\u200b';   // the IME field is never empty, so Backspace on an empty guest line still produces an input event
 
 /* Runtime pack: the x64 DLLs of the VC++ 2015–2022 Redistributable, built by emu/tools/runtime-pack.sh into public/x64/sys32/
@@ -148,6 +154,15 @@ export default function X64App() {
   const [args, setArgs] = useState('');
   const [glInfo, setGlInfo] = useState('');
   const [touch] = useState(() => typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches);
+  const [padMode, setPadMode] = useState(() => boolPref('nebula_x64_touchpad', touch));   // touchpad: relative cursor (default on phones/tablets)
+  const [tmShow, setTmShow] = useState(() => boolPref('nebula_x64_tmouse', touch));       // on-screen mouse buttons
+  const [deskFit, setDeskFit] = useState(() => boolPref('nebula_x64_deskfit', touch));    // the guest desktop = the device screen (portrait and landscape)
+  useEffect(() => setBoolPref('nebula_x64_touchpad', padMode), [padMode]);
+  useEffect(() => setBoolPref('nebula_x64_tmouse', tmShow), [tmShow]);
+  useEffect(() => setBoolPref('nebula_x64_deskfit', deskFit), [deskFit]);
+  const cur = useRef({ x: -1, y: -1 });   // virtual cursor in guest pixels (-1 = not placed yet → screen centre); also the last known pointer spot for the on-screen buttons
+  const cursorRef = useRef<HTMLDivElement | null>(null);
+  const applyDesktopRef = useRef<() => void>(() => {});   // measured desktop size → emulator, callable from the start paths declared above its definition
   const [moduleKB, setModuleKB] = useState(0);
   const [apiStats, setApiStats] = useState('');
   const [jitInfo, setJitInfo] = useState<JitInfo | null>(null);
@@ -192,6 +207,7 @@ export default function X64App() {
     if (rt.status === 'running' || rt.status === 'waiting-stdin') rt.stop();
     setSelected(e.id); setArgs(want.args); consoleBuf.current = ''; setConsoleText(''); setLog([]);
     const argv0 = e.path && e.path.includes(' ') ? `"${e.path}"` : e.path ?? e.name;   // like Explorer: a quoted full path when it has spaces (launchers re-parse GetCommandLineW)
+    applyDesktopRef.current();
     const err = rt.start(e.bytes, e.path ?? e.name, want.args.trim() ? `${argv0} ${want.args.trim()}` : argv0, e.cwd);
     if (err) setLog(l => [...l, 'LOADER: ' + err]);
     setStats(rt.stats()); setFiles(rt.vfsList()); setTab('console');
@@ -259,6 +275,37 @@ export default function X64App() {
     setTimeout(() => screenRef.current?.focus(), 50);
   }, []);
 
+  /* desktop mode: tell the emulator how big the device screen is (in guest pixels) so Windows sees a desktop that fills the view in either orientation.
+     Phones: the desktop is scaled so its short side stays about 720 px (a 1080x2400 phone gets a 720x1600 / 1600x720 desktop) — Windows UI remains legible. */
+  const applyDesktop = useCallback(() => {
+    const rt = rtRef.current; if (!rt) return;
+    const el = canvasRef.current ?? screenRef.current ?? rootRef.current;
+    if (!deskFit || !el) { rt.setDesktop(0, 0); return; }
+    const cw = el.clientWidth, ch = el.clientHeight; if (cw < 200 || ch < 150) return;
+    const dpr = Math.min(2, window.devicePixelRatio || 1); const pw = cw * dpr, ph = ch * dpr;
+    const scale = touch ? Math.max(1, Math.min(2, Math.round(Math.min(pw, ph) / 720 * 4) / 4)) : 1;
+    rt.setDesktop(Math.min(1920, Math.round(pw / scale)), Math.min(1200, Math.round(ph / scale)));
+  }, [deskFit, touch]);
+  useEffect(() => { applyDesktopRef.current = applyDesktop; }, [applyDesktop]);
+  useEffect(() => {
+    applyDesktop(); const el = canvasRef.current ?? rootRef.current; if (!el || typeof ResizeObserver === 'undefined') return;
+    let t = 0; const ro = new ResizeObserver(() => { clearTimeout(t); t = window.setTimeout(applyDesktop, 250); }); ro.observe(el);
+    return () => { ro.disconnect(); clearTimeout(t); };
+  }, [applyDesktop, tab, fs]);
+  /* the virtual cursor (touchpad mode): guest px → canvas px with the presenter's aspect-fit mapping */
+  const placeCursor = useCallback(() => {
+    const rt = rtRef.current, p = presenterRef.current, el = cursorRef.current; if (!rt || !p || !el) return;
+    const { w, h } = rt.screenSize(); const cw = p.canvas.clientWidth, ch = p.canvas.clientHeight; if (!w || !h || !cw || !ch) return;
+    if (cur.current.x < 0) cur.current = { x: w / 2, y: h / 2 };
+    const s = Math.min(cw / w, ch / h); const ox = (cw - w * s) / 2, oy = (ch - h * s) / 2;
+    el.style.transform = `translate(${ox + cur.current.x * s}px, ${oy + cur.current.y * s}px)`;
+  }, []);
+  const moveCursor = useCallback((dx: number, dy: number, silent?: boolean) => {   /* silent: place/clamp only (before a button event), no WM_MOUSEMOVE */
+    const rt = rtRef.current; if (!rt) return; const { w, h } = rt.screenSize(); if (!w || !h) return;
+    if (cur.current.x < 0) cur.current = { x: w / 2, y: h / 2 };
+    cur.current = { x: Math.max(0, Math.min(w - 1, cur.current.x + dx)), y: Math.max(0, Math.min(h - 1, cur.current.y + dy)) };
+    if (!silent) rt.mouse(cur.current.x, cur.current.y, 0); placeCursor();
+  }, [placeCursor]);
   // presenter bound to the canvas
   useEffect(() => {
     const c = canvasRef.current; if (!c) return;
@@ -347,6 +394,9 @@ export default function X64App() {
 
   const current = exes.find(e => e.id === selected) ?? null;
   const running = stats?.status === 'running' || stats?.status === 'waiting-stdin';
+  /* phones: a program that opens a window takes the whole screen (game mode) once per run; the user can still leave with the ⤡ button */
+  const autoFs = useRef(false);
+  useEffect(() => { if (!running) { autoFs.current = false; return; } if (touch && stats?.hasWindow && !fs && !autoFs.current) { autoFs.current = true; setTab('screen'); toggleFullscreen(); } }, [running, stats?.hasWindow, touch, fs, toggleFullscreen]);
 
   const [fetching, setFetching] = useState<string | null>(null);
   const [pack, setPack] = useState<PackState>({ status: 'probing' });
@@ -431,8 +481,10 @@ export default function X64App() {
     }
     const base = current.name.split('\\').pop() || current.name;
     const a0 = current.path ?? base; const argv0 = a0.includes(' ') ? `"${a0}"` : a0;   // a name with spaces is quoted as argv[0] (an opened "Setup (1).exe" used to be split into two parameters)
+    applyDesktopRef.current();
     const err = rt.start(current.bytes, current.path ?? base, args.trim() ? `${argv0} ${args.trim()}` : argv0, current.cwd);
     if (err) { setLog(l => [...l, 'LOADER: ' + err]); setStats(rt.stats()); setTab('report'); return; }
+    cur.current = { x: -1, y: -1 };
     setStats(rt.stats()); setFiles(rt.vfsList()); setFrames(0);
     setTab(current.info.subsystem === 'GUI' ? 'screen' : 'console'); autoTabRef.current = true;
     setTimeout(() => screenRef.current?.focus(), 50);
@@ -513,18 +565,55 @@ export default function X64App() {
   const imePrev = useRef(IME_SENTINEL);
   const [imeOpen, setImeOpen] = useState(false);
   const focusGuest = useCallback(() => { if (imeOpen && imeRef.current) imeRef.current.focus({ preventScroll: true }); else screenRef.current?.focus(); }, [imeOpen]);
+  const pt = useRef<PadTouch | null>(null); const lastTap = useRef(0);
+  const padPointer = useCallback((e: React.PointerEvent, kind: 'down' | 'move' | 'up' | 'cancel', rt: X64Runtime) => {
+    const t = pt.current; const clearT = () => { if (t?.timer) { clearTimeout(t.timer); t.timer = 0; } };
+    if (kind === 'down') {
+      if (t && !t.done) { t.fingers++; t.lastY2 = e.clientY; t.done = true; clearT(); return; }   // a second finger: two-finger scroll (no click on release)
+      e.currentTarget.setPointerCapture(e.pointerId); focusGuest();
+      const now = performance.now();
+      const st: PadTouch = { id: e.pointerId, sx: e.clientX, sy: e.clientY, lx: e.clientX, ly: e.clientY, t0: now, moved: false, drag: false, done: false, timer: 0, fingers: 1, lastY2: 0 };
+      if (now - lastTap.current < 300) { st.drag = true; lastTap.current = 0; moveCursor(0, 0, true); rt.mouse(cur.current.x, cur.current.y, 1); }   // tap, then touch again and move = drag (laptop touchpad)
+      else st.timer = window.setTimeout(() => { const c = pt.current; if (!c || c !== st || c.moved || c.drag || c.done) return; c.done = true; c.timer = 0; moveCursor(0, 0, true); rt.mouse(cur.current.x, cur.current.y, 3); rt.mouse(cur.current.x, cur.current.y, 4); if (navigator.vibrate) navigator.vibrate(15); }, 550);   // hold = right click
+      pt.current = st; return;
+    }
+    if (!t) return;
+    if (kind === 'move') {
+      if (t.fingers >= 2 && e.pointerId !== t.id) { const dy = e.clientY - t.lastY2; if (Math.abs(dy) >= 24) { rt.mouse(dy < 0 ? -120 : 120, 0, 7); t.lastY2 = e.clientY; } return; }
+      if (e.pointerId !== t.id || t.fingers >= 2 || (t.done && !t.drag)) return;
+      const dx = e.clientX - t.lx, dy = e.clientY - t.ly;
+      if (!t.moved) { if (Math.hypot(e.clientX - t.sx, e.clientY - t.sy) < 6) return; t.moved = true; clearT(); }
+      t.lx = e.clientX; t.ly = e.clientY;
+      const { w, h } = rt.screenSize(); const p = presenterRef.current; const cw = p?.canvas.clientWidth || 1, ch = p?.canvas.clientHeight || 1; const s = (w && h ? Math.min(cw / w, ch / h) : 1) || 1;
+      const v = Math.hypot(dx, dy); const gain = PAD_GAIN * (v > 14 ? 1.6 : v > 6 ? 1.25 : 1);   // light acceleration: slow strokes are precise, fast ones cross the screen
+      moveCursor(dx / s * gain, dy / s * gain); return;
+    }
+    if (e.pointerId !== t.id) { if (t.fingers > 0) t.fingers--; return; }
+    clearT(); pt.current = null;
+    if (t.drag) { rt.mouse(cur.current.x, cur.current.y, 2); return; }
+    if (t.done || kind === 'cancel') return;
+    if (!t.moved && performance.now() - t.t0 < 350) { moveCursor(0, 0, true); rt.mouse(cur.current.x, cur.current.y, 1); rt.mouse(cur.current.x, cur.current.y, 2); lastTap.current = performance.now(); }   // a tap = left click at the cursor
+  }, [focusGuest, moveCursor]);
+  /* on-screen mouse buttons act at the virtual cursor (touchpad) or the last touched spot */
+  const tmButton = useCallback((b: MouseBtn, down: boolean) => {
+    const rt = rtRef.current; if (!rt || rt.status !== 'running') return; moveCursor(0, 0, true);
+    const base = b === 'l' ? 1 : b === 'r' ? 3 : 5; rt.mouse(cur.current.x, cur.current.y, down ? base : base + 1); if (down) focusGuest();
+  }, [focusGuest, moveCursor]);
+  const tmWheel = useCallback((dir: -1 | 1) => { const rt = rtRef.current; if (rt && rt.status === 'running') rt.mouse(dir > 0 ? 120 : -120, 0, 7); }, []);
   const ts = useRef<TouchState | null>(null);
   const clearHold = () => { const t = ts.current; if (t?.timer) { clearTimeout(t.timer); t.timer = 0; } };
   const guestPointer = useCallback((e: React.PointerEvent, kind: 'down' | 'move' | 'up' | 'cancel') => {
     const rt = rtRef.current; if (!rt || rt.status !== 'running') return;
     if (e.pointerType !== 'touch') {   // mouse / pen: real buttons
       const g = toGuest(e.clientX, e.clientY); if (!g) return;
+      cur.current = { x: g.x, y: g.y };
       if (kind === 'down') { e.currentTarget.setPointerCapture(e.pointerId); rt.mouse(g.x, g.y, e.button === 2 ? 3 : e.button === 1 ? 5 : 1); focusGuest(); }
       else if (kind === 'up') rt.mouse(g.x, g.y, e.button === 2 ? 4 : e.button === 1 ? 6 : 2);
       else if (kind === 'move') rt.mouse(g.x, g.y, 0);
       return;
     }
     e.preventDefault();
+    if (padMode) { padPointer(e, kind, rt); return; }
     const t = ts.current;
     if (kind === 'down') {
       if (t && !t.done) {   // a second finger while the first is held: right click (or the start of a two-finger scroll)
@@ -534,7 +623,7 @@ export default function X64App() {
       }
       const g = toGuest(e.clientX, e.clientY); if (!g) return;
       e.currentTarget.setPointerCapture(e.pointerId); focusGuest();
-      rt.mouse(g.x, g.y, 0);
+      rt.mouse(g.x, g.y, 0); cur.current = { x: g.x, y: g.y };
       const st: TouchState = { id: e.pointerId, sx: e.clientX, sy: e.clientY, gx: g.x, gy: g.y, t0: performance.now(), pressed: false, done: false, timer: 0, fingers: 1, lastY2: 0 };
       st.timer = window.setTimeout(() => { const c = ts.current; if (!c || c !== st || c.pressed || c.done) return; c.done = true; c.timer = 0; rt.mouse(c.gx, c.gy, 3); rt.mouse(c.gx, c.gy, 4); if (navigator.vibrate) navigator.vibrate(15); }, 550);
       ts.current = st; return;
@@ -555,7 +644,8 @@ export default function X64App() {
     const g = toGuest(e.clientX, e.clientY) ?? { x: t.gx, y: t.gy };
     if (kind === 'cancel') { if (t.pressed) rt.mouse(g.x, g.y, 2); return; }
     if (t.pressed) rt.mouse(g.x, g.y, 2); else { rt.mouse(t.gx, t.gy, 1); rt.mouse(t.gx, t.gy, 2); }   // a tap: click where the finger landed
-  }, [toGuest, focusGuest]);
+  }, [toGuest, focusGuest, padMode, padPointer]);
+  useEffect(() => { placeCursor(); }, [placeCursor, frames, padMode, tab, fs, deskFit, stats?.hasWindow, running]);
   const guestWheel = useCallback((e: React.WheelEvent) => { const rt = rtRef.current; if (!rt || rt.status !== 'running') return; const n = e.deltaMode === 1 ? e.deltaY * 40 : e.deltaY; if (n) rt.mouse(n < 0 ? 120 : -120, 0, 7); }, []);
   /* the IME field: whatever the soft keyboard inserts is diffed against the previous value and sent as text; deletions become Backspace */
   const imeInput = useCallback(() => {
@@ -741,13 +831,25 @@ export default function X64App() {
                   <div className="mt-1 text-[10px] text-slate-500">GUI windows render here through WebGL; console programs write to the Console tab.</div>
                 </div>
               )}
+              {running && padMode && stats?.hasWindow && (
+                <div ref={cursorRef} data-x64-cursor className="pointer-events-none absolute left-0 top-0 z-10 will-change-transform" style={{ filter: 'drop-shadow(0 1px 1px rgba(0,0,0,.8))' }}>
+                  <svg width="18" height="26" viewBox="0 0 18 26"><path d="M1 1v20l5-5 3.5 8 3-1.3-3.4-7.7H16Z" fill="#fff" stroke="#000" strokeWidth="1.2" strokeLinejoin="round" /></svg>
+                </div>
+              )}
               {running && vpad && <VirtualPad onChange={onVpad} onClose={() => setVpad(false)} />}
+              {running && tmShow && stats?.hasWindow && <TouchMouse onButton={tmButton} onWheel={tmWheel} />}
               {running && stats?.hasWindow && (
                 <div data-x64-touchbar className={`absolute bottom-2 left-1/2 flex max-w-full -translate-x-1/2 gap-1 overflow-x-auto rounded-full bg-black/50 px-2 py-1 ${touch ? '' : 'opacity-0 hover:opacity-100'}`} onMouseDown={e => e.stopPropagation()}>
                   <button data-x64-kbd className={`min-w-9 select-none rounded-full px-2 py-1.5 text-white ${imeOpen ? 'bg-indigo-500' : 'bg-white/15'}`} title="Soft keyboard: type into the Windows program" aria-pressed={imeOpen}
                     onPointerDown={e => { e.preventDefault(); e.stopPropagation(); }} onClick={e => { e.preventDefault(); toggleIme(); }}><Keyboard size={14} className="mx-auto" /></button>
                   <button data-x64-vpad-toggle className={`min-w-9 select-none rounded-full px-2 py-1.5 text-white ${vpad ? 'bg-indigo-500' : 'bg-white/15'}`} title="On-screen game controller (XInput / DirectInput controller 0)" aria-pressed={vpad}
                     onPointerDown={e => { e.preventDefault(); e.stopPropagation(); }} onClick={e => { e.preventDefault(); setVpad(v => !v); }}><Gamepad2 size={14} className="mx-auto" /></button>
+                  <button data-x64-touchpad className={`min-w-9 select-none rounded-full px-2 py-1.5 text-white ${padMode ? 'bg-indigo-500' : 'bg-white/15'}`} title="Touchpad: drag anywhere to move the cursor; tap = click; tap, then touch and move = drag; hold = right click; two fingers = scroll.  Off = tap where you point" aria-pressed={padMode}
+                    onPointerDown={e => { e.preventDefault(); e.stopPropagation(); }} onClick={e => { e.preventDefault(); setPadMode(v => !v); }}><Mouse size={14} className="mx-auto" /></button>
+                  <button data-x64-tmouse className={`min-w-9 select-none rounded-full px-2 py-1.5 text-white ${tmShow ? 'bg-indigo-500' : 'bg-white/15'}`} title="On-screen mouse buttons (left · scroll up / middle / scroll down · right); drag them by the ⋮⋮ grip" aria-pressed={tmShow}
+                    onPointerDown={e => { e.preventDefault(); e.stopPropagation(); }} onClick={e => { e.preventDefault(); setTmShow(v => !v); }}><MousePointerClick size={14} className="mx-auto" /></button>
+                  <button data-x64-deskfit className={`min-w-9 select-none rounded-full px-2 py-1.5 text-white ${deskFit ? 'bg-indigo-500' : 'bg-white/15'}`} title="Desktop fills the screen (follows rotation).  Off = the view follows the program's window" aria-pressed={deskFit}
+                    onPointerDown={e => { e.preventDefault(); e.stopPropagation(); }} onClick={e => { e.preventDefault(); setDeskFit(v => !v); }}><Expand size={14} className="mx-auto" /></button>
                   {TOUCH_KEYS.map(k => (
                     <button key={k.vk} className={`min-w-9 shrink-0 select-none rounded-full px-2 py-1.5 text-[11px] font-bold text-white active:bg-indigo-500 ${sticky.includes(k.vk) ? 'bg-indigo-500' : 'bg-white/15'}`} aria-pressed={k.sticky ? sticky.includes(k.vk) : undefined}
                       onPointerDown={e => { e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); touchKey(k.vk, true, k.sticky); }}
