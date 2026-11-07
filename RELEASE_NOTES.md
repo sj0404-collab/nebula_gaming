@@ -1,3 +1,29 @@
+# v1.45.0 — Android: installers extract at native speed, phone desktop fixes, a working language list, FPS counter
+
+**Native LZMA decoding for installers (the speed fix).** The sampling profiler (new: `X64_PROF=1`, `nativeprof.yml`) showed that
+an Inno Setup installer on the phone spends almost all of its time inside its own LZMA decoder — a few hot loops interpreted at
+≈ 11 MIPS. The emulator now recognises Inno Setup's `LzmaDec_DecodeToDic` (LZMA SDK as built by bcc32, Inno 5.x/6.x) by its
+machine-code signature when a 32-bit image is mapped and patches its entry to a built-in decoder (`emu/x64/hle_lzma.inc`,
+a port of the SDK's `LzmaDec_DecodeReal` / `WriteRem` / `TryDummy` working directly on the guest's `CLzmaDec` state and
+dictionary). Same results byte-for-byte — Inno verifies every file by CRC32 — but the extraction runs at device speed. Can be
+switched off (`X64_NOHLE=1` / `x64_set_hle(0)`) for comparison. Nothing else about the program changes: it is the same
+installer executing its own code everywhere except that one function.
+
+**Phone fixes from the v1.44.0 screenshots.**
+- Portrait: the desktop is no longer capped in height, so the picture fills the screen without black bars.
+- After a rotation / size change windows are re-centred, clamped to the new desktop and the desktop is repainted; no leftovers
+  from the old layout. Closing a drop-down list, a modal dialog or `EndDialog` clears the area it covered.
+- **The language list in the setup dialog was empty (white).** A real bug in the combo box: the items were copied into the list
+  window only when the combo was already flagged as dropped, and the flag was set after the copy. Fixed; the list shows
+  English / Français / Polski / Português (Brasil) / Русский … (CJK entries draw as “??” — the built-in font has no CJK glyphs).
+
+**FPS / MIPS counter.** A small readout in the top-left corner of the program view (frames presented per second and the
+emulator's MIPS). Toggle with the `FPS` button on the toolbar; the choice is remembered (`nebula_x64_fps`).
+
+**Tools.** In-emulator sampling profiler (`X64_PROF=1` → top 40 hot 64-byte blocks at exit, shim names resolved);
+`.github/workflows/nativeprof.yml` runs any installer natively on the runner with scripted keys/clicks, keeps frames, the
+profile and Inno's Setup Log.
+
 # v1.44.0 — Android: touchpad, on-screen mouse buttons, a desktop that fills the phone screen
 
 **Touchpad (new, default on phones/tablets).** Dragging a finger anywhere on the program view moves a visible cursor the way a
