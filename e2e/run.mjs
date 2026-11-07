@@ -543,6 +543,7 @@ await test('programs: the official 7-Zip 25.01 x64 setup installs onto the persi
   await page.waitForFunction(() => /^(exited|fault)$/.test(document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') ?? ''), null, { timeout: 240_000 });
   expect(await w.getAttribute('data-x64-status') === 'exited' || await page.locator('[data-x64-status="exited"]').count() === 1, 'setup did not exit cleanly');
   await w.locator('[data-x64-tab="library"]').click();
+  expect(await w.locator('[data-x64-item*="Uninstall"]').count() === 0, 'uninstaller appeared as an installed game');
   const tile = w.locator('[data-x64-item="7-Zip File Manager"]');
   await tile.waitFor({ timeout: 15_000 });
   await tile.locator('[data-x64-icon]').waitFor({ timeout: 15_000 });   // the icon extracted from 7zFM.exe's resources
@@ -583,6 +584,9 @@ await test('explorer + notepad: File Explorer browses the real C:\\ (the 7-Zip i
   await w.locator('[data-explorer-usage]').waitFor({ timeout: 15_000 });
   await page.waitForFunction(() => !/measuring/.test(document.querySelector('[data-explorer-usage]')?.textContent ?? ''), null, { timeout: 15_000 });
   expect(/used/.test(await w.locator('[data-explorer-usage]').innerText()), 'disk usage is not the real storage estimate: ' + await w.locator('[data-explorer-usage]').innerText());
+  // The C: root must show its real top-level folders, not an empty C:\\ / C: mismatch.
+  await w.locator('[data-explorer-quick="This PC"]').click();
+  await w.locator('[data-explorer-item="Program Files"]').waitFor({ timeout: 15000 });
   // the 7-Zip install from the previous test (if it ran): Program Files → 7-Zip → 7zFM.exe with its real icon; double-click starts it
   await w.locator('[data-explorer-quick="Program Files"]').click(); await sleep(400);
   const sevenZip = w.locator('[data-explorer-item="7-Zip"]');

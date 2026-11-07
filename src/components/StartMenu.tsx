@@ -1,3 +1,6 @@
+import { useState } from 'react';
+import { useShortcuts } from '../lib/x64/useShortcuts';
+import { requestX64Launch } from '../lib/x64/launch';
 import { useOS } from '../lib/os';
 import { AppIcon } from './icons';
 import { Power, Search, ChevronRight, User, Settings, FolderOpen, Download } from 'lucide-react';
@@ -17,6 +20,8 @@ const PINNED: { app: Parameters<ReturnType<typeof useOS>['openApp']>[0]; label: 
 
 export default function StartMenu() {
   const { startOpen, setStartOpen, openApp, pushToast } = useOS();
+  const [query, setQuery] = useState('');
+  const shortcuts = useShortcuts().filter(s => /\\start menu\\programs\\/i.test(s.path) && s.path.toLowerCase().includes(query.toLowerCase()));
 
   return (
     <AnimatePresence>
@@ -43,18 +48,19 @@ export default function StartMenu() {
             <div className="flex-1 flex flex-col min-w-0">
               <div className="flex items-center gap-2 border-b border-white/5 px-4 py-3">
                 <Search size={14} className="text-white/50" />
-                <input placeholder="Type here to search" className="w-full bg-transparent text-[12px] text-white outline-none placeholder-white/40" autoFocus />
+                <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Type here to search" className="w-full bg-transparent text-[12px] text-white outline-none placeholder-white/40" autoFocus />
               </div>
               <div className="flex-1 overflow-y-auto p-2">
                 <div className="px-2 py-1 text-[9px] font-bold uppercase tracking-widest text-white/40">Most used</div>
-                {PINNED.slice(0, 6).map(p => (
+                {PINNED.slice(0, 6).filter(p => p.label.toLowerCase().includes(query.toLowerCase())).map(p => (
                   <button key={p.app} onClick={() => openApp(p.app)} className="flex w-full items-center gap-2.5 rounded px-2 py-1.5 text-[11px] text-white/85 hover:bg-white/10">
                     <AppIcon id={p.icon} size={18} />{p.label}
                   </button>
                 ))}
+                {shortcuts.map(s => <button key={s.path} data-start-shortcut={s.path} onClick={() => { requestX64Launch(s.target, s.args, s.workDir || undefined); setStartOpen(false); openApp('x64'); }} className="flex w-full items-center gap-2.5 rounded px-2 py-1.5 text-left text-[11px] text-white/85 hover:bg-white/10"><AppIcon id="x64" size={18} />{s.path.slice(s.path.lastIndexOf('\\') + 1).replace(/\.lnk$/i, '')}</button>)}
                 <div className="mt-2 px-2 py-1 text-[9px] font-bold uppercase tracking-widest text-white/40">All apps</div>
                 <div className="grid grid-cols-2">
-                  {PINNED.slice(6).map(p => (
+                  {PINNED.slice(6).filter(p => p.label.toLowerCase().includes(query.toLowerCase())).map(p => (
                     <button key={p.app} onClick={() => openApp(p.app)} className="flex items-center gap-2 rounded px-2 py-1.5 text-[11px] text-white/80 hover:bg-white/10">
                       <AppIcon id={p.icon} size={16} />{p.label}
                     </button>

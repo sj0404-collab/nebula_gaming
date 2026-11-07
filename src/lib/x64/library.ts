@@ -88,7 +88,7 @@ export interface LibraryItem {
 }
 
 const SKIP_NAME = /uninstall|удал|deinstall|remove|readme|help|manual|license|licence|website|homepage|changelog|документац|changes|release notes|what'?s new|faq|support|forum|donate|report a bug|user manual|command line|console$/i;
-const SKIP_EXE = /\\(unins\w*|uninstall\w*|setup|install\w*|update\w*|crashreport\w*|crashpad\w*|dxsetup|vcredist\w*|vc_redist\w*|dotnet\w*)$/i;
+const SKIP_EXE = /\\(unins\w*|uninstall\w*|setup|install\w*|update\w*|crashreport\w*|crashpad\w*|dxsetup|vcredist\w*|vc_redist\w*|dotnet\w*)\.exe$/i;
 const GAME_HINT = /game|игр|unity|unreal|steam_api|d3d|dx\d|directx|openal|fmod|sdl2|wwise|mono|love\.exe/i;
 
 const SHORTCUT_ROOTS = [
@@ -119,9 +119,9 @@ export function scanLibrary(files: VfsEntry[], read: (path: string) => Uint8Arra
   // 2. Uninstall registry entries (programs that made no shortcut, and the UninstallString for the ones that did)
   for (const u of parseUninstall(read('C:\\Windows\\nebula.reg'))) {
     const icon = stripQuotes((u.displayIcon || '').replace(/,-?\d+$/, '')); const loc = u.installLocation.replace(/[\\/]+$/, '');
-    let exe = icon && /\.exe$/i.test(icon) && exists(icon) ? icon : '';
+    let exe = icon && /\.exe$/i.test(icon) && !SKIP_EXE.test(icon) && exists(icon) ? icon : '';
     if (!exe && loc) {   // pick the largest non-helper exe in InstallLocation
-      const cand = files.filter(f => !f.dir && f.path.toLowerCase().startsWith(loc.toLowerCase() + '\\') && /\.exe$/i.test(f.path) && !SKIP_EXE.test(f.path) && !f.path.slice(loc.length + 1).includes('\\')).sort((a, b) => b.size - a.size);
+      const cand = files.filter(f => !f.dir && f.path.toLowerCase().startsWith(loc.toLowerCase() + '\\') && /\.exe$/i.test(f.path) && !SKIP_EXE.test(f.path)).sort((a, b) => b.size - a.size);
       if (cand[0]) exe = cand[0].path;
     }
     const uninst = stripQuotes(u.uninstallString); const uninstall = uninst && exists(uninst) ? u.uninstallString : undefined;
@@ -132,6 +132,15 @@ export function scanLibrary(files: VfsEntry[], read: (path: string) => Uint8Arra
     const sameFolder = [...items.values()].filter(it => it.exe.slice(0, it.exe.lastIndexOf('\\')).toLowerCase() === exe.slice(0, exe.lastIndexOf('\\')).toLowerCase());
     if (sameFolder.length) { for (const it of sameFolder) { it.uninstall ||= uninstall; it.publisher ||= u.publisher; it.version ||= u.version; } continue; }
     add({ id: exe.toLowerCase(), name: u.displayName.replace(/\s+\d+(\.\d+)+.*$/, '') || u.displayName, exe, args: '', workDir: exe.slice(0, exe.lastIndexOf('\\')), iconPath: exe, iconIndex: 0, uninstall, publisher: u.publisher, version: u.version, group: '', isGame: GAME_HINT.test(exe + ' ' + u.displayName), bytes: exists(exe)!.size });
+  }
+  // Executables copied by the user may have neither a shortcut nor an uninstall entry.
+  for (const f of files) {
+    const p = f.path.toLowerCase();
+    if (f.dir || !/\.exe$/i.test(p) || SKIP_EXE.test(p) || !/^c:\\(?:users\\[^\\]+\\(?:desktop|downloads|documents)|program files(?: \(x86\))?|gog games|games)\\/i.test(p) || /\\(?:dotnet|windowsapps|common files)\\/i.test(p)) continue;
+    if ([...items.values()].some(it => it.exe.toLowerCase() === p)) continue;
+    const name = f.path.slice(f.path.lastIndexOf('\\') + 1).replace(/\.exe$/i, '');
+    if (SKIP_NAME.test(name)) continue;
+    add({ id: p, name, exe: f.path, args: '', workDir: f.path.slice(0, f.path.lastIndexOf('\\')), iconPath: f.path, iconIndex: 0, group: '', isGame: GAME_HINT.test(f.path), bytes: f.size });
   }
   return [...items.values()].sort((a, b) => a.name.localeCompare(b.name));
 }

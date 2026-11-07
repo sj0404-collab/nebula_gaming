@@ -21,7 +21,7 @@ const QUICK: { label: string; path: string }[] = [
   { label: 'Program Files', path: 'C:\\Program Files' },
   { label: 'This PC', path: 'C:' },
 ];
-const keyOf = (p: string) => p.toLowerCase();
+const keyOf = (p: string) => p.toLowerCase().replace(/^([a-z]:)\\$/, '$1');
 const fmtSize = (s: number) => s < 1024 ? `${s} B` : s < 1048576 ? `${(s / 1024).toFixed(1)} KB` : s < 1073741824 ? `${(s / 1048576).toFixed(1)} MB` : `${(s / 1073741824).toFixed(2)} GB`;
 const fmtDate = (t: number) => t ? new Date(t).toLocaleString(undefined, { year: '2-digit', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
 const typeOf = (e: DiskEntry) => {
@@ -169,7 +169,7 @@ export default function ExplorerApp() {
 
       {/* content */}
       <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex h-11 shrink-0 items-center gap-1 border-b border-slate-200 px-2">
+        <div className="flex h-11 shrink-0 items-center gap-1 overflow-x-auto whitespace-nowrap border-b border-slate-200 px-2">
           <button onClick={back} className="rounded p-1.5 hover:bg-slate-100 disabled:opacity-30" disabled={!history.length} title="Back"><ArrowLeft size={15} /></button>
           <button onClick={fwd} className="rounded p-1.5 hover:bg-slate-100 disabled:opacity-30" disabled={!future.length} title="Forward"><ArrowRight size={15} /></button>
           <button onClick={up} className="rounded p-1.5 hover:bg-slate-100 disabled:opacity-30" disabled={path.length <= 2} title="Up" data-explorer-up><ArrowUp size={15} /></button>
@@ -179,7 +179,7 @@ export default function ExplorerApp() {
           <button onClick={() => setNewFolder('New folder')} className="flex items-center gap-1 rounded px-2 py-1 hover:bg-slate-100" title="New folder" data-explorer-newfolder><FolderPlus size={13} /><span className="hidden sm:inline">New folder</span></button>
           {sel && <>
             <span className="mx-1 h-5 w-px bg-slate-200" />
-            <button onClick={() => void open(sel)} className="flex items-center gap-1 rounded px-2 py-1 hover:bg-slate-100" title="Open" data-explorer-open>{/\.(exe|lnk|bat|cmd)$/i.test(sel.name) ? <Play size={13} /> : <FileText size={13} />}<span className="hidden sm:inline">{/\.(exe|lnk|bat|cmd)$/i.test(sel.name) ? 'Run' : 'Open'}</span></button>
+            <button onClick={() => void open(sel)} className="flex items-center gap-1 rounded px-2 py-1 hover:bg-slate-100" title="Open" data-explorer-open>{/\.(exe|lnk|bat|cmd)$/i.test(sel.name) ? <Play size={13} /> : <FileText size={13} />}<span>{/\.(exe|lnk|bat|cmd)$/i.test(sel.name) ? 'Run' : 'Open'}</span></button>
             {!sel.dir && <button onClick={() => void download(sel)} className="flex items-center gap-1 rounded px-2 py-1 hover:bg-slate-100" title="Download to this device" data-explorer-download><Download size={13} /></button>}
             <button onClick={() => setRenaming({ path: sel.path, name: sel.name })} className="flex items-center gap-1 rounded px-2 py-1 hover:bg-slate-100" title="Rename" data-explorer-rename><Pencil size={13} /></button>
             <button onClick={() => void remove(sel)} className="flex items-center gap-1 rounded px-2 py-1 text-red-700 hover:bg-red-50" title="Delete" data-explorer-delete><Trash2 size={13} /></button>
@@ -216,7 +216,7 @@ export default function ExplorerApp() {
           {view === 'grid' ? (
             <div className="grid grid-cols-4 gap-2 sm:grid-cols-5 lg:grid-cols-6">
               {items.map(e => (
-                <button key={e.path} data-explorer-item={e.name} onPointerDown={ev => { touch.current = ev.pointerType === 'touch'; }} onClick={ev => { ev.stopPropagation(); if (selected === keyOf(e.path) && touch.current) void open(e); else setSelected(keyOf(e.path)); }} onDoubleClick={() => void open(e)}
+                <button key={e.path} data-explorer-item={e.name} onPointerDown={ev => { touch.current = ev.pointerType === 'touch'; }} onClick={ev => { ev.stopPropagation(); if (touch.current && (e.dir || selected === keyOf(e.path))) void open(e); else setSelected(keyOf(e.path)); }} onDoubleClick={() => void open(e)}
                   className={`group flex flex-col items-center gap-1.5 rounded-md p-2 outline-none ${selected === keyOf(e.path) ? 'bg-sky-100' : 'hover:bg-sky-50'}`}>
                   <ItemIcon e={e} size={40} icon={icons[keyOf(e.path)]} />
                   {renaming?.path === e.path ? <RenameBox value={renaming.name} onChange={n => setRenaming({ path: e.path, name: n })} onDone={() => void commitRename()} onCancel={() => setRenaming(null)} /> : <span className="w-full truncate text-center text-[10px] leading-tight">{e.name}</span>}
@@ -228,7 +228,7 @@ export default function ExplorerApp() {
               <thead><tr className="text-left text-slate-500"><th className="py-1 font-medium">Name</th><th className="font-medium">Date modified</th><th className="font-medium">Type</th><th className="text-right font-medium">Size</th></tr></thead>
               <tbody>
                 {items.map(e => (
-                  <tr key={e.path} data-explorer-item={e.name} onPointerDown={ev => { touch.current = ev.pointerType === 'touch'; }} onClick={ev => { ev.stopPropagation(); if (selected === keyOf(e.path) && touch.current) void open(e); else setSelected(keyOf(e.path)); }} onDoubleClick={() => void open(e)}
+                  <tr key={e.path} data-explorer-item={e.name} onPointerDown={ev => { touch.current = ev.pointerType === 'touch'; }} onClick={ev => { ev.stopPropagation(); if (touch.current && (e.dir || selected === keyOf(e.path))) void open(e); else setSelected(keyOf(e.path)); }} onDoubleClick={() => void open(e)}
                     className={`cursor-default border-t border-slate-100 ${selected === keyOf(e.path) ? 'bg-sky-100' : 'hover:bg-sky-50'}`}>
                     <td className="flex items-center gap-2 py-1"><ItemIcon e={e} size={16} icon={icons[keyOf(e.path)]} />
                       {renaming?.path === e.path ? <RenameBox value={renaming.name} onChange={n => setRenaming({ path: e.path, name: n })} onDone={() => void commitRename()} onCancel={() => setRenaming(null)} /> : <span className="truncate">{e.name}</span>}

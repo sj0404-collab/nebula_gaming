@@ -1,10 +1,13 @@
 import { useOS } from '../lib/os';
 import { AppIcon } from './icons';
+import { useShortcuts } from '../lib/x64/useShortcuts';
+import { requestX64Launch } from '../lib/x64/launch';
 import { ShieldCheck } from 'lucide-react';
 
 export default function Desktop() {
   const { openApp, windows } = useOS();
   const active = windows.length > 0;
+  const shortcuts = useShortcuts().filter(s => /\\desktop\\[^\\]+\.lnk$/i.test(s.path));
 
   const icons: { id: string; label: string; onOpen: () => void }[] = [
     { id: 'pc', label: 'This PC', onOpen: () => openApp('explorer') },
@@ -14,6 +17,7 @@ export default function Desktop() {
     { id: 'terminal', label: 'Command Prompt', onOpen: () => openApp('terminal') },
     { id: 'opencode', label: 'opencode', onOpen: () => openApp('opencode') },
     { id: 'edge', label: 'Microsoft Edge', onOpen: () => openApp('edge') },
+    ...shortcuts.map(s => ({ id: 'x64', label: s.path.slice(s.path.lastIndexOf('\\') + 1).replace(/\.lnk$/i, ''), onOpen: () => { requestX64Launch(s.target, s.args, s.workDir || undefined); openApp('x64'); } })),
   ];
 
   return (

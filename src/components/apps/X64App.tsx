@@ -212,8 +212,8 @@ export default function X64App() {
     const argv0 = e.path && e.path.includes(' ') ? `"${e.path}"` : e.path ?? e.name;   // like Explorer: a quoted full path when it has spaces (launchers re-parse GetCommandLineW)
     applyDesktopRef.current();
     const err = rt.start(e.bytes, e.path ?? e.name, want.args.trim() ? `${argv0} ${want.args.trim()}` : argv0, e.cwd);
-    if (err) setLog(l => [...l, 'LOADER: ' + err]);
-    setStats(rt.stats()); setFiles(rt.vfsList()); setTab('console');
+    if (err) { setLog(l => [...l, 'LOADER: ' + err]); pushToast('Programs', 'Launch failed: ' + err, 'x64'); }
+    setStats(rt.stats()); setFiles(rt.vfsList()); setTab(err ? 'report' : 'console');
   }, [loadSample, pushToast]);
 
   // init runtime once
@@ -228,7 +228,7 @@ export default function X64App() {
     rt.onPresent = (px, w, h) => { presenterRef.current?.present(px, w, h); setFrames(f => { if (f === 0 && autoTabRef.current) setTab('screen'); return f + 1; }); };
     rt.onGlPresent = (cv, x, y, w, h) => presenterRef.current?.setGl(cv, x, y, w, h) ?? false;
     rt.onGlFlip = () => { presenterRef.current?.redraw(); setFrames(f => f + 1); };
-    rt.onStop = (s) => { setStats(s); setApiStats(rt.apiStats()); setJitInfo(rt.jitStats()); setFiles(rt.vfsList()); rescanRef.current(true); if (s.status !== 'exited' || !s.hasWindow) setTab(t => (s.hasWindow && s.status === 'exited') ? t : (s.status === 'fault' ? 'report' : t === 'screen' && !s.hasWindow ? 'console' : t)); };
+    rt.onStop = (s) => { if (s.status === 'fault') { setFs(false); if (document.fullscreenElement) void document.exitFullscreen().catch(() => {}); } setStats(s); setApiStats(rt.apiStats()); setJitInfo(rt.jitStats()); setFiles(rt.vfsList()); rescanRef.current(true); if (s.status !== 'exited' || !s.hasWindow) setTab(t => (s.hasWindow && s.status === 'exited') ? t : (s.status === 'fault' ? 'report' : t === 'screen' && !s.hasWindow ? 'console' : t)); };
     rt.onDisk = () => setDisk({ files: rt.diskFiles, writes: rt.disk.writes, bytes: rt.disk.bytes, queued: rt.disk.queued() });
     rt.init().then(async () => {
       if (!alive) return;
@@ -680,6 +680,10 @@ export default function X64App() {
 
   return (
     <div ref={rootRef} className={`flex h-full flex-col bg-[#f3f3f3] text-[12px] text-[#1b1b1b] ${fs ? 'fixed inset-0 z-[500]' : ''}`} data-x64-status={stats?.status ?? 'idle'} data-x64-fullscreen={fs ? '1' : undefined}>
+      {fs && <div className="absolute right-2 top-2 z-[600] flex gap-2" data-x64-fullscreen-controls>
+        <button className="rounded bg-red-700 px-3 py-2 font-semibold text-white shadow" onClick={() => { stop(); toggleFullscreen(); setTab('report'); }}>Stop</button>
+        <button className="rounded bg-slate-800 px-3 py-2 font-semibold text-white shadow" onClick={toggleFullscreen}>Exit fullscreen</button>
+      </div>}
       {/* toolbar (hidden in fullscreen / game mode) */}
       {!fs && <div className="flex h-11 shrink-0 items-center gap-2 overflow-x-auto whitespace-nowrap border-b border-slate-200 bg-white px-3 [scrollbar-width:none]">   {/* phones: one scrollable row instead of wrapped, overlapping buttons */}
         <Cpu size={16} className="shrink-0 text-indigo-600" />
