@@ -498,7 +498,9 @@ static int e_insn(Buf *B, const JItem *it, const u8 *code, int m32, int k) {
       e_flags(B, 2, 4, need & (FB_ZF | FB_SF | FB_PF));
       if (need & (FB_CF | FB_OF)) { e_rflags_begin(B, F_CF | F_OF); e_lget(B, L_T0); e_lget(B, L_T0); OP(I64_EXT32_S); OP(I64_NE); OP(I64_EXT_U); e_i64c(B, F_CF | F_OF); OP(I64_MUL); OP(I64_OR); e_rflags_end(B); }
       return 1; }
-    case FK_PUSH: { int r = (e->op & 7) | (e->rexb << 3); e_push_begin(B, psz, m32, start); e_ldreg(B, r, 8); e_push_end(B, psz); return 1; }
+    case FK_PUSH: { int r = (e->op & 7) | (e->rexb << 3);
+      if (r == RSP) { e_ldreg(B, RSP, 8); e_lset(B, L_T3); e_push_begin(B, psz, m32, start); e_lget(B, L_T3); e_push_end(B, psz); return 1; }   /* push esp/rsp: the value before the decrement */
+      e_push_begin(B, psz, m32, start); e_ldreg(B, r, 8); e_push_end(B, psz); return 1; }
     case FK_POP: { int r = (e->op & 7) | (e->rexb << 3); e_lget(B, L_C); e_pop(B, psz, m32, start); e_streg(B, r, 8); return 1; }
     case FK_FF: { int sub = e->reg & 7;
       if (sub == 0 || sub == 1) { e_prep_mem(B, it, sz, 1); e_dst_addr(B, e);

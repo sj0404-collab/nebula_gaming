@@ -180,8 +180,16 @@ static uint32_t t_misc(void) {
     double od[2]; _mm_storeu_pd(od, shd); h = hd(hd(h, od[0]), od[1]);
     /* indirect calls through a table (jmp/call [mem] in both modes) */
     uint32_t fv = fns[c % 3](a); fv = fns[(c >> 2) % 3](fv);
+    /* push esp / push rsp pushes the value the stack pointer had BEFORE the decrement (Intel SDM); pop esp loads the popped value */
+    uintptr_t sp_before, sp_pushed, sp_after;
+#if defined(__x86_64__)
+    __asm__ volatile("mov %%rsp, %0\n\tpush %%rsp\n\tpop %1\n\tmov %%rsp, %2" : "=&r"(sp_before), "=&r"(sp_pushed), "=&r"(sp_after) : : "memory");
+#else
+    __asm__ volatile("mov %%esp, %0\n\tpush %%esp\n\tpop %1\n\tmov %%esp, %2" : "=&r"(sp_before), "=&r"(sp_pushed), "=&r"(sp_after) : : "memory");
+#endif
+    uint32_t spk = (uint32_t)(sp_pushed == sp_before) | ((uint32_t)(sp_after == sp_before) << 1) | ((uint32_t)(sp_pushed - sp_before) << 2);
     uint32_t vals[] = { x, cf1, cf2, cf3, cf4, cf5, cf6, r1, r2, r3, r4, cm1, cm2, cm3, cm4, cm5, d1, d2, z1, z2, bs, (uint32_t)bs64, (uint32_t)(bs64 >> 32), s1, s2, s3, s4, zf1, zf2, lo, hi, ilo, ihi, mf, imf, q, r, (uint32_t)iq, (uint32_t)ir,
-      (uint32_t)p, (uint32_t)ov, (uint32_t)q64, (uint32_t)(q64 >> 32), (uint32_t)r64, (uint32_t)sq, (uint32_t)(sq >> 32), (uint32_t)sr, fv };
+      (uint32_t)p, (uint32_t)ov, (uint32_t)q64, (uint32_t)(q64 >> 32), (uint32_t)r64, (uint32_t)sq, (uint32_t)(sq >> 32), (uint32_t)sr, fv, spk };
     for (unsigned k = 0; k < sizeof vals / sizeof vals[0]; k++) h = h32(h, vals[k]);
   }
   for (int i = 0; i < 64; i++) h = h32(h, bitstr[i]);
