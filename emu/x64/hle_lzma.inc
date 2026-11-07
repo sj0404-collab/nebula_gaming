@@ -287,17 +287,130 @@ static void s_hle_LzmaDec_DecodeToDic(Cpu *c) {
 /* signature of bcc32-built LzmaDec_DecodeToDic (LZMA SDK 4.65–9.20 as shipped in Inno Setup 5.x/6.x): prologue + "inSize = *srcLen; *srcLen = 0;" */
 static const u8 LZ_SIG[] = { 0x55, 0x8B, 0xEC, 0x83, 0xC4, 0xEC, 0x53, 0x56, 0x57, 0x89, 0x4D, 0xF8, 0x89, 0x55, 0xFC, 0x8B, 0xD8, 0x8B, 0x45, 0x10, 0x33, 0xD2, 0x8B, 0x30, 0x8B, 0x45, 0x10, 0x89, 0x10 };
 /* entry patch: jmp rel32 into the shim slot (the slot region lies below every 32-bit image, so rel32 always reaches) */
+
+/* ---------- Inno Setup SHA1Update (SHA1.pas, Delphi register convention: eax = context, edx = buffer, ecx = length; no stack arguments) ----------
+   Every file Inno Setup extracts is hashed (SHA-1 in 5.x/6.0-6.3): on the phone this was ~half of the installation time.
+   TSHA1Context: state[5] @0, count lo/hi (bytes) @0x14/0x18, buffer[64] @0x1c, W[80] @0x5c (scratch of SHA1Transform). */
+static u32 hle_sha1_rol(u32 x, int n) { return (x << n) | (x >> (32 - n)); }
+static void hle_sha1_block(u32 st[5], const u8 *p) {
+  u32 w[80]; for (int i = 0; i < 16; i++) w[i] = (u32)p[4 * i] << 24 | (u32)p[4 * i + 1] << 16 | (u32)p[4 * i + 2] << 8 | p[4 * i + 3];
+  for (int i = 16; i < 80; i++) w[i] = hle_sha1_rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+  u32 a = st[0], b = st[1], c = st[2], d = st[3], e = st[4];
+  for (int i = 0; i < 80; i++) { u32 f, k;
+    if (i < 20) { f = (b & c) | (~b & d); k = 0x5A827999; } else if (i < 40) { f = b ^ c ^ d; k = 0x6ED9EBA1; } else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8F1BBCDC; } else { f = b ^ c ^ d; k = 0xCA62C1D6; }
+    u32 t = hle_sha1_rol(a, 5) + f + e + k + w[i]; e = d; d = c; c = hle_sha1_rol(b, 30); b = a; a = t; }
+  st[0] += a; st[1] += b; st[2] += c; st[3] += d; st[4] += e;
+}
+static u64 g_hle_sha1_bytes;
+static void s_hle_SHA1Update(Cpu *c) {
+  u32 ctx = (u32)g_entry_eax, buf = (u32)c->r[RDX], len = (u32)c->r[RCX];
+  u8 *C = mem_ptr(c->mem, ctx, 0x5c, 1); if (!C) { cpu_fault(c, "SHA1Update: bad context 0x%x", ctx); return; }
+  const u8 *B = len ? mem_ptr(c->mem, buf, len, 0) : 0; if (len && !B) { cpu_fault(c, "SHA1Update: bad buffer 0x%x+%u", buf, len); return; }
+  u32 st[5]; for (int i = 0; i < 5; i++) st[i] = lz_le32(C + 4 * i);
+  u32 old = lz_le32(C + 0x14), cnt = old + len; lz_put32(C + 0x14, cnt); if (old > cnt) lz_put32(C + 0x18, lz_le32(C + 0x18) + 1);
+  u32 j = old & 63, room = 64 - j; u8 *bufr = C + 0x1c;
+  if (len < room) { if (len) e_memcpy(bufr + j, B, len); g_hle_sha1_bytes += len; return; }
+  e_memcpy(bufr + j, B, room); hle_sha1_block(st, bufr); B += room; len -= room;
+  while (len >= 64) { hle_sha1_block(st, B); B += 64; len -= 64; }
+  e_memcpy(bufr, B, 64); /* the guest copies the last whole block through its buffer: keep the buffer bytes identical */
+  if (len) e_memcpy(bufr, B, len);
+  for (int i = 0; i < 5; i++) lz_put32(C + 4 * i, st[i]); g_hle_sha1_bytes += len;
+}
+/* Inno's SHA1Update prologue: push ebx/esi/edi/ebp; esi=len edi=buf ebx=ctx; ebp=count; count+=len; carry -> inc hi; ebp&=63; eax=64-ebp */
+static const u8 SHA1_SIG[] = { 0x53, 0x56, 0x57, 0x55, 0x8B, 0xF1, 0x8B, 0xD8, 0x8B, 0xFA, 0x8B, 0x6B, 0x14, 0x01, 0x73, 0x14, 0x3B, 0x6B, 0x14, 0x76, 0x03, 0xFF, 0x43, 0x18, 0x83, 0xE5, 0x3F, 0xB8, 0x40, 0x00, 0x00, 0x00, 0x2B, 0xC5 };
+
+/* ---------- zlib inflate_fast (inffast.c of zlib 1.2.5-1.2.8, bcc32 register convention: eax = strm, edx = start) ----------
+   GOG's uninstall.dll (shipped in every GOG Inno installer) inflates its payload through a statically linked zlib: the other half of the
+   installation time.  z_stream: next_in @0, avail_in @4, total_in @8, next_out @0xc, avail_out @0x10, total_out @0x14, msg @0x18, state @0x1c.
+   inflate_state (1.2.5-1.2.8 layout, verified against the DLL's code): mode @0, dmax @0x14, wsize @0x28, whave @0x2c, wnext @0x30, window @0x34,
+   hold @0x38, bits @0x3c, lencode @0x4c, distcode @0x50, lenbits @0x54, distbits @0x58, sane @0x1c3c (not used: -DINFLATE_STRICT off). */
+#define ZF_BAD 27   /* inflate_mode BAD in the zlib this signature matches (1.2.5: no COPY_/LEN_ states; the DLL stores 0x1b there, TYPE = 0xb) */
+static u64 g_hle_inflate_bytes;
+static void s_hle_inflate_fast(Cpu *c) {
+  u32 strm = (u32)g_entry_eax, start = (u32)c->r[RDX];
+  u8 *S = mem_ptr(c->mem, strm, 0x20, 1); if (!S) { cpu_fault(c, "inflate_fast: bad z_stream 0x%x", strm); return; }
+  u32 st = lz_le32(S + 0x1c); u8 *ST = mem_ptr(c->mem, st, 0x60, 1); if (!ST) { cpu_fault(c, "inflate_fast: bad inflate_state 0x%x", st); return; }
+  u32 gin = lz_le32(S), avail_in = lz_le32(S + 4), gout = lz_le32(S + 0xc), avail_out = lz_le32(S + 0x10);
+  u32 wsize = lz_le32(ST + 0x28), whave = lz_le32(ST + 0x2c), wnext = lz_le32(ST + 0x30), gwindow = lz_le32(ST + 0x34);
+  u32 hold = lz_le32(ST + 0x38), bits = lz_le32(ST + 0x3c), glen = lz_le32(ST + 0x4c), gdist = lz_le32(ST + 0x50), lmask = (1u << lz_le32(ST + 0x54)) - 1, dmask = (1u << lz_le32(ST + 0x58)) - 1;
+  u32 dmax = lz_le32(ST + 0x14);
+  /* the C code reads up to 5 bytes behind avail_in and writes up to 257 bytes behind avail_out: inflate() guarantees avail_in >= 6 and avail_out >= 258 on entry */
+  if (avail_in < 6 || avail_out < 258) { return; }
+  u8 *in = mem_ptr(c->mem, gin, avail_in, 0), *out = mem_ptr(c->mem, gout, avail_out, 1), *window = wsize ? mem_ptr(c->mem, gwindow, wsize, 0) : 0;
+  const u8 *lcode = mem_ptr(c->mem, glen, (lmask + 1) * 4, 0), *dcode = mem_ptr(c->mem, gdist, (dmask + 1) * 4, 0);
+  if (!in || !out || (wsize && !window) || !lcode || !dcode) { cpu_fault(c, "inflate_fast: bad buffers"); return; }
+  const u8 *last = in + (avail_in - 5); u8 *beg = out - (start - avail_out), *end = out + (avail_out - 257);
+  const u8 *in0 = in; u8 *out0 = out; int bad = 0;
+  do {
+    if (bits < 15) { hold += (u32)*in++ << bits; bits += 8; hold += (u32)*in++ << bits; bits += 8; }
+    const u8 *here = lcode + (hold & lmask) * 4; u32 op, len, dist;
+  dolen:
+    op = here[1]; hold >>= op; bits -= op; op = here[0];
+    if (op == 0) { *out++ = here[2]; }
+    else if (op & 16) {
+      len = (u32)here[2] | (u32)here[3] << 8; op &= 15;
+      if (op) { if (bits < op) { hold += (u32)*in++ << bits; bits += 8; } len += hold & ((1u << op) - 1); hold >>= op; bits -= op; }
+      if (bits < 15) { hold += (u32)*in++ << bits; bits += 8; hold += (u32)*in++ << bits; bits += 8; }
+      here = dcode + (hold & dmask) * 4;
+    dodist:
+      op = here[1]; hold >>= op; bits -= op; op = here[0];
+      if (op & 16) {
+        dist = (u32)here[2] | (u32)here[3] << 8; op &= 15;
+        if (bits < op) { hold += (u32)*in++ << bits; bits += 8; if (bits < op) { hold += (u32)*in++ << bits; bits += 8; } }
+        dist += hold & ((1u << op) - 1); (void)dmax; hold >>= op; bits -= op;
+        op = (u32)(out - beg);
+        if (dist > op) {   /* copy from window */
+          op = dist - op;
+          if (op > whave) { bad = 1; break; }   /* "invalid distance too far back" (sane mode) */
+          const u8 *from = window; u8 *from_w;
+          if (wnext == 0) { from += wsize - op; if (op < len) { len -= op; do { *out++ = *from++; } while (--op); from_w = out - dist; from = from_w; } }
+          else if (wnext < op) { from += wsize + wnext - op; op -= wnext; if (op < len) { len -= op; do { *out++ = *from++; } while (--op); from = window; if (wnext < len) { op = wnext; len -= op; do { *out++ = *from++; } while (--op); from = out - dist; } } }
+          else { from += wnext - op; if (op < len) { len -= op; do { *out++ = *from++; } while (--op); from = out - dist; } }
+          while (len > 2) { *out++ = *from++; *out++ = *from++; *out++ = *from++; len -= 3; }
+          if (len) { *out++ = *from++; if (len > 1) *out++ = *from++; }
+        } else {
+          const u8 *from = out - dist;
+          do { *out++ = *from++; *out++ = *from++; *out++ = *from++; len -= 3; } while (len > 2);
+          if (len) { *out++ = *from++; if (len > 1) *out++ = *from++; }
+        }
+      }
+      else if ((op & 64) == 0) { here = dcode + (((u32)here[2] | (u32)here[3] << 8) + (hold & ((1u << op) - 1))) * 4; goto dodist; }
+      else { bad = 1; break; }   /* invalid distance code */
+    }
+    else if ((op & 64) == 0) { here = lcode + (((u32)here[2] | (u32)here[3] << 8) + (hold & ((1u << op) - 1))) * 4; goto dolen; }
+    else if (op & 32) { lz_put32(ST, 11 /* TYPE */); break; }   /* end of block */
+    else { bad = 1; break; }   /* invalid literal/length code */
+  } while (in < last && out < end);
+  if (bad) { lz_put32(ST, ZF_BAD); lz_put32(S + 0x18, 0); }
+  /* return unused bytes (on entry, bits < 8, so in won't go too far back) */
+  u32 len = bits >> 3; in -= len; bits -= len << 3; hold &= (1u << bits) - 1;
+  lz_put32(S, gin + (u32)(in - in0)); lz_put32(S + 0xc, gout + (u32)(out - out0));
+  lz_put32(S + 4, (u32)(in < last ? 5 + (last - in) : 5 - (in - last))); lz_put32(S + 0x10, (u32)(out < end ? 257 + (end - out) : 257 - (out - end)));
+  lz_put32(ST + 0x38, hold); lz_put32(ST + 0x3c, bits); g_hle_inflate_bytes += (u64)(out - out0);
+}
+/* bcc32-built inflate_fast prologue: push ebx/esi/edi; sub esp,0x44; [esp]=strm; state=strm->state; in=next_in-1; last=in+(avail_in-5) */
+static const u8 INFL_SIG[] = { 0x53, 0x56, 0x57, 0x83, 0xC4, 0xBC, 0x89, 0x04, 0x24, 0x8B, 0x04, 0x24, 0x8B, 0x48, 0x1C, 0x89, 0x4C, 0x24, 0x04, 0x8B, 0x04, 0x24, 0x8B, 0x08, 0x49, 0x89, 0x4C, 0x24, 0x08, 0x8B, 0x04, 0x24, 0x8B, 0x48, 0x04, 0x83, 0xE9, 0x05 };
+
+static int hle_patch(Win32 *w, u8 *img, u64 base, u64 o, const char *name, ShimFn fn, int clean32, const char *what) {
+  u64 slot = w32_shim_slot(w, "nebula_hle", name); if (!slot) return 0;
+  { int idx = (int)((slot - G_SHIM_BASE) / SHIM_SLOT_SIZE); w->slots[idx].clean32 = (u16)clean32; w->slots[idx].warned32 = 1; w->slots[idx].fn = fn; }
+  u64 at = base + o; s32 rel = (s32)((s64)slot - (s64)(at + 5)); img[o] = 0xE9; lz_put32(img + o + 1, (u32)rel);
+  w32_report(w, "[hle] %s at 0x%llx -> %s", name, (unsigned long long)at, what); return 1;
+}
+/* scan a freshly mapped 32-bit image (exe or DLL) for hot library routines we can run natively; each is patched once per image */
 void w32_hle_scan(Win32 *w, u8 *img, u64 base, u64 size) {
-  if (!w->mode32 || size < sizeof LZ_SIG + 64 || g_hle_off) return;
-  for (u64 o = 0; o + sizeof LZ_SIG + 8 <= size; o++) {
-    if (img[o] != 0x55 || img[o + 1] != 0x8B || e_memcmp(img + o, LZ_SIG, sizeof LZ_SIG)) continue;
-    /* the body must also contain "cmp dword [ebx+0x58], 5" (tempBufSize < RC_INIT_SIZE) within the next 160 bytes */
-    static const u8 chk[] = { 0x83, 0x7B, 0x58, 0x05 }; int ok = 0; for (u64 k = o; k + 4 <= size && k < o + 160; k++) if (!e_memcmp(img + k, chk, 4)) { ok = 1; break; }
-    if (!ok) continue;
-    u64 slot = w32_shim_slot(w, "nebula_hle", "LzmaDec_DecodeToDic"); if (!slot) return;
-    { int idx = (int)((slot - G_SHIM_BASE) / SHIM_SLOT_SIZE); w->slots[idx].clean32 = 12; w->slots[idx].warned32 = 1; w->slots[idx].fn = s_hle_LzmaDec_DecodeToDic; }
-    u64 at = base + o; s32 rel = (s32)((s64)slot - (s64)(at + 5)); img[o] = 0xE9; lz_put32(img + o + 1, (u32)rel);
-    w32_report(w, "[hle] LzmaDec_DecodeToDic at 0x%llx -> native LZMA decoder (installer extraction runs at host speed)", (unsigned long long)at);
-    return;
+  if (!w->mode32 || size < 64 || g_hle_off) return;
+  int got_lz = 0, got_sha = 0, got_infl = 0;
+  for (u64 o = 0; o + 48 <= size; o++) {
+    u8 b = img[o];
+    if (b == 0x55 && !got_lz && o + sizeof LZ_SIG + 8 <= size && !e_memcmp(img + o, LZ_SIG, sizeof LZ_SIG)) {
+      /* the body must also contain "cmp dword [ebx+0x58], 5" (tempBufSize < RC_INIT_SIZE) within the next 160 bytes */
+      static const u8 chk[] = { 0x83, 0x7B, 0x58, 0x05 }; int ok = 0; for (u64 k = o; k + 4 <= size && k < o + 160; k++) if (!e_memcmp(img + k, chk, 4)) { ok = 1; break; }
+      if (ok) got_lz = hle_patch(w, img, base, o, "LzmaDec_DecodeToDic", s_hle_LzmaDec_DecodeToDic, 12, "native LZMA decoder");
+    } else if (b == 0x53 && img[o + 1] == 0x56 && img[o + 2] == 0x57) {
+      if (!got_sha && !e_memcmp(img + o, SHA1_SIG, sizeof SHA1_SIG)) got_sha = hle_patch(w, img, base, o, "SHA1Update", s_hle_SHA1Update, 0, "native SHA-1 (Inno Setup file verification)");
+      else if (!got_infl && !e_memcmp(img + o, INFL_SIG, sizeof INFL_SIG)) got_infl = hle_patch(w, img, base, o, "inflate_fast", s_hle_inflate_fast, 0, "native zlib inflate_fast (GOG uninstall.dll)");
+    }
+    if (got_lz && got_sha && got_infl) break;
   }
 }

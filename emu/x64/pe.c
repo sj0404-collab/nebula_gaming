@@ -219,6 +219,7 @@ static int pe_map(Win32 *w, const u8 *bytes, size_t len, const char *name, int w
 int pe_load_dll(Win32 *w, const u8 *bytes, size_t len, const char *name) {
   PeHdr h; u64 base, size; int before = w->nmods;
   if (pe_map(w, bytes, len, name, 1, &h, &base, &size)) return -1;
+  { u8 *img = mem_ptr(w->mem, base, size, 1); if (img) w32_hle_scan(w, img, base, size); }   /* hot library code inside DLLs too (GOG's uninstall.dll carries its own zlib) */
   if (h.dd[9][0] && h.dd[9][0] + 40 <= size) {   /* DLL static TLS: register a slot (mingw DLLs carry one, MSVC DLLs with thread_local too) */
     const u8 *t = mem_ptr(w->mem, base + h.dd[9][0], 40, 0);
     if (t) { u64 rs, re, idx_addr; u32 zero; if (w->mode32) { rs = le32(t); re = le32(t + 4); idx_addr = le32(t + 8); zero = le32(t + 16); } else { rs = le64(t); re = le64(t + 8); idx_addr = le64(t + 16); zero = le32(t + 32); } if (pe_tls_register(w, rs, re, zero, idx_addr) < 0) w32_report(w, "%s: too many images with static TLS (max %d)", name, MAX_TLS_IMAGES); }
