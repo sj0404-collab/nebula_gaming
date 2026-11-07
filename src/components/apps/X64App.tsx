@@ -297,6 +297,7 @@ export default function X64App() {
     const rt = rtRef.current, p = presenterRef.current, el = cursorRef.current; if (!rt || !p || !el) return;
     const { w, h } = rt.screenSize(); const cw = p.canvas.clientWidth, ch = p.canvas.clientHeight; if (!w || !h || !cw || !ch) return;
     if (cur.current.x < 0) cur.current = { x: w / 2, y: h / 2 };
+    if (cur.current.x > w - 1 || cur.current.y > h - 1) cur.current = { x: Math.min(cur.current.x, w - 1), y: Math.min(cur.current.y, h - 1) };   // the desktop shrank (rotation): keep the cursor on it
     const s = Math.min(cw / w, ch / h); const ox = (cw - w * s) / 2, oy = (ch - h * s) / 2;
     el.style.transform = `translate(${ox + cur.current.x * s}px, ${oy + cur.current.y * s}px)`;
   }, []);
