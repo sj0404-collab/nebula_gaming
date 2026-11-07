@@ -1,0 +1,129 @@
+name: Manual Android APK (unverified by full CI)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  runtime-pack:
+    name: Windows runtime pack (VC++ 2015–2022 Redistributable x64 → /x64/sys32)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get install -y -q cabextract
+      - name: Download the official vc_redist.x64.exe and extract its x64 DLLs (msvcp140*, vcruntime140*, concrt140, vcomp140, mfc140* …) + manifest
+        run: ./emu/tools/runtime-pack.sh public/x64/sys32
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-pack
+          path: public/x64/sys32/
+          if-no-files-found: error
+
+  dx-pack:
+    name: DirectX pack (official DirectX End-User Runtimes June 2010, x64 user-mode DLLs → /x64/dx)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get install -y -q cabextract
+      - name: Download directx_Jun2010_redist.exe, extract the x64 cabinets (D3DCompiler_33…43, d3dx9/10/11, d3dcsx, X3DAudio), gzip per file + manifest (nothing modified)
+        run: ./emu/tools/dx-pack.sh public/x64/dx /tmp/dx/pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dx-pack
+          path: public/x64/dx/
+          if-no-files-found: error
+
+  dotnet-pack:
+    name: .NET pack (official Microsoft .NET 10 runtime win-x64 → /x64/dotnet) + managed test apps
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the official dotnet-runtime-10.0.x-win-x64.zip, gzip per file + manifest (nothing modified)
+        run: ./emu/tools/dotnet-pack.sh public/x64/dotnet /tmp/dn/pack
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: 10.0.x }
+      - name: Build the managed test apps (net10.0 framework-dependent + apphost; classic net48 AnyCPU exe)
+        run: |
+          dotnet publish emu/tests/dotnet/app -c Release -o /tmp/dn/app
+          dotnet build emu/tests/dotnet/fx -c Release -o /tmp/dn/fx
+          mkdir -p dn-tests && cp -r /tmp/dn/app /tmp/dn/fx dn-tests/
+      - name: Roslyn csc.dll (IL-only, from the official Microsoft.Net.Compilers.Toolset 5.0.0 NuGet package) for the compiler test
+        run: |
+          curl -fsSL -o /tmp/roslyn.nupkg https://api.nuget.org/v3-flatcontainer/microsoft.net.compilers.toolset/5.0.0/microsoft.net.compilers.toolset.5.0.0.nupkg
+          mkdir -p dn-tests/csc && (cd dn-tests/csc && unzip -q -o /tmp/roslyn.nupkg 'tasks/netcore/bincore/*') && ls dn-tests/csc/tasks/netcore/bincore | head -5
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dotnet-pack
+          path: public/x64/dotnet/
+          if-no-files-found: error
+          include-hidden-files: true   # shared/Microsoft.NETCore.App/<ver>/.version is a dotfile
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dotnet-tests
+          path: dn-tests/
+          if-no-files-found: error
+
+  wasm:
+    name: Build current wasm64 emulator
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with: { version: 0.17.0 }
+      - name: Build emulator from this commit
+        run: BUILD_CMD=1 BUILD_PWSH=1 ZIG=zig ./emu/x64/build.sh
+      - uses: actions/upload-artifact@v4
+        with: { name: nebula_x64-wasm64, path: public/x64/nebula_x64.wasm }
+
+  android:
+    name: Android APK (Capacitor)
+    runs-on: ubuntu-latest
+    needs: [runtime-pack, dotnet-pack, dx-pack, wasm]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: runtime-pack, path: public/x64/sys32 }
+      - uses: actions/download-artifact@v4
+        with: { name: dotnet-pack, path: public/x64/dotnet }
+      - uses: actions/download-artifact@v4
+        with: { name: dx-pack, path: public/x64/dx }
+      - uses: actions/download-artifact@v4   # the wasm64 emulator built in this run — never the committed one (v1.42.0/v1.43.0 APKs shipped a stale module)
+        with: { name: nebula_x64-wasm64, path: public/x64 }
+      - run: ls -la public/x64/nebula_x64.wasm && sha256sum public/x64/nebula_x64.wasm | tee /tmp/wasm.sha
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 21 }
+      # ubuntu-latest already ships the Android SDK (ANDROID_HOME) with accepted licences; Gradle downloads platform 36 itself
+      - run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null 2>&1 || true
+      - run: npm ci
+      - run: npm run build
+      - run: npx cap sync android
+      - name: Version from tag
+        id: v
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF#refs/tags/v}"; else V="0.0.${GITHUB_RUN_NUMBER}"; fi
+          IFS=. read -r a b c <<< "$V"; CODE=$(( ${a:-0}*10000 + ${b:-0}*100 + ${c%%-*} ))
+          echo "name=$V" >> "$GITHUB_OUTPUT"; echo "code=$CODE" >> "$GITHUB_OUTPUT"
+      - name: Build signed release APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleRelease -PversionName=${{ steps.v.outputs.name }} -PversionCode=${{ steps.v.outputs.code }}
+          mkdir -p ../release
+          cp app/build/outputs/apk/release/app-release.apk ../release/NebulaOS-v${{ steps.v.outputs.name }}-android.apk
+          ls -la ../release
+      - name: Verify the APK embeds the wasm built in this run
+        run: |
+          mkdir -p /tmp/apkx && cd /tmp/apkx && unzip -qo "$GITHUB_WORKSPACE"/release/*.apk 2>/dev/null || true
+          f=$(find /tmp/apkx -name 'nebula_x64*.wasm' | head -1); [ -n "$f" ] || { echo "no wasm inside the APK"; find /tmp/apkx -maxdepth 3 | head -30; exit 1; }
+          echo "APK wasm: $f"; a=$(sha256sum "$f" | cut -d' ' -f1); b=$(cut -d' ' -f1 /tmp/wasm.sha); echo "apk=$a built=$b"; [ "$a" = "$b" ] || { echo "APK wasm differs from the module built in this run"; exit 1; }
+      - name: Verify APK signature & manifest
+        run: |
+          BT=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -1)
+          $BT/apksigner verify --print-certs release/*.apk | head -5
+          $BT/aapt dump badging release/*.apk | grep -E "package:|application-label:|sdkVersion|uses-permission" | head -8
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NebulaOS-android-apk
+          path: release/*.apk
+
