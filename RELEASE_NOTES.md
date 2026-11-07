@@ -20,6 +20,10 @@ routines and patches their entry points to built-in native versions (`emu/x64/hl
 Everything else is the installer's own code; Inno still checks every file's hash — now against a hash computed natively.
 `X64_NOHLE=1` / `x64_set_hle(0)` switches the patches off.
 
+**Measured on the GitHub runner (native build, same scripted install, 1600×720 desktop):** installation phase 3 min 17 s →
+**21 s** (12.2 → 1.14 billion guest instructions), all 243 files written, "Installation process succeeded", no hash errors.
+The phone gains proportionally (the remaining work is the installer's own UI loop and file writes).
+
 **Phone fixes from the v1.44.0 screenshots.**
 - Portrait: the desktop is no longer capped in height, so the picture fills the screen without black bars.
 - After a rotation / size change windows are re-centred, clamped to the new desktop and the desktop is repainted; closing a
