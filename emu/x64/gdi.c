@@ -120,7 +120,7 @@ static void s_SetProcessDpiAwarenessContext(Cpu *c) { RET(1); }
 static void s_GetDpiForWindow(Cpu *c) { RET(96); }
 static void s_GetDpiForSystem(Cpu *c) { RET(96); }
 static void s_SetRect(Cpu *c) { u64 r = ARG(0); wr32(c, r, (u32)ARG(1)); wr32(c, r + 4, (u32)ARG(2)); wr32(c, r + 8, (u32)ARG(3)); wr32(c, r + 12, (u32)ARG(4)); RET(1); }
-static void s_PtInRect(Cpu *c) { u64 r = ARG(0); s32 x = (s32)(u32)ARG(1), y = (s32)(u32)(ARG(1) >> 32); RET(x >= (s32)rd32(c, r) && x < (s32)rd32(c, r + 8) && y >= (s32)rd32(c, r + 4) && y < (s32)rd32(c, r + 12)); }
+static void s_PtInRect(Cpu *c) { u64 r = ARG(0); s32 x = (s32)(u32)ARG(1), y = c->mode32 ? (s32)(u32)ARG(2) : (s32)(u32)(ARG(1) >> 32); RET(x >= (s32)rd32(c, r) && x < (s32)rd32(c, r + 8) && y >= (s32)rd32(c, r + 4) && y < (s32)rd32(c, r + 12)); }
 static void s_FillRect(Cpu *c) { Win32 *w = W; Surf s; if (!dc_surf(c, ARG(0), &s)) { RET(0); return; } u64 r = ARG(1); u64 hb = ARG(2); u32 px = 0;
   GdiObj *b = gdi_get(w, hb); if (b) { if (b->kind == K_BRUSH && b->pen_width == -1) { RET(1); return; } px = b->color; } else if (hb >= 1 && hb <= 31) { extern u32 sys_color_px(u32); px = sys_color_px((u32)hb - 1); }
   fill_rect_px(&s, (s32)rd32(c, r), (s32)rd32(c, r + 4), (s32)rd32(c, r + 8), (s32)rd32(c, r + 12), px); mark_screen(w, ARG(0)); RET(1); }

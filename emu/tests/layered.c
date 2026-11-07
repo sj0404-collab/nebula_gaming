@@ -3,6 +3,8 @@
 #include <stdio.h>
 static LRESULT CALLBACK proc(HWND w, UINT m, WPARAM a, LPARAM b) { return DefWindowProcW(w,m,a,b); }
 int main(void) {
+  RECT rect = {100, 200, 400, 300}; POINT inside = {290, 232}, outside = {290, 50};
+  if (!PtInRect(&rect, inside) || PtInRect(&rect, outside)) { puts("layered: POINT FAIL"); return 6; }
   HINSTANCE inst = GetModuleHandleW(NULL);
   WNDCLASSW wc = {0}; wc.lpfnWndProc = proc; wc.hInstance = inst; wc.lpszClassName = L"layer-test";
   if (!RegisterClassW(&wc)) return 1;
