@@ -1,0 +1,44 @@
+name: Official Clover install and launch probe
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  clover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build native runner
+        run: cd emu/x64 && cc -O2 -Wall -Wno-unused-function -Wno-unused-parameter -Wno-misleading-indentation -o x64run lib.c cpu.c pe.c win32.c gdi.c vfs.c api.c dxbc.c host_native.c main_native.c -lm
+      - name: Download official EJIE installer and check its known hash
+        run: |
+          mkdir -p "$RUNNER_TEMP/clover/files" "$RUNNER_TEMP/clover/frames"
+          curl -fsSL --retry 3 'http://cn.ejie.me/uploads/setup_clover@3.5.4.exe' -o "$RUNNER_TEMP/clover/setup.exe"
+          echo '9847281c4caca7b50d73839b8d1a8426a16d55c551ebd55c5854f29bcf517910  '"$RUNNER_TEMP/clover/setup.exe" | sha256sum -c -
+      - name: Install into a write-back virtual disk and launch Clover
+        run: |
+          set -o pipefail
+          cd "$RUNNER_TEMP/clover/frames"
+          runner="$GITHUB_WORKSPACE/emu/x64/x64run"
+          X64_LOG=1 X64_WNDDUMP=1 "$runner" --no-stdin --max-ms 190000 --desktop 1600x720 --click 290,232@8000 --click 285,320@160000 --frames 60 --list-vfs --mount-rw "$RUNNER_TEMP/clover/files=C:\nebula" "$RUNNER_TEMP/clover/setup.exe" > "$RUNNER_TEMP/clover/install.log" 2>&1
+          test -s "$RUNNER_TEMP/clover/files/Clover.exe"
+          mv frame_*.ppm ../ 2>/dev/null || true
+          X64_LOG=1 X64_WNDDUMP=1 "$runner" --no-stdin --max-ms 60000 --desktop 1600x720 --frames 20 --list-vfs --mount-rw "$RUNNER_TEMP/clover/files=C:\nebula" "$RUNNER_TEMP/clover/files/Clover.exe" > "$RUNNER_TEMP/clover/launch.log" 2>&1
+      - name: Convert diagnostic frames
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob, os
+          from PIL import Image
+          for f in glob.glob(os.environ['RUNNER_TEMP'] + '/clover/**/*.ppm', recursive=True):
+              Image.open(f).save(f[:-4] + '.png')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: clover-probe
+          path: |
+            ${{ runner.temp }}/clover/*.log
+            ${{ runner.temp }}/clover/*.png
+            ${{ runner.temp }}/clover/frames/*.png
