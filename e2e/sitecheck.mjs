@@ -22,6 +22,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
 const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
 if (process.env.X64_JIT === '0') await ctx.addInitScript(() => { try { localStorage.setItem('nebula_jit', '0'); } catch { /* ignore */ } });
+if (process.env.X64_JITSKIP) await ctx.addInitScript((sk) => { try { localStorage.setItem('nebula_jitskip', sk); } catch { /* ignore */ } }, process.env.X64_JITSKIP);   /* JIT bisect: kinds lo:hi stepped */
 const page = await ctx.newPage();
 const errors = []; page.on('pageerror', e => errors.push(e.message));
 await page.goto(url); await page.waitForSelector('[aria-label="Start"]');

@@ -23,7 +23,10 @@ on:
       apitrace:
         description: 'native pass with --apitrace (every Win32 call into native.txt)'
         default: '0'
-run-name: "sitecheck · ${{ inputs.filename || inputs.url }} · jit=${{ inputs.jit }}"
+      jitskip:
+        description: 'JIT bisect: instruction kinds lo:hi are interpreted instead of translated (e.g. 1:27); empty = none'
+        default: ''
+run-name: "sitecheck · ${{ inputs.filename || inputs.url }} · jit=${{ inputs.jit }} ${{ inputs.jitskip && format('skip={0}', inputs.jitskip) || '' }}"
 permissions:
   contents: read
 jobs:
@@ -58,10 +61,11 @@ jobs:
           MS="${{ github.event.inputs.wait }}"; [ "$MS" -gt 25000 ] 2>/dev/null || MS=25000; echo "native: --max-ms $MS $KEYS"
           rc=0; X64_LOG=1 timeout $((MS / 1000 + 90)) ./emu/x64/x64run --quiet --no-stdin $AT --max-ms $MS $KEYS --stats --mount-rw "/tmp/sc/guest_tmp=C:\\tmp" "/tmp/sc/$NAME" > /tmp/sc/native.txt 2>&1 || rc=$?
           echo "native rc=$rc"; grep -a -v "^\[wnd\]" /tmp/sc/native.txt | tail -60 | cut -c1-300
-          find /tmp/sc/guest_tmp -type f | head -20; find /tmp/sc/guest_tmp -maxdepth 1 -name "Setup Log*" -exec sh -c 'echo "--- $1"; sed "1s/^\xEF\xBB\xBF//" "$1" | grep -v "DLL function import\|Function name:\|DLL name:\|Dest DLL name:\|Importing the DLL\|imported the DLL\|Failed to import" | head -60 | cut -c1-240; echo "--- tail"; tail -40 "$1" | cut -c1-240' _ {} \; ; find /tmp/sc/guest_tmp -type f \( -name "*.tmp" -o -name "*.exe" -o -name "*.dll" \) -size +20k -exec cp {} /tmp/sc/ \; 2>/dev/null || true
+          find /tmp/sc/guest_tmp -type f | head -20; find /tmp/sc/guest_tmp -maxdepth 1 -name "Setup Log*" -exec sh -c 'echo "--- $1"; sed "1s/^\xEF\xBB\xBF//" "$1" | grep -v "DLL function import\|Function name:\|DLL name:\|Dest DLL name:\|Importing the DLL\|imported the DLL\|Failed to import" | head -60 | cut -c1-240; echo "--- tail"; tail -40 "$1" | cut -c1-240' _ {} \; ; find /tmp/sc/guest_tmp -type f \( -name "*.tmp" -o -name "*.exe" -o -name "*.dll" \) -size +20k -exec cp {} /tmp/sc/ \; 2>/dev/null || true; find /tmp/sc/guest_tmp -maxdepth 1 -name "Setup Log*" -exec cp {} /tmp/sc/ \; 2>/dev/null || true
       - name: Open it through the Programs UI
         env:
           X64_JIT: ${{ github.event.inputs.jit }}
+          X64_JITSKIP: ${{ github.event.inputs.jitskip }}
         run: node e2e/sitecheck.mjs "/tmp/sc/$NAME" --wait "${{ github.event.inputs.wait }}" --args "${{ github.event.inputs.args }}" --keys "${{ github.event.inputs.keys }}" 2>&1 | tee /tmp/sc/sitecheck.txt
       - uses: actions/upload-artifact@v4
         if: always()
@@ -74,4 +78,5 @@ jobs:
             /tmp/sc/browser_log.txt
             /tmp/sc/*.tmp
             /tmp/sc/*.dll
+            /tmp/sc/Setup Log*.txt
           if-no-files-found: warn
