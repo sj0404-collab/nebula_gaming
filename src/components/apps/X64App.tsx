@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Cpu, FolderOpen, FolderInput, Play, Square, Terminal as TerminalIcon, Monitor, FileSearch, AlertTriangle, CheckCircle2, HelpCircle, XCircle, Gamepad2, HardDrive, Download, Trash2, SendHorizontal, Keyboard, LayoutGrid, Maximize2, Minimize2, Image as ImageIcon, FlaskConical, Loader2, PackagePlus, X, Mouse, MousePointerClick, Expand } from 'lucide-react';
 import { scanLibrary, classifyExe, loadPrefs, savePrefs, makeLnk, type LibraryItem, type LibraryPrefs } from '../../lib/x64/library';
 import { peIconDataUrl } from '../../lib/x64/peicon';
+import { notifyDiskChange } from '../../lib/x64/diskbus';
 import { zipEntries, zipRead } from '../../lib/x64/zip';
 import { useOS } from '../../lib/os';
 import { X64Runtime, vkFromEvent, wasm64Supported, type JitInfo, type PeInfo, type RunStats, type VfsEntry } from '../../lib/x64/runtime';
@@ -228,7 +229,7 @@ export default function X64App() {
     rt.onPresent = (px, w, h) => { presenterRef.current?.present(px, w, h); setFrames(f => { if (f === 0 && autoTabRef.current) setTab('screen'); return f + 1; }); };
     rt.onGlPresent = (cv, x, y, w, h) => presenterRef.current?.setGl(cv, x, y, w, h) ?? false;
     rt.onGlFlip = () => { presenterRef.current?.redraw(); setFrames(f => f + 1); };
-    rt.onStop = (s) => { if (s.status === 'fault') { setFs(false); if (document.fullscreenElement) void document.exitFullscreen().catch(() => {}); } setStats(s); setApiStats(rt.apiStats()); setJitInfo(rt.jitStats()); setFiles(rt.vfsList()); rescanRef.current(true); if (s.status !== 'exited' || !s.hasWindow) setTab(t => (s.hasWindow && s.status === 'exited') ? t : (s.status === 'fault' ? 'report' : t === 'screen' && !s.hasWindow ? 'console' : t)); };
+    rt.onStop = (s) => { void rt.syncDisk().then(notifyDiskChange); if (s.status === 'fault') { setFs(false); if (document.fullscreenElement) void document.exitFullscreen().catch(() => {}); } setStats(s); setApiStats(rt.apiStats()); setJitInfo(rt.jitStats()); setFiles(rt.vfsList()); rescanRef.current(true); if (s.status !== 'exited' || !s.hasWindow) setTab(t => (s.hasWindow && s.status === 'exited') ? t : (s.status === 'fault' ? 'report' : t === 'screen' && !s.hasWindow ? 'console' : t)); };
     rt.onDisk = () => setDisk({ files: rt.diskFiles, writes: rt.disk.writes, bytes: rt.disk.bytes, queued: rt.disk.queued() });
     rt.init().then(async () => {
       if (!alive) return;
@@ -547,7 +548,7 @@ export default function X64App() {
     const url = await new Promise<string>((res, rej) => { const im = new Image(); const u = URL.createObjectURL(file); im.onload = () => { const c = document.createElement('canvas'); const s = Math.min(1, 512 / Math.max(im.width, im.height)); c.width = Math.round(im.width * s); c.height = Math.round(im.height * s); c.getContext('2d')!.drawImage(im, 0, 0, c.width, c.height); URL.revokeObjectURL(u); res(c.toDataURL('image/jpeg', 0.85)); }; im.onerror = () => { URL.revokeObjectURL(u); rej(new Error('bad image')); }; im.src = u; }).catch(() => '');
     if (url) updatePrefs(id, { cover: url });
   }, [updatePrefs]);
-  const stop = useCallback(() => { const rt = rtRef.current; if (!rt) return; rt.stop(); setStats(rt.stats()); setApiStats(rt.apiStats()); setJitInfo(rt.jitStats()); setFiles(rt.vfsList()); }, []);   // a manual stop shows the same statistics as a normal exit (JIT regions, Win32 calls)
+  const stop = useCallback(() => { const rt = rtRef.current; if (!rt) return; rt.stop(); void rt.syncDisk().then(notifyDiskChange); setStats(rt.stats()); setApiStats(rt.apiStats()); setJitInfo(rt.jitStats()); setFiles(rt.vfsList()); }, []);   // a manual stop shows the same statistics as a normal exit (JIT regions, Win32 calls)
 
   // keyboard → guest
   const guestKey = useCallback((e: React.KeyboardEvent, down: boolean) => {
