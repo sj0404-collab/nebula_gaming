@@ -1,28 +1,34 @@
-# v1.45.0 — Android: installers extract at native speed, phone desktop fixes, a working language list, FPS counter
+# v1.45.0 — Android: installers hash and inflate at native speed, phone desktop fixes, a working language list, FPS counter
 
-**Native LZMA decoding for installers (the speed fix).** The sampling profiler (new: `X64_PROF=1`, `nativeprof.yml`) showed that
-an Inno Setup installer on the phone spends almost all of its time inside its own LZMA decoder — a few hot loops interpreted at
-≈ 11 MIPS. The emulator now recognises Inno Setup's `LzmaDec_DecodeToDic` (LZMA SDK as built by bcc32, Inno 5.x/6.x) by its
-machine-code signature when a 32-bit image is mapped and patches its entry to a built-in decoder (`emu/x64/hle_lzma.inc`,
-a port of the SDK's `LzmaDec_DecodeReal` / `WriteRem` / `TryDummy` working directly on the guest's `CLzmaDec` state and
-dictionary). Same results byte-for-byte — Inno verifies every file by CRC32 — but the extraction runs at device speed. Can be
-switched off (`X64_NOHLE=1` / `x64_set_hle(0)`) for comparison. Nothing else about the program changes: it is the same
-installer executing its own code everywhere except that one function.
+**Where the installation time really went.** A new in-emulator sampling profiler (`X64_PROF=1`: hottest guest code blocks + host
+time per API call, across processes; `.github/workflows/nativeprof.yml` runs an installer on the runner with scripted keys/clicks
+and keeps frames, the profile and Inno's Setup Log) measured the GOG installer of Shattered Pixel Dungeon (122 MB) end to end:
+**47 % of all executed instructions were Inno Setup's `SHA1Transform`** (every extracted file is SHA-1-verified) and **42 % were
+zlib's `inflate_fast` inside GOG's `uninstall.dll`**; the LZMA decoder itself was 0.7 %, the API calls (file writes, painting)
+under 9 s of 200 s.  ~11 billion instructions for 122 MB — on a phone at 10–20 MIPS that is the slow installation.
+
+**Native replacements (HLE by machine-code signature).** When a 32-bit exe or DLL is mapped, the emulator scans it for three
+routines and patches their entry points to built-in native versions (`emu/x64/hle_lzma.inc`):
+- `SHA1Update` of Inno Setup 5.x/6.x (Delphi register convention) → native SHA-1 on the guest's context (state, byte counters,
+  pending block kept bit-exact);
+- `inflate_fast` of the zlib statically linked into GOG's `uninstall.dll` (bcc32, zlib 1.2.5 layout) → a native port of
+  inffast.c working on the guest's `z_stream`/`inflate_state`, verified byte-exact against zlib 1.2.8 over 40 randomised
+  round-trips with random chunk boundaries;
+- `LzmaDec_DecodeToDic` (LZMA SDK as built into Inno Setup) → native LZMA decoder (correct; little effect on this installer,
+  matters for heavily compressed ones).
+Everything else is the installer's own code; Inno still checks every file's hash — now against a hash computed natively.
+`X64_NOHLE=1` / `x64_set_hle(0)` switches the patches off.
 
 **Phone fixes from the v1.44.0 screenshots.**
 - Portrait: the desktop is no longer capped in height, so the picture fills the screen without black bars.
-- After a rotation / size change windows are re-centred, clamped to the new desktop and the desktop is repainted; no leftovers
-  from the old layout. Closing a drop-down list, a modal dialog or `EndDialog` clears the area it covered.
-- **The language list in the setup dialog was empty (white).** A real bug in the combo box: the items were copied into the list
-  window only when the combo was already flagged as dropped, and the flag was set after the copy. Fixed; the list shows
-  English / Français / Polski / Português (Brasil) / Русский … (CJK entries draw as “??” — the built-in font has no CJK glyphs).
+- After a rotation / size change windows are re-centred, clamped to the new desktop and the desktop is repainted; closing a
+  drop-down list, a modal dialog or `EndDialog` clears the area it covered (no leftovers).
+- **The language list in the setup dialog was empty (white).** A real combo-box bug: the items were copied into the list window
+  only when the combo was already flagged as dropped, and the flag was set after the copy. Fixed; the list shows English /
+  Français / Polski / Português (Brasil) / Русский … (CJK entries draw as “??” — the built-in font has no CJK glyphs).
 
 **FPS / MIPS counter.** A small readout in the top-left corner of the program view (frames presented per second and the
 emulator's MIPS). Toggle with the `FPS` button on the toolbar; the choice is remembered (`nebula_x64_fps`).
-
-**Tools.** In-emulator sampling profiler (`X64_PROF=1` → top 40 hot 64-byte blocks at exit, shim names resolved);
-`.github/workflows/nativeprof.yml` runs any installer natively on the runner with scripted keys/clicks, keeps frames, the
-profile and Inno's Setup Log.
 
 # v1.44.0 — Android: touchpad, on-screen mouse buttons, a desktop that fills the phone screen
 
