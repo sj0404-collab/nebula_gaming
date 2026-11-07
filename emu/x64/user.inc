@@ -799,6 +799,7 @@ static void s_SetLayeredWindowAttributes(Cpu *c) { RET(1); }
    underlying framebuffer intact (repeated alpha composition must not accumulate). */
 static void s_UpdateLayeredWindow(Cpu *c) {
   int i = wnd_of(ARG(0)); u64 dst = ARG(2), sz = ARG(3), hsrc = ARG(4), pt = ARG(5), bf = ARG(7); u32 flags = (u32)ARG(8);
+  e_log("[layered] hwnd=%llx index=%d dst=%llx size=%llx srcdc=%llx srcpt=%llx blend=%llx flags=%x\n", (unsigned long long)ARG(0), i, (unsigned long long)dst, (unsigned long long)sz, (unsigned long long)hsrc, (unsigned long long)pt, (unsigned long long)bf, flags);
   if (i < 0) { W->last_error = 1400; RET(0); return; }
   Wnd *n = &g_wnd[i];
   if (!(n->exstyle & 0x80000u)) { W->last_error = 87; RET(0); return; }
@@ -811,7 +812,7 @@ static void s_UpdateLayeredWindow(Cpu *c) {
     u32 *pixels = emu_alloc((size_t)width * height * 4); if (!pixels) { W->last_error = 8; RET(0); return; }
     for (int y = 0; y < height; y++) e_memcpy(pixels + (size_t)y * width, srow(&src, sy + y) + sx, (size_t)width * 4);
     if (n->layer_pixels) emu_free(n->layer_pixels); n->layer_pixels = pixels; n->layer_w = width; n->layer_h = height; n->layer_flags = flags; n->layer_key = cr2px((u32)ARG(6)); n->layer_blend = blend;
-    n->w = width; n->h = height;
+    n->w = width; n->h = height; e_log("[layered] stored %dx%d first=%08x center=%08x\n", width, height, pixels[0], pixels[(size_t)(height / 2) * width + width / 2]);
   } else if (sz || pt || bf || flags) { W->last_error = 87; RET(0); return; }
   if (dst) { n->x = (s32)rd32(c, dst) - SCREEN_X0; n->y = (s32)rd32(c, dst + 4) - SCREEN_Y0; }
   if (!W->screen) screen_ensure(W, n->x + n->w, n->y + n->h);
