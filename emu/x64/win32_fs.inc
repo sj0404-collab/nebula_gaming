@@ -717,6 +717,16 @@ static void s_ExpandEnvironmentStringsA(Cpu *c) { char out[4096]; size_t n = exp
 static void s_ExpandEnvironmentStringsW(Cpu *c) { char out[4096]; expand_env(name_w(c, ARG(0)), out, sizeof out); size_t n = olen(out, 1) + 1; if (ARG(1) && (u32)ARG(2) >= n) put_w(c, ARG(1), out, 0); RET(n); }
 static void s_GetEnvironmentStrings(Cpu *c) { env_sync(c); RET(W->env_a); }
 static void s_GetEnvironmentStringsW(Cpu *c) { env_sync(c); RET(W->env_w); }
+/* USERENV operates on Nebula's single emulated user; the returned snapshot is separately owned. */
+static void s_CreateEnvironmentBlock(Cpu *c) {
+  u64 out = ARG(0); if (!out) { W->last_error = 87; RET(0); return; }
+  size_t units = 1; for (int i = 0; i < g_nenv; i++) units += olen(g_env[i], 1) + 1;
+  if (units < 2) units = 2; u64 block = w32_heap_alloc(W, units * 2, 1); if (!block) { W->last_error = 8; RET(0); return; }
+  u64 off = 0; for (int i = 0; i < g_nenv; i++) { put_w(c, block + off * 2, g_env[i], 0); off += olen(g_env[i], 1) + 1; }
+  wr16(c, block + off * 2, 0); wrp(c, out, block); RET(1);
+}
+static void s_DestroyEnvironmentBlock(Cpu *c) { u64 p = ARG(0); if (!p) { W->last_error = 87; RET(0); return; } w32_heap_free(W, p); RET(1); }
+
 static void s_p__environ(Cpu *c) { env_sync(c); RET(W->ubuf + 0x228); }
 static void s_p__wenviron(Cpu *c) { env_sync(c); RET(W->ubuf + 0x230); }
 static void s_get_initial_wide_environment(Cpu *c) { env_sync(c); RET(rd64(c, W->ubuf + 0x230)); }
@@ -815,5 +825,5 @@ static void s_mktemp(Cpu *c) { u64 a = ARG(0); u64 l = e_strlen(gstr(c, a)); u32
   SA("_access", access), SA("access", access), SA("_waccess", waccess), SA("_access_s", access_s), SA("_unlink", unlink), SA("unlink", unlink), SA("remove", unlink), SA("_wunlink", wunlink), SA("_wremove", wunlink), SA("_mkdir", mkdir), SA("mkdir", mkdir), SA("_wmkdir", wmkdir), SA("_rmdir", rmdir), SA("rmdir", rmdir), SA("_wrmdir", rmdir), \
   S(rename), SA("_wrename", wrename), SA("_getcwd", getcwd), SA("getcwd", getcwd), SA("_wgetcwd", wgetcwd), SA("_chdir", chdir), SA("chdir", chdir), SA("_wchdir", wchdir), SA("_fullpath", fullpath), SA("_wfullpath", wfullpath), \
   SA("_findfirst64", findfirst64), SA("_findfirst64i32", findfirst64), SA("_findnext64", findnext64), SA("_findnext64i32", findnext64), SA("_findclose", findclose), SA("_kbhit", kbhit), SA("_getch", getch), SA("_getche", getch), SA("gets_s", gets_s), \
-  S(getenv), SA("__p___initenv", p__environ), SA("__p___winitenv", p__wenviron), SA("_wgetenv", wgetenv), S(getenv_s), SA("_dupenv_s", dupenv_s), SA("_putenv", putenv), SA("putenv", putenv), SA("_wputenv", wputenv), SA("_putenv_s", putenv_s), SA("_wputenv_s", wputenv_s), S(GetEnvironmentVariableA), S(GetEnvironmentVariableW), S(SetEnvironmentVariableA), S(SetEnvironmentVariableW), S(ExpandEnvironmentStringsA), S(ExpandEnvironmentStringsW), S(GetEnvironmentStrings), SA("GetEnvironmentStringsA", GetEnvironmentStrings), S(GetEnvironmentStringsW), SA("__p__environ", p__environ), SA("_get_initial_narrow_environment", get_initial_narrow_environment), SA("__getmainargs", getmainargs), \
+  S(CreateEnvironmentBlock), S(DestroyEnvironmentBlock), S(getenv), SA("__p___initenv", p__environ), SA("__p___winitenv", p__wenviron), SA("_wgetenv", wgetenv), S(getenv_s), SA("_dupenv_s", dupenv_s), SA("_putenv", putenv), SA("putenv", putenv), SA("_wputenv", wputenv), SA("_putenv_s", putenv_s), SA("_wputenv_s", wputenv_s), S(GetEnvironmentVariableA), S(GetEnvironmentVariableW), S(SetEnvironmentVariableA), S(SetEnvironmentVariableW), S(ExpandEnvironmentStringsA), S(ExpandEnvironmentStringsW), S(GetEnvironmentStrings), SA("GetEnvironmentStringsA", GetEnvironmentStrings), S(GetEnvironmentStringsW), SA("__p__environ", p__environ), SA("_get_initial_narrow_environment", get_initial_narrow_environment), SA("__getmainargs", getmainargs), \
   S(strspn), S(strcspn), S(strpbrk), S(strtok), S(strtok_s), SA("_strlwr", strlwr), SA("strlwr", strlwr), SA("_strupr", strupr), SA("strupr", strupr), SA("_strrev", strrev), SA("_itoa", itoa), SA("itoa", itoa), SA("_ltoa", itoa), SA("_ultoa", ultoa), SA("_i64toa", i64toa), SA("_ui64toa", ui64toa), SA("_itow", itow), SA("_ltow", itow), SA("_ultow", ultow), SA("_i64tow", i64tow), SA("_ui64tow", ui64tow), SA("_itoa_s", itoa_s), SA("_ltoa_s", itoa_s), SA("_ultoa_s", ultoa_s), SA("_i64toa_s", i64toa_s), SA("_ui64toa_s", ui64toa_s), SA("_itow_s", itow_s), SA("_ltow_s", itow_s), SA("_ultow_s", ultow_s), SA("_i64tow_s", i64tow_s), SA("_ui64tow_s", ui64tow_s), S(iscntrl), SA("_isctype", isctype), S(strerror), S(__sys_nerr), S(__sys_errlist), SA("_strerror", strerror), S(strerror_s), S(strcpy_s), S(strcat_s), S(strncpy_s), S(memcpy_s), SA("memmove_s", memcpy_s), SA("_mktemp", mktemp),

@@ -37,6 +37,16 @@ int main(void) {
     && GetPrivateProfileStructW(L"binary", L"key", restored, sizeof(restored), L"C:\\test-profile.ini")
     && !memcmp(saved, restored, sizeof(saved));
   ok = ok && !GetPrivateProfileStructW(L"binary", L"missing", restored, sizeof(restored), L"C:\\test-profile.ini");
+  typedef BOOL (WINAPI *CreateEnvFn)(LPVOID *, HANDLE, BOOL);
+  typedef BOOL (WINAPI *DestroyEnvFn)(LPVOID);
+  HMODULE userenv = LoadLibraryW(L"userenv.dll");
+  CreateEnvFn create_env = userenv ? (CreateEnvFn)GetProcAddress(userenv, "CreateEnvironmentBlock") : NULL;
+  DestroyEnvFn destroy_env = userenv ? (DestroyEnvFn)GetProcAddress(userenv, "DestroyEnvironmentBlock") : NULL;
+  LPVOID env = NULL; int has_entry = 0;
+  if (create_env && destroy_env && create_env(&env, NULL, FALSE) && env) {
+    for (WCHAR *p = (WCHAR *)env; *p; p += wcslen(p) + 1) if (wcschr(p, L'=')) has_entry = 1;
+    ok = ok && has_entry && destroy_env(env);
+  } else ok = 0;
   printf("procmem: %s\n", ok ? "PASS" : "FAIL");
   return ok ? 0 : 1;
 }
