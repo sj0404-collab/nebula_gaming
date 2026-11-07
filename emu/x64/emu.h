@@ -276,6 +276,7 @@ void w32_env_replace(const char *const *kv, int n);
 int  proc_state(int pid, int *exit_code);           /* 0 unknown, 1 running, 2 exited */
 void proc_handle_ref(int pid, int delta);
 ProcFs *proc_fs(int pid);
+int  proc_write_mem(int pid, u64 addr, const u8 *buf, u64 n);
 int  proc_read_mem(int pid, u64 addr, u8 *buf, u64 n);           /* ReadProcessMemory */
 u64  proc_image_base(int pid, const char **name);
 double proc_start_ms(int pid);

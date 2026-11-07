@@ -554,8 +554,24 @@ static void s_ReadProcessMemory(Cpu *c) {
   int pid = pid_of_handle(c, ARG(0)); u64 n = ARG(3); if (pid < 0 || n > (1u << 24)) { W->last_error = 6; RET(0); return; }
   u8 *dst = mem_ptr(c->mem, ARG(2), n, 1); if (!dst) { W->last_error = 998; RET(0); return; }
   if (pid == W->pid) { const u8 *s = mem_ptr(c->mem, ARG(1), n, 0); if (!s) { W->last_error = 299; RET(0); return; } e_memcpy(dst, s, (size_t)n); }
-  else if (!proc_read_mem(pid, ARG(1), dst, n)) { W->last_error = 299; if (ARG(4)) wr64(c, ARG(4), 0); RET(0); return; }
-  if (ARG(4)) wr64(c, ARG(4), n); RET(1);
+  else if (!proc_read_mem(pid, ARG(1), dst, n)) { W->last_error = 299; if (ARG(4)) wrp(c, ARG(4), 0); RET(0); return; }
+  if (ARG(4)) wrp(c, ARG(4), n); RET(1);
+}
+/* Copy into the addressed guest process, never into host process memory. */
+static void s_WriteProcessMemory(Cpu *c) {
+  int pid = pid_of_handle(c, ARG(0)); u64 n = ARG(3), written = ARG(4);
+  if (written) wrp(c, written, 0);
+  if (pid < 0) { W->last_error = 6; RET(0); return; }
+  if (n > (1u << 24)) { W->last_error = 299; RET(0); return; }
+  if (!n) { RET(1); return; }
+  const u8 *src = mem_ptr(c->mem, ARG(2), n, 0);
+  if (!src) { W->last_error = 998; RET(0); return; }
+  if (pid == W->pid) {
+    u8 *dst = mem_ptr(c->mem, ARG(1), n, 1);
+    if (!dst) { W->last_error = 299; RET(0); return; }
+    e_memmove(dst, src, (size_t)n);
+  } else if (!proc_write_mem(pid, ARG(1), src, n)) { W->last_error = 299; RET(0); return; }
+  if (written) wrp(c, written, n); RET(1);
 }
 /* the emulated Windows is 64-bit: a 32-bit (PE32) process runs "under WOW64", so 32-bit setup stubs that
    probe for a 64-bit OS (7-Zip x64 setup, many NSIS/Inno installers) take their 64-bit path instead of refusing */
@@ -794,7 +810,7 @@ static void s_mktemp(Cpu *c) { u64 a = ARG(0); u64 l = e_strlen(gstr(c, a)); u32
   SA("_filbuf", filbuf), SA("_flsbuf", flsbuf), SA("_fdopen", fdopen), SA("fdopen", fdopen), S(setvbuf), S(fopen), SA("_wfopen", wfopen), S(fopen_s), SA("_wfopen_s", wfopen_s), SA("_fsopen", fsopen), SA("_wfsopen", wfopen), S(freopen), S(fclose), S(fread), SA("fread_s", fread), S(fwrite), S(fgets), S(fgetc), SA("getc", fgetc), S(getchar), S(ungetc), \
   S(fseek), SA("_fseeki64", fseeki64), S(ftell), S(fgetpos), S(fsetpos), SA("_ftelli64", ftell), S(rewind), S(feof), S(ferror), S(clearerr), SA("_fileno", fileno), SA("fileno", fileno), SA("_filelengthi64", filelengthi64), SA("_filelength", filelengthi64), SA("_isatty", isatty), SA("isatty", isatty), SA("_get_osfhandle", get_osfhandle), SA("_open_osfhandle", open_osfhandle), \
   SA("_open", open), SA("open", open), SA("_wopen", wopen), SA("_sopen_s", sopen_s), SA("_wsopen_s", wsopen_s), SA("_sopen", sopen), SA("_sopen_dispatch", sopen_dispatch), SA("_wsopen_dispatch", wsopen_dispatch), SA("_close", close), SA("close", close), SA("_read", read), SA("read", read), SA("_write", write), SA("write", write), \
-  S(SetHandleInformation), S(GetHandleInformation), S(GetProcessImageFileNameA), S(GetProcessImageFileNameW), S(QueryFullProcessImageNameA), S(QueryFullProcessImageNameW), S(EnumProcessModules), S(EnumProcessModulesEx), S(GetModuleFileNameExA), S(GetModuleFileNameExW), S(GetModuleBaseNameA), S(ReadProcessMemory), S(IsWow64Process), S(IsWow64Process2), S(CreateRemoteThread), S(GetProcessTimes), SA("_spawnve", spawnve), SA("_spawnvpe", spawnve), SA("_spawnv", spawnv), SA("_spawnvp", spawnv), SA("_execve", execve), SA("_execvpe", execve), SA("_execv", execv), SA("_execvp", execv), SA("_wspawnve", spawnve), SA("_lseek", lseek), SA("lseek", lseek), SA("_lseeki64", lseeki64), SA("_tell", tell), SA("_telli64", tell), SA("_eof", eof), SA("_chsize", chsize), SA("_chsize_s", chsize), SA("_dup", dup), SA("dup", dup), SA("_dup2", dup2), S(setbuf), S(CreateToolhelp32Snapshot), S(Process32First), S(Process32Next), S(Process32FirstW), S(Process32NextW), S(CreateProcessA), S(CreateProcessW), S(WaitForSingleObject), S(WaitForSingleObjectEx), S(WaitForMultipleObjects), SA("WaitForMultipleObjectsEx", WaitForMultipleObjects), S(GetExitCodeProcess), S(GetProcessId), S(TerminateProcess), S(OpenProcess), S(CreatePipe), S(PeekNamedPipe), S(DuplicateHandle), S(GetCurrentProcessId), SA("_getpid", getpid), SA("getpid", getpid), SA("_cwait", cwait), SA("_pipe", pipe), S(FlushViewOfFile), SA("_commit", commit), \
+  S(SetHandleInformation), S(GetHandleInformation), S(GetProcessImageFileNameA), S(GetProcessImageFileNameW), S(QueryFullProcessImageNameA), S(QueryFullProcessImageNameW), S(EnumProcessModules), S(EnumProcessModulesEx), S(GetModuleFileNameExA), S(GetModuleFileNameExW), S(GetModuleBaseNameA), S(ReadProcessMemory), S(WriteProcessMemory), S(IsWow64Process), S(IsWow64Process2), S(CreateRemoteThread), S(GetProcessTimes), SA("_spawnve", spawnve), SA("_spawnvpe", spawnve), SA("_spawnv", spawnv), SA("_spawnvp", spawnv), SA("_execve", execve), SA("_execvpe", execve), SA("_execv", execv), SA("_execvp", execv), SA("_wspawnve", spawnve), SA("_lseek", lseek), SA("lseek", lseek), SA("_lseeki64", lseeki64), SA("_tell", tell), SA("_telli64", tell), SA("_eof", eof), SA("_chsize", chsize), SA("_chsize_s", chsize), SA("_dup", dup), SA("dup", dup), SA("_dup2", dup2), S(setbuf), S(CreateToolhelp32Snapshot), S(Process32First), S(Process32Next), S(Process32FirstW), S(Process32NextW), S(CreateProcessA), S(CreateProcessW), S(WaitForSingleObject), S(WaitForSingleObjectEx), S(WaitForMultipleObjects), SA("WaitForMultipleObjectsEx", WaitForMultipleObjects), S(GetExitCodeProcess), S(GetProcessId), S(TerminateProcess), S(OpenProcess), S(CreatePipe), S(PeekNamedPipe), S(DuplicateHandle), S(GetCurrentProcessId), SA("_getpid", getpid), SA("getpid", getpid), SA("_cwait", cwait), SA("_pipe", pipe), S(FlushViewOfFile), SA("_commit", commit), \
   SA("_stat64", stat64), SA("_stat64i32", stat64i32), SA("_stat32", stat64i32), SA("_stat", stat64i32), SA("stat", stat64i32), SA("_wstat64", wstat64), SA("_wstat64i32", wstat64i32), SA("_fstat64", fstat64), SA("_fstat64i32", fstat64i32), SA("_fstat32", fstat64i32), SA("_fstat", fstat64i32), SA("fstat", fstat64i32), \
   SA("_access", access), SA("access", access), SA("_waccess", waccess), SA("_access_s", access_s), SA("_unlink", unlink), SA("unlink", unlink), SA("remove", unlink), SA("_wunlink", wunlink), SA("_wremove", wunlink), SA("_mkdir", mkdir), SA("mkdir", mkdir), SA("_wmkdir", wmkdir), SA("_rmdir", rmdir), SA("rmdir", rmdir), SA("_wrmdir", rmdir), \
   S(rename), SA("_wrename", wrename), SA("_getcwd", getcwd), SA("getcwd", getcwd), SA("_wgetcwd", wgetcwd), SA("_chdir", chdir), SA("chdir", chdir), SA("_wchdir", wchdir), SA("_fullpath", fullpath), SA("_wfullpath", wfullpath), \

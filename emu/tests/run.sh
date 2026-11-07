@@ -6,6 +6,9 @@ X=./x64/x64run; S=../public/x64/samples; fail=0
 check() { # name, expected-substring, output
   if printf '%s' "$3" | grep -q -- "$2"; then echo "  ok   $1"; else echo "  FAIL $1: expected '$2' in:"; printf '%s\n' "$3" | head -20; fail=1; fi
 }
+echo "[0] process memory (x86 and x64)"
+check "WriteProcessMemory x64" "procmem: PASS" "$($X --quiet --no-stdin tests/procmem.exe 2>&1 || true)"
+check "WriteProcessMemory x86" "procmem: PASS" "$($X --quiet --no-stdin tests/procmem32.exe 2>&1 || true)"
 echo "[1] hello.exe (UCRT console)"
 rc=0; out=$($X --quiet tests/hello.exe a b 2>&1) || rc=$?
 check "greeting"      "Hello from x86-64 Windows! argc=3" "$out"

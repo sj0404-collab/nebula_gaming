@@ -4141,6 +4141,7 @@ static const struct { const char *n; unsigned short bytes; } stdcall32_tab[] = {
   { "WriteFile", 20 },
   { "WriteFileEx", 20 },
   { "WritePrinter", 16 },
+  { "WriteProcessMemory", 20 },
   { "WritePrivateProfileStringA", 16 },
   { "WritePrivateProfileStringW", 16 },
   { "WritePrivateProfileStringWrapW", 16 },

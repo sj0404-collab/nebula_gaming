@@ -33,6 +33,7 @@ static void proc_exit(Proc *p, int code) {
 int proc_state(int pid, int *exit_code) { Proc *p = proc_find(pid); if (!p) return 0; if (exit_code) *exit_code = p->exit_code; return p->state == 2 ? 2 : 1; }
 void proc_handle_ref(int pid, int delta) { Proc *p = proc_find(pid); if (p) p->handles += delta; }
 ProcFs *proc_fs(int pid) { Proc *p = proc_find(pid); return p ? p->w32.fs : 0; }
+int proc_write_mem(int pid, u64 addr, const u8 *buf, u64 n) { Proc *p = proc_find(pid); if (!p || p->state != 1) return 0; u8 *d = mem_ptr(&p->mem, addr, n, 1); if (!d) return 0; e_memmove(d, buf, (size_t)n); return 1; }
 int proc_read_mem(int pid, u64 addr, u8 *buf, u64 n) { Proc *p = proc_find(pid); if (!p || p->state != 1) return 0; const u8 *s = mem_ptr(&p->mem, addr, n, 0); if (!s) return 0; e_memcpy(buf, s, (size_t)n); return 1; }
 u64 proc_image_base(int pid, const char **name) { Proc *p = proc_find(pid); if (!p) return 0; if (name) *name = p->name; return p->w32.image_base; }
 double proc_start_ms(int pid) { Proc *p = proc_find(pid); return p ? p->w32.start_ms : 0; }

@@ -93,6 +93,10 @@ jobs:
         run: |
           cmp emu/cmd/cmd.exe public/x64/apps/cmd.exe
           if ! git diff --quiet -- emu/cmd/cmd.exe; then echo "::warning::cmd.exe built in CI differs from the committed one (zig drift?) — CI build is tested"; cp emu/cmd/cmd.exe public/x64/apps/cmd.exe; fi
+      - name: Build process-memory regression programs (x86 and x64)
+        run: |
+          zig cc -target x86_64-windows-gnu -O2 emu/tests/procmem.c -o emu/tests/procmem.exe
+          zig cc -target x86-windows-gnu -O2 emu/tests/procmem.c -o emu/tests/procmem32.exe
       - name: Native capability tests (hello, bench, busybox-w32 incl. virtual disk + stdin, plink, NebulaStrike, cmd.exe/system()/subprocess, real msvcp140 via runtime pack, rejections)
         run: DX_PACK=/tmp/dx/sys32 ./emu/tests/run.sh
       - name: .NET tests (REAL CoreCLR 10 + RyuJIT on the emulator — LINQ/exceptions/JSON/reflection/Regex/GC, apphost, GC with spinning + pool threads, HttpClient, direct .dll start, net48 exe, Roslyn csc compiles + runs a program, rejection without the pack)
