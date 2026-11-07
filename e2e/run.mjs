@@ -1218,7 +1218,9 @@ await test('phone (landscape 1000×560, touch): Programs — touchpad (relative 
   await p6.screenshot({ path: resolve(SHOTS, 'phone-x64-touchmouse.png') });
   // portrait: the desktop follows the rotation (leave the browser's fullscreen first — the kiosk layout stays; Playwright cannot resize a fullscreen window)
   await p6.evaluate(() => document.fullscreenElement ? document.exitFullscreen().catch(() => {}) : null); await sleep(500);
-  await p6.setViewportSize({ width: 560, height: 1000 }); await sleep(1500);
+  await p6.setViewportSize({ width: 560, height: 1000 }); await sleep(800);
+  if (!(await p6.locator('[data-x64-fullscreen="1"]').count())) { await w.locator('[data-x64-fs]').tap(); }   // leaving the browser's fullscreen also left game mode: back in with the ⤢ button
+  await sleep(1500);
   const scr2 = await p6.evaluate(() => window.__x64.screenSize());
   expect(scr2.h > scr2.w && scr2.h >= 800, `after rotation the guest desktop is ${scr2.w}x${scr2.h}, expected portrait ≥ 560x800`);
   await p6.screenshot({ path: resolve(SHOTS, 'phone-x64-portrait.png') });
