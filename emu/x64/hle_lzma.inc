@@ -391,6 +391,19 @@ static void s_hle_inflate_fast(Cpu *c) {
 /* bcc32-built inflate_fast prologue: push ebx/esi/edi; sub esp,0x44; [esp]=strm; state=strm->state; in=next_in-1; last=in+(avail_in-5) */
 static const u8 INFL_SIG[] = { 0x53, 0x56, 0x57, 0x83, 0xC4, 0xBC, 0x89, 0x04, 0x24, 0x8B, 0x04, 0x24, 0x8B, 0x48, 0x1C, 0x89, 0x4C, 0x24, 0x04, 0x8B, 0x04, 0x24, 0x8B, 0x08, 0x49, 0x89, 0x4C, 0x24, 0x08, 0x8B, 0x04, 0x24, 0x8B, 0x48, 0x04, 0x83, 0xE9, 0x05 };
 
+/* ---------- zlib adler32 (same DLL; bcc32 register convention: eax = adler, edx = buf, ecx = len; returns eax) ----------
+   inflate() checksums every inflated byte with it — half of what remained after inflate_fast went native. */
+static u64 g_hle_adler_bytes;
+static void s_hle_adler32(Cpu *c) {
+  u32 adler = (u32)g_entry_eax, buf = (u32)c->r[RDX], len = (u32)c->r[RCX];
+  if (!buf) { RET(1); return; }
+  const u8 *B = len ? mem_ptr(c->mem, buf, len, 0) : 0; if (len && !B) { cpu_fault(c, "adler32: bad buffer 0x%x+%u", buf, len); return; }
+  u32 a = adler & 0xffff, b = adler >> 16; g_hle_adler_bytes += len;
+  while (len) { u32 n = len > 5552 ? 5552 : len; len -= n; while (n--) { a += *B++; b += a; } a %= 65521; b %= 65521; }
+  RET(b << 16 | a);
+}
+static const u8 ADLER_SIG[] = { 0x53, 0x56, 0x8B, 0xD8, 0x57, 0x8B, 0xFB, 0x55, 0xC1, 0xEF, 0x10, 0x8B, 0xE9, 0x81, 0xE7, 0xFF, 0xFF, 0x00, 0x00, 0x81, 0xE3, 0xFF, 0xFF, 0x00, 0x00, 0x83, 0xFD, 0x01, 0x8B, 0xF2, 0x75, 0x30 };
+
 static int hle_patch(Win32 *w, u8 *img, u64 base, u64 o, const char *name, ShimFn fn, int clean32, const char *what) {
   u64 slot = w32_shim_slot(w, "nebula_hle", name); if (!slot) return 0;
   { int idx = (int)((slot - G_SHIM_BASE) / SHIM_SLOT_SIZE); w->slots[idx].clean32 = (u16)clean32; w->slots[idx].warned32 = 1; w->slots[idx].fn = fn; }
@@ -400,17 +413,19 @@ static int hle_patch(Win32 *w, u8 *img, u64 base, u64 o, const char *name, ShimF
 /* scan a freshly mapped 32-bit image (exe or DLL) for hot library routines we can run natively; each is patched once per image */
 void w32_hle_scan(Win32 *w, u8 *img, u64 base, u64 size) {
   if (!w->mode32 || size < 64 || g_hle_off) return;
-  int got_lz = 0, got_sha = 0, got_infl = 0;
+  int got_lz = 0, got_sha = 0, got_infl = 0, got_adler = 0;
   for (u64 o = 0; o + 48 <= size; o++) {
     u8 b = img[o];
     if (b == 0x55 && !got_lz && o + sizeof LZ_SIG + 8 <= size && !e_memcmp(img + o, LZ_SIG, sizeof LZ_SIG)) {
       /* the body must also contain "cmp dword [ebx+0x58], 5" (tempBufSize < RC_INIT_SIZE) within the next 160 bytes */
       static const u8 chk[] = { 0x83, 0x7B, 0x58, 0x05 }; int ok = 0; for (u64 k = o; k + 4 <= size && k < o + 160; k++) if (!e_memcmp(img + k, chk, 4)) { ok = 1; break; }
       if (ok) got_lz = hle_patch(w, img, base, o, "LzmaDec_DecodeToDic", s_hle_LzmaDec_DecodeToDic, 12, "native LZMA decoder");
+    } else if (b == 0x53 && img[o + 1] == 0x56 && img[o + 2] == 0x8B) {
+      if (!got_adler && !e_memcmp(img + o, ADLER_SIG, sizeof ADLER_SIG)) got_adler = hle_patch(w, img, base, o, "adler32", s_hle_adler32, 0, "native zlib adler32");
     } else if (b == 0x53 && img[o + 1] == 0x56 && img[o + 2] == 0x57) {
       if (!got_sha && !e_memcmp(img + o, SHA1_SIG, sizeof SHA1_SIG)) got_sha = hle_patch(w, img, base, o, "SHA1Update", s_hle_SHA1Update, 0, "native SHA-1 (Inno Setup file verification)");
       else if (!got_infl && !e_memcmp(img + o, INFL_SIG, sizeof INFL_SIG)) got_infl = hle_patch(w, img, base, o, "inflate_fast", s_hle_inflate_fast, 0, "native zlib inflate_fast (GOG uninstall.dll)");
     }
-    if (got_lz && got_sha && got_infl) break;
+    if (got_lz && got_sha && got_infl && got_adler) break;
   }
 }

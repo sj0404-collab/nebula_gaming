@@ -14,6 +14,7 @@ routines and patches their entry points to built-in native versions (`emu/x64/hl
 - `inflate_fast` of the zlib statically linked into GOG's `uninstall.dll` (bcc32, zlib 1.2.5 layout) → a native port of
   inffast.c working on the guest's `z_stream`/`inflate_state`, verified byte-exact against zlib 1.2.8 over 40 randomised
   round-trips with random chunk boundaries;
+- `adler32` of the same zlib (inflate() checksums every inflated byte) → native;
 - `LzmaDec_DecodeToDic` (LZMA SDK as built into Inno Setup) → native LZMA decoder (correct; little effect on this installer,
   matters for heavily compressed ones).
 Everything else is the installer's own code; Inno still checks every file's hash — now against a hash computed natively.
