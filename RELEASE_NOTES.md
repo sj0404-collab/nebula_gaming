@@ -1,3 +1,27 @@
+# v1.44.0 — Android: touchpad, on-screen mouse buttons, a desktop that fills the phone screen
+
+**Touchpad (new, default on phones/tablets).** Dragging a finger anywhere on the program view moves a visible cursor the way a
+laptop touchpad does (relative, with light acceleration) instead of jumping to the spot under the finger — small Windows
+controls (wizard buttons, checkboxes, menus) can be hit precisely. Tap = left click at the cursor; tap, then touch again and
+move = drag; hold ≈ 0.5 s = right click; two fingers = wheel. The old "tap where you point" mode is still there (toolbar
+button 🖱 toggles; the choice is remembered).
+
+**On-screen mouse buttons (new).** Two semi-transparent clusters over the program: **left**: LMB; **right**: ▲ (wheel up) ·
+● (middle button, held while pressed) · ▼ (wheel down) and RMB. Buttons hold while the finger stays down (LMB held + a stroke
+on the touchpad = drag), ▲/▼ auto-repeat. Each cluster is dragged by its ⋮⋮ grip to wherever it does not cover the game;
+positions are kept as screen fractions, so they survive rotation; double-tap a grip to reset. Toggle on the toolbar.
+
+**Desktop fills the screen (new, default on phones).** The emulator has a *desktop mode* (`x64_set_desktop`, native
+`--desktop WxH`): the framebuffer is a fixed desktop the size of the device screen (scaled so its short side stays ≈ 720 px:
+a 1080×2400 phone gets 1600×720 landscape / 720×1600 portrait) instead of following the program's first window. Windows sees
+that desktop in `GetSystemMetrics`, `SystemParametersInfo(SPI_GETWORKAREA)`, `GetMonitorInfo`, `EnumDisplayMonitors`,
+`GetWindowRect(desktop)`, `ClipCursor`, `SendInput(ABSOLUTE)`; popups/dialogs centre on it. Rotating the phone resizes the
+desktop and pulls windows back inside. Programs that open a window go to game mode (fullscreen) automatically on phones.
+
+**Tests.** run.sh: input.exe (x64) and dlg32.exe (x86) also run under `--desktop`; e2e: a landscape phone context checks the
+desktop size, a touchpad stroke moving the cursor (WM_MOUSEMOVE stream, click at the cursor rather than under the finger),
+LMB/RMB/MMB/▲/▼ reaching the guest with the right button codes, grip dragging + persistence, and a portrait rotation.
+
 # v1.43.2 — GOG installers reach the branded wizard: msi.dll, a JIT `push esp` bug, 32-bit pseudo-handles, real JPEG decoding
 
 **"Cannot Import dll: msi.dll" (phone report, v1.43.1).** GOG's Inno Setup scripts import `MsiQueryProductState` / `MsiEnumRelatedProducts`

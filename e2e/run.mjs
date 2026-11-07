@@ -1216,8 +1216,9 @@ await test('phone (landscape 1000×560, touch): Programs — touchpad (relative 
   const saved = await p6.evaluate(() => localStorage.getItem('nebula_x64_touchmouse'));
   expect(saved && JSON.parse(saved).r.x < 0.8, 'cluster position not remembered');
   await p6.screenshot({ path: resolve(SHOTS, 'phone-x64-touchmouse.png') });
-  // portrait: the desktop follows the rotation
-  await p6.setViewportSize({ width: 560, height: 1000 }); await sleep(1200);
+  // portrait: the desktop follows the rotation (leave the browser's fullscreen first — the kiosk layout stays; Playwright cannot resize a fullscreen window)
+  await p6.evaluate(() => document.fullscreenElement ? document.exitFullscreen().catch(() => {}) : null); await sleep(500);
+  await p6.setViewportSize({ width: 560, height: 1000 }); await sleep(1500);
   const scr2 = await p6.evaluate(() => window.__x64.screenSize());
   expect(scr2.h > scr2.w && scr2.h >= 800, `after rotation the guest desktop is ${scr2.w}x${scr2.h}, expected portrait ≥ 560x800`);
   await p6.screenshot({ path: resolve(SHOTS, 'phone-x64-portrait.png') });
