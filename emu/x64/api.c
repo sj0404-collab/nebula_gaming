@@ -151,7 +151,7 @@ static int run_one(Proc *p, u64 budget) {
   switch_to(p); Cpu *tc = p->w32.cpu; u64 ic0 = tc->icount; int r = cpu_run(tc, budget);
   if (g_trace) { char msg[256]; e_snprintf(msg, sizeof msg, "[sched] pid %d tid %d %.40s ran %llu insns -> r=%d block=%d rip=0x%llx\n", p->pid, p->w32.th[p->w32.cur_th].tid, p->w32.cmdline, (unsigned long long)(tc->icount - ic0), r, p->w32.block, (unsigned long long)tc->rip); host_write(3, msg, e_strlen(msg));
     if (g_trace > 1) { int *lastc = p->lastc; for (int i = 2; i < p->w32.nslots; i++) if (p->w32.slots[i].calls != lastc[i]) { e_snprintf(msg, sizeof msg, "   %s!%s +%d\n", p->w32.slots[i].dll, p->w32.slots[i].name, p->w32.slots[i].calls - lastc[i]); host_write(3, msg, e_strlen(msg)); lastc[i] = p->w32.slots[i].calls; } } }
-  if (p->w32.dirty && p->w32.screen) { host_present(p->w32.screen, p->w32.screen_w, p->w32.screen_h); p->w32.dirty = 0; g_shown = &p->w32; }
+  if (p->w32.dirty && p->w32.screen) { u32 *layered = user_layered_frame(&p->w32); host_present(layered ? layered : p->w32.screen, p->w32.screen_w, p->w32.screen_h); if (layered) emu_free(layered); p->w32.dirty = 0; g_shown = &p->w32; }
   /* a fault/exit in a worker thread is reported through the main thread's cpu (what the host inspects) */
   if ((r == RUN_FAULT || r == RUN_BREAK || r == RUN_EXIT) && tc != &p->cpu) { Cpu *m = &p->cpu; Cpu saved = *m; *m = *tc; m->mem = saved.mem; m->w = saved.w; p->w32.th[0].cpu = m; }
   return r;

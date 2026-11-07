@@ -5,6 +5,7 @@ on:
     paths:
       - 'emu/x64/**'
       - 'emu/tests/procmem.c'
+      - 'emu/tests/layered.c'
       - '.github/workflows/procmem-test.yml'
     branches: [main]
 permissions:
@@ -23,6 +24,8 @@ jobs:
           cd ../..
           zig cc -target x86_64-windows-gnu -O2 emu/tests/procmem.c -o emu/tests/procmem.exe
           zig cc -target x86-windows-gnu -O2 emu/tests/procmem.c -o emu/tests/procmem32.exe
+          zig cc -target x86_64-windows-gnu -O2 emu/tests/layered.c -o emu/tests/layered.exe -lgdi32 -luser32
+          zig cc -target x86-windows-gnu -O2 emu/tests/layered.c -o emu/tests/layered32.exe -lgdi32 -luser32
       - name: Execute guest regressions
         run: |
           set -o pipefail
@@ -31,4 +34,26 @@ jobs:
             emu/x64/x64run --no-stdin --max-ms 30000 "emu/tests/$exe" 2>&1 | tee "$RUNNER_TEMP/$exe.log"
             grep -q 'procmem: PASS' "$RUNNER_TEMP/$exe.log"
             if grep -q 'stdcall cleanup size unknown' "$RUNNER_TEMP/$exe.log"; then exit 1; fi
+          done
+      - name: Verify layered-window pixels (x86 and x64)
+        run: |
+          set -o pipefail
+          for exe in layered.exe layered32.exe; do
+            mkdir -p "$RUNNER_TEMP/$exe"; cd "$RUNNER_TEMP/$exe"
+            "$GITHUB_WORKSPACE/emu/x64/x64run" --no-stdin --desktop 400x300 --frames 1 --max-ms 10000 "$GITHUB_WORKSPACE/emu/tests/$exe" 2>&1 | tee run.log
+            grep -q 'layered: PASS' run.log
+            python3 - <<'PY'
+          import glob
+          files = glob.glob('frame_*.ppm')
+          assert files, 'no frames produced'
+          found = False
+          for path in files:
+              with open(path, 'rb') as f:
+                  assert f.readline().strip() == b'P6'
+                  w, h = map(int, f.readline().split()); assert f.readline().strip() == b'255'
+                  p = f.read()
+              def pixel(x,y): return tuple(p[(y*w+x)*3:(y*w+x)*3+3])
+              if pixel(30,40) == (255,0,0) and pixel(70,40) == (0,255,0): found = True
+          assert found, 'layered window source pixels were not presented'
+          PY
           done

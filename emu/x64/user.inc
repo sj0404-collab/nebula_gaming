@@ -38,6 +38,7 @@ typedef struct {
   int used, destroyed; int parent, owner; int builtin; int superclassed; /* app-registered class whose wndproc delegates to a built-in proc (VCL TNewButton …): behaves like the built-in for painting but all messages flow through the guest wndproc */ int pid;   /* owning process: messages from other processes are posted to its queue */ char clsname[40]; u64 wndproc; u64 cls_brush; u32 cls_style; int cls_extra;
   u32 style, exstyle; u64 id, inst; int dc_gen;
   int x, y, w, h;            /* relative to the parent's client origin (top-level: framebuffer coordinates) */
+  u32 *layer_pixels; int layer_w, layer_h; u32 layer_flags, layer_key, layer_blend;
   int ncx, ncy;              /* client offset inside the window (caption/border of secondary top-level windows) */
   char *text; int textcap; char tbuf[1024]; u32 bgcol; int bgcol_set; /* EM_SETBKGNDCOLOR */ char *stream; int stream_len, stream_cap; u64 stream_buf; u32 stream_flags; /* EM_STREAMIN in progress */ void *cc; /* common-control state (comctl.inc) */ u64 sub_proc[8], sub_id[8], sub_ref[8], sub_orig; int nsub, subcur; int unicode_wnd; /* created through CreateWindowExW (decides A/W notifications of common controls) */ /* comctl32 SetWindowSubclass chain: subcur = index of the subclass currently running (nsub = none) */   /* window text: inline buffer, grown on the heap for long edit contents (licence viewers) */
   u64 userdata; u64 extra[16];
@@ -565,7 +566,7 @@ static void wnd_deactivated(Win32 *w, int i) { if (g_active != i && !(wnd_alive(
   if (ow < 0) { if (g_active == i) g_active = -1; if (g_focus >= 0 && wnd_alive(g_focus) && wnd_root(g_focus) == i) g_focus = -1; return; }
   g_active = ow; if (!wnd_alive(g_focus) || wnd_root(g_focus) == i) g_focus = ow;
   if (!g_wnd[ow].builtin || g_wnd[ow].superclassed) { post_msg_to(w, HWND_OF(ow), 0x06, 1, HWND_OF(i)); post_msg_to(w, HWND_OF(ow), 0x07, HWND_OF(i), 0); } }
-static void wnd_free(int i) { Wnd *n = &g_wnd[i]; items_free(n); if (n->text && n->text != n->tbuf) emu_free(n->text); if (n->stream) { emu_free(n->stream); n->stream = 0; } if (n->cc) { emu_free(n->cc); n->cc = 0; } n->nsub = 0; n->subcur = 0; n->sub_orig = 0; n->edit_wnd = 0; n->combo_wnd = 0; n->himl = 0; n->cbex_exstyle = 0; n->text = n->tbuf; n->textcap = sizeof n->tbuf; n->tbuf[0] = 0; kill_timers_of(i); if (g_focus == i) g_focus = -1; if (g_capture == i) g_capture = -1; if (g_active == i) g_active = -1; n->used = 0; n->destroyed = 1; }
+static void wnd_free(int i) { Wnd *n = &g_wnd[i]; if (n->layer_pixels) { emu_free(n->layer_pixels); n->layer_pixels = 0; } items_free(n); if (n->text && n->text != n->tbuf) emu_free(n->text); if (n->stream) { emu_free(n->stream); n->stream = 0; } if (n->cc) { emu_free(n->cc); n->cc = 0; } n->nsub = 0; n->subcur = 0; n->sub_orig = 0; n->edit_wnd = 0; n->combo_wnd = 0; n->himl = 0; n->cbex_exstyle = 0; n->text = n->tbuf; n->textcap = sizeof n->tbuf; n->tbuf[0] = 0; kill_timers_of(i); if (g_focus == i) g_focus = -1; if (g_capture == i) g_capture = -1; if (g_active == i) g_active = -1; n->used = 0; n->destroyed = 1; }
 /* process exit: its windows vanish without WM_DESTROY (no code left to run them) and its window classes are released */
 void user_proc_exit(Win32 *w) { for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].pid == w->pid && w->pid != 0) { g_wnd[k].destroyed = 1; g_wnd[k].visible = 0; wnd_free(k); if (k == 0) sync_main(w); }
   for (int i = 0; i < 64; i++) if (g_cls[i].used && g_cls[i].pid == w->pid && w->pid != 0) g_cls[i].used = 0; wnd_invalidate_all(); }
@@ -793,7 +794,63 @@ static void s_IsGUIThread(Cpu *c) { RET(1); }
 static void s_FlashWindowEx(Cpu *c) { RET(0); }
 static void s_FlashWindow(Cpu *c) { RET(0); }
 static void s_SetLayeredWindowAttributes(Cpu *c) { RET(1); }
-static void s_UpdateLayeredWindow(Cpu *c) { RET(1); }
+/* Store the supplied bitmap independently of its HDC: applications commonly destroy that DC
+   immediately after this call. The scheduler composites it only for presentation, leaving the
+   underlying framebuffer intact (repeated alpha composition must not accumulate). */
+static void s_UpdateLayeredWindow(Cpu *c) {
+  int i = wnd_of(ARG(0)); u64 dst = ARG(2), sz = ARG(3), hsrc = ARG(4), pt = ARG(5), bf = ARG(7); u32 flags = (u32)ARG(8);
+  if (i < 0) { W->last_error = 1400; RET(0); return; }
+  Wnd *n = &g_wnd[i];
+  if (!(n->exstyle & 0x80000u)) { W->last_error = 87; RET(0); return; }
+  if (hsrc) {
+    if (!sz || !pt || (flags != 1 && flags != 2 && flags != 4) || (flags == 2 && !bf)) { W->last_error = 87; RET(0); return; }
+    int width = (s32)rd32(c, sz), height = (s32)rd32(c, sz + 4), sx = (s32)rd32(c, pt), sy = (s32)rd32(c, pt + 4); Surf src;
+    if (width <= 0 || height <= 0 || width > 4096 || height > 4096 || !dc_surf_raw(c, hsrc, &src) || sx < 0 || sy < 0 || sx > src.w - width || sy > src.h - height) { W->last_error = 87; RET(0); return; }
+    u32 blend = bf ? rd32(c, bf) : 0x00ff0000u;
+    if (flags == 2 && ((blend & 0xffffu) != 0 || ((blend >> 24) & ~1u))) { W->last_error = 87; RET(0); return; }
+    u32 *pixels = emu_alloc((size_t)width * height * 4); if (!pixels) { W->last_error = 8; RET(0); return; }
+    for (int y = 0; y < height; y++) e_memcpy(pixels + (size_t)y * width, srow(&src, sy + y) + sx, (size_t)width * 4);
+    if (n->layer_pixels) emu_free(n->layer_pixels); n->layer_pixels = pixels; n->layer_w = width; n->layer_h = height; n->layer_flags = flags; n->layer_key = cr2px((u32)ARG(6)); n->layer_blend = blend;
+    n->w = width; n->h = height;
+  } else if (sz || pt || bf || flags) { W->last_error = 87; RET(0); return; }
+  if (dst) { n->x = (s32)rd32(c, dst) - SCREEN_X0; n->y = (s32)rd32(c, dst + 4) - SCREEN_Y0; }
+  if (!W->screen) screen_ensure(W, n->x + n->w, n->y + n->h);
+  W->dirty = 1; RET(1);
+}
+
+/* A temporary output surface prevents alpha accumulating into the application's own framebuffer.
+   Opaque higher-z top-level windows mask layers underneath; per-pixel occlusion for other
+   overlapping layered windows and full desktop recomposition remain limited. */
+u32 *user_layered_frame(Win32 *w) {
+  int order[MAX_WND], count = 0;
+  for (int i = 0; i < MAX_WND; i++) if (wnd_alive(i) && g_wnd[i].pid == w->pid && g_wnd[i].layer_pixels && wnd_visible_chain(i)) {
+    int j = count++; while (j > 0 && g_wnd[order[j-1]].zseq > g_wnd[i].zseq) { order[j] = order[j-1]; j--; } order[j] = i;
+  }
+  if (!count || !w->screen) return 0;
+  u32 *out = emu_alloc((size_t)w->screen_w * w->screen_h * 4); if (!out) return 0;
+  e_memcpy(out, w->screen, (size_t)w->screen_w * w->screen_h * 4);
+  for (int j = 0; j < count; j++) {
+    int i = order[j], ox, oy; Wnd *n = &g_wnd[i]; wnd_window_origin(i, &ox, &oy);
+    int ca = (n->layer_blend >> 16) & 255, per_pixel = (n->layer_blend >> 24) & 1;
+    int occluders[MAX_WND], nocc = 0;
+    for (int k = 0; k < MAX_WND; k++) { Wnd *t = &g_wnd[k]; if (k != i && wnd_alive(k) && t->visible && t->pid == w->pid && t->parent < 0 && !t->layer_pixels && t->zseq > n->zseq) occluders[nocc++] = k; }
+    for (int y = 0; y < n->layer_h; y++) { int yy = oy + y; if (yy < 0 || yy >= w->screen_h) continue;
+      for (int x = 0; x < n->layer_w; x++) { int xx = ox + x; if (xx < 0 || xx >= w->screen_w) continue;
+        int covered = 0; for (int k = 0; k < nocc; k++) { Wnd *t = &g_wnd[occluders[k]]; if (xx >= t->x && xx < t->x + t->w && yy >= t->y && yy < t->y + t->h) { covered = 1; break; } } if (covered) continue;
+        u32 src = n->layer_pixels[(size_t)y * n->layer_w + x], *d = out + (size_t)yy * w->screen_w + xx;
+        if (n->layer_flags == 1 && (src & 0xffffffu) == n->layer_key) continue;
+        if (n->layer_flags != 2) { *d = src | 0xff000000u; continue; }
+        int alpha = (per_pixel ? (int)(src >> 24) : 255) * ca / 255, inv = 255 - alpha;
+        int r = ((src >> 16) & 255) * ca / 255 + ((*d >> 16) & 255) * inv / 255;
+        int g = ((src >> 8) & 255) * ca / 255 + ((*d >> 8) & 255) * inv / 255;
+        int b = (src & 255) * ca / 255 + (*d & 255) * inv / 255;
+        if (r > 255) r = 255; if (g > 255) g = 255; if (b > 255) b = 255;
+        *d = 0xff000000u | (u32)r << 16 | (u32)g << 8 | (u32)b;
+      }
+    }
+  }
+  return out;
+}
 static void s_AnimateWindow(Cpu *c) { int i = wnd_of(ARG(0)); if (i >= 0) { if (ARG(2) & 0x10000) { g_wnd[i].visible = 0; wnd_invalidate_all(); } else wnd_show_now(c, i); } RET(1); }
 static void s_SetWindowRgn(Cpu *c) { RET(1); }
 static void s_GetWindowRgn(Cpu *c) { RET(0); }
