@@ -40,7 +40,7 @@ static int mount_dir(const char *host, const char *guest, int depth) {   /* copi
 /* X64_PROF=1: sample rip every 20 K instructions, report the hottest 64-byte code blocks (poor man's profiler for spin loops) */
 static int g_prof;
 int main(int argc, char **argv) {
-  int inspect = 0, dump_every = 0; double max_ms = 60000; const char *prefix = "frame"; int quiet = 0;
+  int inspect = 0, dump_every = 0; double max_ms = 60000; const char *prefix = "frame"; int quiet = 0, list_vfs = 0;
   const char *mounts[16][2]; int nmounts = 0; int no_stdin = 0;
   struct { int vk; double at; int down; } keys[64]; int nkeys = 0; int ai = 1; int stats = 0;
   struct { int x, y; double at; int ev; } clicks[64]; int nclicks = 0;
@@ -53,6 +53,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[ai], "--prefix") && ai + 1 < argc) prefix = argv[++ai];
     else if (!strcmp(argv[ai], "--max-ms") && ai + 1 < argc) max_ms = atof(argv[++ai]);
     else if (!strcmp(argv[ai], "--quiet")) quiet = 1;
+    else if (!strcmp(argv[ai], "--list-vfs")) list_vfs = 1;
     else if (!strcmp(argv[ai], "--trace")) x64_trace(1); else if (!strcmp(argv[ai], "--trace2")) x64_trace(2); else if (!strcmp(argv[ai], "--apitrace")) { extern void w32_api_trace(int); g_apitrace = 1; }
     else if (!strcmp(argv[ai], "--env") && ai + 1 < argc) { extern void w32_add_env(const char *); w32_add_env(argv[++ai]); }   /* one guest variable, value may contain ';' (PATH=…) */
     else if (!strcmp(argv[ai], "--mount-rw") && ai + 1 < argc) { extern void host_fs_mount_rw(const char *, const char *); const char *spec = argv[++ai]; char hostd[1024]; const char *eq = strchr(spec, '='); const char *guest = "C:\\nebula"; if (eq) { snprintf(hostd, sizeof hostd, "%.*s", (int)(eq - spec), spec); guest = eq + 1; } else snprintf(hostd, sizeof hostd, "%s", spec); char abs_[4096]; if (!realpath(hostd, abs_)) snprintf(abs_, sizeof abs_, "%s", hostd); host_fs_mount_rw(abs_, guest); nmounts++; mounts[nmounts - 1][0] = strdup(abs_); mounts[nmounts - 1][1] = guest; }   /* like --mount, but files the guest writes land on the host (and leave RAM) */
@@ -133,5 +134,6 @@ int main(int argc, char **argv) {
   }
   if (g_prof) { double dt2 = (host_now_ms() - t0) / 1000.0; extern const char *x64_prof_shims(void); fprintf(stderr, "[prof] wall %.1f s: in x64_run %.1f s, host sleeps %.1f s, %llu guest instructions (%.1f MIPS)\n", dt2, t_run / 1000, t_sleep / 1000, (unsigned long long)x64_icount(), dt2 > 0 ? x64_icount() / dt2 / 1e6 : 0); fputs(x64_prof_shims(), stderr); static char pb[8192]; prof_report(pb, sizeof pb, 40); fputs(pb, stderr); }
   vfs_sync_all();   /* flush files still open / never closed to the write-back mounts */
+  if (list_vfs) { VNodeInfo in; for (int i = 0; i < vfs_node_count(); i++) if (vfs_node_info(i, &in)) fprintf(stderr, "[vfs] %s %llu %s\n", in.is_dir ? "dir" : "file", (unsigned long long)in.size, in.path); }
   return r == RUN_EXIT ? x64_exit_code() : r == -1 ? 0 : 100 + r;
 }

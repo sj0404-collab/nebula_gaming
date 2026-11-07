@@ -31,8 +31,9 @@ jobs:
           set -o pipefail
           for exe in procmem.exe procmem32.exe; do
             echo "--- $exe ---"
-            emu/x64/x64run --no-stdin --max-ms 30000 "emu/tests/$exe" 2>&1 | tee "$RUNNER_TEMP/$exe.log"
+            emu/x64/x64run --no-stdin --list-vfs --max-ms 30000 "emu/tests/$exe" 2>&1 | tee "$RUNNER_TEMP/$exe.log"
             grep -q 'procmem: PASS' "$RUNNER_TEMP/$exe.log"
+            grep -q '\[vfs\] file .*procmem' "$RUNNER_TEMP/$exe.log"
             if grep -q 'stdcall cleanup size unknown' "$RUNNER_TEMP/$exe.log"; then exit 1; fi
           done
       - name: Verify layered-window pixels (x86 and x64)
