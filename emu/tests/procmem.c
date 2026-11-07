@@ -47,6 +47,10 @@ int main(void) {
     for (WCHAR *p = (WCHAR *)env; *p; p += wcslen(p) + 1) if (wcschr(p, L'=')) has_entry = 1;
     ok = ok && has_entry && destroy_env(env);
   } else ok = 0;
+  typedef HANDLE (WINAPI *SetEventHookFn)(DWORD, DWORD, HMODULE, LPVOID, DWORD, DWORD, DWORD);
+  HMODULE user32 = LoadLibraryW(L"user32.dll");
+  SetEventHookFn hook = user32 ? (SetEventHookFn)GetProcAddress(user32, "SetWinEventHook") : NULL;
+  SetLastError(0); ok = ok && hook && !hook(1, 2, NULL, NULL, 0, 0, 0) && GetLastError() == ERROR_NOT_SUPPORTED;
   printf("procmem: %s\n", ok ? "PASS" : "FAIL");
   return ok ? 0 : 1;
 }

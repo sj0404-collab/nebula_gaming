@@ -344,6 +344,10 @@ typedef struct { int used, type, pid; u64 proc; u32 tid; } Hook; static Hook g_h
 static int hook_find(Cpu *c, int type, int after) { for (int k = after + 1; k < 16; k++) if (g_hooks[k].used && g_hooks[k].type == type && g_hooks[k].pid == W->pid) return k; return -1; }
 static void hook_cur_push(int h) { if (g_nhook_cur < 16) g_hook_cur[g_nhook_cur++] = h; }
 static void hook_cur_pop(void) { if (g_nhook_cur) g_nhook_cur--; }
+/* Accessibility event hooks are not implemented. Never claim a hook is installed
+   without delivering its callbacks. */
+static void s_SetWinEventHook(Cpu *c) { W->last_error = 50; w32_report(W, "SetWinEventHook: accessibility event hooks are not supported"); RET(0); }
+static void s_UnhookWinEvent(Cpu *c) { W->last_error = 6; RET(0); }
 static void s_SetWindowsHookExW(Cpu *c) { int type = (int)(s32)(u32)ARG(0); u64 proc = ARG(1); if (!proc) { RET(0); return; } for (int k = 0; k < 16; k++) if (!g_hooks[k].used) { g_hooks[k].used = 1; g_hooks[k].type = type; g_hooks[k].proc = proc; g_hooks[k].tid = (u32)ARG(3); g_hooks[k].pid = W->pid; RET(0x48000 + k + 1); return; } RET(0); }
 static void s_SetWindowsHookExA(Cpu *c) { s_SetWindowsHookExW(c); }
 static void s_UnhookWindowsHookEx(Cpu *c) { u64 h = ARG(0); if (h > 0x48000 && h <= 0x48010) { g_hooks[h - 0x48001].used = 0; RET(1); return; } RET(0); }
