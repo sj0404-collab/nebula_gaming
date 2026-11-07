@@ -279,7 +279,7 @@ done:
 
 static u64 g_hle_lzma_calls, g_hle_lzma_bytes; int g_hle_off = 0;   /* x64_set_hle(0) / X64_NOHLE=1: keep the guest's own decoder (comparison, fallback) */
 static void s_hle_LzmaDec_DecodeToDic(Cpu *c) {
-  u32 gp = (u32)c->r[RAX], dicLimit = (u32)c->r[RDX], gsrc = (u32)c->r[RCX]; u32 statusPtr = (u32)ARG(0), finishMode = (u32)ARG(1), srcLenPtr = (u32)ARG(2);
+  u32 gp = (u32)g_entry_eax /* the dispatcher zeroes eax before calling a shim; Borland register convention passes the first argument there */, dicLimit = (u32)c->r[RDX], gsrc = (u32)c->r[RCX]; u32 statusPtr = (u32)ARG(0), finishMode = (u32)ARG(1), srcLenPtr = (u32)ARG(2);
   u32 pos0 = rd32(c, gp + 36); int rc = lz_decode_to_dic(c, gp, dicLimit, gsrc, srcLenPtr, finishMode, statusPtr); if (c->status != RUN_OK) return;
   g_hle_lzma_calls++; g_hle_lzma_bytes += rd32(c, gp + 36) - pos0; RET((u32)rc);
 }
