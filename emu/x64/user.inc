@@ -199,7 +199,13 @@ void w32_key(Win32 *w, int vk, int down) {
 }
 /* topmost visible window under a framebuffer point (children before parents, later siblings first) */
 static int hit_in(int i, int fx, int fy) {
-  if (!g_wnd[i].visible) return -1; int wx, wy; wnd_window_origin(i, &wx, &wy); if (fx < wx || fy < wy || fx >= wx + g_wnd[i].w || fy >= wy + g_wnd[i].h) return -1;
+  if (!g_wnd[i].visible || (g_wnd[i].exstyle & 0x20u)) return -1; int wx, wy; wnd_window_origin(i, &wx, &wy); if (fx < wx || fy < wy || fx >= wx + g_wnd[i].w || fy >= wy + g_wnd[i].h) return -1;
+  Wnd *n = &g_wnd[i];
+  if (n->layer_pixels) { int x = fx - wx, y = fy - wy;
+    if (x < 0 || y < 0 || x >= n->layer_w || y >= n->layer_h) return -1;
+    u32 p = n->layer_pixels[(size_t)y * n->layer_w + x];
+    if ((n->layer_flags == 1 && (p & 0xffffffu) == n->layer_key) || (n->layer_flags == 2 && (((n->layer_blend >> 16) & 255) == 0 || (((n->layer_blend >> 24) & 1) && !(p >> 24))))) return -1;
+  }
   int best = -1, bestz = -1; for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].parent == i && g_wnd[k].zseq > bestz) { int r = hit_in(k, fx, fy); if (r >= 0) { if (r == k && g_wnd[k].builtin == BI_BUTTON && (g_wnd[k].style & 0xF) == 7) continue; /* group boxes are HTTRANSPARENT */ best = r; bestz = g_wnd[k].zseq; } }
   return best >= 0 ? best : i;
 }
