@@ -230,6 +230,7 @@ int pe_load(Win32 *w, const u8 *bytes, size_t len, const char *name) {
   u8 *img = mem_ptr(w->mem, base, size, 1); if (!img) return -6;
   w->image_base = base; w->image_size = size; w->entry = base + h.entry; w->subsystem = h.subsystem; w->exe_pdata_rva = h.dd[3][0]; w->exe_pdata_size = h.dd[3][1];
   e_snprintf(w->exe_name, sizeof w->exe_name, "%s", name);
+  w32_hle_scan(w, img, base, size);
   /* TLS: register the template (slot 0 for the exe), build the main thread's block */
   Cpu *c = w->cpu;
   if (h.dd[9][0] && h.dd[9][0] + 40 <= size) {

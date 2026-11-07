@@ -155,6 +155,7 @@ static int run_one(Proc *p, u64 budget) {
   if ((r == RUN_FAULT || r == RUN_BREAK || r == RUN_EXIT) && tc != &p->cpu) { Cpu *m = &p->cpu; Cpu saved = *m; *m = *tc; m->mem = saved.mem; m->w = saved.w; p->w32.th[0].cpu = m; }
   return r;
 }
+extern int g_hle_off; EXPORT(x64_set_hle) void x64_set_hle(int on) { g_hle_off = !on; }   /* high-level emulation of hot library code found by signature (LZMA decoder in installers) */
 EXPORT(x64_set_jit) void x64_set_jit(int on) { g_jit_on = on != 0; if (on > 1) g_jit_hot = on; }   /* host has a wasm engine and provided host_jit_compile */
 EXPORT(x64_jit_stats) const char *x64_jit_stats(void) { return jit_stats_text(); }
 extern int g_jit_skip_lo, g_jit_skip_hi;

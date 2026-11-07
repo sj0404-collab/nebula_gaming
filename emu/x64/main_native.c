@@ -8,7 +8,7 @@
 
 int x64_load(const u8 *bytes, size_t len, const char *name, const char *cmdline);
 static int g_apitrace;
-int x64_run(u64 budget); void x64_set_desktop(int dw, int dh); extern int g_prof_on; int prof_report(char *buf, int cap, int top); void x64_trace(int on); const char *x64_inspect(const u8 *b, size_t n); const char *x64_error(void); u64 x64_error_rip(void); const char *x64_report(void); u64 x64_icount(void); int x64_exit_code(void); const char *x64_error_bytes(void); const char *x64_regs(void); const char *x64_history(void); int x64_mem_copy(u64 addr, unsigned char *dst, unsigned n); void x64_key(int vk, int down); void x64_mouse(int x, int y, int ev); double x64_sleep_ms(void); const char *x64_api_stats(void); int x64_has_window(void);
+int x64_run(u64 budget); void x64_set_desktop(int dw, int dh); extern int g_prof_on; int prof_report(char *buf, int cap, int top); void x64_set_hle(int on); void x64_trace(int on); const char *x64_inspect(const u8 *b, size_t n); const char *x64_error(void); u64 x64_error_rip(void); const char *x64_report(void); u64 x64_icount(void); int x64_exit_code(void); const char *x64_error_bytes(void); const char *x64_regs(void); const char *x64_history(void); int x64_mem_copy(u64 addr, unsigned char *dst, unsigned n); void x64_key(int vk, int down); void x64_mouse(int x, int y, int ev); double x64_sleep_ms(void); const char *x64_api_stats(void); int x64_has_window(void);
 int x64_vfs_add(const char *path, const u8 *data, size_t n); int x64_vfs_mkdir(const char *path); const char *x64_vfs_list(void); void x64_stdin_write(const u8 *data, size_t n); void x64_stdin_eof(void); int x64_wants_stdin(void);
 void host_set_dump(int every, const char *prefix); int host_frames(void); double host_now_ms(void);
 
@@ -99,6 +99,7 @@ int main(int argc, char **argv) {
   if (g_apitrace) { extern void w32_api_trace(int); w32_api_trace(1); }
   if (rc) { fprintf(stderr, "load failed (%d): %s", rc, x64_report()); return 3; }
   g_prof = getenv("X64_PROF") != 0; g_prof_on = g_prof;
+  if (getenv("X64_NOHLE")) x64_set_hle(0);
   if (getenv("X64_DWATCH")) { extern u64 g_dwatch; g_dwatch = strtoull(getenv("X64_DWATCH"), 0, 16); }
   if (getenv("X64_WATCH")) { extern u64 g_watch[8]; extern int g_watch_n; char *ws = strdup(getenv("X64_WATCH")); for (char *t = strtok(ws, ","); t && g_watch_n < 8; t = strtok(0, ",")) g_watch[g_watch_n++] = strtoull(t, 0, 16); }
   u64 trace_after = getenv("X64_TRACE_AFTER") ? strtoull(getenv("X64_TRACE_AFTER"), 0, 10) : 0; int trace_on = 0;
