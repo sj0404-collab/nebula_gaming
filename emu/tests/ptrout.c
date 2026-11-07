@@ -40,6 +40,11 @@ int main(void) {
   char *t = strtok_s(buf, ",", (char **)&ctx.slot); if (!t || strcmp(t, "a")) { printf("strtok_s bad\n"); bad = 1; }
   t = strtok_s(NULL, ",", (char **)&ctx.slot); if (!t || strcmp(t, "b")) { printf("strtok_s#2 bad\n"); bad = 1; }
   CHECK(ctx, "strtok_s");
+  /* pseudo-handles: a 32-bit caller passes GetCurrentProcess()/GetCurrentThread() as 0xFFFFFFFF/0xFFFFFFFE */
+  if (GetProcessId(GetCurrentProcess()) != GetCurrentProcessId()) { printf("GetProcessId(GetCurrentProcess()) bad\n"); bad = 1; }
+  { DWORD code = 7; if (!GetExitCodeProcess(GetCurrentProcess(), &code) || code != STILL_ACTIVE) { printf("GetExitCodeProcess(self) bad: %lu\n", (unsigned long)code); bad = 1; } }
+  if (WaitForSingleObject(GetCurrentProcess(), 0) != WAIT_TIMEOUT) { printf("WaitForSingleObject(self) bad\n"); bad = 1; }
+  if (GetThreadId(GetCurrentThread()) != GetCurrentThreadId()) { printf("GetThreadId(GetCurrentThread()) bad\n"); bad = 1; }
   printf(bad ? "PTROUT FAIL\n" : "PTROUT OK\n");
   return bad;
 }

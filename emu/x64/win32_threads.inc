@@ -54,7 +54,7 @@ static int wait_check(int pid, int tid, const int *kinds, const int *idxs, int n
 }
 /* HANDLE → waitable object: kind 1 = process (idx pid), kind 2 = kernel object (idx) */
 static int wait_handle(Cpu *c, u64 h, int *kind, int *idx) {
-  if (h == ~1ull) { *kind = 2; *idx = cur_thread(W)->kobj; return 1; }
+  h = h_norm(h); if (h == ~1ull) { *kind = 2; *idx = cur_thread(W)->kobj; return 1; }
   if (h == ~0ull) { *kind = 1; *idx = W->pid; return 1; }
   int fd = handle_fd(h); if (h == 0x10 || (fd >= 3 && vfs_resolve(fd) == -1)) { *kind = 3; *idx = 0; return 1; }   /* console input handle: signaled while input is pending (libuv's raw tty reader waits on it) */
   if (fd < 3) return 0;
@@ -210,8 +210,8 @@ static void s_GetThreadId(Cpu *c) { KObj *k = kobj_of_handle(c, ARG(0), KO_THREA
 static void s_GetProcessIdOfThread(Cpu *c) { KObj *k = kobj_of_handle(c, ARG(0), KO_THREAD); if (!k) { W->last_error = 6; RET(0); return; } RET((u32)k->pid); }
 static void s_OpenThread(Cpu *c) { u32 tid = (u32)ARG(2); for (int i = 0; i < KOBJ_MAX; i++) { KObj *k = kobj_get(i); if (k && k->kind == KO_THREAD && (u32)k->tid == tid) { int fd = vfs_kobj_handle(i); if (fd < 0) break; vfs_set_inherit(fd, (u32)ARG(1) != 0); RET(H_OF(fd)); return; } } W->last_error = 87; RET(0); }
 static void s_ResumeThread(Cpu *c) { Thread *t = thread_of_handle(c, ARG(0)); if (!t) { W->last_error = 6; RET(~0ull); return; } int prev = t->suspend; if (t->suspend > 0) t->suspend--; RET((u32)prev); }
-static void s_SuspendThread(Cpu *c) { Thread *t = ARG(0) == ~1ull ? cur_thread(W) : thread_of_handle(c, ARG(0)); if (!t) { W->last_error = 6; RET(~0ull); return; } int prev = t->suspend++; RET((u32)prev); if (t == cur_thread(W)) { W->block = BLOCK_NONE; c->status = RUN_YIELD; } }
-static void s_TerminateThread(Cpu *c) { Thread *t = ARG(0) == ~1ull ? cur_thread(W) : thread_of_handle(c, ARG(0)); if (!t) { W->last_error = 6; RET(0); return; } if (t == cur_thread(W)) { thread_finish(c, (u32)ARG(1)); return; } thread_mark_exited(W, (int)(t - W->th), (u32)ARG(1)); RET(1); }
+static void s_SuspendThread(Cpu *c) { Thread *t = h_norm(ARG(0)) == ~1ull ? cur_thread(W) : thread_of_handle(c, ARG(0)); if (!t) { W->last_error = 6; RET(~0ull); return; } int prev = t->suspend++; RET((u32)prev); if (t == cur_thread(W)) { W->block = BLOCK_NONE; c->status = RUN_YIELD; } }
+static void s_TerminateThread(Cpu *c) { Thread *t = h_norm(ARG(0)) == ~1ull ? cur_thread(W) : thread_of_handle(c, ARG(0)); if (!t) { W->last_error = 6; RET(0); return; } if (t == cur_thread(W)) { thread_finish(c, (u32)ARG(1)); return; } thread_mark_exited(W, (int)(t - W->th), (u32)ARG(1)); RET(1); }
 static void s_SwitchToThread(Cpu *c) { call_shim(c, s_Sleep, 0, 0, 0, 0); if (c->status != RUN_YIELD) RET(1); }
 static void s_SetThreadDescription(Cpu *c) { RET(0); }
 static void s_GetThreadDescription(Cpu *c) { RET(0x80070057u); }

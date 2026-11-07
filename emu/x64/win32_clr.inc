@@ -98,14 +98,14 @@ static void clr_ctx_write(Cpu *c, u64 a, Cpu *t, u32 want, int other) {
 }
 static void s_GetThreadContext(Cpu *c) {
   u64 a = ARG(1); if (!a) { W->last_error = 87; RET(0); return; }
-  Thread *t = ARG(0) == ~1ull ? cur_thread(W) : thread_of_handle(c, ARG(0)); if (!t || !t->cpu) { W->last_error = 6; RET(0); return; }
+  Thread *t = h_norm(ARG(0)) == ~1ull ? cur_thread(W) : thread_of_handle(c, ARG(0)); if (!t || !t->cpu) { W->last_error = 6; RET(0); return; }
   u32 want = rd32(c, a + 0x30); int other = t != cur_thread(W);
   if (other && t->state == 1 && t->suspend <= 0) { W->last_error = 5; RET(0); return; }   /* must be suspended first (as on Windows) */
   clr_ctx_write(c, a, other ? t->cpu : c, want, other); RET(1);
 }
 static void s_SetThreadContext(Cpu *c) {
   u64 a = ARG(1); if (!a) { W->last_error = 87; RET(0); return; }
-  Thread *t = ARG(0) == ~1ull ? cur_thread(W) : thread_of_handle(c, ARG(0)); if (!t || !t->cpu) { W->last_error = 6; RET(0); return; }
+  Thread *t = h_norm(ARG(0)) == ~1ull ? cur_thread(W) : thread_of_handle(c, ARG(0)); if (!t || !t->cpu) { W->last_error = 6; RET(0); return; }
   Cpu *x = t == cur_thread(W) ? c : t->cpu; u32 flags = rd32(c, a + 0x30);
   if (x != c && clr_in_shim(x->rip)) { x->rip = rd64(c, x->r[RSP]); x->r[RSP] += 8; }   /* leave the parked call: the new context replaces it */
   if (flags & 0x2) for (int i = 0; i < 16; i++) if (i != RSP) x->r[i] = rd64(c, a + 0x78 + 8 * i);

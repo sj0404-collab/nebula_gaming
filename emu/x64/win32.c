@@ -939,7 +939,7 @@ static void s_InterlockedExchange(Cpu *c) { u32 old = rd32(c, ARG(0)); wr32(c, A
 static void s_InterlockedIncrement(Cpu *c) { u32 v = rd32(c, ARG(0)) + 1; wr32(c, ARG(0), v); RET(v); }
 static void s_InterlockedDecrement(Cpu *c) { u32 v = rd32(c, ARG(0)) - 1; wr32(c, ARG(0), v); RET(v); }
 static void s_InterlockedExchangeAdd(Cpu *c) { u32 v = rd32(c, ARG(0)); wr32(c, ARG(0), v + (u32)ARG(1)); RET(v); }
-static void s_QueueUserAPC(Cpu *c) { if (ARG(1) != ~1ull) { W->last_error = 87; RET(0); return; } queue_apc(W, ARG(0), ARG(2), 0, 0); RET(1); }   /* only the current thread */
+static void s_QueueUserAPC(Cpu *c) { if (h_norm(ARG(1)) != ~1ull) { W->last_error = 87; RET(0); return; } queue_apc(W, ARG(0), ARG(2), 0, 0); RET(1); }   /* only the current thread */
 static void s_GetTimeZoneInformation(Cpu *c) { u8 *p = mem_ptr(c->mem, ARG(0), 172, 1); if (p) e_memset(p, 0, 172); RET(0); }
 static void s_FileTimeToSystemTime(Cpu *c) { fill_systemtime(c, ARG(1)); RET(1); }
 static void s_SystemTimeToFileTime(Cpu *c) { wr64(c, ARG(1), now_100ns()); RET(1); }
