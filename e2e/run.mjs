@@ -528,7 +528,20 @@ const installerBytes = async () => {
 };
 await test('programs: the official 7-Zip 25.01 x64 setup installs onto the persistent C:\\ (Program Files, Start Menu shortcut, Uninstall key); the library shows “7-Zip File Manager” with its real icon; Play starts 7zFM.exe; the install survives a page reload', async () => {
   const bytes = await installerBytes(); if (!bytes) { const e = new Error('7z2501-x64.exe not available (no network)'); e.name = 'Inconclusive'; throw e; }
-  await page.evaluate(() => new Promise(res => { const r = indexedDB.deleteDatabase('nebula-x64-disk'); r.onsuccess = r.onerror = r.onblocked = () => res(); }));
+  await page.evaluate(() => new Promise((resolve, reject) => {
+    // Other desktop components keep this database open. deleteDatabase's blocked event is not
+    // completion: a pending delete would prevent every subsequent Programs window opening it.
+    const request = indexedDB.open('nebula-x64-disk', 1);
+    request.onupgradeneeded = () => { if (!request.result.objectStoreNames.contains('files')) request.result.createObjectStore('files'); };
+    request.onerror = () => reject(request.error);
+    request.onblocked = () => reject(new Error('Opening the test disk was blocked'));
+    request.onsuccess = () => {
+      const db = request.result; const tx = db.transaction('files', 'readwrite');
+      tx.objectStore('files').clear();
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = tx.onabort = () => { db.close(); reject(tx.error ?? new Error('Disk clear failed')); };
+    };
+  }));
   await page.reload({ waitUntil: 'load' }); await page.waitForSelector('[aria-label="Start"]');
   const w = await x64Open();
   // the library starts empty on a fresh disk
@@ -657,7 +670,20 @@ await test('explorer + notepad: File Explorer browses the real C:\\ (the 7-Zip i
   await w2.locator('[data-explorer-item="readme.txt"]').click(); await w2.locator('[data-explorer-delete]').click();
   await page.waitForFunction(() => !document.querySelector('[data-explorer-item="readme.txt"]'), null, { timeout: 15_000 });
   await closeAll();
-  await page.evaluate(() => new Promise(res => { const r = indexedDB.deleteDatabase('nebula-x64-disk'); r.onsuccess = r.onerror = r.onblocked = () => res(); }));
+  await page.evaluate(() => new Promise((resolve, reject) => {
+    // Other desktop components keep this database open. deleteDatabase's blocked event is not
+    // completion: a pending delete would prevent every subsequent Programs window opening it.
+    const request = indexedDB.open('nebula-x64-disk', 1);
+    request.onupgradeneeded = () => { if (!request.result.objectStoreNames.contains('files')) request.result.createObjectStore('files'); };
+    request.onerror = () => reject(request.error);
+    request.onblocked = () => reject(new Error('Opening the test disk was blocked'));
+    request.onsuccess = () => {
+      const db = request.result; const tx = db.transaction('files', 'readwrite');
+      tx.objectStore('files').clear();
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = tx.onabort = () => { db.close(); reject(tx.error ?? new Error('Disk clear failed')); };
+    };
+  }));
 });
 
 await test('x64: NebulaStrike.exe (real Win32 GDI PE32+) renders frames through WebGL and reacts to keys', async () => {
