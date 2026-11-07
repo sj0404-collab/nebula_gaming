@@ -1,0 +1,34 @@
+name: Process memory and locale regression
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'emu/x64/**'
+      - 'emu/tests/procmem.c'
+      - '.github/workflows/procmem-test.yml'
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  guest-apis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with: { version: 0.17.0 }
+      - name: Build native emulator and 32/64-bit guest regressions
+        run: |
+          cd emu/x64
+          cc -O2 -Wall -Wno-unused-function -Wno-unused-parameter -Wno-misleading-indentation -o x64run lib.c cpu.c pe.c win32.c gdi.c vfs.c api.c dxbc.c host_native.c main_native.c -lm
+          cd ../..
+          zig cc -target x86_64-windows-gnu -O2 emu/tests/procmem.c -o emu/tests/procmem.exe
+          zig cc -target x86-windows-gnu -O2 emu/tests/procmem.c -o emu/tests/procmem32.exe
+      - name: Execute guest regressions
+        run: |
+          set -o pipefail
+          for exe in procmem.exe procmem32.exe; do
+            echo "--- $exe ---"
+            emu/x64/x64run --no-stdin --max-ms 30000 "emu/tests/$exe" 2>&1 | tee "$RUNNER_TEMP/$exe.log"
+            grep -q 'procmem: PASS' "$RUNNER_TEMP/$exe.log"
+            if grep -q 'stdcall cleanup size unknown' "$RUNNER_TEMP/$exe.log"; then exit 1; fi
+          done
