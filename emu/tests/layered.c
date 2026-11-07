@@ -10,6 +10,12 @@ int main(void) {
   if (!RegisterClassW(&wc)) return 1;
   HWND w = CreateWindowExW(WS_EX_LAYERED, wc.lpszClassName, L"layer", WS_POPUP, 20, 30, 64, 64, 0, 0, inst, 0);
   if (!w) return 2;
+  typedef BOOL (WINAPI *ShellHookFn)(HWND);
+  HMODULE user32 = LoadLibraryW(L"user32.dll");
+  ShellHookFn reg = (ShellHookFn)GetProcAddress(user32, "RegisterShellHookWindow");
+  ShellHookFn unreg = (ShellHookFn)GetProcAddress(user32, "DeregisterShellHookWindow");
+  UINT shell_msg = RegisterWindowMessageW(L"SHELLHOOK");
+  if (!reg || !unreg || !shell_msg || !reg(w)) { puts("layered: SHELL REGISTER FAIL"); return 7; }
   HDC dc = CreateCompatibleDC(NULL); BITMAPINFO bi = {0};
   bi.bmiHeader.biSize = sizeof(bi.bmiHeader); bi.bmiHeader.biWidth = 64; bi.bmiHeader.biHeight = -64;
   bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
@@ -25,6 +31,7 @@ int main(void) {
   POINT transparent = {21, 31}, opaque = {30, 40};
   if (WindowFromPoint(transparent) == w || WindowFromPoint(opaque) != w) { puts("layered: HIT FAIL"); return 5; }
   InvalidateRect(w, NULL, TRUE);
-  MSG msg; while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+  MSG msg; int notified = 0; while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) { if (msg.message == shell_msg && msg.wParam == 1 && (HWND)msg.lParam == w) notified = 1; TranslateMessage(&msg); DispatchMessageW(&msg); }
+  if (!notified || !unreg(w)) { puts("layered: SHELL NOTIFY FAIL"); return 8; }
   printf("layered: PASS\n"); Sleep(1000); return 0;
 }

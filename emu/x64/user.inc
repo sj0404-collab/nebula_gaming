@@ -185,6 +185,17 @@ static void post_msg_to(Win32 *w, u64 hwnd, u32 msg, u64 wp, u64 lp) {
   int next = (w->msg_tail + 1) % MAX_MSGS; if (next == w->msg_head) return;
   GuestMsg *m = &w->msgs[w->msg_tail]; m->hwnd = hwnd; m->msg = msg; m->wparam = wp; m->lparam = lp; m->time = (u32)(host_now_ms() - w->start_ms); w->msg_tail = next;
 }
+/* Shell hook registrations; support top-level window shown/destroyed notifications. */
+static u64 g_shell_hooks[32];
+static u32 shell_hook_message(void) { u32 h = 0xC000; for (const char *p = "SHELLHOOK"; *p; p++) h = (h * 31 + (u8)*p) & 0x3fff; return 0xC000 + h; }
+static void shell_hook_event(Win32 *w, int i, u32 event) {
+  if (i < 0 || g_wnd[i].parent >= 0 || (g_wnd[i].exstyle & 0x80)) return;
+  for (int k = 0; k < 32; k++) if (g_shell_hooks[k]) { int h = wnd_of(g_shell_hooks[k]); if (h < 0 || !wnd_alive(h)) g_shell_hooks[k] = 0; else post_msg_to(w, g_shell_hooks[k], shell_hook_message(), event, HWND_OF(i)); }
+}
+static void s_RegisterShellHookWindow(Cpu *c) { u64 h = ARG(0); int i = wnd_of(h); if (i < 0 || !wnd_alive(i) || g_wnd[i].pid != W->pid) { W->last_error = 1400; RET(0); return; }
+  for (int k = 0; k < 32; k++) if (g_shell_hooks[k] == h) { RET(1); return; }
+  for (int k = 0; k < 32; k++) if (!g_shell_hooks[k] || wnd_of(g_shell_hooks[k]) < 0) { g_shell_hooks[k] = h; RET(1); return; } W->last_error = 8; RET(0); }
+static void s_DeregisterShellHookWindow(Cpu *c) { u64 h = ARG(0); for (int k = 0; k < 32; k++) if (g_shell_hooks[k] == h && h) { g_shell_hooks[k] = 0; RET(1); return; } RET(0); }
 static void post_msg(Win32 *w, u32 msg, u64 wp, u64 lp) { post_msg_to(w, g_wnd[0].used ? HWND_OF(0) : 0, msg, wp, lp); }
 void w32_post_msg(Win32 *w, u32 msg, u64 wp, u64 lp) { post_msg(w, msg, wp, lp); }
 static u64 key_target(void) { int mt = menu_top_wnd(); if (mt >= 0) return HWND_OF(mt); if (wnd_alive(g_focus)) return HWND_OF(g_focus); if (wnd_alive(g_active)) return HWND_OF(g_active); return g_wnd[0].used ? HWND_OF(0) : 0; }
@@ -545,7 +556,7 @@ static u64 make_createstruct(Cpu *c, int i, u64 param, u64 title_a, u64 cls_a) {
   return cs; }
 static void builtin_proc_direct(Cpu *c, int i, u32 msg, u64 wp, u64 lp);
 /* finish creation after WM_CREATE: WM_SIZE / WM_MOVE / show — guest classes get them through the CONT_WNDCREATE steps */
-static void wnd_show_now(Cpu *c, int i) { Win32 *w = W; Wnd *n = &g_wnd[i]; if (n->visible) return; n->visible = 1; n->invalid = 1; n->erase = 1; wnd_invalidate(i, 1); if (n->parent < 0) { g_active = i; if (n->is_dlg || n->builtin == BI_MSGBOX) { /* focus goes to the dialog's first control if nothing has it */ } } if (i == 0) sync_main(w); w->dirty = 1; (void)c; }
+static void wnd_show_now(Cpu *c, int i) { Win32 *w = W; Wnd *n = &g_wnd[i]; if (n->visible) return; n->visible = 1; n->invalid = 1; n->erase = 1; wnd_invalidate(i, 1); shell_hook_event(w, i, 1); if (n->parent < 0) { g_active = i; if (n->is_dlg || n->builtin == BI_MSGBOX) { /* focus goes to the dialog's first control if nothing has it */ } } if (i == 0) sync_main(w); w->dirty = 1; (void)c; }
 static void create_window(Cpu *c, u64 cls_a, u64 title_a, int wide, u32 style, u32 exstyle, int x, int y, int cx, int cy, u64 parent_h, u64 id, u64 inst, u64 param) {
   Win32 *w = W; char cls[64], title[1024]; cls_name_in(c, cls_a, wide, cls, sizeof cls); text_in(c, title_a, wide, title, sizeof title);
   if (!e_stricmp(cls, "#32770") || !e_stricmp(cls, "#32768")) { /* dialog class (also used for message boxes) */ }
@@ -593,7 +604,7 @@ static void destroy_step(Cpu *c) {
 static void destroy_window(Cpu *c, int i) { Win32 *w = W; if (g_ndestroy >= 6) { cpu_fault(c, "DestroyWindow nesting too deep"); return; }
   int d = g_ndestroy++; g_destroy[d].n = 0; g_destroy[d].pos = 0; g_destroy[d].phase = 0; g_destroy[d].root = i; destroy_collect(i, g_destroy[d].list, &g_destroy[d].n);
   for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].parent < 0 && g_wnd[k].owner == i && g_destroy[d].n < 64) destroy_collect(k, g_destroy[d].list, &g_destroy[d].n);
-  if (g_wnd[i].parent < 0) wnd_deactivated(W, i);
+  if (g_wnd[i].parent < 0) { if (g_wnd[i].visible) shell_hook_event(w, i, 2); wnd_deactivated(W, i); }
   w32_push_cont(c, CONT_WNDDESTROY, (u64)i); (void)w; destroy_step(c); }
 static void s_DestroyWindow(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0 || g_wnd[i].destroyed) { W->last_error = 1400; RET(0); return; } destroy_window(c, i); }
 
@@ -1976,7 +1987,7 @@ void gdi_set_msgbox_auto(int on) { g_msgbox_auto = on; }
   S(MapVirtualKeyExW), SA("MapVirtualKeyW", MapVirtualKeyA), SA("MapVirtualKeyExA", MapVirtualKeyA), S(GetKeyboardLayout), S(GetKeyboardLayoutList), S(ActivateKeyboardLayout), S(GetKeyNameTextW), SA("GetKeyNameTextA", GetKeyNameTextW), S(ToUnicode), S(ToUnicodeEx), S(ToAscii), SA("ToAsciiEx", ToAscii), S(VkKeyScanW), S(VkKeyScanA), SA("VkKeyScanExW", VkKeyScanW), S(keybd_event), S(mouse_event), S(SendInput), S(BlockInput), S(GetLastInputInfo), S(GetDoubleClickTime), S(SetDoubleClickTime), S(GetSystemMetricsForDpi), S(SystemParametersInfoW), S(SystemParametersInfoForDpi), \
   S(GetMonitorInfoW), S(EnumDisplayDevicesW), S(EnumDisplayDevicesA), S(EnumDisplaySettingsW), S(EnumDisplaySettingsA), S(EnumDisplaySettingsExW), S(EnumDisplaySettingsExA), S(ChangeDisplaySettingsW), S(ChangeDisplaySettingsA), S(ChangeDisplaySettingsExW), S(ChangeDisplaySettingsExA), S(GetDisplayConfigBufferSizes), S(QueryDisplayConfig), S(DisplayConfigGetDeviceInfo), S(GetMonitorInfoA), S(MonitorFromWindow), S(MonitorFromPoint), S(MonitorFromRect), S(EnumDisplayMonitors), S(GetDpiForMonitor), \
   S(DrawTextExW), S(DrawTextExA), S(TabbedTextOutW), S(DrawEdge), S(DrawFocusRect), S(DrawFrameControl), S(DrawStateW), SA("DrawStateA", DrawStateW), S(FrameRect), S(InvertRect), S(DrawCaption), S(GrayStringW), SA("GrayStringA", GrayStringW), \
-  S(OpenClipboard), S(CloseClipboard), S(EmptyClipboard), S(SetClipboardData), S(GetClipboardData), S(IsClipboardFormatAvailable), S(GetClipboardSequenceNumber), S(CountClipboardFormats), S(EnumClipboardFormats), S(GetClipboardOwner), S(SetClipboardViewer), S(ChangeClipboardChain), S(AddClipboardFormatListener), S(RemoveClipboardFormatListener), S(GetClipboardFormatNameW), SA("GetClipboardFormatNameA", GetClipboardFormatNameW), S(RegisterClipboardFormatW), S(RegisterWindowMessageW), S(RegisterWindowMessageA), \
+  S(RegisterShellHookWindow), S(DeregisterShellHookWindow), S(OpenClipboard), S(CloseClipboard), S(EmptyClipboard), S(SetClipboardData), S(GetClipboardData), S(IsClipboardFormatAvailable), S(GetClipboardSequenceNumber), S(CountClipboardFormats), S(EnumClipboardFormats), S(GetClipboardOwner), S(SetClipboardViewer), S(ChangeClipboardChain), S(AddClipboardFormatListener), S(RemoveClipboardFormatListener), S(GetClipboardFormatNameW), SA("GetClipboardFormatNameA", GetClipboardFormatNameW), S(RegisterClipboardFormatW), S(RegisterWindowMessageW), S(RegisterWindowMessageA), \
   S(SetScrollInfo), S(GetScrollInfo), S(SetScrollPos), S(GetScrollPos), S(SetScrollRange), S(GetScrollRange), S(ShowScrollBar), S(EnableScrollBar), S(ScrollWindowEx), S(ScrollWindow), S(LoadAcceleratorsW), S(LoadAcceleratorsA), S(CreateAcceleratorTableW), S(CreateAcceleratorTableA), S(CopyAcceleratorTableW), S(CopyAcceleratorTableA), S(DestroyAcceleratorTable), S(TranslateAcceleratorW), S(TranslateAcceleratorA), SA("TranslateAccelerator", TranslateAcceleratorA), \
   S(CreateCaret), S(DestroyCaret), S(ShowCaret), S(HideCaret), S(SetCaretPos), S(GetCaretPos), S(SetCaretBlinkTime), S(GetCaretBlinkTime), S(InitCommonControls), S(InitCommonControlsEx), \
   S(CreateStatusWindowW), S(CreateStatusWindowA), S(CreateToolbarEx), S(SetWindowSubclass), S(RemoveWindowSubclass), S(NebulaSubclassProc), S(DefSubclassProc), S(GetWindowSubclass), S(TaskDialogIndirect), S(TaskDialog), S(SetSysColors), \
