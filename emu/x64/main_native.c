@@ -38,12 +38,7 @@ static int mount_dir(const char *host, const char *guest, int depth) {   /* copi
   closedir(d); return n;
 }
 /* X64_PROF=1: sample rip every 20 K instructions, report the hottest 64-byte code blocks (poor man's profiler for spin loops) */
-static int g_prof; static struct { u64 key; u64 n; } g_pf[65536]; static u64 g_pf_total;
-static void prof_sample(u64 rip) { u64 k = rip >> 6; u32 h = (u32)(k * 0x9E3779B97F4A7C15ull >> 48); for (int i = 0; i < 65536; i++) { u32 j = (h + i) & 65535; if (!g_pf[j].n || g_pf[j].key == k) { g_pf[j].key = k; g_pf[j].n++; g_pf_total++; return; } } }
-static void prof_dump(void) { fprintf(stderr, "[x64run] profile: %llu samples, hottest 64-byte blocks:\n", (unsigned long long)g_pf_total);
-  for (int t = 0; t < 30; t++) { int bi = -1; for (int j = 0; j < 65536; j++) if (g_pf[j].n && (bi < 0 || g_pf[j].n > g_pf[bi].n)) bi = j; if (bi < 0) break;
-    u64 a = g_pf[bi].key << 6; const char *sn = ""; if (a >= 0x200000ull && a < 0x400000ull) { extern const char *x64_slot_name(u64); sn = x64_slot_name(a); }
-    fprintf(stderr, "  %5.1f%%  0x%llx %s\n", 100.0 * (double)g_pf[bi].n / (double)g_pf_total, (unsigned long long)a, sn); g_pf[bi].n = 0; } }
+static int g_prof;
 int main(int argc, char **argv) {
   int inspect = 0, dump_every = 0; double max_ms = 60000; const char *prefix = "frame"; int quiet = 0;
   const char *mounts[16][2]; int nmounts = 0; int no_stdin = 0;
@@ -103,6 +98,7 @@ int main(int argc, char **argv) {
   if (getenv("X64_DWATCH")) { extern u64 g_dwatch; g_dwatch = strtoull(getenv("X64_DWATCH"), 0, 16); }
   if (getenv("X64_WATCH")) { extern u64 g_watch[8]; extern int g_watch_n; char *ws = strdup(getenv("X64_WATCH")); for (char *t = strtok(ws, ","); t && g_watch_n < 8; t = strtok(0, ",")) g_watch[g_watch_n++] = strtoull(t, 0, 16); }
   u64 trace_after = getenv("X64_TRACE_AFTER") ? strtoull(getenv("X64_TRACE_AFTER"), 0, 10) : 0; int trace_on = 0;
+  double t_run = 0, t_sleep = 0;
   double t0 = host_now_ms(); int r; int ki = 0, ci = 0, pi = 0; u64 yields = 0; int stdin_eof = 0;
   for (;;) {
     double el = host_now_ms() - t0;
@@ -111,16 +107,15 @@ int main(int argc, char **argv) {
     while (ci < nclicks && clicks[ci].at <= el) { x64_mouse(clicks[ci].x, clicks[ci].y, clicks[ci].ev); ci++; }
     while (pi < npads && pads[pi].at <= el) { extern void x64_pad(int, int, u32, int, int, int, int, int, int); x64_pad(pads[pi].idx, pads[pi].conn, pads[pi].btn, pads[pi].lt, pads[pi].rt, pads[pi].lx, pads[pi].ly, pads[pi].rx, pads[pi].ry); pi++; }
     for (int q = 0; q < ntypes; q++) if (types[q].s && types[q].at <= el) { const unsigned char *u = (const unsigned char *)types[q].s; while (*u) { unsigned cp = *u++; int ex = cp >= 0xF0 ? 3 : cp >= 0xE0 ? 2 : cp >= 0xC0 ? 1 : 0; cp &= ex == 3 ? 7 : ex == 2 ? 15 : ex == 1 ? 31 : 255; while (ex-- > 0 && *u) cp = (cp << 6) | (*u++ & 63); extern void x64_char(unsigned); x64_char(cp); } types[q].s = 0; }
-    if (g_prof) { extern u64 x64_rip(void); r = x64_run(20000); prof_sample(x64_rip()); } else r = x64_run(2000000);
+    { double tr0 = host_now_ms(); r = x64_run(2000000); t_run += host_now_ms() - tr0; }
     if (trace_after && !trace_on && x64_icount() >= trace_after) { extern void w32_api_trace(int); w32_api_trace(1); trace_on = 1; fprintf(stderr, "[x64run] apitrace enabled at %llu instructions\n", (unsigned long long)x64_icount()); }
     if (!no_stdin && !stdin_eof) {   /* feed host stdin as raw bytes whenever some arrive (TUIs read single key presses; never block the emulator on the terminal) */
       struct pollfd pf = { 0, POLLIN, 0 }; if (poll(&pf, 1, 0) > 0) { unsigned char buf[4096]; ssize_t got = read(0, buf, sizeof buf); if (got > 0) x64_stdin_write(buf, (size_t)got); else if (got == 0 || (errno != EAGAIN && errno != EINTR)) { stdin_eof = 1; x64_stdin_eof(); } } }
     if (r == RUN_YIELD && x64_wants_stdin()) { if (no_stdin || stdin_eof) { x64_stdin_eof(); continue; } struct pollfd pf = { 0, POLLIN, 0 }; if (poll(&pf, 1, 2) <= 0) { yields++; continue; } continue; }
-    if (r == RUN_YIELD) { yields++; double s = x64_sleep_ms(); if (s > 0) { if (s > 16) s = 16; usleep((useconds_t)(s * 1000)); } else if (x64_has_window()) usleep(1000); continue; }
+    if (r == RUN_YIELD) { yields++; double s = x64_sleep_ms(); double ts0 = host_now_ms(); if (s > 0) { if (s > 16) s = 16; usleep((useconds_t)(s * 1000)); } else if (x64_has_window()) usleep(1000); t_sleep += host_now_ms() - ts0; continue; }
     if (r != RUN_OK) break;
   }
   double dt = (host_now_ms() - t0) / 1000.0; u64 ic = x64_icount();
-  if (g_prof) prof_dump();
   if (!quiet) {
     fflush(stdout);
     if (r == RUN_EXIT) fprintf(stderr, "[x64run] exit code %d\n", x64_exit_code());
@@ -134,8 +129,9 @@ int main(int argc, char **argv) {
 #endif
     if (x64_report()[0]) fprintf(stderr, "[x64run] report:\n%s", x64_report());
     if (stats) fprintf(stderr, "[x64run] api calls: %s\n", x64_api_stats());
-    if (g_prof) { static char pb[8192]; prof_report(pb, sizeof pb, 40); fputs(pb, stderr); }   /* the finer in-interpreter sampler (every 1024th instruction) */
+   /* the finer in-interpreter sampler (every 1024th instruction) */
   }
+  if (g_prof) { double dt2 = (host_now_ms() - t0) / 1000.0; extern const char *x64_prof_shims(void); fprintf(stderr, "[prof] wall %.1f s: in x64_run %.1f s, host sleeps %.1f s, %llu guest instructions (%.1f MIPS)\n", dt2, t_run / 1000, t_sleep / 1000, (unsigned long long)x64_icount(), dt2 > 0 ? x64_icount() / dt2 / 1e6 : 0); fputs(x64_prof_shims(), stderr); static char pb[8192]; prof_report(pb, sizeof pb, 40); fputs(pb, stderr); }
   vfs_sync_all();   /* flush files still open / never closed to the write-back mounts */
   return r == RUN_EXIT ? x64_exit_code() : r == -1 ? 0 : 100 + r;
 }

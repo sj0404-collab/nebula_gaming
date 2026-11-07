@@ -155,6 +155,20 @@ static int run_one(Proc *p, u64 budget) {
   if ((r == RUN_FAULT || r == RUN_BREAK || r == RUN_EXIT) && tc != &p->cpu) { Cpu *m = &p->cpu; Cpu saved = *m; *m = *tc; m->mem = saved.mem; m->w = saved.w; p->w32.th[0].cpu = m; }
   return r;
 }
+/* X64_PROF: host time inside API shims, all processes, hottest first (where the wall clock goes when the guest is not executing instructions) */
+EXPORT(x64_prof_shims) const char *x64_prof_shims(void) {
+  static char buf[8192]; int p = 0; double total = 0;
+  for (int i = 0; i < PROC_MAX; i++) { Proc *q = g_procs[i]; if (!q) continue; for (int k = 0; k < q->w32.nslots; k++) total += q->w32.slots[k].ms; }
+  p += e_snprintf(buf + p, sizeof buf - p, "[prof] host time inside API shims: %.1f s\n", total / 1000);
+  for (int r = 0; r < 25 && p < (int)sizeof buf - 120; r++) {
+    ShimSlot *best = 0; Proc *bp = 0;
+    for (int i = 0; i < PROC_MAX; i++) { Proc *q = g_procs[i]; if (!q) continue; for (int k = 0; k < q->w32.nslots; k++) { ShimSlot *s = &q->w32.slots[k]; if (s->ms > 0 && (!best || s->ms > best->ms)) { best = s; bp = q; } } }
+    if (!best) break;
+    p += e_snprintf(buf + p, sizeof buf - p, "[prof] %7.2f s %9d calls  %s!%s (pid %d)\n", best->ms / 1000, best->calls, best->dll ? best->dll : "?", best->name ? best->name : "?", bp->pid); best->ms = -best->ms;
+  }
+  for (int i = 0; i < PROC_MAX; i++) { Proc *q = g_procs[i]; if (!q) continue; for (int k = 0; k < q->w32.nslots; k++) if (q->w32.slots[k].ms < 0) q->w32.slots[k].ms = -q->w32.slots[k].ms; }
+  return buf;
+}
 extern int g_hle_off; EXPORT(x64_set_hle) void x64_set_hle(int on) { g_hle_off = !on; }   /* high-level emulation of hot library code found by signature (LZMA decoder in installers) */
 EXPORT(x64_set_jit) void x64_set_jit(int on) { g_jit_on = on != 0; if (on > 1) g_jit_hot = on; }   /* host has a wasm engine and provided host_jit_compile */
 EXPORT(x64_jit_stats) const char *x64_jit_stats(void) { return jit_stats_text(); }

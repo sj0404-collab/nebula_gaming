@@ -187,6 +187,7 @@ static void cont_finish(Cpu *c, u64 rax) {
 static void do_exit(Cpu *c, int code) { W->exited = 1; c->exit_code = code; c->status = RUN_EXIT; }
 static void retry_and_yield(Cpu *c, u64 slot) { cpu_push(c, c->rip); c->rip = slot; c->status = RUN_YIELD; }
 static u64 g_cur_slot, g_entry_eax;
+extern int g_prof_on;
 static void w32_marshal32_in(Cpu *c, ShimSlot *s); static void w32_marshal32_out(Cpu *c, ShimSlot *s);
 static int thread_cont_resume(Cpu *c, int kind, u64 rax);
 static int tp_cont_resume(Cpu *c, int kind, u64 rax);
@@ -314,6 +315,7 @@ int w32_dispatch(Cpu *c, u64 addr) {
   }
   g_entry_eax = c->r[RAX]; c->r[RAX] = 0;   /* x86 __CxxFrameHandler thunks pass FuncInfo in eax */
   if (w->api_trace) e_log("[api] t%d %s(%llx, %llx, %llx, %llx, %llx, %llx) @%llx\n", w->th[w->cur_th].tid, s->name, (unsigned long long)ARG(0), (unsigned long long)ARG(1), (unsigned long long)ARG(2), (unsigned long long)ARG(3), (unsigned long long)ARG(4), (unsigned long long)ARG(5), (unsigned long long)ret);
+  if (g_prof_on) { double t0 = host_now_ms(); if (c->mode32) w32_call32(c, s, ret); else s->fn(c); s->ms += host_now_ms() - t0; if (w->api_trace) e_log("[api]   -> %llx\n", (unsigned long long)c->r[RAX]); return c->status; }
   if (c->mode32) { w32_call32(c, s, ret); if (w->api_trace) e_log("[api]   -> %llx\n", (unsigned long long)c->r[RAX]); return c->status; }
   s->fn(c);
   if (w->api_trace) e_log("[api]   -> %llx\n", (unsigned long long)c->r[RAX]);
