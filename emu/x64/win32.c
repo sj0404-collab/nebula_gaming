@@ -18,7 +18,7 @@ static inline void ov_set(Cpu *c, u64 ov, u64 status, u64 info) { wrp(c, ov, sta
 static char g_extra_env_buf[32][2048]; static const char *g_extra_env[32]; static int g_nextra_env;
 void w32_add_env(const char *kv) { if (g_nextra_env < 32 && kv && kv[0]) { e_snprintf(g_extra_env_buf[g_nextra_env], sizeof g_extra_env_buf[0], "%s", kv); g_extra_env[g_nextra_env] = g_extra_env_buf[g_nextra_env]; g_nextra_env++; } }
 
-enum { CONT_STARTUP = 1, CONT_INITTERM, CONT_ATEXIT, CONT_RET_RAX, CONT_RET_VAL, CONT_CREATEWND, CONT_QSORT, CONT_BSEARCH, CONT_DLLMAIN };
+enum { CONT_STARTUP = 1, CONT_INITTERM, CONT_ATEXIT, CONT_RET_RAX, CONT_RET_VAL, CONT_CREATEWND, CONT_QSORT, CONT_BSEARCH, CONT_DLLMAIN, CONT_ENUMLOCALE };
 static int attach_next_module(Cpu *c);
 enum { SLOT_STARTUP = 0, SLOT_CONT = 1, SLOT_FIRST = 2 };
 #define SLOT_ADDR(i) (G_SHIM_BASE + (u64)(i) * SHIM_SLOT_SIZE)
@@ -248,6 +248,7 @@ void w32_cont_resume(Cpu *c) {
       if (w->n_at_exit > 0) { u64 fn = w->at_exit[--w->n_at_exit]; guest_call(c, fn, 0, 0, 0, 0); return; }
       if (w->cont[i].data[0]) { do_exit(c, (int)w->cont[i].data[1]); return; }
       cont_finish(c, 0); return;
+    case CONT_ENUMLOCALE: w32_heap_free(w, w->cont[i].data[0]); cont_finish(c, 1); return;
     case CONT_RET_RAX: cont_finish(c, rax); return;
     case CONT_RET_VAL: cont_finish(c, w->cont[i].data[0]); return;
     case CONT_CREATEWND: { extern void gdi_cont_resume(Cpu *c, int kind, u64 rax); gdi_cont_resume(c, CONT_CREATEWND, rax); return; }
@@ -878,7 +879,21 @@ static void s_GetLocaleInfoW(Cpu *c) { RET(0); }
 static void s_GetLocaleInfoEx(Cpu *c) { RET(0); }
 static void s_IsValidLocale(Cpu *c) { RET(1); }
 static void s_IsValidCodePage(Cpu *c) { RET(1); }
-static void s_EnumSystemLocalesW(Cpu *c) { RET(1); }
+/* Nebula currently exposes the en-US locale; pass its LCID to the guest callback.
+   The callback may stop enumeration by returning FALSE; EnumSystemLocales still returns success. */
+static void enum_locales(Cpu *c, int wide) {
+  u64 cb = ARG(0); u32 flags = (u32)ARG(1);
+  if (!cb) { W->last_error = 87; RET(0); return; }
+  if (flags & ~3u || flags == 3) { W->last_error = 1004; RET(0); return; }
+  u64 p = w32_heap_alloc(W, wide ? 18 : 9, 1);
+  if (!p) { W->last_error = 8; RET(0); return; }
+  const char *id = "00000409";
+  for (int k = 0; k < 9; k++) { if (wide) wr16(c, p + 2 * k, (u8)id[k]); else wr8(c, p + k, (u8)id[k]); }
+  int i = cont_push(c, CONT_ENUMLOCALE); if (i < 0) { w32_heap_free(W, p); return; }
+  W->cont[i].data[0] = p; guest_call(c, cb, p, 0, 0, 0);
+}
+static void s_EnumSystemLocalesA(Cpu *c) { enum_locales(c, 0); }
+static void s_EnumSystemLocalesW(Cpu *c) { enum_locales(c, 1); }
 /* date / time format enumeration: success without callbacks (like EnumCalendarInfo*) — callers fall back to GetLocaleInfo's defaults */
 static void s_EnumDateFormatsW(Cpu *c) { RET(1); }
 static void s_EnumDateFormatsA(Cpu *c) { RET(1); }
@@ -1473,7 +1488,7 @@ static const ShimDef shims[] = {
   S(AllocateAndInitializeSid), S(FreeSid), S(SetEntriesInAclA), S(SetEntriesInAclW), S(ConvertStringSecurityDescriptorToSecurityDescriptorW), S(ConvertStringSecurityDescriptorToSecurityDescriptorA),
   SA("RegEnumKeyExA", ret2), SA("RegEnumKeyExW", ret2), SA("RegEnumValueW", ret2), SA("RegEnumValueA", ret2), SA("RegGetValueA", RegGetValueW), SA("RegNotifyChangeKeyValue", ret0), SA("RegQueryInfoKeyA", RegQueryInfoKeyW), SA("RegDeleteKeyW", ret2), SA("RegDeleteValueW", ret2), SA("RegFlushKey", ret0),
   S(GetAdaptersAddresses), S(GetUnicastIpAddressTable), S(GetIfTable), S(GetIfEntry), S(GetIpAddrTable), S(GetFriendlyIfIndex), S(GetNumberOfInterfaces), S(GetAdaptersInfo), S(GetIfTable2), S(GetIpForwardTable), SA("FreeMibTable", ret0), SA("CancelMibChangeNotify2", ret0), SA("NotifyIpInterfaceChange", ret50), SA("ConvertInterfaceIndexToLuid", ret50), SA("ConvertInterfaceLuidToNameW", ret50), SA("ConvertInterfaceLuidToIndex", ret50), SA("GetBestInterfaceEx", ret50), SA("GetIfEntry2", ret50), SA("GetIpForwardTable2", ret50), SA("GetAdaptersInfo", ret50), SA("GetNetworkParams", ret50), SA("NotifyAddrChange", ret50), SA("NotifyRouteChange", ret50), SA("GetPerAdapterInfo", ret50), SA("if_nametoindex", ret0), SA("if_indextoname", ret0), SA("ConvertInterfaceLuidToGuid", ret50), SA("ConvertInterfaceGuidToLuid", ret50),
-  S(GetThreadLocale), S(GetUserDefaultLCID), S(GetUserDefaultLangID), S(GetSystemDefaultLangID), S(GetUserDefaultUILanguage), S(GetLocaleInfoA), S(GetLocaleInfoW), S(GetLocaleInfoEx), S(IsValidLocale), S(IsValidCodePage), S(EnumSystemLocalesW), S(EnumDateFormatsW), S(EnumDateFormatsA), S(EnumDateFormatsExW), S(EnumDateFormatsExEx), S(EnumTimeFormatsW), S(EnumTimeFormatsA), S(EnumTimeFormatsEx), S(GetUserDefaultLocaleName), S(LCMapStringW), S(LCMapStringEx), S(LCMapStringA), S(CompareStringW), S(CompareStringA), S(CompareStringEx), S(CompareStringOrdinal), S(GetStringTypeW), S(GetStringTypeA), S(MultiByteToWideChar), S(WideCharToMultiByte), S(CharUpperA), S(CharLowerA),
+  S(GetThreadLocale), S(GetUserDefaultLCID), S(GetUserDefaultLangID), S(GetSystemDefaultLangID), S(GetUserDefaultUILanguage), S(GetLocaleInfoA), S(GetLocaleInfoW), S(GetLocaleInfoEx), S(IsValidLocale), S(IsValidCodePage), S(EnumSystemLocalesA), S(EnumSystemLocalesW), S(EnumDateFormatsW), S(EnumDateFormatsA), S(EnumDateFormatsExW), S(EnumDateFormatsExEx), S(EnumTimeFormatsW), S(EnumTimeFormatsA), S(EnumTimeFormatsEx), S(GetUserDefaultLocaleName), S(LCMapStringW), S(LCMapStringEx), S(LCMapStringA), S(CompareStringW), S(CompareStringA), S(CompareStringEx), S(CompareStringOrdinal), S(GetStringTypeW), S(GetStringTypeA), S(MultiByteToWideChar), S(WideCharToMultiByte), S(CharUpperA), S(CharLowerA),
   S(lstrlenA), S(lstrlenW), S(lstrcpyA), S(lstrcmpiA), S(lstrcmpA), S(InterlockedCompareExchange), S(InterlockedExchange), S(InterlockedIncrement), S(InterlockedDecrement), S(InterlockedExchangeAdd), S(QueueUserAPC),
   S(CreateNamedPipeW), S(CreateNamedPipeA), S(ConnectNamedPipe), S(ReadFileEx), S(WriteFileEx), S(RtlNtStatusToDosError), S(CancelIo), SA("CancelIoEx", CancelIo),
   S(GetTimeZoneInformation), S(FileTimeToSystemTime), S(SystemTimeToFileTime), S(FileTimeToLocalFileTime), S(GetDateFormatA), S(GetTimeFormatA), S(SystemFunction036), SA("ProcessPrng", SystemFunction036), SA("BCryptGenRandom", BCryptGenRandom), S(GetComputerNameA), S(GetUserNameA), S(GetDriveTypeA), S(GetLogicalDrives), S(GetDiskFreeSpaceExA), S(SetHandleCount), S(GetHandleInformation), S(SetHandleInformation), S(DuplicateHandle), S(CreatePipe), S(PeekNamedPipe), S(GetOverlappedResult), S(Beep), S(DebugBreak), S(GetProcessId), S(K32GetProcessMemoryInfo), SA("GetProcessMemoryInfo", K32GetProcessMemoryInfo),

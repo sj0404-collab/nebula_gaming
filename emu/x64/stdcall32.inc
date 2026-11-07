@@ -615,6 +615,7 @@ static const struct { const char *n; unsigned short bytes; } stdcall32_tab[] = {
   { "EnumResourceLanguagesW", 20 },
   { "EnumResourceNamesW", 16 },
   { "EnumResourceNamesWrapW", 16 },
+  { "EnumSystemLocalesA", 8 },
   { "EnumSystemLocalesW", 8 },
   { "EnumThemeColors", 16 },
   { "EnumThemeSizes", 16 },
