@@ -156,10 +156,13 @@ export default function X64App() {
   const [touch] = useState(() => typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches);
   const [padMode, setPadMode] = useState(() => boolPref('nebula_x64_touchpad', touch));   // touchpad: relative cursor (default on phones/tablets)
   const [tmShow, setTmShow] = useState(() => boolPref('nebula_x64_tmouse', touch));       // on-screen mouse buttons
-  const [deskFit, setDeskFit] = useState(() => boolPref('nebula_x64_deskfit', touch));    // the guest desktop = the device screen (portrait and landscape)
+  const [deskFit, setDeskFit] = useState(() => boolPref('nebula_x64_deskfit', touch));
+  const [fpsShow, setFpsShow] = useState(() => boolPref('nebula_x64_fps', true));          // FPS / MIPS counter in the corner of the screen
+  const [fps, setFps] = useState(0); const fpsRef = useRef({ t: 0, f: 0 });    // the guest desktop = the device screen (portrait and landscape)
   useEffect(() => setBoolPref('nebula_x64_touchpad', padMode), [padMode]);
   useEffect(() => setBoolPref('nebula_x64_tmouse', tmShow), [tmShow]);
   useEffect(() => setBoolPref('nebula_x64_deskfit', deskFit), [deskFit]);
+  useEffect(() => setBoolPref('nebula_x64_fps', fpsShow), [fpsShow]);
   const cur = useRef({ x: -1, y: -1 });   // virtual cursor in guest pixels (-1 = not placed yet → screen centre); also the last known pointer spot for the on-screen buttons
   const cursorRef = useRef<HTMLDivElement | null>(null);
   const applyDesktopRef = useRef<() => void>(() => {});   // measured desktop size → emulator, callable from the start paths declared above its definition
@@ -319,7 +322,8 @@ export default function X64App() {
 
   // stats ticker while running
   useEffect(() => {
-    const t = setInterval(() => { const rt = rtRef.current; if (rt && (rt.status === 'running' || rt.status === 'waiting-stdin')) { setStats(rt.stats()); setDisk({ files: rt.diskFiles, writes: rt.disk.writes, bytes: rt.disk.bytes, queued: rt.disk.queued() }); setPadInfo(rt.pads.describe()); } }, 500);
+    const t = setInterval(() => { const rt = rtRef.current; if (rt && (rt.status === 'running' || rt.status === 'waiting-stdin')) { const st = rt.stats(); setStats(st); setDisk({ files: rt.diskFiles, writes: rt.disk.writes, bytes: rt.disk.bytes, queued: rt.disk.queued() }); setPadInfo(rt.pads.describe());
+      const now = performance.now(), r = fpsRef.current; if (r.t) setFps(Math.round((st.frames - r.f) * 1000 / Math.max(1, now - r.t))); r.t = now; r.f = st.frames; } }, 500);
     return () => clearInterval(t);
   }, []);
 
@@ -826,6 +830,9 @@ export default function X64App() {
                 className="absolute bottom-0 left-0 h-px w-px resize-none opacity-0" style={{ fontSize: 16, pointerEvents: imeOpen ? 'auto' : 'none' }} tabIndex={imeOpen ? 0 : -1}
                 onInput={imeInput} onCompositionEnd={imeInput} onKeyDown={e => imeKey(e, true)} onKeyUp={e => imeKey(e, false)} onBlur={() => { if (imeOpen && running) setTimeout(() => { const a = document.activeElement; if (imeOpen && a && a !== imeRef.current && !a.closest?.('[data-x64-touchbar]')) setImeOpen(false); }, 0); }} />
               <button data-x64-fs onClick={e => { e.stopPropagation(); toggleFullscreen(); }} title={fs ? 'Exit fullscreen' : 'Fullscreen (game mode)'} className={`absolute right-2 top-2 rounded-full bg-black/50 p-2 text-white ${touch || fs ? '' : 'opacity-0 hover:opacity-100'}`} onPointerDown={e => e.stopPropagation()}>{fs ? <Minimize2 size={14} /> : <Maximize2 size={14} />}</button>
+              {running && fpsShow && stats && (
+                <div data-x64-fps className="pointer-events-none absolute left-2 top-2 rounded bg-black/50 px-1.5 py-0.5 font-mono text-[11px] leading-tight text-lime-300">{fps} FPS · {stats.mips.toFixed(0)} MIPS</div>
+              )}
               {!running && frames === 0 && (
                 <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center text-slate-400">
                   <Monitor size={40} strokeWidth={1} />
@@ -852,6 +859,8 @@ export default function X64App() {
                     onPointerDown={e => { e.preventDefault(); e.stopPropagation(); }} onClick={e => { e.preventDefault(); setTmShow(v => !v); }}><MousePointerClick size={14} className="mx-auto" /></button>
                   <button data-x64-deskfit className={`min-w-9 select-none rounded-full px-2 py-1.5 text-white ${deskFit ? 'bg-indigo-500' : 'bg-white/15'}`} title="Desktop fills the screen (follows rotation).  Off = the view follows the program's window" aria-pressed={deskFit}
                     onPointerDown={e => { e.preventDefault(); e.stopPropagation(); }} onClick={e => { e.preventDefault(); setDeskFit(v => !v); }}><Expand size={14} className="mx-auto" /></button>
+                  <button data-x64-fpstoggle className={`min-w-9 select-none rounded-full px-2 py-1.5 text-[11px] font-bold text-white ${fpsShow ? 'bg-indigo-500' : 'bg-white/15'}`} title="FPS / MIPS counter in the corner" aria-pressed={fpsShow}
+                    onPointerDown={e => { e.preventDefault(); e.stopPropagation(); }} onClick={e => { e.preventDefault(); setFpsShow(v => !v); }}>FPS</button>
                   {TOUCH_KEYS.map(k => (
                     <button key={k.vk} className={`min-w-9 shrink-0 select-none rounded-full px-2 py-1.5 text-[11px] font-bold text-white active:bg-indigo-500 ${sticky.includes(k.vk) ? 'bg-indigo-500' : 'bg-white/15'}`} aria-pressed={k.sticky ? sticky.includes(k.vk) : undefined}
                       onPointerDown={e => { e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); touchKey(k.vk, true, k.sticky); }}
