@@ -1,3 +1,34 @@
+# v1.43.2 — GOG installers reach the branded wizard: msi.dll, a JIT `push esp` bug, 32-bit pseudo-handles, real JPEG decoding
+
+**"Cannot Import dll: msi.dll" (phone report, v1.43.1).** GOG's Inno Setup scripts import `MsiQueryProductState` / `MsiEnumRelatedProducts`
+/ `MsiGetProductInfo` / `MsiSetInternalUI` / `MsiGetFileVersion` / `MsiGetFileHash` from msi.dll to look for installed
+redistributables. There is a real msi.dll now (`emu/x64/win32_msi.inc`): an empty product database with correct Windows
+Installer return codes (`INSTALLSTATE_UNKNOWN`, `ERROR_NO_MORE_ITEMS`, `ERROR_UNKNOWN_PRODUCT`), `MsiSetInternalUI` state, and
+`MsiGetFileVersion` / `MsiGetFileHash` over real files (version resource + MD5). Every Msi* entry is listed for the x86 stdcall
+table — the first version corrupted the PascalScript stack on x86 because 159 names had no argument size. `tests/msi.c` runs
+on x86 and x64 and requires a clean exit code.
+
+**"Error reading BackButton.Width" after the language dialog (JIT only).** Found with the runner: the GOG wizard opened when
+the language dialog was confirmed within seconds, and failed when it had been left open for a minute. The idle loop made
+Delphi's `push esp` hot, and the translator pushed the *already decremented* stack pointer (Intel: the value before the push).
+Fixed in `jit.inc`; `jitdiff.c` now checks `push esp`/`push rsp` + `pop esp` in both bitnesses. sitecheck got a `jitskip`
+input (bisect by instruction kind, the way this one was found) and keeps the Inno Setup Log in the artifact.
+
+**32-bit pseudo-handles.** `GetCurrentProcess()` / `GetCurrentThread()` arrive from x86 code as `0xFFFFFFFF` / `0xFFFFFFFE`;
+every consumer compared against the 64-bit values, so psapi `EnumProcessModules`, `GetProcessId`, `GetExitCodeProcess`,
+`WaitForSingleObject(self)`, `DuplicateHandle`, `CreateFileMapping(INVALID_HANDLE_VALUE)` (page-file mappings!),
+`Suspend/TerminateThread`, `QueueUserAPC` failed with "invalid handle" on x86. Normalised (`h_norm`), covered by `tests/ptrout.c`.
+
+**x86 pointer-sized out-parameters.** `SysReAllocStringLen`, `fopen_s`, `CreatePipe`, `DuplicateHandle`, `getenv_s`, … wrote
+8 bytes into a 4-byte slot on x86 — `SysReAllocStringLen` clobbered PascalScript's variant stack in the GOG script.
+
+**Real JPEG decoder (GDI+ / WIC).** Baseline + progressive, restart markers, any chroma sampling, libjpeg-style fancy
+upsampling, Adobe RGB/CMYK; tested against libjpeg references (`tests/jpegtest.c`). The GOG wizard background is a JPEG.
+
+**Where the GOG installer is now (runner, JIT on):** language dialog → branded Welcome page with background, logo, OpenSans
+text, Options / Install buttons (732 M instructions). The rest of the wizard (Install click → directory → file copy) is the
+next step. Native run.sh: 379 + msi + jpeg + ptrout tests per bitness; CI e2e and jitdiff green.
+
 # v1.43.1 — the APK finally ships the emulator that was tested; exe names up to 259 characters
 
 **Why v1.42.0 / v1.43.0 behaved differently on the phone than on the runner.** The CI job that built the APK (and the e2e
