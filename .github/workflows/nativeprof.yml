@@ -66,3 +66,5 @@ jobs:
             /tmp/np/native.txt
             /tmp/np/frames/*.png
             /tmp/np/guest_tmp/Setup Log*
+            /tmp/np/guest_tmp/is-*/*.tmp
+            /tmp/np/guest_tmp/is-*/*.dll
