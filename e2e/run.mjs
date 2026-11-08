@@ -236,6 +236,43 @@ const x64Open = async () => {
   await w.locator('[data-x64-samples="ready"]').waitFor({ timeout: 120_000 });
   return w;
 };
+await test('components persist across closing Programs and reloading the app', async () => {
+  await openFromDesktop('Programs');
+  let w = page.locator('[data-window][aria-label*="Programs"]');
+  await w.locator('[data-x64-tab="components"]').click();
+  const names = ['data-x64-vc10','data-x64-vc14x86','data-x64-vc14x64','data-x64-component-dx','data-x64-component-dotnet'];
+  for (const attr of names) {
+    await w.locator(`[${attr}]`).waitFor({ timeout: 120000 });
+    await page.waitForFunction(a => { const s=document.querySelector(`[${a}]`)?.getAttribute(a); return s && s!=='probing'; }, attr, { timeout: 120000 });
+    if (await w.locator(`[${attr}]`).getAttribute(attr) !== 'installed') await w.locator(`[${attr}]`).click({ timeout: 120000 });
+    // The .NET and DX installer opens Console. Wait on the toolbar state for
+    // those packs, then return to the components view.
+    const toolbar = attr === 'data-x64-component-dx' ? 'data-x64-dx' : attr === 'data-x64-component-dotnet' ? 'data-x64-dotnet' : null;
+    if (toolbar) await page.waitForFunction(a => document.querySelector(`[${a}]`)?.getAttribute(a)==='installed', toolbar, { timeout: 300000 });
+    else await page.waitForFunction(a => document.querySelector(`[${a}]`)?.getAttribute(a)==='installed', attr, { timeout: 300000 });
+    await w.locator('[data-x64-tab="components"]').click();
+  }
+  await page.screenshot({ path: resolve(SHOTS, 'components-installed.png') });
+  await closeAll(); await openFromDesktop('Programs');
+  w = page.locator('[data-window][aria-label*="Programs"]'); await w.locator('[data-x64-tab="components"]').click();
+  for (const attr of names) await page.waitForFunction(a => document.querySelector(`[${a}]`)?.getAttribute(a)==='installed', attr, { timeout: 120000 });
+  await page.reload({ waitUntil: 'load' }); await page.waitForSelector('[aria-label="Start"]');
+  await openFromDesktop('Programs'); w = page.locator('[data-window][aria-label*="Programs"]'); await w.locator('[data-x64-tab="components"]').click();
+  for (const attr of names) await page.waitForFunction(a => document.querySelector(`[${a}]`)?.getAttribute(a)==='installed', attr, { timeout: 120000 });
+  const verified = await page.evaluate(async () => { const rt=window.__x64; const paths=['C:\\Windows\\SysWOW64\\msvcr100.dll','C:\\Windows\\SysWOW64\\msvcp140.dll','C:\\Windows\\System32\\msvcp140.dll','C:\\Windows\\System32\\d3dcompiler_33.dll','C:\\Program Files\\dotnet\\dotnet.exe']; return Promise.all(paths.map(async p => { const f=await rt.disk.read(p); const v=rt.vfsRead(p); return !!f?.data?.length && !!v?.length && f.data.length===v.length; })); });
+  expect(verified.every(Boolean), 'persistent DLL/runtime content missing after reload: '+JSON.stringify(verified));
+  await page.screenshot({ path: resolve(SHOTS, 'components-restored.png') });
+  // Remove one stored file, reopen, then simulate unavailable persistent storage.
+  // The installer must report an error, not success, in this situation.
+  await page.evaluate(async () => { const d=window.__x64.disk; d.remove('C:\\Windows\\SysWOW64\\msvcr100.dll'); await d.flushChecked(); });
+  await closeAll(); await openFromDesktop('Programs'); w=page.locator('[data-window][aria-label*="Programs"]');
+  await w.locator('[data-x64-tab="components"]').click();
+  await page.waitForFunction(() => window.__x64?.disk?.available && document.querySelector('[data-x64-vc10]')?.getAttribute('data-x64-vc10')==='available', null, { timeout: 120000 });
+  await page.evaluate(() => { window.__x64.disk.available=false; });
+  await w.locator('[data-x64-vc10]').click();
+  await page.waitForFunction(() => document.querySelector('[data-x64-vc10]')?.getAttribute('data-x64-vc10')==='error', null, { timeout: 120000 });
+  await closeAll();
+});
 await test('x64: emulator loads (wasm64), scans the bundled samples and reports verdicts', async () => {
   const w = await x64Open();
   for (const n of ['NebulaStrike.exe', 'hello.exe', 'bench.exe'])

@@ -317,6 +317,11 @@ export class X64Runtime {
     if (!resident && ex.x64_vfs_add_lazy && !isScratch(path)) { this.cache.set(diskKey(path), data); return !!ex.x64_vfs_add_lazy(this.putStr(path), BigInt(data.length)); }
     return !!ex.x64_vfs_add(this.putStr(path), this.put(data), BigInt(data.length));
   }
+  /** Stage a bundled component both on the virtual disk and for durable storage. */
+  vfsAddPersistent(path: string, data: Uint8Array): boolean {
+    if (isScratch(path) || !this.disk.available || !this.vfsAdd(path, data)) return false;
+    return this.disk.putOwned(path, data);
+  }
   vfsMkdir(path: string): boolean { return !!this.ex!.x64_vfs_mkdir(this.putStr(path)); }
   vfsRemove(path: string): boolean { const ok = !!this.ex!.x64_vfs_remove(this.putStr(path)); if (ok) this.cache.delete(diskKey(path)); return ok; }
   vfsList(): VfsEntry[] { if (!this.ex) return []; try { return JSON.parse(this.cstr(this.ex.x64_vfs_list())) as VfsEntry[]; } catch { return []; } }

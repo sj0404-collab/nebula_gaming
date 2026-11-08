@@ -4,6 +4,7 @@ import { Cpu, FolderOpen, FolderInput, Play, Square, Terminal as TerminalIcon, M
 import { scanLibrary, classifyExe, loadPrefs, savePrefs, makeLnk, type LibraryItem, type LibraryPrefs } from '../../lib/x64/library';
 import { peIconDataUrl } from '../../lib/x64/peicon';
 import { notifyDiskChange } from '../../lib/x64/diskbus';
+import { diskKey } from '../../lib/x64/disk';
 import { zipEntries, zipRead } from '../../lib/x64/zip';
 import { useOS } from '../../lib/os';
 import { X64Runtime, vkFromEvent, wasm64Supported, type JitInfo, type PeInfo, type RunStats, type VfsEntry } from '../../lib/x64/runtime';
@@ -408,6 +409,7 @@ export default function X64App() {
   useEffect(() => { if (!running) { autoFs.current = false; return; } if (touch && stats?.hasWindow && !fs && !autoFs.current) { autoFs.current = true; setTab('screen'); toggleFullscreen(); } }, [running, stats?.hasWindow, touch, fs, toggleFullscreen]);
 
   const [fetching, setFetching] = useState<string | null>(null);
+  const attempted = useRef({ pack: false, dx: false, dotnet: false, vc10: false, vc14x86: false });
   const [pack, setPack] = useState<PackState>({ status: 'probing' });
   useEffect(() => { let alive = true; (async () => {
     try { const r = await fetch(PACK_URL + 'manifest.json'); if (!r.ok) throw new Error('HTTP ' + r.status); const man = await r.json() as PackManifest; if (alive) setPack({ status: 'available', manifest: man }); }
@@ -416,15 +418,17 @@ export default function X64App() {
   const installPack = useCallback(async (rt: X64Runtime): Promise<boolean> => {
     if (pack.status === 'installed') return true;
     if (pack.status !== 'available' || !pack.manifest) { setLog(l => [...l, 'RUNTIME PACK: ' + (pack.note ?? pack.status)]); return false; }
+    attempted.current.pack = true;
     const man = pack.manifest; let done = 0, bytes = 0;
     setPack({ status: 'installing', manifest: man, done: 0 }); setFetching(`installing runtime pack (${man.files.length} DLLs)…`);
     try {
       for (const f of man.files) {
         const r = await fetch(PACK_URL + f.name); if (!r.ok) throw new Error(`${f.name}: HTTP ${r.status}`);
-        const b = new Uint8Array(await r.arrayBuffer()); bytes += b.length; done++;
-        rt.vfsAdd('C:\\Windows\\System32\\' + f.name, b);
+        const b = new Uint8Array(await r.arrayBuffer()); if (b.length !== f.size) throw new Error(`${f.name}: unexpected size`); bytes += b.length; done++;
+        if (!rt.vfsAddPersistent('C:\\Windows\\System32\\' + f.name, b)) throw new Error(`${f.name}: cannot persist file`);
         setPack({ status: 'installing', manifest: man, done }); setFetching(`installing runtime pack: ${done}/${man.files.length}, ${(bytes / 1048576).toFixed(1)} MB`);
       }
+      await rt.disk.flushChecked();
     } catch (e) { setFetching(null); setPack({ status: 'available', manifest: man, note: String(e) }); setLog(l => [...l, 'RUNTIME PACK: ' + String(e)]); return false; }
     setFetching(null); setPack({ status: 'installed', manifest: man, done }); setFiles(rt.vfsList());
     setLog(l => [...l, `runtime pack installed: ${done} DLLs, ${(bytes / 1048576).toFixed(1)} MB → C:\\Windows\\System32 (${man.pack})`]);
@@ -440,6 +444,7 @@ export default function X64App() {
   const installGz = useCallback(async (rt: X64Runtime, pk: GzPack, st: DotnetState, set: (v: DotnetState) => void): Promise<boolean> => {
     if (st.status === 'installed') return true;
     if (st.status !== 'available' || !st.manifest) { setLog(l => [...l, pk.label.toUpperCase() + ': ' + (st.note ?? st.status)]); return false; }
+    attempted.current[pk.key] = true;
     const man = st.manifest; let done = 0, bytes = 0;
     set({ status: 'installing', manifest: man, done: 0 }); setFetching(`installing ${pk.label} (${man.files.length} files)…`); setTab('console');
     try {
@@ -451,11 +456,12 @@ export default function X64App() {
         try { b = await fetchGz(pk.url + f.gz, 0, pk.url + f.path.replace(/\\/g, '/')); } catch (e) { failed = true; throw e; }
         if (failed) return;   // another worker failed meanwhile: do not touch the state again (it already says 'available' + the error)
         if (b.length !== f.size) { failed = true; throw new Error(`${f.path}: ${b.length} bytes, expected ${f.size}`); }
-        if (!rt.vfsAdd(pk.dir + f.path, b)) { failed = true; throw new Error(`${f.path}: virtual disk refused the file`); }
+        if (!rt.vfsAddPersistent(pk.dir + f.path, b)) { failed = true; throw new Error(`${f.path}: virtual disk refused the file`); }
         bytes += b.length; done++; inflight.delete(f.gz.slice(f.gz.lastIndexOf('/') + 1));
         if (done % 50 === 0) setLog(l => [...l, `${pk.label}: ${done}/${man.files.length} files, ${(bytes / 1048576).toFixed(1)} MB in ${((performance.now() - t0) / 1000).toFixed(1)} s`]);
         set({ status: 'installing', manifest: man, done }); setFetching(label()); } };
       await Promise.all(Array.from({ length: PAR }, worker));
+      await rt.disk.flushChecked();
     } catch (e) { setFetching(null); set({ status: 'available', manifest: man, note: String(e) }); setLog(l => [...l, pk.label.toUpperCase() + ': ' + String(e)]); return false; }
     setFetching(null); set({ status: 'installed', manifest: man, done }); setFiles(rt.vfsList());
     setLog(l => [...l, `${pk.label} installed: ${done} files, ${(bytes / 1048576).toFixed(1)} MB → ${pk.dir} (${man.pack})`]);
@@ -467,14 +473,16 @@ export default function X64App() {
   const [vc10Error, setVc10Error] = useState('');
   const installVC10 = async (rt: X64Runtime): Promise<boolean> => {
     if (vc10Installed.current) return true;
+    attempted.current.vc10 = true;
     setVc10Status('installing'); setVc10Error('');
     setFetching('Installing Visual C++ 2010 x86 runtime…');
     try {
       for (const name of ['msvcr100.dll', 'msvcp100.dll']) {
         const r = await fetch(`${PACK_URL}vc2010-x86/${name}`);
         if (!r.ok) throw new Error(`${name}: HTTP ${r.status}`);
-        if (!rt.vfsAdd(`C:\\Windows\\SysWOW64\\${name}`, new Uint8Array(await r.arrayBuffer()))) throw new Error(`${name}: virtual disk refused file`);
+        if (!rt.vfsAddPersistent(`C:\\Windows\\SysWOW64\\${name}`, new Uint8Array(await r.arrayBuffer()))) throw new Error(`${name}: virtual disk refused file`);
       }
+      await rt.disk.flushChecked();
       vc10Installed.current = true; setVc10Status('installed'); setFetching(null); setFiles(rt.vfsList());
       return true;
     } catch (e) {
@@ -487,6 +495,7 @@ export default function X64App() {
   const vc14x86Installed = useRef(false);
   const installVC14x86 = async (rt: X64Runtime): Promise<boolean> => {
     if (vc14x86Installed.current) return true;
+    attempted.current.vc14x86 = true;
     setVc14x86Status('installing'); setVc14x86Error(''); setFetching('Installing Visual C++ 2015–2022 x86…');
     try {
       const base = `${PACK_URL}vc2015-x86/`;
@@ -497,8 +506,9 @@ export default function X64App() {
         if (!/^[a-z0-9_.-]+\.dll$/i.test(file.name)) throw new Error(`invalid DLL name: ${file.name}`);
         const r = await fetch(base + file.name); if (!r.ok) throw new Error(`${file.name}: HTTP ${r.status}`);
         const bytes = new Uint8Array(await r.arrayBuffer()); if (bytes.length !== file.size) throw new Error(`${file.name}: unexpected size`);
-        if (!rt.vfsAdd(`C:\\Windows\\SysWOW64\\${file.name}`, bytes)) throw new Error(`${file.name}: virtual disk refused file`);
+        if (!rt.vfsAddPersistent(`C:\\Windows\\SysWOW64\\${file.name}`, bytes)) throw new Error(`${file.name}: virtual disk refused file`);
       }
+      await rt.disk.flushChecked();
       vc14x86Installed.current = true; setVc14x86Status('installed'); setFetching(null); setFiles(rt.vfsList()); return true;
     } catch (e) { setVc14x86Status('error'); setVc14x86Error(String(e)); setFetching(null); setLog(l => [...l, `VC++ 2015–2022 x86: ${String(e)}`]); return false; }
   };
@@ -509,6 +519,22 @@ export default function X64App() {
     if (dlls.some(d => /^(msvcp140|vcruntime140|concrt140|vcomp140)/i.test(d)) && !(await installVC14x86(rt))) return false;
     return true;
   };
+  // The runtime's cache is populated from IndexedDB during init. Only advertise
+  // a restored package if every manifest entry exists at the expected size.
+  useEffect(() => {
+    const rt = rtRef.current; if (ready !== 'ready' || !rt) return;
+    const complete = (items: { path: string; size: number }[]) => items.length > 0 && items.every(f => rt.cache.get(diskKey(f.path))?.length === f.size);
+    const vc10 = ['msvcr100.dll', 'msvcp100.dll'].map(n => rt.cache.get(diskKey(`C:\\Windows\\SysWOW64\\${n}`)));
+    if (!attempted.current.vc10 && vc10Status === 'available' && vc10.every(b => b && b.length > 0)) { vc10Installed.current = true; setVc10Status('installed'); }
+    if (!attempted.current.pack && pack.status === 'available' && pack.manifest && complete(pack.manifest.files.map(f => ({ path: 'C:\\Windows\\System32\\' + f.name, size: f.size })))) setPack({ ...pack, status: 'installed', done: pack.manifest.files.length });
+    if (!attempted.current.dx && dx.status === 'available' && dx.manifest && complete(dx.manifest.files.map(f => ({ path: DX_DIR + f.path, size: f.size })))) setDx({ ...dx, status: 'installed', done: dx.manifest.files.length });
+    if (!attempted.current.dotnet && dotnet.status === 'available' && dotnet.manifest && complete(dotnet.manifest.files.map(f => ({ path: DOTNET_DIR + f.path, size: f.size })))) setDotnet({ ...dotnet, status: 'installed', done: dotnet.manifest.files.length });
+    let alive = true;
+    if (!attempted.current.vc14x86 && vc14x86Status === 'available' && !vc14x86Installed.current) void fetch(`${PACK_URL}vc2015-x86/manifest.json`).then(r => r.ok ? r.json() : null).then((man: PackManifest | null) => {
+      if (alive && !attempted.current.vc14x86 && man?.files && complete(man.files.map(f => ({ path: `C:\\Windows\\SysWOW64\\${f.name}`, size: f.size })))) { vc14x86Installed.current = true; setVc14x86Status('installed'); }
+    }).catch(() => {});
+    return () => { alive = false; };
+  }, [ready, pack, dx, dotnet, vc10Status, vc14x86Status]);
   const installDotnet = useCallback((rt: X64Runtime) => installGz(rt, GZ_PACKS.dotnet, dotnet, setDotnet), [installGz, dotnet]);
   const installDx = useCallback((rt: X64Runtime) => installGz(rt, GZ_PACKS.dx, dx, setDx), [installGz, dx]);
   const run = useCallback(async (entry?: ExeEntry, argv?: string) => {
@@ -814,13 +840,13 @@ export default function X64App() {
           {tab === 'components' && !fs && (
             <div className="min-h-0 flex-1 overflow-auto p-4" data-x64-components>
               <h2 className="mb-2 text-lg font-bold">Системные компоненты</h2>
-              <p className="mb-4 text-sm text-slate-600">Установка в виртуальный диск Nebula, а не в Android. Некоторые компоненты устанавливаются автоматически при запуске программы. Статус относится к текущему сеансу.</p>
+              <p className="mb-4 text-sm text-slate-600">Установка в виртуальный диск Nebula, а не в Android. Некоторые компоненты устанавливаются автоматически при запуске программы. Файлы сохраняются на виртуальном диске между запусками.</p>
               <div className="space-y-3">
-                <div className="rounded border p-3"><b>Visual C++ 2010 x86</b><p className="text-sm">MSVCR100 и MSVCP100, для 32-битных программ. {vc10Status === 'installed' ? 'Установлено в этом сеансе.' : vc10Status === 'installing' ? 'Устанавливается…' : vc10Error || 'Доступно для установки.'}</p><button data-x64-vc10={vc10Status} disabled={ready !== 'ready' || !!running || !!fetching || vc10Status === 'installed'} onClick={() => { const rt = rtRef.current; if (rt) void installVC10(rt); }} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button></div>
-                <div className="rounded border p-3"><b>Visual C++ 2015–2022 x86</b><p className="text-sm">Библиотеки Microsoft для 32-битных программ. Статус: {vc14x86Status}{vc14x86Error ? ` — ${vc14x86Error}` : ''}</p><button disabled={ready !== 'ready' || !!running || !!fetching || vc14x86Status === 'installed'} onClick={() => { const rt = rtRef.current; if (rt) void installVC14x86(rt); }} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button></div>
-                <div className="rounded border p-3"><b>Visual C++ 2015–2022 x64</b><p className="text-sm">Библиотеки Microsoft для 64-битных программ. Статус: {pack.status}{pack.note ? ` — ${pack.note}` : ''}</p><button disabled={ready !== 'ready' || pack.status !== 'available' || !!running || !!fetching} onClick={() => { const rt = rtRef.current; if (rt) void installPack(rt); }} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button></div>
-                <div className="rounded border p-3"><b>DirectX June 2010 x64</b><p className="text-sm">Пользовательские DLL; не драйвер и не полная реализация DirectX. Статус: {dx.status}{dx.note ? ` — ${dx.note}` : ''}</p><button disabled={ready !== 'ready' || dx.status !== 'available' || !!running || !!fetching} onClick={() => { const rt = rtRef.current; if (rt) void installDx(rt); }} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button></div>
-                <div className="rounded border p-3"><b>.NET 10 x64</b><p className="text-sm">Среда Microsoft для поддерживаемых управляемых программ. Статус: {dotnet.status}{dotnet.note ? ` — ${dotnet.note}` : ''}</p><button disabled={ready !== 'ready' || dotnet.status !== 'available' || !!running || !!fetching} onClick={() => { const rt = rtRef.current; if (rt) void installDotnet(rt); }} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button></div>
+                <div className="rounded border p-3"><b>Visual C++ 2010 x86</b><p className="text-sm">MSVCR100 и MSVCP100, для 32-битных программ. {vc10Status === 'installed' ? 'Установлено.' : vc10Status === 'installing' ? 'Устанавливается…' : vc10Error || 'Доступно для установки.'}</p><button data-x64-vc10={vc10Status} disabled={ready !== 'ready' || !!running || !!fetching || vc10Status === 'installed'} onClick={() => { const rt = rtRef.current; if (rt) void installVC10(rt); }} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button></div>
+                <div className="rounded border p-3"><b>Visual C++ 2015–2022 x86</b><p className="text-sm">Библиотеки Microsoft для 32-битных программ. Статус: {vc14x86Status}{vc14x86Error ? ` — ${vc14x86Error}` : ''}</p><button data-x64-vc14x86={vc14x86Status} disabled={ready !== 'ready' || !!running || !!fetching || vc14x86Status === 'installed'} onClick={() => { const rt = rtRef.current; if (rt) void installVC14x86(rt); }} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button></div>
+                <div className="rounded border p-3"><b>Visual C++ 2015–2022 x64</b><p className="text-sm">Библиотеки Microsoft для 64-битных программ. Статус: {pack.status}{pack.note ? ` — ${pack.note}` : ''}</p><button data-x64-vc14x64={pack.status} disabled={ready !== 'ready' || pack.status !== 'available' || !!running || !!fetching} onClick={() => { const rt = rtRef.current; if (rt) void installPack(rt); }} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button></div>
+                <div className="rounded border p-3"><b>DirectX June 2010 x64</b><p className="text-sm">Пользовательские DLL; не драйвер и не полная реализация DirectX. Статус: {dx.status}{dx.note ? ` — ${dx.note}` : ''}</p><button data-x64-component-dx={dx.status} disabled={ready !== 'ready' || dx.status !== 'available' || !!running || !!fetching} onClick={() => { const rt = rtRef.current; if (rt) void installDx(rt); }} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button></div>
+                <div className="rounded border p-3"><b>.NET 10 x64</b><p className="text-sm">Среда Microsoft для поддерживаемых управляемых программ. Статус: {dotnet.status}{dotnet.note ? ` — ${dotnet.note}` : ''}</p><button data-x64-component-dotnet={dotnet.status} disabled={ready !== 'ready' || dotnet.status !== 'available' || !!running || !!fetching} onClick={() => { const rt = rtRef.current; if (rt) void installDotnet(rt); }} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button></div>
               </div>
               <p className="mt-4 text-sm text-slate-600">VC++ 2005, 2008, 2012 и 2013 здесь пока недоступны. Драйверы ядра Windows нельзя установить в Android: системные API и устройства реализуются эмулятором, их поддержка неполная.</p>
             </div>

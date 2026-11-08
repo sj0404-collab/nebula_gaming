@@ -77,7 +77,7 @@ export class Disk {
     if (!this.pending.size) return Promise.resolve();
     const batch = this.pending; this.pending = new Map();
     this.flushing = (async () => {
-      if (!(await this.open())) return;
+      if (!(await this.open())) { for (const [k, v] of batch) if (!this.pending.has(k)) this.pending.set(k, v); return; }
       const db = this.db!;
       await new Promise<void>((res, rej) => {
         const tx = db.transaction(STORE, 'readwrite'); const st = tx.objectStore(STORE);
@@ -87,6 +87,11 @@ export class Disk {
       this.onActivity?.();
     })().finally(() => { this.flushing = null; });
     return this.flushing;
+  }
+  /** Only report an installation as durable after IndexedDB accepted its whole batch. */
+  async flushChecked(): Promise<void> {
+    await this.flush();
+    if (!this.available || this.queued() !== 0) throw new Error('IndexedDB не сохранил файлы; проверьте доступность и свободное место');
   }
   queued() { return this.pending.size + (this.flushing ? 1 : 0); }
 

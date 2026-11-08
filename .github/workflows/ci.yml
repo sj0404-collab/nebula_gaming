@@ -200,6 +200,8 @@ jobs:
           if-no-files-found: ignore
 
   android:
+    # Temporarily disabled until the requested WASM work and verification are complete.
+    if: ${{ false }}
     name: Android APK (Capacitor)
     runs-on: ubuntu-latest
     needs: test
