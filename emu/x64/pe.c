@@ -224,6 +224,7 @@ int pe_load_dll(Win32 *w, const u8 *bytes, size_t len, const char *name) {
     const u8 *t = mem_ptr(w->mem, base + h.dd[9][0], 40, 0);
     if (t) { u64 rs, re, idx_addr; u32 zero; if (w->mode32) { rs = le32(t); re = le32(t + 4); idx_addr = le32(t + 8); zero = le32(t + 16); } else { rs = le64(t); re = le64(t + 8); idx_addr = le64(t + 16); zero = le32(t + 32); } if (pe_tls_register(w, rs, re, zero, idx_addr) < 0) w32_report(w, "%s: too many images with static TLS (max %d)", name, MAX_TLS_IMAGES); }
   }
+  w->mods[before].load_order = ++w->module_load_order; /* imports completed before this module */
   return before;   /* index of the module registered by pe_map */
 }
 int pe_load(Win32 *w, const u8 *bytes, size_t len, const char *name) {

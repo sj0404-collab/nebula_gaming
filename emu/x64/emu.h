@@ -308,7 +308,7 @@ typedef struct Thread {
 } Thread;
 
 #define MAX_MODULES 256
-typedef struct { char name[260]; char dir[300]; u64 base, size, entry; u32 exp_rva, exp_size, pdata_rva, pdata_size; int attached; } GuestModule;   /* dir: where it was found (LoadLibrary searches the directories of loaded modules, like LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR) */   /* a DLL loaded from the virtual disk */
+typedef struct { char name[260]; char dir[300]; u64 base, size, entry; u32 exp_rva, exp_size, pdata_rva, pdata_size; int attached, load_order; } GuestModule;   /* dir: where it was found (LoadLibrary searches the directories of loaded modules, like LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR) */   /* a DLL loaded from the virtual disk */
 struct Win32 {
   Cpu *cpu;                              /* the CURRENT thread's cpu */
   Mem *mem;
@@ -321,7 +321,7 @@ struct Win32 {
   union { ThreadCtx tctx; struct { THREAD_CTX_FIELDS; }; };    /* current thread's state (see Thread.ctx) */
   Thread th[THREAD_MAX]; int nth, cur_th; Cpu tcpu[THREAD_MAX]; int next_tid;
   struct { u64 tmpl, tmpl_size, blk_size; } tls[MAX_TLS_IMAGES]; int ntls;   /* static TLS templates (exe + DLLs), index = slot in the TEB+0x58 array */
-  GuestModule mods[MAX_MODULES]; int nmods; u64 dll_next; u32 exe_exp_rva, exe_exp_size;   /* export directory of the main image (Bun exports napi_* for .node addons) */
+  GuestModule mods[MAX_MODULES]; int nmods, module_load_order; u64 dll_next; u32 exe_exp_rva, exe_exp_size;   /* export directory of the main image (Bun exports napi_* for .node addons) */
   u32 exe_pdata_rva, exe_pdata_size;                          /* .pdata of the exe (RUNTIME_FUNCTION table) for SEH / C++ unwinding */     /* private DLLs (LoadLibrary / static imports) */
   int wake_gen;                                               /* bumped by WakeByAddress / InitOnceComplete */
   /* heap */

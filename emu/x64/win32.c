@@ -597,8 +597,8 @@ u64 w32_resolve_import(Win32 *w, const char *dll, const char *name, u32 ordinal)
 }
 /* DllMain(base, DLL_PROCESS_ATTACH, 0) for every module not yet attached (one per continuation round trip) */
 static int attach_next_module(Cpu *c) {
-  /* PE registration happens before recursive import loading: dependencies are registered later. Attach them first. */
-  Win32 *w = W; for (int i = w->nmods - 1; i >= 0; i--) if (!w->mods[i].attached) { w->mods[i].attached = 1; if (w->mods[i].entry) { guest_call(c, w->mods[i].entry, w->mods[i].base, 1, 0, 0); return 1; } }
+  /* A module receives load_order only after its recursive imports complete; shared dependencies attach first too. */
+  Win32 *w = W; for (;;) { int best = -1; for (int i = 0; i < w->nmods; i++) if (!w->mods[i].attached && w->mods[i].load_order && (best < 0 || w->mods[i].load_order < w->mods[best].load_order)) best = i; if (best < 0) break; w->mods[best].attached = 1; if (w->mods[best].entry) { guest_call(c, w->mods[best].entry, w->mods[best].base, 1, 0, 0); return 1; } }
   return 0;
 }
 /* pseudo handles for system DLLs served by shims: 0x7ff00000000 + slot<<12; the name is kept so GetProcAddress can resolve ordinals */
