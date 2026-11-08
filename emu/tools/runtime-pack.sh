@@ -22,6 +22,16 @@ mkdir -p "$OUT"
 n=0
 for f in "$work"/s2/*.dll_amd64; do b=$(basename "$f"); cp "$f" "$OUT/${b%_amd64}"; n=$((n + 1)); done
 [ "$n" -gt 0 ] || { echo "runtime-pack: no amd64 DLLs found in the redistributable" >&2; exit 1; }
+# VC++ 2010 SP1 x86 for legacy 32-bit applications (kept separate from x64 DLLs).
+VC10_URL=https://download.microsoft.com/download/1/6/5/165255E7-1014-4D0A-B094-B6A430A6BFFC/vcredist_x86.exe
+curl -fL --retry 3 -o "$work/vc10.exe" "$VC10_URL"
+mkdir -p "$work/vc10" "$work/vc10files" "$OUT/vc2010-x86"
+7z x -y -o"$work/vc10" "$work/vc10.exe" >/dev/null
+msiextract -C "$work/vc10files" "$work/vc10/vc_red.msi" >/dev/null
+for dll in msvcr100.dll msvcp100.dll; do
+  f=$(find "$work/vc10files" -iname "$dll" -print -quit); [ -n "$f" ] || { echo "missing $dll" >&2; exit 1; }
+  cp "$f" "$OUT/vc2010-x86/$dll"
+done
 python3 - "$OUT" "$URL" "$work/vc_redist.x64.exe" <<'EOF'
 import sys, os, json, hashlib, struct, time
 out, url, bundle = sys.argv[1], sys.argv[2], sys.argv[3]

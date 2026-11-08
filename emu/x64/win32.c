@@ -552,6 +552,7 @@ static int mod_load(Win32 *w, const char *name) {
   char pm[8][600]; int npm = 0;
   for (int i = w->nmods - 1; i >= 0 && npm < 8; i--) { if (!w->mods[i].dir[0]) continue; int dup = 0; for (int k = 0; k < npm; k++) if (!e_strnicmp_(pm[k], w->mods[i].dir, e_strlen(w->mods[i].dir))) { dup = 1; break; } if (dup) continue; e_snprintf(pm[npm], sizeof pm[npm], "%s\\%s", w->mods[i].dir, bn); cands[nc++] = pm[npm++]; }
   char pd[8][600]; for (int i = 0; i < w->ndll_dirs && i < 8; i++) if (w->dll_dirs[i][0]) { e_snprintf(pd[i], sizeof pd[i], "%s\\%s", w->dll_dirs[i], bn); cands[nc++] = pd[i]; }
+  char p32[600]; if (w->mode32) { e_snprintf(p32, sizeof p32, "C:\\Windows\\SysWOW64\\%s", bn); cands[nc++] = p32; }
   e_snprintf(p3, sizeof p3, "C:\\Windows\\System32\\%s", bn); cands[nc++] = p3;
   e_snprintf(p1, sizeof p1, "%s\\%s", vfs_cwd(), bn); cands[nc++] = p1; e_snprintf(p2, sizeof p2, "C:\\nebula\\%s", bn); cands[nc++] = p2;
   { const char *pv = env_get("PATH"); while (pv && *pv && np < 8) { const char *e = pv; while (*e && *e != ';') e++; size_t l = (size_t)(e - pv); if (l && l < 500) { e_memcpy(pbuf[np], pv, l); if (pbuf[np][l - 1] == '\\') l--; e_snprintf(pbuf[np] + l, sizeof pbuf[np] - l, "\\%s", bn); cands[nc++] = pbuf[np]; np++; } pv = *e ? e + 1 : e; } }

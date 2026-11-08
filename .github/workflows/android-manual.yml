@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get install -y -q cabextract
+      - run: sudo apt-get install -y -q cabextract p7zip-full msitools
       - name: Download the official vc_redist.x64.exe and extract its x64 DLLs (msvcp140*, vcruntime140*, concrt140, vcomp140, mfc140* …) + manifest
         run: ./emu/tools/runtime-pack.sh public/x64/sys32
       - uses: actions/upload-artifact@v4

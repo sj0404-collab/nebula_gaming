@@ -166,6 +166,7 @@ export default function X64App() {
   useEffect(() => setBoolPref('nebula_x64_fps', fpsShow), [fpsShow]);
   const cur = useRef({ x: -1, y: -1 });   // virtual cursor in guest pixels (-1 = not placed yet → screen centre); also the last known pointer spot for the on-screen buttons
   const cursorRef = useRef<HTMLDivElement | null>(null);
+  const ensureVC10Ref = useRef<(rt: X64Runtime, e: ExeEntry) => Promise<boolean>>(async () => true);
   const applyDesktopRef = useRef<() => void>(() => {});   // measured desktop size → emulator, callable from the start paths declared above its definition
   const [moduleKB, setModuleKB] = useState(0);
   const [apiStats, setApiStats] = useState('');
@@ -209,6 +210,7 @@ export default function X64App() {
     if (!e) { const got = await loadSample(rt, want.exe); if (!got) return; e = got; setExes(l => [...l, got]); }
     if (!e || e.pending) return;
     if (rt.status === 'running' || rt.status === 'waiting-stdin') rt.stop();
+    if (!await ensureVC10Ref.current(rt, e)) return;
     setSelected(e.id); setArgs(want.args); consoleBuf.current = ''; setConsoleText(''); setLog([]);
     const argv0 = e.path && e.path.includes(' ') ? `"${e.path}"` : e.path ?? e.name;   // like Explorer: a quoted full path when it has spaces (launchers re-parse GetCommandLineW)
     applyDesktopRef.current();
@@ -459,6 +461,24 @@ export default function X64App() {
     setLog(l => [...l, `${pk.label} installed: ${done} files, ${(bytes / 1048576).toFixed(1)} MB → ${pk.dir} (${man.pack})`]);
     return true;
   }, []);
+  // VC10 is a separate x86 runtime. Never put it over the x64 System32 DLLs.
+  const vc10Installed = useRef(false);
+  ensureVC10Ref.current = async (rt: X64Runtime, entry: ExeEntry) => {
+    if (entry.info.pe32plus || !entry.info.dlls?.some(d => /^(msvcr100|msvcp100)(\.dll)?$/i.test(d))) return true;
+    if (vc10Installed.current) return true;
+    setFetching('Installing Visual C++ 2010 x86 runtime…');
+    try {
+      for (const name of ['msvcr100.dll', 'msvcp100.dll']) {
+        const r = await fetch(`${PACK_URL}vc2010-x86/${name}`);
+        if (!r.ok) throw new Error(`${name}: HTTP ${r.status}`);
+        if (!rt.vfsAdd(`C:\\Windows\\SysWOW64\\${name}`, new Uint8Array(await r.arrayBuffer()))) throw new Error(`${name}: virtual disk refused file`);
+      }
+      vc10Installed.current = true; setFetching(null); return true;
+    } catch (e) {
+      setFetching(null); setLog(l => [...l, `Visual C++ 2010 x86 runtime: ${String(e)}`]);
+      pushToast('Programs', `Visual C++ 2010 x86 runtime could not be installed: ${String(e)}`, 'x64'); return false;
+    }
+  };
   const installDotnet = useCallback((rt: X64Runtime) => installGz(rt, GZ_PACKS.dotnet, dotnet, setDotnet), [installGz, dotnet]);
   const installDx = useCallback((rt: X64Runtime) => installGz(rt, GZ_PACKS.dx, dx, setDx), [installGz, dx]);
   const run = useCallback(async (entry?: ExeEntry, argv?: string) => {
@@ -480,6 +500,7 @@ export default function X64App() {
       } catch (e) { setFetching(null); setLog(l => [...l, 'DOWNLOAD: ' + String(e)]); setTab('report'); return; }
       setFetching(null);
     }
+    if (!await ensureVC10Ref.current(rt, current)) { setTab('report'); return; }
     const sample = current.source === 'sample' ? SAMPLES.find(x => x.name === current.name) : undefined;
     if (pack.status !== 'installed' && (sample?.needsPack || exeWantsPack(current.info.dlls, pack.manifest))) await installPack(rt);   // the program imports a vendor-runtime DLL we ship
     if (dx.status !== 'installed' && (sample?.needsDx || exeWantsDx(current.info.dlls, dx.manifest))) await installDx(rt);   // the program imports a DirectX DLL we ship (D3DX, D3DCompiler …)
