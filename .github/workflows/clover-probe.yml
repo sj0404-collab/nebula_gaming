@@ -24,7 +24,7 @@ jobs:
           X64_LOG=1 X64_WNDDUMP=1 "$runner" --no-stdin --max-ms 190000 --desktop 1600x720 --click 290,232@8000 --click 285,320@160000 --frames 60 --list-vfs --mount-rw "$RUNNER_TEMP/clover/files=C:\nebula" "$RUNNER_TEMP/clover/setup.exe" > "$RUNNER_TEMP/clover/install.log" 2>&1
           test -s "$RUNNER_TEMP/clover/files/Clover.exe"
           mv frame_*.ppm ../ 2>/dev/null || true
-          X64_LOG=1 X64_WNDDUMP=1 "$runner" --no-stdin --max-ms 60000 --desktop 1600x720 --frames 20 --list-vfs --mount-rw "$RUNNER_TEMP/clover/files=C:\nebula" "$RUNNER_TEMP/clover/files/Clover.exe" > "$RUNNER_TEMP/clover/launch.log" 2>&1
+          X64_LOG=1 X64_WNDDUMP=1 "$runner" --no-stdin --max-ms 60000 --desktop 1600x720 --frames 1 --apitrace --list-vfs --mount-rw "$RUNNER_TEMP/clover/files=C:\nebula" "$RUNNER_TEMP/clover/files/Clover.exe" > "$RUNNER_TEMP/clover/launch.log" 2>&1
       - name: Convert diagnostic frames
         if: always()
         run: |
