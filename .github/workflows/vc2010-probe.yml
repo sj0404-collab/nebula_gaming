@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - 'emu/tests/vc2010-probe.c'
+      - 'emu/x64/**'
       - '.github/workflows/vc2010-probe.yml'
     branches: [main]
 permissions:
