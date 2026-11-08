@@ -187,7 +187,8 @@ static void post_msg_to(Win32 *w, u64 hwnd, u32 msg, u64 wp, u64 lp) {
 }
 /* Shell hook registrations; support top-level window shown/destroyed notifications. */
 static u64 g_shell_hooks[32];
-static u32 shell_hook_message(void) { u32 h = 0xC000; for (const char *p = "SHELLHOOK"; *p; p++) h = (h * 31 + (u8)*p) & 0x3fff; return 0xC000 + h; }
+static u32 registered_message(const char *s) { u32 h = 2166136261u; for (const char *p = s; *p; p++) h = (h ^ (u8)*p) * 16777619u; return 0xC000u + (h % 0x3FFFu); }
+static u32 shell_hook_message(void) { return registered_message("SHELLHOOK"); }
 static void shell_hook_event(Win32 *w, int i, u32 event) {
   if (i < 0 || g_wnd[i].parent >= 0 || (g_wnd[i].exstyle & 0x80)) return;
   for (int k = 0; k < 32; k++) if (g_shell_hooks[k]) { int h = wnd_of(g_shell_hooks[k]); if (h < 0 || !wnd_alive(h)) g_shell_hooks[k] = 0; else post_msg_to(w, g_shell_hooks[k], shell_hook_message(), event, HWND_OF(i)); }
@@ -359,6 +360,8 @@ static void hook_cur_pop(void) { if (g_nhook_cur) g_nhook_cur--; }
    without delivering its callbacks. */
 static void s_SetWinEventHook(Cpu *c) { W->last_error = 50; w32_report(W, "SetWinEventHook: accessibility event hooks are not supported"); RET(0); }
 static void s_UnhookWinEvent(Cpu *c) { W->last_error = 6; RET(0); }
+/* No accessibility hooks can be registered in this implementation, so no listeners exist. */
+static void s_NotifyWinEvent(Cpu *c) { RET(0); }
 static void s_SetWindowsHookExW(Cpu *c) { int type = (int)(s32)(u32)ARG(0); u64 proc = ARG(1); if (!proc) { RET(0); return; } for (int k = 0; k < 16; k++) if (!g_hooks[k].used) { g_hooks[k].used = 1; g_hooks[k].type = type; g_hooks[k].proc = proc; g_hooks[k].tid = (u32)ARG(3); g_hooks[k].pid = W->pid; RET(0x48000 + k + 1); return; } RET(0); }
 static void s_SetWindowsHookExA(Cpu *c) { s_SetWindowsHookExW(c); }
 static void s_UnhookWindowsHookEx(Cpu *c) { u64 h = ARG(0); if (h > 0x48000 && h <= 0x48010) { g_hooks[h - 0x48001].used = 0; RET(1); return; } RET(0); }
@@ -1112,8 +1115,8 @@ static void s_RemoveClipboardFormatListener(Cpu *c) { RET(1); }
 static void s_GetClipboardFormatNameW(Cpu *c) { RET(0); }
 static void s_RegisterClipboardFormatA(Cpu *c) { RET(0xC100); }
 static void s_RegisterClipboardFormatW(Cpu *c) { RET(0xC100); }
-static void s_RegisterWindowMessageW(Cpu *c) { char n[128]; text_in(c, ARG(0), 1, n, sizeof n); u32 h = 0xC000; for (const char *p = n; *p; p++) h = (h * 31 + (u8)*p) & 0x3fff; RET(0xC000 + h); }
-static void s_RegisterWindowMessageA(Cpu *c) { char n[128]; text_in(c, ARG(0), 0, n, sizeof n); u32 h = 0xC000; for (const char *p = n; *p; p++) h = (h * 31 + (u8)*p) & 0x3fff; RET(0xC000 + h); }
+static void s_RegisterWindowMessageW(Cpu *c) { char n[128]; text_in(c, ARG(0), 1, n, sizeof n); RET(registered_message(n)); }
+static void s_RegisterWindowMessageA(Cpu *c) { char n[128]; text_in(c, ARG(0), 0, n, sizeof n); RET(registered_message(n)); }
 
 /* ---------- menus / scrollbars / accelerators: handles that behave, nothing drawn (honest limit) ---------- */
 static void s_SetScrollInfo(Cpu *c) { RET(0); }

@@ -2613,6 +2613,7 @@ static const struct { const char *n; unsigned short bytes; } stdcall32_tab[] = {
   { "NotifyAddrChange", 8 },
   { "NotifyIpInterfaceChange", 20 },
   { "NotifyRouteChange", 8 },
+  { "NotifyWinEvent", 16 },
   { "NtAllocateVirtualMemory", 24 },
   { "NtClose", 4 },
   { "NtCreateFile", 44 },
