@@ -571,24 +571,24 @@ static void coll_Item(Cpu *c) { AObj *o = aobj_of(c, ARG(0), AK_COLL); u32 i = (
 static void dev_Activate(Cpu *c) {
   AObj *d = aobj_of(c, ARG(0), AK_DEV); u64 riid = ARG(1), pp = ARG(4); if (!d || !riid || !pp) { RET(E_INVALIDARG_); return; } u32 d1 = rd32(c, riid);
   int kind = (d1 == 0x1CB9AD4Cu || d1 == 0x726778CDu || d1 == 0x7ED4EE07u) ? AK_CLIENT : d1 == 0x5CDF2C82u ? AK_EPVOL : 0;
-  if (!kind) { aud_log("[audio] IMMDevice::Activate({%08x-…}): E_NOINTERFACE (IAudioClient/2/3 and IAudioEndpointVolume are available)\n", d1); wr64(c, pp, 0); RET(E_NOINTERFACE_); return; }
-  u64 a; AObj *o = aobj_new(c, kind, &a); if (!o) { RET(E_OUTOFMEMORY_); return; } wr64(c, pp, a); RET(0);
+  if (!kind) { aud_log("[audio] IMMDevice::Activate({%08x-…}): E_NOINTERFACE (IAudioClient/2/3 and IAudioEndpointVolume are available)\n", d1); wrp(c, pp, 0); RET(E_NOINTERFACE_); return; }
+  u64 a; AObj *o = aobj_new(c, kind, &a); if (!o) { RET(E_OUTOFMEMORY_); return; } wrp(c, pp, a); RET(0);
 }
-static void dev_OpenPropertyStore(Cpu *c) { u64 pp = ARG(2); if (!pp) { RET(E_INVALIDARG_); return; } u64 a; AObj *o = aobj_new(c, AK_PROPS, &a); if (!o) { RET(E_OUTOFMEMORY_); return; } wr64(c, pp, a); RET(0); }
-static void dev_GetId(Cpu *c) { u64 pp = ARG(1); if (!pp) { RET(E_INVALIDARG_); return; } wr64(c, pp, aud_wstr_cotask(c, AUD_RENDER_ID)); RET(0); }
+static void dev_OpenPropertyStore(Cpu *c) { u64 pp = ARG(2); if (!pp) { RET(E_INVALIDARG_); return; } u64 a; AObj *o = aobj_new(c, AK_PROPS, &a); if (!o) { RET(E_OUTOFMEMORY_); return; } wrp(c, pp, a); RET(0); }
+static void dev_GetId(Cpu *c) { u64 pp = ARG(1); if (!pp) { RET(E_INVALIDARG_); return; } wrp(c, pp, aud_wstr_cotask(c, AUD_RENDER_ID)); RET(0); }
 static void dev_GetState(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), 1 /* DEVICE_STATE_ACTIVE */); RET(0); }
 static void ep_GetDataFlow(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), 0 /* eRender */); RET(0); }
 static void props_GetCount(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), 4); RET(0); }
 static void props_GetValue(Cpu *c) {   /* (PROPERTYKEY *key, PROPVARIANT *pv) */
   u64 key = ARG(1), pv = ARG(2); if (!key || !pv) { RET(E_INVALIDARG_); return; } u32 g1 = rd32(c, key), pid = rd32(c, key + 16);
-  for (int i = 0; i < 24; i++) wr8(c, pv + i, 0);
-  if (g1 == 0xa45c254eu && pid == 14) { wr16(c, pv, 31); wr64(c, pv + 8, aud_wstr_cotask(c, "Nebula Audio Output (host)")); RET(0); return; }             /* PKEY_Device_FriendlyName */
-  if (g1 == 0xa45c254eu && pid == 2) { wr16(c, pv, 31); wr64(c, pv + 8, aud_wstr_cotask(c, "Nebula Audio Output")); RET(0); return; }                     /* PKEY_Device_DeviceDesc */
-  if (g1 == 0xb3f8fa53u && pid == 6) { wr16(c, pv, 31); wr64(c, pv + 8, aud_wstr_cotask(c, "Nebula x64")); RET(0); return; }                              /* PKEY_DeviceInterface_FriendlyName */
-  if (g1 == 0x1da5d803u && pid == 4) { wr16(c, pv, 31); wr64(c, pv + 8, aud_wstr_cotask(c, "{6f1a3c5e-4b2d-4e8a-9c1f-2e7d5a6b8c90}")); RET(0); return; }  /* PKEY_AudioEndpoint_GUID */
+  for (int i = 0; i < (c->mode32 ? 16 : 24); i++) wr8(c, pv + i, 0);
+  if (g1 == 0xa45c254eu && pid == 14) { wr16(c, pv, 31); wrp(c, pv + 8, aud_wstr_cotask(c, "Nebula Audio Output (host)")); RET(0); return; }             /* PKEY_Device_FriendlyName */
+  if (g1 == 0xa45c254eu && pid == 2) { wr16(c, pv, 31); wrp(c, pv + 8, aud_wstr_cotask(c, "Nebula Audio Output")); RET(0); return; }                     /* PKEY_Device_DeviceDesc */
+  if (g1 == 0xb3f8fa53u && pid == 6) { wr16(c, pv, 31); wrp(c, pv + 8, aud_wstr_cotask(c, "Nebula x64")); RET(0); return; }                              /* PKEY_DeviceInterface_FriendlyName */
+  if (g1 == 0x1da5d803u && pid == 4) { wr16(c, pv, 31); wrp(c, pv + 8, aud_wstr_cotask(c, "{6f1a3c5e-4b2d-4e8a-9c1f-2e7d5a6b8c90}")); RET(0); return; }  /* PKEY_AudioEndpoint_GUID */
   if (g1 == 0x1da5d803u && pid == 3) { wr16(c, pv, 19); wr32(c, pv + 8, 3 /* front L+R */); RET(0); return; }                                            /* PKEY_AudioEndpoint_PhysicalSpeakers */
   if (g1 == 0x1da5d803u && pid == 0) { wr16(c, pv, 19); wr32(c, pv + 8, 1 /* Speakers */); RET(0); return; }                                             /* PKEY_AudioEndpoint_FormFactor */
-  if (g1 == 0xf19f064du && (pid == 0 || pid == 1)) { u64 b = w32_heap_alloc(W, 40, 1); wfmt_write(c, b, 2, g_aud_host_rate ? g_aud_host_rate : 48000, 32, 1, 1); wr16(c, pv, 65 /* VT_BLOB */); wr32(c, pv + 8, 40); wr64(c, pv + 16, b); RET(0); return; }   /* PKEY_AudioEngine_DeviceFormat / OEMFormat */
+  if (g1 == 0xf19f064du && (pid == 0 || pid == 1)) { u64 b = w32_heap_alloc(W, 40, 1); wfmt_write(c, b, 2, g_aud_host_rate ? g_aud_host_rate : 48000, 32, 1, 1); wr16(c, pv, 65 /* VT_BLOB */); wr32(c, pv + 8, 40); wrp(c, pv + (c->mode32 ? 12 : 16), b); RET(0); return; }   /* PKEY_AudioEngine_DeviceFormat / OEMFormat */
   RET(0);   /* VT_EMPTY for everything else (that is what Windows does for unknown keys) */
 }
 static void props_GetAt(Cpu *c) { RET(E_INVALIDARG_); }

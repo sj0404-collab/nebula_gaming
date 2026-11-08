@@ -126,7 +126,7 @@ export default function X64App() {
   const [initError, setInitError] = useState('');
   const [exes, setExes] = useState<ExeEntry[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
-  const [tab, setTab] = useState<'library' | 'screen' | 'console' | 'files' | 'report'>('library');
+  const [tab, setTab] = useState<'library' | 'screen' | 'console' | 'files' | 'report' | 'components'>('library');
   const { pushToast } = useOS();
   const [showTests, setShowTests] = useState(false);          // the emulator's self-test / sample programs (hidden by default; loaded on demand)
   const samplesLoaded = useRef<Promise<ExeEntry[]> | null>(null);
@@ -463,9 +463,11 @@ export default function X64App() {
   }, []);
   // VC10 is a separate x86 runtime. Never put it over the x64 System32 DLLs.
   const vc10Installed = useRef(false);
-  ensureVC10Ref.current = async (rt: X64Runtime, entry: ExeEntry) => {
-    if (entry.info.pe32plus || !entry.info.dlls?.some(d => /^(msvcr100|msvcp100)(\.dll)?$/i.test(d))) return true;
+  const [vc10Status, setVc10Status] = useState<'available' | 'installing' | 'installed' | 'error'>('available');
+  const [vc10Error, setVc10Error] = useState('');
+  const installVC10 = async (rt: X64Runtime): Promise<boolean> => {
     if (vc10Installed.current) return true;
+    setVc10Status('installing'); setVc10Error('');
     setFetching('Installing Visual C++ 2010 x86 runtime…');
     try {
       for (const name of ['msvcr100.dll', 'msvcp100.dll']) {
@@ -473,11 +475,16 @@ export default function X64App() {
         if (!r.ok) throw new Error(`${name}: HTTP ${r.status}`);
         if (!rt.vfsAdd(`C:\\Windows\\SysWOW64\\${name}`, new Uint8Array(await r.arrayBuffer()))) throw new Error(`${name}: virtual disk refused file`);
       }
-      vc10Installed.current = true; setFetching(null); return true;
+      vc10Installed.current = true; setVc10Status('installed'); setFetching(null); setFiles(rt.vfsList());
+      return true;
     } catch (e) {
-      setFetching(null); setLog(l => [...l, `Visual C++ 2010 x86 runtime: ${String(e)}`]);
+      setVc10Status('error'); setVc10Error(String(e)); setFetching(null); setLog(l => [...l, `Visual C++ 2010 x86 runtime: ${String(e)}`]);
       pushToast('Programs', `Visual C++ 2010 x86 runtime could not be installed: ${String(e)}`, 'x64'); return false;
     }
+  };
+  ensureVC10Ref.current = async (rt: X64Runtime, entry: ExeEntry) => {
+    if (entry.info.pe32plus || !entry.info.dlls?.some(d => /^(msvcr100|msvcp100)(\.dll)?$/i.test(d))) return true;
+    return installVC10(rt);
   };
   const installDotnet = useCallback((rt: X64Runtime) => installGz(rt, GZ_PACKS.dotnet, dotnet, setDotnet), [installGz, dotnet]);
   const installDx = useCallback((rt: X64Runtime) => installGz(rt, GZ_PACKS.dx, dx, setDx), [installGz, dx]);
@@ -748,9 +755,9 @@ export default function X64App() {
           <Download size={11} /> {dx.status === 'installed' ? 'DirectX ✓' : dx.status === 'installing' ? `DirectX ${dx.done}/${dx.manifest?.files.length}` : dx.status === 'unavailable' ? 'DirectX n/a' : 'DirectX'}
         </button>
         <div className="ml-auto flex items-center gap-1 rounded bg-slate-100 p-0.5">
-          {(['library', 'screen', 'console', 'files', 'report'] as const).map(t => (
+          {(['library', 'screen', 'console', 'files', 'report', 'components'] as const).map(t => (
             <button key={t} data-x64-tab={t} onClick={() => { autoTabRef.current = false; setTab(t); }} className={`flex items-center gap-1 rounded px-2 py-1 capitalize ${tab === t ? 'bg-white shadow-sm font-semibold' : 'text-slate-500 hover:text-slate-800'}`}>
-              {t === 'library' ? <LayoutGrid size={12} /> : t === 'screen' ? <Monitor size={12} /> : t === 'console' ? <TerminalIcon size={12} /> : t === 'files' ? <HardDrive size={12} /> : <FileSearch size={12} />}{t}
+              {t === 'library' ? <LayoutGrid size={12} /> : t === 'screen' ? <Monitor size={12} /> : t === 'console' ? <TerminalIcon size={12} /> : t === 'files' ? <HardDrive size={12} /> : t === 'components' ? <PackagePlus size={12} /> : <FileSearch size={12} />}{t === 'components' ? 'Компоненты' : t}
             </button>
           ))}
           <button data-x64-tests aria-pressed={showTests} onClick={() => setShowTests(v => !v)} title="Emulator test programs (self-tests and bundled real console tools)" className={`flex items-center gap-1 rounded px-2 py-1 ${showTests ? 'bg-white shadow-sm font-semibold' : 'text-slate-500 hover:text-slate-800'}`}><FlaskConical size={12} />tests</button>
@@ -781,6 +788,19 @@ export default function X64App() {
 
         {/* main */}
         <div className="flex min-w-0 flex-1 flex-col">
+          {tab === 'components' && !fs && (
+            <div className="min-h-0 flex-1 overflow-auto p-4" data-x64-components>
+              <h2 className="mb-2 text-lg font-bold">Системные компоненты</h2>
+              <p className="mb-4 text-sm text-slate-600">Установка в виртуальный диск Nebula, а не в Android. Некоторые компоненты устанавливаются автоматически при запуске программы. Статус относится к текущему сеансу.</p>
+              <div className="space-y-3">
+                <div className="rounded border p-3"><b>Visual C++ 2010 x86</b><p className="text-sm">MSVCR100 и MSVCP100, для 32-битных программ. {vc10Status === 'installed' ? 'Установлено в этом сеансе.' : vc10Status === 'installing' ? 'Устанавливается…' : vc10Error || 'Доступно для установки.'}</p><button data-x64-vc10={vc10Status} disabled={ready !== 'ready' || !!running || !!fetching || vc10Status === 'installed'} onClick={() => { const rt = rtRef.current; if (rt) void installVC10(rt); }} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button></div>
+                <div className="rounded border p-3"><b>Visual C++ 2015–2022 x64</b><p className="text-sm">Библиотеки Microsoft для 64-битных программ. Статус: {pack.status}{pack.note ? ` — ${pack.note}` : ''}</p><button disabled={ready !== 'ready' || pack.status !== 'available' || !!running || !!fetching} onClick={() => { const rt = rtRef.current; if (rt) void installPack(rt); }} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button></div>
+                <div className="rounded border p-3"><b>DirectX June 2010 x64</b><p className="text-sm">Пользовательские DLL; не драйвер и не полная реализация DirectX. Статус: {dx.status}{dx.note ? ` — ${dx.note}` : ''}</p><button disabled={ready !== 'ready' || dx.status !== 'available' || !!running || !!fetching} onClick={() => { const rt = rtRef.current; if (rt) void installDx(rt); }} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button></div>
+                <div className="rounded border p-3"><b>.NET 10 x64</b><p className="text-sm">Среда Microsoft для поддерживаемых управляемых программ. Статус: {dotnet.status}{dotnet.note ? ` — ${dotnet.note}` : ''}</p><button disabled={ready !== 'ready' || dotnet.status !== 'available' || !!running || !!fetching} onClick={() => { const rt = rtRef.current; if (rt) void installDotnet(rt); }} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button></div>
+              </div>
+              <p className="mt-4 text-sm text-slate-600">Другие версии VC++ и x86-пакеты здесь пока недоступны. Драйверы ядра Windows нельзя установить в Android: системные API и устройства реализуются эмулятором, их поддержка неполная.</p>
+            </div>
+          )}
           {tab === 'library' && !fs && (
             <div className="min-h-0 flex-1 overflow-auto" data-x64-library onClick={() => setMenuFor(null)}>
               {ready === 'loading' && <div className="p-4 text-slate-400"><Loader2 size={14} className="mr-1 inline animate-spin" />Loading the emulator and the persistent disk…</div>}
