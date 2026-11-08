@@ -1,0 +1,48 @@
+name: Visual C++ 2010 x86 compatibility probe
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'emu/tests/vc2010-probe.c'
+      - '.github/workflows/vc2010-probe.yml'
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  vc10:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+      - name: Download and extract official Microsoft VC++ 2010 SP1 x86
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -q p7zip-full msitools cabextract
+          mkdir -p "$RUNNER_TEMP/vc10" "$RUNNER_TEMP/vc10/unpacked" "$RUNNER_TEMP/vc10/files"
+          curl -fL --retry 3 -o "$RUNNER_TEMP/vc10/vcredist_x86.exe" https://download.microsoft.com/download/1/6/5/165255E7-1014-4D0A-B094-B6A430A6BFFC/vcredist_x86.exe
+          sha256sum "$RUNNER_TEMP/vc10/vcredist_x86.exe"
+          7z x -y -o"$RUNNER_TEMP/vc10/unpacked" "$RUNNER_TEMP/vc10/vcredist_x86.exe"
+          find "$RUNNER_TEMP/vc10/unpacked" -type f | head -60
+          msi=$(find "$RUNNER_TEMP/vc10/unpacked" -iname '*.msi' -print -quit)
+          test -n "$msi"
+          msiextract -C "$RUNNER_TEMP/vc10/files" "$msi"
+          find "$RUNNER_TEMP/vc10/files" -type f | head -60
+          for dll in msvcr100.dll msvcp100.dll; do
+            file=$(find "$RUNNER_TEMP/vc10/files" -iname "$dll" -print -quit); test -n "$file"; cp "$file" "$RUNNER_TEMP/vc10/$dll"
+          done
+      - name: Build the emulator and the x86 test
+        run: |
+          cd emu/x64
+          cc -O2 -Wall -Wno-unused-function -Wno-unused-parameter -Wno-misleading-indentation -o x64run lib.c cpu.c pe.c win32.c gdi.c vfs.c api.c dxbc.c host_native.c main_native.c -lm
+          cd ../..
+          zig cc -target x86-windows-gnu -O2 emu/tests/vc2010-probe.c -o "$RUNNER_TEMP/vc10/vc10-test.exe"
+      - name: Verify real VC10 DLL loading and _malloc_crt
+        run: |
+          set -o pipefail
+          emu/x64/x64run --no-stdin --max-ms 45000 --mount "$RUNNER_TEMP/vc10=C:\\nebula" "$RUNNER_TEMP/vc10/vc10-test.exe" 2>&1 | tee "$RUNNER_TEMP/vc10.log"
+          grep -q 'VC10 PROBE PASS' "$RUNNER_TEMP/vc10.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vc2010-diagnostics
+          path: ${{ runner.temp }}/vc10.log
+          if-no-files-found: warn
