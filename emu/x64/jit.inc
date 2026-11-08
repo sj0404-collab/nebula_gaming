@@ -39,7 +39,7 @@ static inline Jb *jb_find(u64 rip, void *mem, int m32) {   /* lookup without evi
 }
 int g_jit_on = 0;
 #define JIT_MAX_FN 65536
-static u32 g_jit_free[JIT_MAX_FN]; static int g_jit_nfree; static u32 g_jit_fn_hi;   /* table slots whose module may be replaced; the highest slot handed out */
+static u32 g_jit_free[JIT_MAX_FN]; static int g_jit_nfree; static u32 g_jit_fn_hi; static u8 g_jit_owned[JIT_MAX_FN / 8];   /* table slots whose module may be replaced; the highest slot handed out; the slots the host created for us (the table also holds the C function pointers — never those) */
 static u16 g_fnref[JIT_MAX_FN];   /* JB entries referencing a table slot; 0 → slot reusable */
 #define JIT_MAX_BLOCKS 160
 #define JIT_MAX_REGION_INSNS 2400
@@ -741,6 +741,7 @@ static int jit_translate(Cpu *c, Jb *b0) {
   u32 fn = host_jit_compile(mod.b, mod.n, reuse);
   if (!fn || fn >= JIT_MAX_FN) { g_jit_st.fails++; if (reuse) g_jit_free[g_jit_nfree++] = reuse; return 0; }
   if (fn > g_jit_fn_hi) g_jit_fn_hi = fn;
+  g_jit_owned[fn >> 3] |= (u8)(1 << (fn & 7));
   /* publish every block start as an entry; the hot one (rip) LAST: jb_lookup evicts 2-way set neighbours, so publishing another
      block of this region could otherwise evict b0's slot and leave it describing a different block (wrong pc -> wrong code run) */
   int hot = -1; g_fnref[fn] = 1;   /* hold: publishing may evict (jit_drop) a block of this very region; the count must not hit 0 and free the slot */
@@ -765,7 +766,7 @@ static void jit_session_reset(void) {
   for (int i = 0; i < (1 << JB_BITS); i++) if (g_jb[i].fn) jit_drop(&g_jb[i]);
   __builtin_memset(g_jb, 0, sizeof g_jb);
   /* every table slot is reusable now (the host replaces the module in a reused slot, so the old regions can be collected) */
-  g_jit_nfree = 0; for (u32 fn = g_jit_fn_hi; fn >= 1 && g_jit_nfree < JIT_MAX_FN; fn--) { g_fnref[fn] = 0; g_jit_free[g_jit_nfree++] = fn; }
+  g_jit_nfree = 0; for (u32 fn = g_jit_fn_hi; fn >= 1 && g_jit_nfree < JIT_MAX_FN; fn--) if (g_jit_owned[fn >> 3] & (1 << (fn & 7))) { g_fnref[fn] = 0; g_jit_free[g_jit_nfree++] = fn; }
 }
 static inline int jit_enter(Cpu *c, u64 budget) {
   int ran = 0; u64 ic0 = c->icount;

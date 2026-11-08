@@ -116,8 +116,9 @@ for root, _, files in os.walk(src):
         if not name.endswith('.dll'): name += '.dll'
         name = os.path.basename(name.replace('\\', '/'))
         if skip.match(name): continue
+        vt = tuple(int(x) for x in fv.split('.')) if fv else (0,)
         cur = picked.get(name)
-        if cur is None or tuple(int(x) for x in fv.split('.')) > cur[0]: picked[name] = (tuple(int(x) for x in fv.split('.')) if fv else (0,), p, fv, d)
+        if cur is None or vt > cur[0]: picked[name] = (vt, p, fv, d)
 if not picked:
     print(f'runtime-pack: {pid}: no {arch} DLLs found under {src}', file=sys.stderr); sys.exit(1)
 os.makedirs(out, exist_ok=True)
