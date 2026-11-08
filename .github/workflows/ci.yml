@@ -106,6 +106,12 @@ jobs:
           ./emu/tests/dotnet.sh /tmp/dn/pack /tmp/dn/app /tmp/dn/fx /tmp/dn/csc/tasks/netcore/bincore
       - uses: actions/setup-node@v4
         with: { node-version: 24 }
+      - name: Guest restart in one module instance (x64_load again = "run another exe" in the app; catches process-slot reuse bugs — stale guest vtables / shim renumbering / GL strings / sys brushes)
+        run: |
+          set -o pipefail
+          for exe in emu/tests/hello.exe emu/tests/cxxexc.exe emu/tests/cxxexc32.exe emu/tests/audio.exe emu/tests/pthreads.exe; do
+            echo "== $exe x3"; node emu/tests/wasm_run.mjs --max-ms 120000 --jit 1 --rerun 2 "$exe" 2>&1 | grep -a '\[wasm_run\]'
+          done
       - name: .NET on the wasm64 module WITH the x86-64->wasm JIT (node 24 + emu/tests/wasm_run.mjs; the native runner is interpreter-only, JIT bugs only show here and in the browser)
         run: |
           APP=$PWD/public/x64/samples/dotnet

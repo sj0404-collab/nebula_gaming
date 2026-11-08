@@ -350,6 +350,7 @@ struct Win32 {
   u64 veh[16]; int nveh; u64 uef; char hw_msg[160]; u32 hw_code; u64 cxx32_obj, cxx32_ti;   /* x86: the exception being handled (for `throw;`) */   /* vectored exception handlers, top-level filter, text of the last hardware fault */
   int wndclass_registered; u64 wndclass_proc; char wndclass_name[64];
   u64 gl_extstr;                         /* WGL extension string owned by this process */
+  u64 sys_brush[31];                     /* GetSysColorBrush handles (GDI objects are per process) */
   u64 ubuf;                              /* small scratch buffer in guest memory */
   u64 rt_scratch;                        /* win32_rt.inc: zeroed block for the real msvcp140's locale-name / processing-throw pointers */
   int quit_posted; int shortcuts; double msgwait_dl; u64 msgwait_rip;   /* MsgWaitForMultipleObjects timeout across retries */   /* .lnk files written through IShellLink (reported after install) */

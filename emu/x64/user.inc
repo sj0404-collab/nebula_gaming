@@ -1216,10 +1216,9 @@ static void s_TaskDialog(Cpu *c) { if (ARG(6)) wr32(c, ARG(6), 1); RET(0); }
 static u32 g_sys_colors[31] = { 0xc0c0c0, 0x000000, 0x800000, 0x808080, 0xf0f0f0, 0xffffff, 0x646464, 0x000000, 0x000000, 0x000000, 0xb4b4b4, 0xf4f7fc, 0xababab, 0x0078d7, 0xffffff, 0xf0f0f0, 0xa0a0a0, 0x6d6d6d, 0x000000, 0x000000, 0xffffff, 0x696969, 0xe3e3e3, 0x000000, 0xffffe1, 0x000000, 0x3399ff, 0x99b4d1, 0xbfcddb, 0xf0f0f0, 0xffffff };
 u32 sys_color_px(u32 i) { return i < 31 ? g_sys_colors[i] : 0; }
 static void s_GetSysColor(Cpu *c) { u32 i = (u32)ARG(0); RET(i < 31 ? px2cr(g_sys_colors[i]) : 0); }
-static u64 g_sys_brush[31];
-static void s_GetSysColorBrush(Cpu *c) { u32 i = (u32)ARG(0); if (i >= 31) { RET(0); return; } if (!g_sys_brush[i]) { GdiObj *b = gdi_new(W, K_BRUSH); if (!b) { RET(0); return; } b->color = g_sys_colors[i]; g_sys_brush[i] = b->handle; } RET(g_sys_brush[i]); }
+static void s_GetSysColorBrush(Cpu *c) { u32 i = (u32)ARG(0); if (i >= 31) { RET(0); return; } u64 *sb = W->sys_brush; if (!sb[i]) { GdiObj *b = gdi_new(W, K_BRUSH); if (!b) { RET(0); return; } b->color = g_sys_colors[i]; sb[i] = b->handle; } RET(sb[i]); }
 static void s_SetSysColors(Cpu *c) { RET(1); }
-static int is_sys_brush(u64 h) { for (int i = 0; i < 31; i++) if (g_sys_brush[i] && g_sys_brush[i] == h) return 1; return 0; }
+static int is_sys_brush(Win32 *w, u64 h) { for (int i = 0; i < 31; i++) if (w->sys_brush[i] && w->sys_brush[i] == h) return 1; return 0; }
 static u32 brush_px(Win32 *w, u64 hb, u32 dflt) { GdiObj *b = gdi_get(w, hb); if (b && b->kind == K_BRUSH && b->pen_width != -1) return b->color; if (hb >= 1 && hb <= 31) return g_sys_colors[hb - 1]; return dflt; }
 /* notifications to the parent: WM_COMMAND(MAKELONG(id, code), hwnd) — a guest call that returns the given value afterwards */
 static void notify_parent(Cpu *c, int i, u32 code, u64 ret) { int p = g_wnd[i].parent; if (p < 0 || !wnd_alive(p)) { RET(ret); return; } send_to(c, p, 0x111, ((u64)code << 16) | (g_wnd[i].id & 0xffff), HWND_OF(i), CONT_RET_VAL_, ret); }

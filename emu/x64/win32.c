@@ -1552,6 +1552,8 @@ void w32_init(Win32 *w, Cpu *c, Mem *m) { g_fs_w = w;
   /* A process-table slot may be reused at the same host address after exit.
      Its cached guest vtables and objects belong to the old address space. */
   if (g_avt_owner == w) { e_memset(g_avt, 0, sizeof g_avt); g_avt_owner = 0; }
+  if (g_com_vt_owner == w) g_com_vt_owner = 0;
+  if (g_cxxexc_owner == w) g_cxxexc_owner = 0;
   for (int i = 1; i < AOBJ_MAX; i++) if (g_aobj[i].used && g_aobj[i].w == w) g_aobj[i].used = 0;
   for (int i = 0; i < AUD_MAX; i++) if (g_astr[i].used && g_astr[i].w == w) astr_free(&g_astr[i]);
   ProcFs *fs = w->fs ? w->fs : emu_alloc(sizeof(ProcFs));

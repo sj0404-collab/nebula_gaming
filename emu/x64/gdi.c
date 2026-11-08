@@ -515,6 +515,9 @@ ShimFn gdi_find_shim(const char *name) { for (size_t i = 0; i < sizeof gdi_shims
 void gdi_init(Win32 *w) {
   /* Process slots are recycled; do not reuse DirectInput guest pointers. */
   if (g_divt_owner == w) { e_memset(g_divt, 0, sizeof g_divt); g_divt_owner = 0; }
+  if (g_cm_vt_owner == w) g_cm_vt_owner = 0;
+  if (g_sv_vt_owner == w) g_sv_vt_owner = 0;
+  if (g_wvt_owner == w) g_wvt_owner = 0;   /* guest vtables hold shim-slot addresses that are renumbered by the new process */
   for (int i = 1; i < DIOBJ_MAX; i++) if (g_diobj[i].used && g_diobj[i].w == w) g_diobj[i].used = 0;
   /* stock objects */
   static const u32 brush_cols[] = { 0xffffff, 0xc0c0c0, 0x808080, 0x404040, 0x000000 };

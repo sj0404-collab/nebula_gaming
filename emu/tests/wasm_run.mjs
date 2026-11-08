@@ -8,7 +8,7 @@ import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 
 const argv = process.argv.slice(2);
-let jitskip = null; let maxMs = 60000, jit = 1, wasmPath = new URL('../../public/x64/nebula_x64.wasm', import.meta.url).pathname, exe = '', verbose = 0;
+let jitskip = null; let rerun = 0; let maxMs = 60000, jit = 1, wasmPath = new URL('../../public/x64/nebula_x64.wasm', import.meta.url).pathname, exe = '', verbose = 0;
 const mounts = [];
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
@@ -18,6 +18,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--wasm') wasmPath = argv[++i];
   else if (a === '--mount') mounts.push(argv[++i]);
   else if (a === '-v') verbose = 1;
+  else if (a === '--rerun') rerun = +argv[++i];   // load+run the exe again N more times in the SAME module instance (= the app's 'run another/the same exe' path: process-slot reuse, shim renumbering, stale host caches)
   else { exe = a; break; }
 }
 if (!exe) { console.error('usage: wasm_run.mjs [--max-ms N] [--jit 0|1] exe'); process.exit(2); }
@@ -89,9 +90,12 @@ for (const m of mounts) {
 const exeBytes = fs.readFileSync(exe);
 let name = 'C:\\nebula\\' + path.basename(exe);
 for (const m of mounts) { const [host, guest] = m.split('='); const rel = path.relative(path.resolve(host), path.resolve(exe)); if (!rel.startsWith('..')) name = guest + '\\' + rel.split(path.sep).join('\\'); }
+const RUN_OK = 0, RUN_EXIT = 1, RUN_FAULT = 2, RUN_YIELD = 3, RUN_BREAK = 4;
+let exitRc = 0;
+for (let pass = 0; pass <= rerun; pass++) {
+if (pass && ex.x64_stop) ex.x64_stop();
 const rc = ex.x64_load(put(exeBytes), BigInt(exeBytes.length), putStr(name), putStr([name, ...argv.slice(argv.indexOf(exe) + 1)].join(' ')));
 if (rc !== 0) { console.error('load failed:', cstr(ex.x64_report())); process.exit(1); }
-const RUN_OK = 0, RUN_EXIT = 1, RUN_FAULT = 2, RUN_YIELD = 3, RUN_BREAK = 4;
 let r = RUN_OK, status = 'timeout';
 const tRun = performance.now();
 for (;;) {
@@ -109,5 +113,8 @@ for (;;) {
 }
 const ms = performance.now() - tRun, ic = Number(ex.x64_icount());
 const stats = ex.x64_jit_stats ? cstr(ex.x64_jit_stats()) : '';
-console.error(`[wasm_run] ${status}; ${(ic / 1e6).toFixed(1)} M insns in ${ms.toFixed(0)} ms = ${(ic / ms / 1000).toFixed(1)} MIPS; jit: ${jitModules} blocks, ${jitBytes} B, compile ${jitMs.toFixed(0)} ms, ${jitFail} failed ${stats}`);
-process.exit(status.startsWith('exit 0') ? 0 : status.startsWith('exit') ? 3 : status.startsWith('FAULT') ? 102 : 4);
+console.error(`[wasm_run]${rerun ? ' pass ' + (pass + 1) + '/' + (rerun + 1) + ':' : ''} ${status}; ${(ic / 1e6).toFixed(1)} M insns in ${ms.toFixed(0)} ms = ${(ic / ms / 1000).toFixed(1)} MIPS; jit: ${jitModules} blocks, ${jitBytes} B, compile ${jitMs.toFixed(0)} ms, ${jitFail} failed ${stats}`);
+const passRc = status.startsWith('exit 0') ? 0 : status.startsWith('exit') ? 3 : status.startsWith('FAULT') ? 102 : 4;
+if (pass === 0 || passRc !== exitRc) { if (pass && passRc !== exitRc) { console.error(`[wasm_run] RERUN MISMATCH: pass 1 -> ${exitRc}, pass ${pass + 1} -> ${passRc}`); exitRc = 101; break; } exitRc = passRc; }
+}
+process.exit(exitRc);
