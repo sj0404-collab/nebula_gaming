@@ -105,10 +105,10 @@ const DX_DIR = 'C:\\Windows\\System32\\';
 type GzPack = { key: 'dotnet' | 'dx'; url: string; dir: string; label: string };
 const GZ_PACKS: Record<'dotnet' | 'dx', GzPack> = { dotnet: { key: 'dotnet', url: DOTNET_URL, dir: DOTNET_DIR, label: '.NET pack' }, dx: { key: 'dx', url: DX_URL, dir: DX_DIR, label: 'DirectX pack' } };
 const exeWantsDx = (dlls: string[] | undefined, man: DotnetManifest | undefined) => !!man && !!dlls && dlls.some(d => man.files.some(f => f.path.toLowerCase() === d.toLowerCase()));
-async function fetchGz(url: string, attempt = 0): Promise<Uint8Array> {   // some static servers (vite preview, nginx gzip_static) send .gz files with Content-Encoding: gzip → the browser already inflated them
+async function fetchGz(url: string, attempt = 0, plainUrl?: string): Promise<Uint8Array> {   // some static servers (vite preview, nginx gzip_static) send .gz files with Content-Encoding: gzip → the browser already inflated them
   const ac = new AbortController(); const timer = setTimeout(() => ac.abort(), 90_000); let raw: Uint8Array<ArrayBuffer>;
-  try { const r = await fetch(url, { signal: ac.signal }); if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`); raw = new Uint8Array(await r.arrayBuffer()); }
-  catch (e) { clearTimeout(timer); if (attempt < 2) return fetchGz(url, attempt + 1); throw new Error(`${url}: ${ac.signal.aborted ? 'timed out' : String(e)}`); }
+  try { let r = await fetch(url, { signal: ac.signal }); if (r.status === 404 && plainUrl) r = await fetch(plainUrl, { signal: ac.signal }); if (!r.ok) throw new Error(`${r.url || url}: HTTP ${r.status}`); raw = new Uint8Array(await r.arrayBuffer()); }
+  catch (e) { clearTimeout(timer); if (attempt < 2) return fetchGz(url, attempt + 1, plainUrl); throw new Error(`${url}: ${ac.signal.aborted ? 'timed out' : String(e)}`); }
   clearTimeout(timer);
   if (raw.length < 2 || raw[0] !== 0x1f || raw[1] !== 0x8b) return raw;
   if (typeof DecompressionStream === 'undefined') throw new Error('DecompressionStream not supported by this browser');
@@ -448,7 +448,7 @@ export default function X64App() {
       const label = () => `installing ${pk.label}: ${done}/${man.files.length}, ${(bytes / 1048576).toFixed(1)} MB` + (done + inflight.size >= man.files.length ? ` — waiting for ${[...inflight].join(', ')}` : '');
       const worker = async () => { for (;;) { const f = queue.shift(); if (!f || failed) return; inflight.add(f.gz.slice(f.gz.lastIndexOf('/') + 1));
         let b: Uint8Array;
-        try { b = await fetchGz(pk.url + f.gz); } catch (e) { failed = true; throw e; }
+        try { b = await fetchGz(pk.url + f.gz, 0, pk.url + f.path.replace(/\\/g, '/')); } catch (e) { failed = true; throw e; }
         if (failed) return;   // another worker failed meanwhile: do not touch the state again (it already says 'available' + the error)
         if (b.length !== f.size) { failed = true; throw new Error(`${f.path}: ${b.length} bytes, expected ${f.size}`); }
         if (!rt.vfsAdd(pk.dir + f.path, b)) { failed = true; throw new Error(`${f.path}: virtual disk refused the file`); }

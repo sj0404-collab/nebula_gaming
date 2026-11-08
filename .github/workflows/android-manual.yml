@@ -120,6 +120,27 @@ jobs:
           mkdir -p /tmp/apkx && cd /tmp/apkx && unzip -qo "$GITHUB_WORKSPACE"/release/*.apk 2>/dev/null || true
           f=$(find /tmp/apkx -name 'nebula_x64*.wasm' | head -1); [ -n "$f" ] || { echo "no wasm inside the APK"; find /tmp/apkx -maxdepth 3 | head -30; exit 1; }
           echo "APK wasm: $f"; a=$(sha256sum "$f" | cut -d' ' -f1); b=$(cut -d' ' -f1 /tmp/wasm.sha); echo "apk=$a built=$b"; [ "$a" = "$b" ] || { echo "APK wasm differs from the module built in this run"; exit 1; }
+      - name: Verify runtime-pack assets in APK
+        run: |
+          python3 - <<'PYCODE'
+          import json, zipfile, glob
+          with zipfile.ZipFile(glob.glob('release/*.apk')[0]) as z:
+              names=set(z.namelist())
+              for pack in ('dx','dotnet'):
+                  prefix='assets/public/x64/'+pack+'/'
+                  manifest=json.loads(z.read(prefix+'manifest.json'))
+                  for f in manifest['files']:
+                      raw=prefix+f['path'].replace('\\','/')
+                      compressed=prefix+f['gz']
+                      if raw not in names and compressed not in names:
+                          raise SystemExit('missing APK runtime asset: '+raw+' or '+compressed)
+                  print(pack, len(manifest['files']), 'assets available')
+              prefix='assets/public/x64/sys32/vc2015-x86/'
+              manifest=json.loads(z.read(prefix+'manifest.json'))
+              for f in manifest['files']:
+                  if prefix+f['name'] not in names: raise SystemExit('missing '+prefix+f['name'])
+              print('vc2015-x86', len(manifest['files']), 'assets available')
+          PYCODE
       - name: Verify upgrade compatibility with v1.45.0
         shell: bash
         run: |
