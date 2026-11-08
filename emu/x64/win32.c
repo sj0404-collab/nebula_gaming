@@ -1548,7 +1548,13 @@ void w32_api_trace(int on) { g_fs_w->api_trace = on; }
 int w32_have_shim(const char *dll, const char *name) { return find_shim(dll, name) != 0; }
 
 /* ---------- init ---------- */
-void w32_init(Win32 *w, Cpu *c, Mem *m) { g_fs_w = w; ProcFs *fs = w->fs ? w->fs : emu_alloc(sizeof(ProcFs));
+void w32_init(Win32 *w, Cpu *c, Mem *m) { g_fs_w = w;
+  /* A process-table slot may be reused at the same host address after exit.
+     Its cached guest vtables and objects belong to the old address space. */
+  if (g_avt_owner == w) { e_memset(g_avt, 0, sizeof g_avt); g_avt_owner = 0; }
+  for (int i = 1; i < AOBJ_MAX; i++) if (g_aobj[i].used && g_aobj[i].w == w) g_aobj[i].used = 0;
+  for (int i = 0; i < AUD_MAX; i++) if (g_astr[i].used && g_astr[i].w == w) astr_free(&g_astr[i]);
+  ProcFs *fs = w->fs ? w->fs : emu_alloc(sizeof(ProcFs));
   e_memset(w, 0, sizeof *w); w->fs = fs; w->cpu = c; w->mem = m; c->w = w; c->mem = m;
   w->start_ms = host_now_ms(); w->rand_state = 1; w->next_handle = 0x100;
   u8 *shim = mem_map(m, G_SHIM_BASE, G_SHIM_SIZE, "shim"); e_memset(shim, 0xCC, 0x10000);

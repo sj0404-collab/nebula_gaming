@@ -76,8 +76,7 @@ static void s_wglCopyContext(Cpu *c) { RET(gl_ctx_of(ARG(0)) >= 0 && gl_ctx_of(A
 static void s_wglSwapIntervalEXT(Cpu *c) { int v = (int)(s32)ARG(0); if (v < 0) v = -v; g_gl_swap_interval = v > 4 ? 4 : v; RET(1); }
 static void s_wglGetSwapIntervalEXT(Cpu *c) { RET(g_gl_swap_interval); }
 static const char *GL_WGL_EXTENSIONS = "WGL_ARB_extensions_string WGL_EXT_extensions_string WGL_ARB_create_context WGL_ARB_create_context_profile WGL_ARB_pixel_format WGL_ARB_make_current_read WGL_EXT_swap_control";
-static u64 g_gl_extstr;
-static void s_wglGetExtensionsStringARB(Cpu *c) { if (!g_gl_extstr) g_gl_extstr = w32_guest_strdup(W, GL_WGL_EXTENSIONS); RET(g_gl_extstr); }
+static void s_wglGetExtensionsStringARB(Cpu *c) { if (!W->gl_extstr) W->gl_extstr = w32_guest_strdup(W, GL_WGL_EXTENSIONS); RET(W->gl_extstr); }
 static void s_wglGetExtensionsStringEXT(Cpu *c) { s_wglGetExtensionsStringARB(c); }
 /* WGL_ARB_pixel_format */
 static int gl_pf_attrib(int fmt, u32 key, int *out) {

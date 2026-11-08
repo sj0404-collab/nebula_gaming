@@ -513,6 +513,9 @@ ShimFn gdi_find_shim(const char *name) { for (size_t i = 0; i < sizeof gdi_shims
   return 0; }
 
 void gdi_init(Win32 *w) {
+  /* Process slots are recycled; do not reuse DirectInput guest pointers. */
+  if (g_divt_owner == w) { e_memset(g_divt, 0, sizeof g_divt); g_divt_owner = 0; }
+  for (int i = 1; i < DIOBJ_MAX; i++) if (g_diobj[i].used && g_diobj[i].w == w) g_diobj[i].used = 0;
   /* stock objects */
   static const u32 brush_cols[] = { 0xffffff, 0xc0c0c0, 0x808080, 0x404040, 0x000000 };
   for (int i = 0; i < 5; i++) { GdiObj *b = gdi_new(w, K_BRUSH); b->color = brush_cols[i]; stock[i] = b->handle; }

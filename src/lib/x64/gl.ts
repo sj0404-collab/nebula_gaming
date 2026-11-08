@@ -126,6 +126,8 @@ export class GLBridge {
   private texUnits: Map<number, number>[] = [];   // unit → (target → tex id)
   private attribs = new Map<number, Attrib[]>();  // per VAO id (0 = default)
   private maps: MapInfo[] = [];
+  /** Guest addresses cease to exist when a new program replaces its process. */
+  resetGuestStrings() { this.strings.clear(); }
   private strings = new Map<string, bigint>();    // guest copies of glGetString results
   private extList: string[] = [];
   private scratchVbo: WebGLBuffer | null = null; private scratchIbo: WebGLBuffer | null = null; private quadIbo: WebGLBuffer | null = null; private quadIboCount = 0;

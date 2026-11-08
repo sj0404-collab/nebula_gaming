@@ -256,7 +256,7 @@ export class X64Runtime {
 
   /** Load an exe and start the frame loop.  Returns the loader error text, or null on success. */
   start(bytes: Uint8Array, name: string, cmdline?: string, cwd?: string): string | null {
-    const ex = this.ex!; this.stop();
+    const ex = this.ex!; this.stop(); this.glb.resetGuestStrings(); this.lastGl = null;
     const p = this.putCached(bytes);
     const rc = ex.x64_load(p, BigInt(bytes.length), this.putStr(name), this.putStr(cmdline ?? name));
     if (rc !== 0) { this.status = 'fault'; return this.cstr(ex.x64_report()) || `loader error ${rc}`; }
