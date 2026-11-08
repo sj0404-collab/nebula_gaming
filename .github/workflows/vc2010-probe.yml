@@ -40,7 +40,7 @@ jobs:
           set -o pipefail
           mkdir -p "$RUNNER_TEMP/vc10-system"
           cp "$RUNNER_TEMP/vc10/"*.dll "$RUNNER_TEMP/vc10-system/"
-          emu/x64/x64run --no-stdin --max-ms 45000 --mount "$RUNNER_TEMP/vc10-system=C:\\Windows\\SysWOW64" "$RUNNER_TEMP/vc10/vc10-test.exe" 2>&1 | tee "$RUNNER_TEMP/vc10.log"
+          X64_LOG=1 emu/x64/x64run --no-stdin --max-ms 45000 --mount "$RUNNER_TEMP/vc10-system=C:\\Windows\\SysWOW64" "$RUNNER_TEMP/vc10/vc10-test.exe" 2>&1 | tee "$RUNNER_TEMP/vc10.log"
           grep -qi 'loaded DLL msvcr100.dll' "$RUNNER_TEMP/vc10.log"
           grep -qi 'loaded DLL msvcp100.dll' "$RUNNER_TEMP/vc10.log"
           grep -q 'VC10 PROBE PASS' "$RUNNER_TEMP/vc10.log"
