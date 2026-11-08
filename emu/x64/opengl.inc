@@ -140,7 +140,7 @@ static int gl_present_window(Win32 *w, int wnd) {   /* 0 = the GPU still owes fr
 static void s_SwapBuffers(Cpu *c) {
   Win32 *w = W; int wnd = gl_dc_wnd(w, ARG(0)); if (wnd < 0) { w->last_error = 6; RET(0); return; }
   double now = host_now_ms();
-  { extern int g_prof_on; extern u64 x64_icount(void); static int nswap; if (g_prof_on) { nswap++; if (nswap <= 5 || nswap == 10 || nswap % 50 == 0) { char b[128]; int n = e_snprintf(b, sizeof b, "[prof] SwapBuffers #%d at %.1f s, %.2f G insns\n", nswap, (now - w->start_ms) / 1000.0, x64_icount() / 1e9); host_write(2, b, n); } } }
+  { extern int g_prof_on; extern u64 x64_icount(void); extern int g_prof_skip_frames; extern void prof_reset(void); static int nswap; if (g_prof_on) { nswap++; if (nswap == g_prof_skip_frames) { prof_reset(); char b[96]; int n = e_snprintf(b, sizeof b, "[prof] profile tables cleared at SwapBuffers #%d\n", nswap); host_write(2, b, n); } if (nswap <= 5 || nswap == 10 || nswap % 50 == 0) { char b[128]; int n = e_snprintf(b, sizeof b, "[prof] SwapBuffers #%d at %.1f s, %.2f G insns\n", nswap, (now - w->start_ms) / 1000.0, x64_icount() / 1e9); host_write(2, b, n); } } }
   if (w->sleeping && g_gl_wait_gpu) { if (now < w->sleep_until_ms) { w->block = BLOCK_SLEEP; w32_retry_yield(c); return; } w->sleeping = 0; g_gl_wait_gpu = 0; }
   if (!w->sleeping) { gl_host_ok(w, wnd);
     if (!gl_present_window(w, wnd)) { g_gl_wait_gpu = 1; w->sleeping = 1; w->sleep_until_ms = now + 1.0; w->block = BLOCK_SLEEP; w32_retry_yield(c); return; }   /* swap chain full: wait ~1 ms and present again */

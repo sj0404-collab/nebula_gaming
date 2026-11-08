@@ -35,6 +35,9 @@ on:
       glnull:
         description: 'X64_GL_NULL=1: null OpenGL driver (the game loop runs without a display; frames are not rendered)'
         default: '0'
+      profskip:
+        description: 'X64_PROF_SKIP=N: clear the profile at the N-th SwapBuffers (steady state of a game instead of its start-up)'
+        default: '0'
 run-name: "nativeprof · ${{ inputs.filename || inputs.url }} · ${{ inputs.ms }} ms · ${{ inputs.xargs }}"
 permissions:
   contents: read
@@ -57,7 +60,7 @@ jobs:
         run: |
           MS="${{ github.event.inputs.ms }}"; cd /tmp/np/frames
           echo "x64run --max-ms $MS ${{ github.event.inputs.xargs }} $NAME"
-          X64_WNDDUMP=${{ github.event.inputs.wnddump }}; export X64_WNDDUMP; [ "$X64_WNDDUMP" = "1" ] || unset X64_WNDDUMP; quiet=--quiet; [ "${{ github.event.inputs.verbose }}" = "1" ] && quiet=; rc=0; [ "${{ github.event.inputs.nohle }}" = "1" ] && export X64_NOHLE=1; [ "${{ github.event.inputs.glnull }}" = "1" ] && export X64_GL_NULL=1; X64_PROF=${{ github.event.inputs.prof }} X64_LOG=${{ github.event.inputs.log }} timeout $((MS / 1000 + 600)) "$GITHUB_WORKSPACE/emu/x64/x64run" $quiet --no-stdin --max-ms $MS --stats --mount-rw "/tmp/np/guest_tmp=C:\\tmp" $MOUNT ${{ github.event.inputs.xargs }} "$EXE" > /tmp/np/native.txt 2>&1 || rc=$?
+          X64_WNDDUMP=${{ github.event.inputs.wnddump }}; export X64_WNDDUMP; [ "$X64_WNDDUMP" = "1" ] || unset X64_WNDDUMP; quiet=--quiet; [ "${{ github.event.inputs.verbose }}" = "1" ] && quiet=; rc=0; [ "${{ github.event.inputs.nohle }}" = "1" ] && export X64_NOHLE=1; [ "${{ github.event.inputs.glnull }}" = "1" ] && export X64_GL_NULL=1; export X64_PROF_SKIP="${{ github.event.inputs.profskip }}"; X64_PROF=${{ github.event.inputs.prof }} X64_LOG=${{ github.event.inputs.log }} timeout $((MS / 1000 + 600)) "$GITHUB_WORKSPACE/emu/x64/x64run" $quiet --no-stdin --max-ms $MS --stats --mount-rw "/tmp/np/guest_tmp=C:\\tmp" $MOUNT ${{ github.event.inputs.xargs }} "$EXE" > /tmp/np/native.txt 2>&1 || rc=$?
           echo "native rc=$rc"; grep -a -v "^\[wnd\]" /tmp/np/native.txt | tail -80 | cut -c1-300
           ls /tmp/np/frames | head; find /tmp/np/guest_tmp -type f | head -40
           find /tmp/np/guest_tmp -maxdepth 1 -name "Setup Log*" -exec sh -c 'echo "--- $1"; sed "1s/^\xEF\xBB\xBF//" "$1" | grep -v "DLL function import\|Function name:\|DLL name:\|Dest DLL name:\|Importing the DLL\|imported the DLL\|Failed to import" | tail -80 | cut -c1-240' _ {} \;

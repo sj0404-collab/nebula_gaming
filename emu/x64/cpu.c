@@ -913,6 +913,8 @@ static const char *prof_label(Cpu *c, u64 rip) { Win32 *w = c ? c->w : 0; if (!w
   for (int i = 0; i < w->ndynft; i++) if (rip >= w->dynft[i].lo && rip < w->dynft[i].hi) return "dynamic code";
   return ""; }
 static Cpu *g_prof_cpu;
+int g_prof_skip_frames;   /* X64_PROF_SKIP=N: the tables are cleared at the N-th SwapBuffers — profile the steady state of a game, not its start-up */
+void prof_reset(void) { e_memset(g_prof_tab, 0, sizeof g_prof_tab); for (int i = 0; i < g_prof_nmod; i++) g_prof_mod[i].n = 0; for (int i = 0; i < g_prof_nthr; i++) g_prof_thr[i].n = 0; g_prof_jit_samples = 0; }
 static int prof_tab_report(char *buf, int cap, int p, const char *title, struct ProfName *tab, int n, u64 total) { p += e_snprintf(buf + p, cap - p, "[prof] by %s:\n", title);
   for (int r = 0; r < 12 && p < cap - 120; r++) { int best = -1; for (int i = 0; i < n; i++) if (tab[i].n && (best < 0 || tab[i].n > tab[best].n)) best = i; if (best < 0) break;
     p += e_snprintf(buf + p, cap - p, "[prof] %3d.%d%%  %s\n", (int)(1000 * tab[best].n / (total ? total : 1)) / 10, (int)(1000 * tab[best].n / (total ? total : 1)) % 10, tab[best].name); tab[best].n = 0; }
