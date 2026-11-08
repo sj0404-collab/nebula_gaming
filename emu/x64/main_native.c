@@ -94,7 +94,7 @@ int main(int argc, char **argv) {
   int rc = x64_load(bytes, len, base, cmdline);
   if (g_apitrace) { extern void w32_api_trace(int); w32_api_trace(1); }
   if (rc) { fprintf(stderr, "load failed (%d): %s", rc, x64_report()); return 3; }
-  g_prof = getenv("X64_PROF") != 0; g_prof_on = g_prof; { extern int g_prof_skip_frames; const char *sk = getenv("X64_PROF_SKIP"); if (sk) g_prof_skip_frames = atoi(sk); }
+  g_prof = getenv("X64_PROF") != 0; g_prof_on = g_prof; if (getenv("X64_JIT_DUMP")) { extern int g_jit_on; g_jit_on = 1; }   /* translate hot blocks natively only to dump the modules (host_native.c) */ { extern int g_prof_skip_frames; const char *sk = getenv("X64_PROF_SKIP"); if (sk) g_prof_skip_frames = atoi(sk); }
   if (getenv("X64_NOHLE")) x64_set_hle(0);
   if (getenv("X64_DWATCH")) { extern u64 g_dwatch; g_dwatch = strtoull(getenv("X64_DWATCH"), 0, 16); }
   if (getenv("X64_WATCH")) { extern u64 g_watch[8]; extern int g_watch_n; char *ws = strdup(getenv("X64_WATCH")); for (char *t = strtok(ws, ","); t && g_watch_n < 8; t = strtok(0, ",")) g_watch[g_watch_n++] = strtoull(t, 0, 16); }

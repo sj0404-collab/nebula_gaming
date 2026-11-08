@@ -21,7 +21,11 @@ static int g_dump_frames; static int g_frame_count; static const char *g_dump_pr
 void host_write(int fd, const char *p, size_t n) { if (fd == 3) { if (getenv("X64_LOG")) fwrite(p, 1, n, stderr); return; } fwrite(p, 1, n, fd == 2 ? stderr : stdout); fflush(fd == 2 ? stderr : stdout); }
 double host_wall_ms(void) { struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6; }
 void host_pad_rumble(int idx, int lo, int hi) { (void)idx; (void)lo; (void)hi; }
-u32 host_jit_compile(const u8 *bytes, u64 len, u32 reuse) { (void)bytes; (void)len; (void)reuse; return 0; }   /* no wasm engine natively: interpreter only */
+/* no wasm engine natively: interpreter only.  X64_JIT_DUMP=<dir> (with --jit-dump) writes every module the translator would hand to the browser as
+   <dir>/jit_<n>_<rip>.wasm (wasm-tools print → the generated code of a hot block, for JIT quality work) */
+u32 host_jit_compile(const u8 *bytes, u64 len, u32 reuse) { (void)reuse; static int n; static const char *dir; if (!dir) { dir = getenv("X64_JIT_DUMP"); if (!dir) dir = ""; }
+  if (*dir && n < 4000) { extern u64 x64_rip(void); char path[1024]; snprintf(path, sizeof path, "%s/jit_%04d_%llx.wasm", dir, n++, (unsigned long long)x64_rip()); FILE *f = fopen(path, "wb"); if (f) { fwrite(bytes, 1, (size_t)len, f); fclose(f); } }
+  return 0; }
 double host_now_ms(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6; }
 void host_present(const u32 *bgra, int w, int h) {
   g_frame_count++;

@@ -69,13 +69,14 @@ JEXPORT(jit_alu) u64 jit_alu(Cpu *c, int op, u64 a, u64 b, int sz) { return alu(
 JEXPORT(jit_shift) u64 jit_shift(Cpu *c, int op, u64 v, int cnt, int sz) { return shift(c, op, v, cnt, sz); }
 
 /* ---- wasm byte emitter ---- */
-typedef struct { u8 *b; u32 n, cap; int depth; const u64 *starts; int nblk, blk, m32; const u8 *retblk; } Buf;   /* retblk[j]: block j is a call fall-through (ret landing) */   /* starts/nblk/blk: region blocks (sorted) and the one being emitted */
+typedef struct { u8 *b; u32 n, cap; int depth; const u64 *starts; int nblk, blk, m32; const u8 *retblk; u64 clo, cspan; } Buf;   /* clo/cspan: guest address range of the region's code (stores into it reset the validated-block set) */   /* retblk[j]: block j is a call fall-through (ret landing) */   /* starts/nblk/blk: region blocks (sorted) and the one being emitted */
 static void b8(Buf *B, u32 v) { if (B->n < B->cap) B->b[B->n] = (u8)v; B->n++; }
 static void bu(Buf *B, u64 v) { do { u8 x = v & 0x7f; v >>= 7; if (v) x |= 0x80; b8(B, x); } while (v); }
 static void bs(Buf *B, s64 v) { for (;;) { u8 x = v & 0x7f; v >>= 7; if ((v == 0 && !(x & 0x40)) || (v == -1 && (x & 0x40))) { b8(B, x); return; } b8(B, x | 0x80); } }
 static void bbytes(Buf *B, const void *p, u32 n) { for (u32 i = 0; i < n; i++) b8(B, ((const u8 *)p)[i]); }
 #define OP(x) b8(B, x)
-enum { L_C = 0, L_CODE = 1, L_PC = 2, L_LIMIT = 3, L_EA = 4, L_HOST = 5, L_T0 = 6, L_T1 = 7, L_T2 = 8, L_RET = 9, L_T3 = 10, L_F0 = 11, L_F1 = 12 };
+enum { L_C = 0, L_CODE = 1, L_PC = 2, L_LIMIT = 3, L_EA = 4, L_HOST = 5, L_T0 = 6, L_T1 = 7, L_T2 = 8, L_RET = 9, L_T3 = 10, L_F0 = 11, L_F1 = 12, L_V0 = 13 };   /* L_V0..L_V0+2: bit set of the blocks whose code bytes were verified during this call of the region */
+#define L_V(j) (L_V0 + ((j) >> 6))
 #define CO_X(ri)  ((u64)__builtin_offsetof(Cpu, x) + (u64)(ri) * 16)
 #define CO_FS     ((u64)__builtin_offsetof(Cpu, fs_base))
 #define CO_GS     ((u64)__builtin_offsetof(Cpu, gs_base))
@@ -156,9 +157,12 @@ static void e_ea(Buf *B, const JItem *it) {
   if (it->seg) { e_lget(B, L_C); e_ld(B, 0x29, 3, it->seg == 1 ? CO_FS : CO_GS); OP(I64_ADD); }   /* fs: / gs: (TEB / TLS) */
 }
 /* EA on the stack → host pointer in L_HOST through the module-local TLB function; 0 = fault → leave the block (c->rip set) */
+static void e_vreset(Buf *B) { for (int j = 0; j < 3; j++) { e_i64c(B, 0); e_lset(B, L_V0 + j); } }
+static void e_vreset_if_code(Buf *B) { e_lget(B, L_EA); e_i64c(B, B->clo - 16); OP(I64_SUB); e_i64c(B, B->cspan + 16); OP(I64_LT_U); e_if(B, 0); e_vreset(B); e_end(B); }   /* a store (up to 16 bytes) at clo-16 .. clo+cspan may touch the region's code */
 static void e_host(Buf *B, int size, int write, u64 rip) {
   e_lset(B, L_EA); e_lget(B, L_C); e_lget(B, L_EA); e_i64c(B, size); e_i32c(B, write); e_i64c(B, rip); OP(CALL); bu(B, FN_TLB);
   e_ltee(B, L_HOST); OP(I64_EQZ); OP(BR_IF); bu(B, lbl_fault(B));
+  if (write && B->cspan) e_vreset_if_code(B);
 }
 /* r/m operand helpers (memory forms assume L_HOST is set) */
 static void e_rm_load(Buf *B, const Dc *e, int sz) { if (e->mod == 3) e_ldreg(B, e->rm, sz); else { e_lget(B, L_HOST); e_ld(B, ld_u(sz), 0, 0); } }
@@ -320,6 +324,7 @@ static void e_step(Buf *B, u64 rip, u64 next, int k) {   /* interpreter single s
   e_lget(B, L_C); e_i64c(B, rip); OP(CALL); bu(B, FN_STEP); e_ltee(B, L_RET); e_i64c(B, next); OP(I64_NE);
   e_lget(B, L_C); e_ld(B, 0x28, 2, CO_STATUS); OP(I32_EQZ); OP(I32_EQZ); OP(I32_OR);
   e_if(B, 0); e_icount(B, k); e_lget(B, L_RET); OP(RETURN); e_end(B);
+  if (B->cspan) e_vreset(B);
 }
 /* source operand of an ALU form: register, 8-bit register, or immediate (already masked to sz) */
 typedef struct { int reg; u64 imm; } Src;
@@ -674,7 +679,8 @@ static int jit_translate(Cpu *c, Jb *b0) {
   /* flags liveness per block (backwards; everything live at a block end) */
   for (int i = 0; i < nb; i++) { int live = FL_ALL; for (int q = blk[i].first + blk[i].n - 1; q >= blk[i].first; q--) { it[q].need = (u8)(it[q].fdef & live); live = (live & ~it[q].fdef) | it[q].fuse; } }
   Buf body = { g_jit_body, 0, sizeof g_jit_body, 0, bstarts, nb, 0, m32, retblk }; Buf *B = &body;
-  bu(B, 2); bu(B, 7); OP(0x7E); bu(B, 2); OP(0x7C);   /* locals 4..10: i64, 11..12: f64 */
+  bu(B, 3); bu(B, 7); OP(0x7E); bu(B, 2); OP(0x7C); bu(B, 3); OP(0x7E);   /* locals 4..10: i64, 11..12: f64, 13..15: i64 verified-block bits (zero at entry) */
+  { u64 clo = blk[0].start, chi = blk[0].end; for (int i = 1; i < nb; i++) { if (blk[i].start < clo) clo = blk[i].start; if (blk[i].end > chi) chi = blk[i].end; } B->clo = clo; B->cspan = chi - clo; }
   /* layout:  block $fault  loop $dispatch  block $b(nb-1) … block $b0  br_table pc  end $b0 CODE0 end $b1 CODE1 … end $b(nb-1) CODE(nb-1)  end $dispatch  end $fault  <fault exit> */
   OP(0x02); OP(0x40); OP(0x03); OP(0x40); for (int i = 0; i < nb; i++) { OP(0x02); OP(0x40); }
   e_lget(B, L_PC); OP(BR_TABLE); bu(B, nb); for (int i = 0; i < nb; i++) bu(B, i); bu(B, nb - 1);
@@ -682,12 +688,15 @@ static int jit_translate(Cpu *c, Jb *b0) {
   for (int i = 0; i < nb; i++) {
     OP(0x0B);   /* end $b_i → CODE_i */
     B->blk = i; int k = 0;
-    /* the block's code bytes must still be what we translated (self-modifying / regenerated code → stale, return 1): checked on every entry of the block */
+    /* the block's code bytes must still be what we translated (self-modifying / regenerated code → stale, return 1): checked on the first entry of the block in this
+       call of the region; the bit is dropped again by any store into the region's code range and by any interpreter step (loops re-entering a block skip the compare) */
+    e_lget(B, L_V(i)); e_i64c(B, 1ull << (i & 63)); OP(I64_AND); OP(I64_EQZ); e_if(B, 0);
     for (u64 off = blk[i].start; off < blk[i].end; off += 8) {
       u32 nbyt = blk[i].end - off < 8 ? (u32)(blk[i].end - off) : 8; u64 w = 0; __builtin_memcpy(&w, rbase + (off - lo), nbyt); u64 msk = nbyt == 8 ? ~0ull : (1ull << (nbyt * 8)) - 1;
       e_lget(B, L_CODE); e_ld(B, 0x29, 0, off - lo); if (nbyt < 8) { e_i64c(B, msk); OP(I64_AND); } e_i64c(B, w); OP(I64_NE);
       e_if(B, 0); e_lget(B, L_C); e_i64c(B, blk[i].start); e_st(B, 0x37, 3, CO_RIP); e_i64c(B, 1); OP(RETURN); e_end(B);   /* stale: c->rip = this block (earlier blocks of this run already executed) */
     }
+    e_lget(B, L_V(i)); e_i64c(B, 1ull << (i & 63)); OP(I64_OR); e_lset(B, L_V(i)); e_end(B);
     for (int q = blk[i].first; q < blk[i].first + blk[i].n; q++) {
       const Dc *e = it[q].e; u64 next = it[q].rip + e->len; if (m32) next = (u32)next;
       int done = 0;
