@@ -4,7 +4,8 @@
 typedef void *(__cdecl *allocfn)(size_t);
 typedef void (__cdecl *freefn)(void *);
 int main(void) {
-  HMODULE a=LoadLibraryA("msvcr100.dll"), b=LoadLibraryA("msvcp100.dll");
+  /* The C++ DLL depends on the C runtime: load it FIRST to check dependency initialisation. */
+  HMODULE b=LoadLibraryA("msvcp100.dll"), a=LoadLibraryA("msvcr100.dll");
   if(!a || !b) { printf("VC10 LOAD FAIL %lu\n", (unsigned long)GetLastError()); return 1; }
   allocfn alloc=(allocfn)GetProcAddress(a,"_malloc_crt");
   freefn release=(freefn)GetProcAddress(a,"free");
