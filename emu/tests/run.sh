@@ -474,7 +474,9 @@ d=m.group(1); pages=re.findall(r'\[wnd\] #\d+ hwnd=\w+ pid=\d+ \"#32770\" \"\" p
 print('page_ok' if pages and all(int(x) >= 160 and int(y) < 40 for x, y in pages) else 'pages %r' % pages[:3])")"
   rm -rf $ID; ID=$(mktemp -d)
   # the real LangDLL.dll plugin now loads (lazy VFS) and shows the "Installer Language" dialog first (OK at 149,106), as on Windows
-  out=$($X --no-stdin --max-ms 150000 --mount-rw "$ID=C:\\inst" --click 149,106@4000 --click 149,106@7000 --click 357,337@10000 --click 357,337@13000 --click 357,337@16000 --click 357,337@19000 --click 357,337@70000 --click 357,337@80000 --click 357,337@90000 --click 357,337@110000 tests/inst/npp32.exe '/D=C:\inst\npp' 2>&1 | grep -v "last blocks" || true)
+  # pages (MUI1): Language OK → Welcome (InstallOptions + ioSpecial.ini — real since the INI lookup fix) → License → Directory → Components →
+  # ExtraOptions (nsDialogs) Install @22 s → install ≈ 40 s → Finish page (InstallOptions) → Finish @70 s runs notepad++ and exits
+  out=$($X --no-stdin --max-ms 150000 --mount-rw "$ID=C:\\inst" --click 149,106@4000 --click 149,106@7000 --click 357,337@10000 --click 357,337@13000 --click 357,337@16000 --click 357,337@19000 --click 357,337@22000 --click 357,337@70000 --click 357,337@80000 --click 357,337@90000 --click 357,337@110000 tests/inst/npp32.exe '/D=C:\inst\npp' 2>&1 | grep -v "last blocks" || true)
   check "NSIS x86 setup: GUI wizard (license → components → directory → install → finish) exit 0"   "exit code 0"   "$out"
   check "NSIS x86 setup: frames presented"   "[1-9][0-9]* frames"   "$out"
   check "NSIS x86 setup: 32-bit notepad++.exe written through the wizard"   "PE32 "   "$(python3 -c "import struct;d=open('$ID/npp/notepad++.exe','rb').read();pe=struct.unpack_from('<I',d,0x3c)[0];print('PE32+' if struct.unpack_from('<H',d,pe+24)[0]==0x20b else 'PE32 ')" 2>/dev/null)"
