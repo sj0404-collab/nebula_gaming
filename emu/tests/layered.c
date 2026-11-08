@@ -26,6 +26,7 @@ int main(void) {
   if (!reg || !unreg || !shell_msg || !reg(w)) { puts("layered: SHELL REGISTER FAIL"); return 7; }
   HDC dc = CreateCompatibleDC(NULL); BITMAPINFO bi = {0};
   if (!dc || GetGraphicsMode(dc) != GM_COMPATIBLE || SetGraphicsMode(dc, GM_ADVANCED) != GM_COMPATIBLE || GetGraphicsMode(dc) != GM_ADVANCED) { puts("layered: GRAPHICS MODE FAIL"); return 11; }
+  if (GetDCBrushColor(dc) != RGB(255,255,255) || SetDCBrushColor(dc, RGB(10,20,30)) != RGB(255,255,255) || GetDCBrushColor(dc) != RGB(10,20,30) || SetDCPenColor(dc, RGB(30,20,10)) != RGB(0,0,0) || GetDCPenColor(dc) != RGB(30,20,10) || !GetStockObject(DC_PEN)) { puts("layered: DC COLORS FAIL"); return 14; }
   if (GetArcDirection(dc) != AD_COUNTERCLOCKWISE || SetArcDirection(dc, AD_CLOCKWISE) != AD_COUNTERCLOCKWISE || GetArcDirection(dc) != AD_CLOCKWISE || SetArcDirection(dc, 99) != 0) { puts("layered: ARC DIRECTION FAIL"); return 13; }
   if (!SaveDC(dc) || SetGraphicsMode(dc, GM_COMPATIBLE) != GM_ADVANCED || !RestoreDC(dc, -1) || GetGraphicsMode(dc) != GM_ADVANCED || SetGraphicsMode(dc, 99) != 0) { puts("layered: GRAPHICS SAVE FAIL"); return 12; }
   bi.bmiHeader.biSize = sizeof(bi.bmiHeader); bi.bmiHeader.biWidth = 64; bi.bmiHeader.biHeight = -64;

@@ -210,7 +210,7 @@ typedef struct {
 
 typedef struct {
   u64 handle; int kind;               /* 1 DC, 2 BITMAP, 3 BRUSH, 4 PEN, 5 FONT, 6 RGN */
-  /* DC */ u64 bitmap; u32 text_color, bk_color; int bk_mode; u64 font, brush, pen; u32 text_align;   /* TA_* (SetTextAlign): TA_BASELINE/TA_BOTTOM/TA_RIGHT/TA_CENTER/TA_UPDATECP move the TextOut reference point */
+  /* DC */ u64 bitmap; u32 text_color, bk_color, dc_brush_color, dc_pen_color; int bk_mode; u64 font, brush, pen; u32 text_align;   /* TA_* (SetTextAlign): TA_BASELINE/TA_BOTTOM/TA_RIGHT/TA_CENTER/TA_UPDATECP move the TextOut reference point */
   int wnd, ox, oy, vw, vh;            /* window DC: window index+1 (-1 = whole screen), framebuffer origin and visible size */
   int lox, loy;                       /* DC: logical → device shift (viewport org − window org) */
   int clip_on, cl, ct, cr, cb;        /* DC: clip rectangle in device coordinates (IntersectClipRect / BeginPaint) */
