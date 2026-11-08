@@ -8,6 +8,7 @@ on:
       - 'emu/tests/layered.c'
       - 'emu/tests/msgthreads.c'
       - 'emu/tests/dinputcom.c'
+      - 'emu/tests/audioenum.c'
       - '.github/workflows/procmem-test.yml'
     branches: [main]
 permissions:
@@ -40,6 +41,8 @@ jobs:
           zig cc -target x86-windows-gnu -O2 emu/tests/msgthreads.c -o emu/tests/msgthreads32.exe -luser32
           zig cc -target x86_64-windows-gnu -O2 emu/tests/dinputcom.c -o emu/tests/dinputcom.exe -lole32
           zig cc -target x86-windows-gnu -O2 emu/tests/dinputcom.c -o emu/tests/dinputcom32.exe -lole32
+          zig cc -target x86_64-windows-gnu -O2 emu/tests/audioenum.c -o emu/tests/audioenum.exe -lole32
+          zig cc -target x86-windows-gnu -O2 emu/tests/audioenum.c -o emu/tests/audioenum32.exe -lole32
       - name: Execute guest regressions
         run: |
           set -o pipefail
@@ -63,6 +66,14 @@ jobs:
           for exe in dinputcom.exe dinputcom32.exe; do
             emu/x64/x64run --no-stdin --max-ms 30000 "emu/tests/$exe" 2>&1 | tee "$RUNNER_TEMP/$exe.log"
             grep -q 'dinputcom: PASS' "$RUNNER_TEMP/$exe.log"
+          done
+      - name: Verify Core Audio COM vtables (x86 and x64)
+        run: |
+          set -o pipefail
+          for exe in audioenum.exe audioenum32.exe; do
+            emu/x64/x64run --no-stdin --max-ms 30000 "emu/tests/$exe" 2>&1 | tee "$RUNNER_TEMP/$exe.log"
+            grep -q 'audioenum: PASS' "$RUNNER_TEMP/$exe.log"
+            if grep -q 'stdcall cleanup size unknown' "$RUNNER_TEMP/$exe.log"; then exit 1; fi
           done
       - name: Verify layered-window pixels (x86 and x64)
         run: |

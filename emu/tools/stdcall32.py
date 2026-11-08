@@ -22,7 +22,7 @@ for f in sorted(glob.glob(os.path.join(spec_dir, '*.spec'))):
         n = sum(sizes.get(a, 4) for a in args)
         if name in known and name not in tab: tab[name] = n
 # APIs that Wine stubs/omits or that live in DLLs without a spec here (mswsock, combase): arity from the Windows SDK headers
-extra = {'AcceptEx': 32, 'ConnectEx': 28, 'DisconnectEx': 16, 'GetAcceptExSockaddrs': 32, 'TransmitFile': 28, 'ProcessPrng': 8, 'SetThreadpoolWaitEx': 16,
+extra = {'PostThreadMessageA': 16, 'AcceptEx': 32, 'ConnectEx': 28, 'DisconnectEx': 16, 'GetAcceptExSockaddrs': 32, 'TransmitFile': 28, 'ProcessPrng': 8, 'SetThreadpoolWaitEx': 16,
          'RoInitialize': 4, 'RoUninitialize': 0, 'RoGetActivationFactory': 12, 'RoOriginateError': 8, 'RoOriginateErrorW': 12, 'RoOriginateLanguageException': 12,
          'RoReportUnhandledError': 4, 'RoGetErrorReportingFlags': 4, 'RoSetErrorReportingFlags': 4, 'GetRestrictedErrorInfo': 4, 'SetRestrictedErrorInfo': 4,
          'XInputGetAudioDeviceIds': 20, '_CxxThrowException': 8, '_SetWinRTOutOfMemoryExceptionCallback': 4,

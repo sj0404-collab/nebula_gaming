@@ -383,14 +383,14 @@ static u64 g_avt[32]; static Win32 *g_avt_owner;
 static u64 aud_vtable(Cpu *c, int kind) {
   Win32 *w = W; if (g_avt_owner != w) { e_memset(g_avt, 0, sizeof g_avt); g_avt_owner = w; }
   if (g_avt[kind]) return g_avt[kind];
-  const AIface *f = &g_aif[kind]; u64 vt = w32_heap_alloc(w, (u64)f->n * 8, 1); if (!vt) return 0;
-  for (int i = 0; i < f->n; i++) { char nm[96]; e_snprintf(nm, sizeof nm, "%s::%s", f->name, f->m[i]); wr64(c, vt + 8 * i, w32_shim_slot(w, "audio", nm)); }
+  const AIface *f = &g_aif[kind]; u64 psz = PSZ_OF(c); u64 vt = w32_heap_alloc(w, (u64)f->n * psz, 1); if (!vt) return 0;
+  for (int i = 0; i < f->n; i++) { char nm[96]; e_snprintf(nm, sizeof nm, "%s::%s", f->name, f->m[i]); wrp(c, vt + psz * i, w32_shim_slot(w, "audio", nm)); }
   g_avt[kind] = vt; return vt;
 }
 static AObj *aobj_new(Cpu *c, int kind, u64 *addr_out) {
   int id; for (id = 1; id < AOBJ_MAX && g_aobj[id].used; id++) { } if (id == AOBJ_MAX) return 0;
   u64 vt = aud_vtable(c, kind); u64 a = w32_heap_alloc(W, 32, 1); if (!vt || !a) return 0;
-  wr64(c, a, vt); wr32(c, a + 8, (u32)id); wr32(c, a + 12, 1);
+  wrp(c, a, vt); wr32(c, a + 8, (u32)id); wr32(c, a + 12, 1);
   AObj *o = &g_aobj[id]; e_memset(o, 0, sizeof *o); o->used = 1; o->kind = kind; o->addr = a; o->w = W; o->stream = -1; *addr_out = a; return o;
 }
 static AObj *aobj_of(Cpu *c, u64 self, int kind) {
@@ -556,18 +556,18 @@ static void mme_create_enum(Cpu *c, u64 ppv) { u64 a; AObj *o = aobj_new(c, AK_E
 static void mme_EnumAudioEndpoints(Cpu *c) {   /* (dataFlow, stateMask, ppDevices): eRender 0, eCapture 1, eAll 2 */
   u32 flow = (u32)ARG(1), mask = (u32)ARG(2); u64 pp = ARG(3); if (!pp) { RET(E_INVALIDARG_); return; }
   u64 a; AObj *o = aobj_new(c, AK_COLL, &a); if (!o) { RET(E_OUTOFMEMORY_); return; } o->ds = (flow == 1 || !(mask & 1)) ? 0 : 1;   /* number of devices in the collection: one active render endpoint */
-  wr64(c, pp, a); RET(0);
+  wrp(c, pp, a); RET(0);
 }
 static void mme_GetDefaultAudioEndpoint(Cpu *c) {
   u32 flow = (u32)ARG(1); u64 pp = ARG(3); if (!pp) { RET(E_INVALIDARG_); return; }
-  if (flow == 1) { aud_log("[audio] GetDefaultAudioEndpoint(eCapture): no microphone in this environment (E_NOTFOUND)\n"); wr64(c, pp, 0); RET(E_NOTFOUND_); return; }
-  u64 a; AObj *o = aobj_new(c, AK_DEV, &a); if (!o) { RET(E_OUTOFMEMORY_); return; } wr64(c, pp, a); RET(0);
+  if (flow == 1) { aud_log("[audio] GetDefaultAudioEndpoint(eCapture): no microphone in this environment (E_NOTFOUND)\n"); wrp(c, pp, 0); RET(E_NOTFOUND_); return; }
+  u64 a; AObj *o = aobj_new(c, AK_DEV, &a); if (!o) { RET(E_OUTOFMEMORY_); return; } wrp(c, pp, a); RET(0);
 }
 static void mme_GetDevice(Cpu *c) { char id[128]; wstr_to_utf8(c, ARG(1), id, sizeof id, -1); u64 pp = ARG(2); if (!pp) { RET(E_INVALIDARG_); return; }
-  if (e_strcmp(id, AUD_RENDER_ID)) { aud_log("[audio] IMMDeviceEnumerator::GetDevice(%s): E_NOTFOUND\n", id); wr64(c, pp, 0); RET(E_NOTFOUND_); return; }
-  u64 a; AObj *o = aobj_new(c, AK_DEV, &a); if (!o) { RET(E_OUTOFMEMORY_); return; } wr64(c, pp, a); RET(0); }
+  if (e_strcmp(id, AUD_RENDER_ID)) { aud_log("[audio] IMMDeviceEnumerator::GetDevice(%s): E_NOTFOUND\n", id); wrp(c, pp, 0); RET(E_NOTFOUND_); return; }
+  u64 a; AObj *o = aobj_new(c, AK_DEV, &a); if (!o) { RET(E_OUTOFMEMORY_); return; } wrp(c, pp, a); RET(0); }
 static void coll_GetCount(Cpu *c) { AObj *o = aobj_of(c, ARG(0), AK_COLL); if (!o || !ARG(1)) { RET(E_INVALIDARG_); return; } wr32(c, ARG(1), (u32)o->ds); RET(0); }
-static void coll_Item(Cpu *c) { AObj *o = aobj_of(c, ARG(0), AK_COLL); u32 i = (u32)ARG(1); u64 pp = ARG(2); if (!o || !pp) { RET(E_INVALIDARG_); return; } if (i >= (u32)o->ds) { RET(E_INVALIDARG_); return; } u64 a; AObj *d = aobj_new(c, AK_DEV, &a); if (!d) { RET(E_OUTOFMEMORY_); return; } wr64(c, pp, a); RET(0); }
+static void coll_Item(Cpu *c) { AObj *o = aobj_of(c, ARG(0), AK_COLL); u32 i = (u32)ARG(1); u64 pp = ARG(2); if (!o || !pp) { RET(E_INVALIDARG_); return; } if (i >= (u32)o->ds) { RET(E_INVALIDARG_); return; } u64 a; AObj *d = aobj_new(c, AK_DEV, &a); if (!d) { RET(E_OUTOFMEMORY_); return; } wrp(c, pp, a); RET(0); }
 static void dev_Activate(Cpu *c) {
   AObj *d = aobj_of(c, ARG(0), AK_DEV); u64 riid = ARG(1), pp = ARG(4); if (!d || !riid || !pp) { RET(E_INVALIDARG_); return; } u32 d1 = rd32(c, riid);
   int kind = (d1 == 0x1CB9AD4Cu || d1 == 0x726778CDu || d1 == 0x7ED4EE07u) ? AK_CLIENT : d1 == 0x5CDF2C82u ? AK_EPVOL : 0;

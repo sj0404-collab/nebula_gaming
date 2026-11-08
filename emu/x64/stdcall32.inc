@@ -2808,6 +2808,7 @@ static const struct { const char *n; unsigned short bytes; } stdcall32_tab[] = {
   { "PostMessageWrapW", 16 },
   { "PostQueuedCompletionStatus", 16 },
   { "PostQuitMessage", 4 },
+  { "PostThreadMessageA", 16 },
   { "PostThreadMessageW", 16 },
   { "PostThreadMessageWrapW", 16 },
   { "PrintDlgWrapW", 4 },
