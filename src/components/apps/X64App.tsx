@@ -482,10 +482,6 @@ export default function X64App() {
       pushToast('Programs', `Visual C++ 2010 x86 runtime could not be installed: ${String(e)}`, 'x64'); return false;
     }
   };
-  ensureVC10Ref.current = async (rt: X64Runtime, entry: ExeEntry) => {
-    if (entry.info.pe32plus || !entry.info.dlls?.some(d => /^(msvcr100|msvcp100)(\.dll)?$/i.test(d))) return true;
-    return installVC10(rt);
-  };
   const [vc14x86Status, setVc14x86Status] = useState<'available' | 'installing' | 'installed' | 'error'>('available');
   const [vc14x86Error, setVc14x86Error] = useState('');
   const vc14x86Installed = useRef(false);
@@ -505,6 +501,13 @@ export default function X64App() {
       }
       vc14x86Installed.current = true; setVc14x86Status('installed'); setFetching(null); setFiles(rt.vfsList()); return true;
     } catch (e) { setVc14x86Status('error'); setVc14x86Error(String(e)); setFetching(null); setLog(l => [...l, `VC++ 2015–2022 x86: ${String(e)}`]); return false; }
+  };
+  ensureVC10Ref.current = async (rt: X64Runtime, entry: ExeEntry) => {
+    if (entry.info.pe32plus) return true;
+    const dlls = entry.info.dlls ?? [];
+    if (dlls.some(d => /^(msvcr100|msvcp100)(\.dll)?$/i.test(d)) && !(await installVC10(rt))) return false;
+    if (dlls.some(d => /^(msvcp140|vcruntime140|concrt140|vcomp140)/i.test(d)) && !(await installVC14x86(rt))) return false;
+    return true;
   };
   const installDotnet = useCallback((rt: X64Runtime) => installGz(rt, GZ_PACKS.dotnet, dotnet, setDotnet), [installGz, dotnet]);
   const installDx = useCallback((rt: X64Runtime) => installGz(rt, GZ_PACKS.dx, dx, setDx), [installGz, dx]);
@@ -529,7 +532,6 @@ export default function X64App() {
     }
     if (!await ensureVC10Ref.current(rt, current)) { setTab('report'); return; }
     const sample = current.source === 'sample' ? SAMPLES.find(x => x.name === current.name) : undefined;
-    if (!current.info.pe32plus && current.info.dlls?.some(d => /^(msvcp140|vcruntime140|concrt140|vcomp140)/i.test(d)) && !(await installVC14x86(rt))) { setTab('report'); return; }
     if (current.info.pe32plus && pack.status !== 'installed' && (sample?.needsPack || exeWantsPack(current.info.dlls, pack.manifest))) await installPack(rt);   // the program imports a vendor-runtime DLL we ship
     if (dx.status !== 'installed' && (sample?.needsDx || exeWantsDx(current.info.dlls, dx.manifest))) await installDx(rt);   // the program imports a DirectX DLL we ship (D3DX, D3DCompiler …)
     if (current.info.dotnet && dotnet.status !== 'installed' && !(await installDotnet(rt))) {   // managed code needs the real runtime
