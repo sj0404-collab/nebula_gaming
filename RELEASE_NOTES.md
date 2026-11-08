@@ -1,3 +1,43 @@
+# v1.46.0 — Android: Shattered Pixel Dungeon 13× faster to the title screen, a JIT that stops re-checking its own code, CI green again
+
+**Where the game's time went (measured, not guessed).** The sampling profiler now attributes every sample to a module /
+dynamic code and to a process+thread, counts the JIT regions too, prints the hex of the hottest blocks, and can be reset at the
+N-th `SwapBuffers` (`X64_PROF_SKIP=N`) to profile a game's steady state instead of its start-up. `nativeprof.yml` can unpack a
+zip to `C:\game` and run an exe from it with a null GL driver (`zipexe`, `glnull`, `profskip` inputs). Run on the official
+Shattered Pixel Dungeon v4.0.2 Windows build (jpackage, JDK 17.0.17, no CDS archive) on the GitHub runner, 240 s each:
+- default JVM: **47 % of all instructions were HotSpot's C2 compiler thread** (plus C1), the game thread sat in the slow
+  profiled tier meanwhile — **64 frames in 240 s**;
+- `-XX:TieredStopAtLevel=1` (C1 only): **860 frames in 240 s**, first frame at 30 s instead of 40 s, title screen reached in
+  ~95 s instead of ~130 s; steady state ≈ 4.2 M instructions per frame;
+- the steady-state profile, matched against HotSpot's `LogCompilation` (`-XX:+LogCompilation` + the nmethod addresses):
+  **~60 % of the instructions on the title screen decode the Ogg Vorbis music in Java (`jorbis` `Mdct.mdct_kernel`,
+  `OggInputStream.read`) and 10 % mix it in OpenAL-soft**; the rendering itself is cheap.  C2-compiled code would do the same
+  work with ~3× fewer instructions, but reaching that state takes 4–5 minutes of a 60-MIPS CPU; C1 is the better trade on a
+  phone, so the emulator now gives every JVM `JAVA_TOOL_OPTIONS=-XX:TieredStopAtLevel=1 -XX:-UsePerfData
+  -XX:+IgnoreUnrecognizedVMOptions` by default (the JVM announces it: "Picked up JAVA_TOOL_OPTIONS"; `--env` overrides it).
+
+**JIT: verify a block's code bytes once per region call.** Translated blocks re-compared their own machine code with the
+guest memory on every entry — inside a hot loop that was ~25 % of the generated instructions. A region now keeps a bit set of
+the blocks it has verified during the current call; any store into the region's own code range and any interpreter step
+reset the set, so self-modifying / regenerated code (HotSpot, .NET) is still caught at the same points.  Browser (runner,
+`game-video.yml`, same game): 400 frames presented after 71 s instead of 90 s (106 s before the JVM change); steady state
+~14 fps instead of ~11 at 100 MIPS.  `X64_JIT_DUMP=<dir>` writes every module the translator produces natively
+(`wasm-tools print` shows the generated code of a hot block).
+
+**Honest limits.** The phone is slower than the runner (24 MIPS was measured on the device in v1.45.0 while the C2 storm
+was running); the music decoder alone needs ~28 M instructions per second with C1 code, so on a 24-MIPS device the title
+screen will still be a few frames per second.  The next speed steps are in the x86→wasm JIT itself (register caching,
+region-to-region chaining) — the game's own work is now known and small.
+
+**CI and the 61 commits on `main`.** The NSIS wizard test was failing after the INI-lookup fix made the MUI1 Welcome/Finish
+pages real: the test's scripted click schedule was one page short, so the Finish click landed on the still-installing page
+and the run hit the time limit.  The schedule has the extra click (and the page sequence documented).  The Android APK job in
+`ci.yml` had been switched off ("temporarily disabled") — it is on again.  The `nebula-<sha>` releases created outside CI are
+marked pre-release so "Latest" is a tested tag again.  Re-running an exe after another one could fault with "jump into shim
+region": host-side caches of guest vtables (context menu, shell view, WIC, D3D11, C++ exception helpers) and the system
+colour brushes survived the process-slot reuse while the shim slots were renumbered — all of them are dropped at process
+start now, and `wasm_run.mjs --rerun N` + a CI step run several test programs twice in one module instance.
+
 # v1.45.0 — Android: installers hash and inflate at native speed, phone desktop fixes, a working language list, FPS counter
 
 **Where the installation time really went.** A new in-emulator sampling profiler (`X64_PROF=1`: hottest guest code blocks + host

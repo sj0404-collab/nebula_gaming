@@ -1610,8 +1610,8 @@ void w32_start(Win32 *w, const char *cmdline) {
      GC regions in a fixed 768 MB reservation, invariant globalization (no ICU on the virtual disk), no telemetry/first-run noise */
   static const char *dotnet_envs[] = { "DOTNET_EnableWriteXorExecute=0", "DOTNET_GCRegionRange=0x30000000", "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1", "DOTNET_SYSTEM_GLOBALIZATION_PREDEFINED_CULTURES_ONLY=0", "DOTNET_CLI_TELEMETRY_OPTOUT=1", "DOTNET_NOLOGO=1", "DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1", "DOTNET_TieredPGO=0", "DOTNET_ROOT=C:\\Program Files\\dotnet",
     /* HotSpot (jpackage launchers, java.exe): C1 only — on an emulated CPU the C2 compiler thread eats ~40 % of all instructions and methods wait in the slow profiled tier 3 meanwhile
-       (Shattered Pixel Dungeon, native runner, 240 s: 64 frames with the default tiered compilation vs 860 with C1 only); serial GC = no concurrent GC threads; no hsperfdata file. The JVM reports it: "Picked up JAVA_TOOL_OPTIONS" */
-    "JAVA_TOOL_OPTIONS=-XX:TieredStopAtLevel=1 -XX:+UseSerialGC -XX:-UsePerfData -XX:+IgnoreUnrecognizedVMOptions", 0 };
+       (Shattered Pixel Dungeon, native runner, 240 s: 64 frames with the default tiered compilation vs 860 with C1 only); no hsperfdata file. The JVM reports it: "Picked up JAVA_TOOL_OPTIONS" */
+    "JAVA_TOOL_OPTIONS=-XX:TieredStopAtLevel=1 -XX:-UsePerfData -XX:+IgnoreUnrecognizedVMOptions", 0 };   /* no GC choice here: an app that selects its own collector would get "multiple garbage collectors selected"; with 1 reported CPU HotSpot picks SerialGC itself */
   const char *envs[128]; int ne = 0; for (int i = 0; base_envs[i] && ne < 64; i++) envs[ne++] = base_envs[i];
   for (int i = 0; dotnet_envs[i] && ne < 90; i++) { const char *eq = dotnet_envs[i]; size_t nl = 0; while (eq[nl] && eq[nl] != '=') nl++; int dup = 0; for (int k = 0; k < g_nextra_env; k++) if (e_strncmp(g_extra_env[k], dotnet_envs[i], nl) == 0 && g_extra_env[k][nl] == '=') dup = 1; if (!dup) envs[ne++] = dotnet_envs[i]; }
   for (int i = 0; i < g_nextra_env && ne < 127; i++) envs[ne++] = g_extra_env[i]; envs[ne] = 0;
