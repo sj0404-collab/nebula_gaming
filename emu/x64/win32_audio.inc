@@ -613,12 +613,12 @@ static void aclient_GetBufferSize(Cpu *c) { AStream *s = aobj_stream(aobj_of(c, 
 static void aclient_GetStreamLatency(Cpu *c) { AStream *s = aobj_stream(aobj_of(c, ARG(0), AK_CLIENT)); if (!s) { RET(AUDCLNT_E_NOT_INITIALIZED); return; } if (ARG(1)) wr64(c, ARG(1), 100000); RET(0); }
 static void aclient_GetCurrentPadding(Cpu *c) { AStream *s = aobj_stream(aobj_of(c, ARG(0), AK_CLIENT)); if (!s) { RET(AUDCLNT_E_NOT_INITIALIZED); return; } if (ARG(1)) wr32(c, ARG(1), s->filled / s->block); RET(0); }
 static void aclient_IsFormatSupported(Cpu *c) {   /* (mode, pFormat, ppClosestMatch) */
-  u64 fmtp = ARG(2), pp = ARG(3); WFmt f = wfmt_read(c, fmtp); if (pp) wr64(c, pp, 0);
+  u64 fmtp = ARG(2), pp = ARG(3); WFmt f = wfmt_read(c, fmtp); if (pp) wrp(c, pp, 0);
   if (f.ok) { RET(0); return; }
-  if (pp && (u32)ARG(1) == 0) { u64 b = w32_heap_alloc(W, 40, 1); wfmt_write(c, b, 2, g_aud_host_rate ? g_aud_host_rate : 48000, 32, 1, 1); wr64(c, pp, b); RET(1 /* S_FALSE */); return; }
+  if (pp && (u32)ARG(1) == 0) { u64 b = w32_heap_alloc(W, 40, 1); wfmt_write(c, b, 2, g_aud_host_rate ? g_aud_host_rate : 48000, 32, 1, 1); wrp(c, pp, b); RET(1 /* S_FALSE */); return; }
   RET(AUDCLNT_E_UNSUPPORTED_FORMAT);
 }
-static void aclient_GetMixFormat(Cpu *c) { u64 pp = ARG(1); if (!pp) { RET(E_INVALIDARG_); return; } u64 b = w32_heap_alloc(W, 40, 1); if (!b) { RET(E_OUTOFMEMORY_); return; } wfmt_write(c, b, 2, g_aud_host_rate ? g_aud_host_rate : 48000, 32, 1, 1); wr64(c, pp, b); RET(0); }
+static void aclient_GetMixFormat(Cpu *c) { u64 pp = ARG(1); if (!pp) { RET(E_INVALIDARG_); return; } u64 b = w32_heap_alloc(W, 40, 1); if (!b) { RET(E_OUTOFMEMORY_); return; } wfmt_write(c, b, 2, g_aud_host_rate ? g_aud_host_rate : 48000, 32, 1, 1); wrp(c, pp, b); RET(0); }
 static void aclient_GetDevicePeriod(Cpu *c) { if (ARG(1)) wr64(c, ARG(1), 100000); if (ARG(2)) wr64(c, ARG(2), 30000); RET(0); }
 static void aclient_Start(Cpu *c) { AStream *s = aobj_stream(aobj_of(c, ARG(0), AK_CLIENT)); if (!s) { RET(AUDCLNT_E_NOT_INITIALIZED); return; } if (s->playing) { RET(AUDCLNT_E_NOT_STOPPED); return; } if (s->event_mode && s->ev_kobj < 0) { RET(AUDCLNT_E_EVENTHANDLE_NOT_SET); return; } s->playing = 1; s->started_once = 1; if (s->event_mode) kobj_signal(s->w, s->ev_kobj); RET(0); }
 static void aclient_Stop(Cpu *c) { AStream *s = aobj_stream(aobj_of(c, ARG(0), AK_CLIENT)); if (!s) { RET(AUDCLNT_E_NOT_INITIALIZED); return; } int was = s->playing; s->playing = 0; RET(was ? 0 : 1); }
@@ -627,15 +627,15 @@ static void aclient_SetEventHandle(Cpu *c) { AStream *s = aobj_stream(aobj_of(c,
 static void aclient_GetService(Cpu *c) {
   AObj *o = aobj_of(c, ARG(0), AK_CLIENT); u64 riid = ARG(1), pp = ARG(2); if (!o || !riid || !pp) { RET(E_INVALIDARG_); return; } if (o->stream < 0) { RET(AUDCLNT_E_NOT_INITIALIZED); return; }
   u32 d1 = rd32(c, riid); int kind = d1 == 0xF294ACFCu ? AK_RENDER : (d1 == 0xCD63314Fu || d1 == 0x6f49ff73u) ? AK_CLOCK : d1 == 0x87CE5498u ? AK_SVOL : d1 == 0x93014887u ? AK_STRVOL : (d1 == 0xF4B1A599u || d1 == 0xbfb7ff88u) ? AK_SESSION : 0;
-  if (d1 == 0xC8ADBD64u) { aud_log("[audio] IAudioClient::GetService(IAudioCaptureClient) on a render endpoint: AUDCLNT_E_WRONG_ENDPOINT_TYPE\n"); wr64(c, pp, 0); RET(AUDCLNT_E_WRONG_ENDPOINT_TYPE); return; }
-  if (!kind) { aud_log("[audio] IAudioClient::GetService({%08x-…}): E_NOINTERFACE\n", d1); wr64(c, pp, 0); RET(E_NOINTERFACE_); return; }
-  u64 a; AObj *n = aobj_new(c, kind, &a); if (!n) { RET(E_OUTOFMEMORY_); return; } n->stream = o->stream; wr64(c, pp, a); RET(0);
+  if (d1 == 0xC8ADBD64u) { aud_log("[audio] IAudioClient::GetService(IAudioCaptureClient) on a render endpoint: AUDCLNT_E_WRONG_ENDPOINT_TYPE\n"); wrp(c, pp, 0); RET(AUDCLNT_E_WRONG_ENDPOINT_TYPE); return; }
+  if (!kind) { aud_log("[audio] IAudioClient::GetService({%08x-…}): E_NOINTERFACE\n", d1); wrp(c, pp, 0); RET(E_NOINTERFACE_); return; }
+  u64 a; AObj *n = aobj_new(c, kind, &a); if (!n) { RET(E_OUTOFMEMORY_); return; } n->stream = o->stream; wrp(c, pp, a); RET(0);
 }
 static void aclient_IsOffloadCapable(Cpu *c) { if (ARG(2)) wr32(c, ARG(2), 0); RET(0); }
 static void aclient_SetClientProperties(Cpu *c) { RET(0); }
 static void aclient_GetBufferSizeLimits(Cpu *c) { if (ARG(3)) wr64(c, ARG(3), 30000); if (ARG(4)) wr64(c, ARG(4), 50000000); RET(0); }
 static void aclient_GetSharedModeEnginePeriod(Cpu *c) { /* (pFormat, pDefault, pFundamental, pMin, pMax) in frames */ WFmt f = wfmt_read(c, ARG(1)); u32 r = f.ok ? (u32)f.rate : 48000; if (ARG(2)) wr32(c, ARG(2), r / 100); if (ARG(3)) wr32(c, ARG(3), r / 1000); if (ARG(4)) wr32(c, ARG(4), r / 1000 * 3); if (ARG(5)) wr32(c, ARG(5), r / 2); RET(0); }
-static void aclient_GetCurrentSharedModeEnginePeriod(Cpu *c) { u64 pp = ARG(1); if (pp) { u64 b = w32_heap_alloc(W, 40, 1); wfmt_write(c, b, 2, g_aud_host_rate ? g_aud_host_rate : 48000, 32, 1, 1); wr64(c, pp, b); } if (ARG(2)) wr32(c, ARG(2), (u32)(g_aud_host_rate ? g_aud_host_rate : 48000) / 100); RET(0); }
+static void aclient_GetCurrentSharedModeEnginePeriod(Cpu *c) { u64 pp = ARG(1); if (pp) { u64 b = w32_heap_alloc(W, 40, 1); wfmt_write(c, b, 2, g_aud_host_rate ? g_aud_host_rate : 48000, 32, 1, 1); wrp(c, pp, b); } if (ARG(2)) wr32(c, ARG(2), (u32)(g_aud_host_rate ? g_aud_host_rate : 48000) / 100); RET(0); }
 static void aclient_InitializeSharedAudioStream(Cpu *c) {   /* (flags, periodFrames, pFormat, guid) → shared Initialize with 3 periods of buffer */
   WFmt f = wfmt_read(c, ARG(3)); u32 per = (u32)ARG(2); if (!f.ok) { RET(AUDCLNT_E_UNSUPPORTED_FORMAT); return; }
   aclient_init_impl(c, aobj_of(c, ARG(0), AK_CLIENT), 0, (u32)ARG(1), (s64)((u64)per * 3 * 10000000ull / (u64)f.rate), ARG(3));
@@ -643,9 +643,9 @@ static void aclient_InitializeSharedAudioStream(Cpu *c) {   /* (flags, periodFra
 static void render_GetBuffer(Cpu *c) {
   AStream *s = aobj_stream(aobj_of(c, ARG(0), AK_RENDER)); u32 n = (u32)ARG(1); u64 pp = ARG(2); if (!s) { RET(AUDCLNT_E_NOT_INITIALIZED); return; } if (!pp) { RET(E_INVALIDARG_); return; }
   if (s->closed) { RET(AUDCLNT_E_OUT_OF_ORDER); return; }   /* GetBuffer twice without ReleaseBuffer */
-  if (n == 0) { wr64(c, pp, 0); RET(0); return; }
+  if (n == 0) { wrp(c, pp, 0); RET(0); return; }
   u32 free_frames = (s->size - s->filled) / s->block; if (n > s->stage_frames || n > free_frames) { RET(AUDCLNT_E_BUFFER_TOO_LARGE); return; }
-  s->closed = 1; wr64(c, pp, s->stage); RET(0);
+  s->closed = 1; wrp(c, pp, s->stage); RET(0);
 }
 static void render_ReleaseBuffer(Cpu *c) {
   AStream *s = aobj_stream(aobj_of(c, ARG(0), AK_RENDER)); u32 n = (u32)ARG(1), fl = (u32)ARG(2); if (!s) { RET(AUDCLNT_E_NOT_INITIALIZED); return; }
