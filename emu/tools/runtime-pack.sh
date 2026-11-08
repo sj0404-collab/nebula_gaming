@@ -22,6 +22,21 @@ mkdir -p "$OUT"
 n=0
 for f in "$work"/s2/*.dll_amd64; do b=$(basename "$f"); cp "$f" "$OUT/${b%_amd64}"; n=$((n + 1)); done
 [ "$n" -gt 0 ] || { echo "runtime-pack: no amd64 DLLs found in the redistributable" >&2; exit 1; }
+# Keep official 32-bit VC++ 2015-2022 DLLs separate from System32 x64.
+VC14_X86_URL=https://aka.ms/vs/17/release/vc_redist.x86.exe
+curl -fL --retry 8 --retry-delay 5 --retry-all-errors -o "$work/vc_redist.x86.exe" "$VC14_X86_URL"
+mkdir -p "$work/x86s1" "$work/x86s2" "$OUT/vc2015-x86"
+cabextract -q -d "$work/x86s1" "$work/vc_redist.x86.exe"
+for f in "$work"/x86s1/*; do cabextract -q -d "$work/x86s2" "$f" 2>/dev/null || true; done
+n=0
+for f in "$work"/x86s2/*.dll_x86; do [ -f "$f" ] || continue; b=$(basename "$f"); cp "$f" "$OUT/vc2015-x86/${b%_x86}"; n=$((n + 1)); done
+[ "$n" -gt 0 ] || { echo "runtime-pack: no x86 DLLs found" >&2; exit 1; }
+python3 - "$OUT/vc2015-x86" <<'PYMAN'
+import json, os, sys
+out = sys.argv[1]
+files = [{'name': n, 'size': os.path.getsize(os.path.join(out,n))} for n in sorted(os.listdir(out)) if n.lower().endswith('.dll')]
+json.dump({'pack':'Microsoft Visual C++ 2015-2022 x86', 'files':files},open(os.path.join(out,'manifest.json'),'w'))
+PYMAN
 # VC++ 2010 SP1 x86 for legacy 32-bit applications (kept separate from x64 DLLs).
 VC10_URL=https://download.microsoft.com/download/1/6/5/165255E7-1014-4D0A-B094-B6A430A6BFFC/vcredist_x86.exe
 curl -fL --retry 3 -o "$work/vc10.exe" "$VC10_URL"
