@@ -252,6 +252,15 @@ await test('components persist across closing Programs and reloading the app', a
     else await page.waitForFunction(a => document.querySelector(`[${a}]`)?.getAttribute(a)==='installed', attr, { timeout: 300000 });
     await w.locator('[data-x64-tab="components"]').click();
   }
+  // every other VC++ pack (2005/2008/2010 x64/2012/2013, both bitnesses) through "install all"; the log must record each one
+  const nPacks = await w.locator('[data-x64-vcpack]').count();
+  expect(nPacks >= 10, `expected the VC++ 2005–2022 packs in the Components tab, found ${nPacks}`);
+  if (await w.locator('[data-x64-vc-all]').isEnabled()) await w.locator('[data-x64-vc-all]').click();
+  await page.waitForFunction(() => { const l = [...document.querySelectorAll('[data-x64-vcpack-status]')]; return l.length > 0 && l.every(e => e.getAttribute('data-x64-vcpack-status') === 'installed'); }, null, { timeout: 600000 });
+  const logText = await w.locator('[data-x64-complog]').innerText();
+  expect(/2005 .*x86.*installed: \d+ DLLs/.test(logText) && /2013 .*x64.*installed: \d+ DLLs/.test(logText), 'components log lacks pack results: ' + logText.slice(0, 300));
+  const vcDlls = await page.evaluate(() => { const rt = window.__x64; return ['C:\\Windows\\SysWOW64\\msvcr80.dll', 'C:\\Windows\\SysWOW64\\msvcp90.dll', 'C:\\Windows\\System32\\msvcr100.dll', 'C:\\Windows\\SysWOW64\\msvcr110.dll', 'C:\\Windows\\System32\\msvcp120.dll'].map(p => (rt.vfsRead(p)?.length ?? 0) > 1000); });
+  expect(vcDlls.every(Boolean), 'VC++ 2005–2013 DLLs missing on the disk: ' + JSON.stringify(vcDlls));
   await page.screenshot({ path: resolve(SHOTS, 'components-installed.png') });
   await closeAll(); await openFromDesktop('Programs');
   w = page.locator('[data-window][aria-label*="Programs"]'); await w.locator('[data-x64-tab="components"]').click();

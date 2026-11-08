@@ -12,12 +12,12 @@ permissions:
 
 jobs:
   runtime-pack:
-    name: Windows runtime pack (VC++ 2015–2022 Redistributable x64 → /x64/sys32)
+    name: Windows runtime packs (VC++ 2005/2008/2010/2012/2013/2015–2022 Redistributables, x86 + x64 → /x64/sys32)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get install -y -q cabextract p7zip-full msitools
-      - name: Download the official vc_redist.x64.exe and extract its x64 DLLs (msvcp140*, vcruntime140*, concrt140, vcomp140, mfc140* …) + manifest
+      - name: Download the official vcredist/vc_redist installers (2005…2022, x86 + x64) and extract their DLLs (identified by VERSIONINFO + PE machine) + manifests + packs.json
         run: ./emu/tools/runtime-pack.sh public/x64/sys32
       - uses: actions/upload-artifact@v4
         with:

@@ -89,7 +89,27 @@ const IME_SENTINEL = '\u200b\u200b';   // the IME field is never empty, so Backs
 type PackManifest = { pack: string; files: { name: string; size: number; version: string }[] };
 type PackState = { status: 'probing' | 'available' | 'installing' | 'installed' | 'unavailable'; manifest?: PackManifest; done?: number; note?: string };
 const PACK_URL = '/x64/sys32/';
-const PACK_BUILTIN = new Set(['vcruntime140.dll']);   // shipped in the pack for completeness, but the emulator always uses its own implementation (pe_dll_native_ok)
+const PACK_BUILTIN = new Set(['vcruntime140.dll']);
+/* every Visual C++ redistributable the build extracts (emu/tools/runtime-pack.sh → /x64/sys32/packs.json); the x64 2015–2022 pack is the flat one above */
+type VcPack = { id: string; label: string; arch: 'x86' | 'x64'; guest_dir: string; base: string; source: string; files: { name: string; size: number; version: string }[] };
+type VcState = { status: 'available' | 'installing' | 'installed' | 'error'; done?: number; note?: string };
+type CompLogEntry = { t: number; pack: string; ok: boolean; text: string };
+const COMP_LOG_KEY = 'nebula_x64_components_log';
+const loadCompLog = (): CompLogEntry[] => { try { const v = JSON.parse(localStorage.getItem(COMP_LOG_KEY) ?? '[]'); return Array.isArray(v) ? v as CompLogEntry[] : []; } catch { return []; } };
+/* import DLL name → redistributable family (the arch suffix comes from the exe) */
+const VC_FAMILY: [RegExp, string][] = [
+  [/^(msvcr|msvcp|msvcm|mfc|mfcm|atl)80(u|d)?\.dll$/i, 'vc2005'], [/^vcomp\.dll$/i, 'vc2005'],
+  [/^(msvcr|msvcp|msvcm|mfc|mfcm|atl|vcomp)90(u|d)?\.dll$/i, 'vc2008'],
+  [/^(msvcr|msvcp|mfc|mfcm|atl|vcomp)100(u|d)?\.dll$/i, 'vc2010'],
+  [/^(msvcr|msvcp|mfc|mfcm|atl|vcomp|vccorlib|vcamp)110(u|d)?\.dll$/i, 'vc2012'],
+  [/^(msvcr|msvcp|mfc|mfcm|atl|vcomp|vccorlib|vcamp)120(u|d)?\.dll$/i, 'vc2013'],
+  [/^(msvcp|concrt|vcomp|vcamp|vccorlib|mfc|mfcm)140(u|d)?(_\w+)?\.dll$|^vcruntime140_\w+\.dll$/i, 'vc2015'],
+];
+const vcPacksFor = (dlls: string[] | undefined, pe32plus: boolean | undefined): string[] => {
+  const out = new Set<string>();
+  for (const d0 of dlls ?? []) { const d = d0.toLowerCase().endsWith('.dll') ? d0.toLowerCase() : d0.toLowerCase() + '.dll'; for (const [re, fam] of VC_FAMILY) if (re.test(d)) out.add(fam + (pe32plus ? '-x64' : '-x86')); }
+  return [...out];
+};   // shipped in the pack for completeness, but the emulator always uses its own implementation (pe_dll_native_ok)
 const exeWantsPack = (dlls: string[] | undefined, man: PackManifest | undefined) => !!man && !!dlls && dlls.some(d => !PACK_BUILTIN.has(d.toLowerCase()) && man.files.some(f => f.name.toLowerCase() === d.toLowerCase()));
 
 /* .NET pack: the official Microsoft .NET Runtime 10 (win-x64), built by emu/tools/dotnet-pack.sh into public/x64/dotnet/ (per-file gzip)
@@ -409,7 +429,7 @@ export default function X64App() {
   useEffect(() => { if (!running) { autoFs.current = false; return; } if (touch && stats?.hasWindow && !fs && !autoFs.current) { autoFs.current = true; setTab('screen'); toggleFullscreen(); } }, [running, stats?.hasWindow, touch, fs, toggleFullscreen]);
 
   const [fetching, setFetching] = useState<string | null>(null);
-  const attempted = useRef({ pack: false, dx: false, dotnet: false, vc10: false, vc14x86: false });
+  const attempted = useRef({ pack: false, dx: false, dotnet: false });
   const [pack, setPack] = useState<PackState>({ status: 'probing' });
   useEffect(() => { let alive = true; (async () => {
     try { const r = await fetch(PACK_URL + 'manifest.json'); if (!r.ok) throw new Error('HTTP ' + r.status); const man = await r.json() as PackManifest; if (alive) setPack({ status: 'available', manifest: man }); }
@@ -467,56 +487,53 @@ export default function X64App() {
     setLog(l => [...l, `${pk.label} installed: ${done} files, ${(bytes / 1048576).toFixed(1)} MB → ${pk.dir} (${man.pack})`]);
     return true;
   }, []);
-  // VC10 is a separate x86 runtime. Never put it over the x64 System32 DLLs.
-  const vc10Installed = useRef(false);
-  const [vc10Status, setVc10Status] = useState<'available' | 'installing' | 'installed' | 'error'>('available');
-  const [vc10Error, setVc10Error] = useState('');
-  const installVC10 = async (rt: X64Runtime): Promise<boolean> => {
-    if (vc10Installed.current) return true;
-    attempted.current.vc10 = true;
-    setVc10Status('installing'); setVc10Error('');
-    setFetching('Installing Visual C++ 2010 x86 runtime…');
+  /* ---- Visual C++ redistributables 2005…2022, x86 and x64, from /x64/sys32/packs.json ---- */
+  const [vcPacks, setVcPacks] = useState<VcPack[]>([]);
+  const [vcState, setVcState] = useState<Record<string, VcState>>({});
+  const vcInstalled = useRef<Set<string>>(new Set());
+  const vcAttempted = useRef<Set<string>>(new Set());
+  const [compLog, setCompLog] = useState<CompLogEntry[]>(loadCompLog);
+  const logComp = useCallback((pack: string, ok: boolean, text: string) => {
+    setCompLog(l => { const n = [...l, { t: Date.now(), pack, ok, text }].slice(-200); try { localStorage.setItem(COMP_LOG_KEY, JSON.stringify(n)); } catch { /* quota */ } return n; });
+    setLog(l => [...l, `${pack}: ${text}`]);
+  }, []);
+  useEffect(() => { let alive = true; (async () => {
+    try { const r = await fetch(PACK_URL + 'packs.json'); if (!r.ok) throw new Error('HTTP ' + r.status); const idx = await r.json() as { packs: VcPack[] };
+      if (alive && Array.isArray(idx.packs)) setVcPacks(idx.packs.filter(p => p.id !== 'vc2015-x64' && Array.isArray(p.files) && p.files.length > 0)); }
+    catch { /* an older deployment without packs.json: only the flat x64 pack exists */ }
+  })(); return () => { alive = false; }; }, []);
+  const installVcPack = useCallback(async (rt: X64Runtime, id: string): Promise<boolean> => {
+    if (vcInstalled.current.has(id)) return true;
+    const pk = vcPacks.find(p => p.id === id);
+    if (!pk) { logComp(id, false, 'this pack is not built into this deployment'); return false; }
+    vcAttempted.current.add(id);
+    setVcState(st => ({ ...st, [id]: { status: 'installing', done: 0 } })); setFetching(`Installing ${pk.label}…`);
+    const t0 = performance.now(); let done = 0, bytes = 0;
     try {
-      for (const name of ['msvcr100.dll', 'msvcp100.dll']) {
-        const r = await fetch(`${PACK_URL}vc2010-x86/${name}`);
-        if (!r.ok) throw new Error(`${name}: HTTP ${r.status}`);
-        if (!rt.vfsAddPersistent(`C:\\Windows\\SysWOW64\\${name}`, new Uint8Array(await r.arrayBuffer()))) throw new Error(`${name}: virtual disk refused file`);
+      for (const file of pk.files) {
+        if (!/^[a-z0-9_.-]+\.dll$/i.test(file.name)) throw new Error(`invalid DLL name: ${file.name}`);
+        const r = await fetch(PACK_URL + pk.base + file.name); if (!r.ok) throw new Error(`${file.name}: HTTP ${r.status}`);
+        const b = new Uint8Array(await r.arrayBuffer()); if (b.length !== file.size) throw new Error(`${file.name}: ${b.length} bytes, expected ${file.size}`);
+        if (!rt.vfsAddPersistent(`${pk.guest_dir}\\${file.name}`, b)) throw new Error(`${file.name}: virtual disk refused the file`);
+        bytes += b.length; done++; setVcState(st => ({ ...st, [id]: { status: 'installing', done } })); setFetching(`Installing ${pk.label}: ${done}/${pk.files.length}, ${(bytes / 1048576).toFixed(1)} MB`);
       }
       await rt.disk.flushChecked();
-      vc10Installed.current = true; setVc10Status('installed'); setFetching(null); setFiles(rt.vfsList());
+      vcInstalled.current.add(id); setVcState(st => ({ ...st, [id]: { status: 'installed', done } })); setFetching(null); setFiles(rt.vfsList());
+      logComp(pk.label, true, `installed: ${done} DLLs, ${(bytes / 1048576).toFixed(1)} MB → ${pk.guest_dir} in ${((performance.now() - t0) / 1000).toFixed(1)} s (${pk.files.map(f => f.name.replace(/\.dll$/i, '')).join(', ')})`);
       return true;
     } catch (e) {
-      setVc10Status('error'); setVc10Error(String(e)); setFetching(null); setLog(l => [...l, `Visual C++ 2010 x86 runtime: ${String(e)}`]);
-      pushToast('Programs', `Visual C++ 2010 x86 runtime could not be installed: ${String(e)}`, 'x64'); return false;
+      setVcState(st => ({ ...st, [id]: { status: 'error', done, note: String(e) } })); setFetching(null);
+      logComp(pk.label, false, `failed after ${done}/${pk.files.length} files: ${String(e)}`);
+      pushToast('Programs', `${pk.label} could not be installed: ${String(e)}`, 'x64'); return false;
     }
-  };
-  const [vc14x86Status, setVc14x86Status] = useState<'available' | 'installing' | 'installed' | 'error'>('available');
-  const [vc14x86Error, setVc14x86Error] = useState('');
-  const vc14x86Installed = useRef(false);
-  const installVC14x86 = async (rt: X64Runtime): Promise<boolean> => {
-    if (vc14x86Installed.current) return true;
-    attempted.current.vc14x86 = true;
-    setVc14x86Status('installing'); setVc14x86Error(''); setFetching('Installing Visual C++ 2015–2022 x86…');
-    try {
-      const base = `${PACK_URL}vc2015-x86/`;
-      const response = await fetch(base + 'manifest.json'); if (!response.ok) throw new Error(`manifest: HTTP ${response.status}`);
-      const man = await response.json() as PackManifest;
-      if (!Array.isArray(man.files) || !man.files.length) throw new Error('empty runtime manifest');
-      for (const file of man.files) {
-        if (!/^[a-z0-9_.-]+\.dll$/i.test(file.name)) throw new Error(`invalid DLL name: ${file.name}`);
-        const r = await fetch(base + file.name); if (!r.ok) throw new Error(`${file.name}: HTTP ${r.status}`);
-        const bytes = new Uint8Array(await r.arrayBuffer()); if (bytes.length !== file.size) throw new Error(`${file.name}: unexpected size`);
-        if (!rt.vfsAddPersistent(`C:\\Windows\\SysWOW64\\${file.name}`, bytes)) throw new Error(`${file.name}: virtual disk refused file`);
-      }
-      await rt.disk.flushChecked();
-      vc14x86Installed.current = true; setVc14x86Status('installed'); setFetching(null); setFiles(rt.vfsList()); return true;
-    } catch (e) { setVc14x86Status('error'); setVc14x86Error(String(e)); setFetching(null); setLog(l => [...l, `VC++ 2015–2022 x86: ${String(e)}`]); return false; }
-  };
+  }, [vcPacks, logComp, pushToast]);
+  /* before a program starts: every VC++ family it imports, for its own bitness (the x64 2015–2022 pack is handled by installPack) */
   ensureVC10Ref.current = async (rt: X64Runtime, entry: ExeEntry) => {
-    if (entry.info.pe32plus) return true;
-    const dlls = entry.info.dlls ?? [];
-    if (dlls.some(d => /^(msvcr100|msvcp100)(\.dll)?$/i.test(d)) && !(await installVC10(rt))) return false;
-    if (dlls.some(d => /^(msvcp140|vcruntime140|concrt140|vcomp140)/i.test(d)) && !(await installVC14x86(rt))) return false;
+    for (const id of vcPacksFor(entry.info.dlls, entry.info.pe32plus)) {
+      if (id === 'vc2015-x64') continue;
+      if (!vcPacks.some(p => p.id === id)) { setLog(l => [...l, `${id}: the runtime pack is not built into this deployment; the program's own copies of the DLLs (next to the exe) are used if present`]); continue; }
+      if (!(await installVcPack(rt, id))) return false;
+    }
     return true;
   };
   // The runtime's cache is populated from IndexedDB during init. Only advertise
@@ -524,17 +541,11 @@ export default function X64App() {
   useEffect(() => {
     const rt = rtRef.current; if (ready !== 'ready' || !rt) return;
     const complete = (items: { path: string; size: number }[]) => items.length > 0 && items.every(f => rt.cache.get(diskKey(f.path))?.length === f.size);
-    const vc10 = ['msvcr100.dll', 'msvcp100.dll'].map(n => rt.cache.get(diskKey(`C:\\Windows\\SysWOW64\\${n}`)));
-    if (!attempted.current.vc10 && vc10Status === 'available' && vc10.every(b => b && b.length > 0)) { vc10Installed.current = true; setVc10Status('installed'); }
     if (!attempted.current.pack && pack.status === 'available' && pack.manifest && complete(pack.manifest.files.map(f => ({ path: 'C:\\Windows\\System32\\' + f.name, size: f.size })))) setPack({ ...pack, status: 'installed', done: pack.manifest.files.length });
     if (!attempted.current.dx && dx.status === 'available' && dx.manifest && complete(dx.manifest.files.map(f => ({ path: DX_DIR + f.path, size: f.size })))) setDx({ ...dx, status: 'installed', done: dx.manifest.files.length });
     if (!attempted.current.dotnet && dotnet.status === 'available' && dotnet.manifest && complete(dotnet.manifest.files.map(f => ({ path: DOTNET_DIR + f.path, size: f.size })))) setDotnet({ ...dotnet, status: 'installed', done: dotnet.manifest.files.length });
-    let alive = true;
-    if (!attempted.current.vc14x86 && vc14x86Status === 'available' && !vc14x86Installed.current) void fetch(`${PACK_URL}vc2015-x86/manifest.json`).then(r => r.ok ? r.json() : null).then((man: PackManifest | null) => {
-      if (alive && !attempted.current.vc14x86 && man?.files && complete(man.files.map(f => ({ path: `C:\\Windows\\SysWOW64\\${f.name}`, size: f.size })))) { vc14x86Installed.current = true; setVc14x86Status('installed'); }
-    }).catch(() => {});
-    return () => { alive = false; };
-  }, [ready, pack, dx, dotnet, vc10Status, vc14x86Status]);
+    for (const pk of vcPacks) if (!vcAttempted.current.has(pk.id) && !vcInstalled.current.has(pk.id) && complete(pk.files.map(f => ({ path: `${pk.guest_dir}\\${f.name}`, size: f.size })))) { vcInstalled.current.add(pk.id); setVcState(st => ({ ...st, [pk.id]: { status: 'installed', done: pk.files.length } })); }
+  }, [ready, pack, dx, dotnet, vcPacks]);
   const installDotnet = useCallback((rt: X64Runtime) => installGz(rt, GZ_PACKS.dotnet, dotnet, setDotnet), [installGz, dotnet]);
   const installDx = useCallback((rt: X64Runtime) => installGz(rt, GZ_PACKS.dx, dx, setDx), [installGz, dx]);
   const run = useCallback(async (entry?: ExeEntry, argv?: string) => {
@@ -842,13 +853,26 @@ export default function X64App() {
               <h2 className="mb-2 text-lg font-bold">Системные компоненты</h2>
               <p className="mb-4 text-sm text-slate-600">Установка в виртуальный диск Nebula, а не в Android. Некоторые компоненты устанавливаются автоматически при запуске программы. Файлы сохраняются на виртуальном диске между запусками.</p>
               <div className="space-y-3">
-                <div className="rounded border p-3"><b>Visual C++ 2010 x86</b><p className="text-sm">MSVCR100 и MSVCP100, для 32-битных программ. {vc10Status === 'installed' ? 'Установлено.' : vc10Status === 'installing' ? 'Устанавливается…' : vc10Error || 'Доступно для установки.'}</p><button data-x64-vc10={vc10Status} disabled={ready !== 'ready' || !!running || !!fetching || vc10Status === 'installed'} onClick={() => { const rt = rtRef.current; if (rt) void installVC10(rt); }} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button></div>
-                <div className="rounded border p-3"><b>Visual C++ 2015–2022 x86</b><p className="text-sm">Библиотеки Microsoft для 32-битных программ. Статус: {vc14x86Status}{vc14x86Error ? ` — ${vc14x86Error}` : ''}</p><button data-x64-vc14x86={vc14x86Status} disabled={ready !== 'ready' || !!running || !!fetching || vc14x86Status === 'installed'} onClick={() => { const rt = rtRef.current; if (rt) void installVC14x86(rt); }} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button></div>
                 <div className="rounded border p-3"><b>Visual C++ 2015–2022 x64</b><p className="text-sm">Библиотеки Microsoft для 64-битных программ. Статус: {pack.status}{pack.note ? ` — ${pack.note}` : ''}</p><button data-x64-vc14x64={pack.status} disabled={ready !== 'ready' || pack.status !== 'available' || !!running || !!fetching} onClick={() => { const rt = rtRef.current; if (rt) void installPack(rt); }} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button></div>
                 <div className="rounded border p-3"><b>DirectX June 2010 x64</b><p className="text-sm">Пользовательские DLL; не драйвер и не полная реализация DirectX. Статус: {dx.status}{dx.note ? ` — ${dx.note}` : ''}</p><button data-x64-component-dx={dx.status} disabled={ready !== 'ready' || dx.status !== 'available' || !!running || !!fetching} onClick={() => { const rt = rtRef.current; if (rt) void installDx(rt); }} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button></div>
                 <div className="rounded border p-3"><b>.NET 10 x64</b><p className="text-sm">Среда Microsoft для поддерживаемых управляемых программ. Статус: {dotnet.status}{dotnet.note ? ` — ${dotnet.note}` : ''}</p><button data-x64-component-dotnet={dotnet.status} disabled={ready !== 'ready' || dotnet.status !== 'available' || !!running || !!fetching} onClick={() => { const rt = rtRef.current; if (rt) void installDotnet(rt); }} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button></div>
+                {vcPacks.map(pk => { const st = vcState[pk.id] ?? { status: 'available' as const }; const mb = pk.files.reduce((a, f) => a + f.size, 0) / 1048576; return (
+                  <div key={pk.id} className="rounded border p-3" data-x64-vcpack={pk.id} data-x64-vcpack-status={st.status}>
+                    <b>{pk.label}</b>
+                    <p className="text-sm">{pk.arch === 'x64' ? 'Библиотеки Microsoft для 64-битных программ' : 'Библиотеки Microsoft для 32-битных программ'} → {pk.guest_dir}: {pk.files.map(f => f.name.replace(/\.dll$/i, '')).join(', ')} ({mb.toFixed(1)} MB, {pk.files[0]?.version}).
+                      {' '}{st.status === 'installed' ? 'Установлено.' : st.status === 'installing' ? `Устанавливается… ${st.done ?? 0}/${pk.files.length}` : st.status === 'error' ? `Ошибка: ${st.note}` : 'Доступно для установки (ставится автоматически, когда программа импортирует эти DLL).'}</p>
+                    <button data-x64-vcpack-btn={pk.id} {...(pk.id === 'vc2010-x86' ? { 'data-x64-vc10': st.status } : pk.id === 'vc2015-x86' ? { 'data-x64-vc14x86': st.status } : {})} disabled={ready !== 'ready' || !!running || !!fetching || st.status === 'installed' || st.status === 'installing'} onClick={() => { const rt = rtRef.current; if (rt) void installVcPack(rt, pk.id); }} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">{st.status === 'error' ? 'Повторить' : 'Установить'}</button>
+                  </div>); })}
+                {vcPacks.length === 0 && <p className="text-sm text-slate-500">Пакеты VC++ 2005–2013 и 2015–2022 x86 не собраны в этой сборке (нет /x64/sys32/packs.json).</p>}
               </div>
-              <p className="mt-4 text-sm text-slate-600">VC++ 2005, 2008, 2012 и 2013 здесь пока недоступны. Драйверы ядра Windows нельзя установить в Android: системные API и устройства реализуются эмулятором, их поддержка неполная.</p>
+              {vcPacks.length > 0 && <button data-x64-vc-all disabled={ready !== 'ready' || !!running || !!fetching || vcPacks.every(pk => vcState[pk.id]?.status === 'installed')} onClick={() => { const rt = rtRef.current; if (!rt) return; void (async () => { for (const pk of vcPacks) if (vcState[pk.id]?.status !== 'installed') await installVcPack(rt, pk.id); })(); }} className="mt-3 rounded border border-indigo-600 px-3 py-2 text-indigo-700 disabled:opacity-40">Установить все Visual C++ (x86 и x64)</button>}
+              <h3 className="mb-1 mt-5 text-sm font-bold">Журнал установки</h3>
+              {compLog.length === 0 ? <p className="text-sm text-slate-500">Пока пусто: здесь будет результат каждой установки (файлы, размер, время, ошибки).</p> : (
+                <div className="max-h-64 overflow-auto rounded border bg-white p-2 font-mono text-[10px]" data-x64-complog>
+                  {compLog.slice().reverse().map((e, i) => <div key={i} className={e.ok ? 'text-emerald-800' : 'text-rose-700'}>{new Date(e.t).toLocaleString()} · {e.pack} · {e.text}</div>)}
+                </div>)}
+              {compLog.length > 0 && <button onClick={() => { setCompLog([]); try { localStorage.removeItem(COMP_LOG_KEY); } catch { /* ignore */ } }} className="mt-2 rounded border px-2 py-1 text-xs">Очистить журнал</button>}
+              <p className="mt-4 text-sm text-slate-600">Все пакеты извлекаются при сборке из официальных установщиков Microsoft (vcredist / vc_redist) и ставятся на виртуальный диск C:\ Nebula, а не в Android. Драйверы ядра Windows установить нельзя: системные API и устройства реализуются эмулятором, их поддержка неполная.</p>
             </div>
           )}
           {tab === 'library' && !fs && (
@@ -1007,7 +1031,7 @@ export default function X64App() {
           )}
           {tab === 'report' && (
             <div className="min-h-0 flex-1 overflow-auto p-4" data-x64-report>
-              {current ? <PeReport e={current} stats={stats} log={log} apiStats={apiStats} jit={jitInfo} /> : <div className="text-slate-400">Select an executable to see its compatibility report.</div>}
+              {current ? <PeReport e={current} stats={stats} log={log} apiStats={apiStats} jit={jitInfo} runtime={{ packs: vcPacks, status: id => vcState[id]?.status ?? 'available', install: id => { const rt = rtRef.current; if (rt) void installVcPack(rt, id); }, busy: !!running || !!fetching }} /> : <div className="text-slate-400">Select an executable to see its compatibility report.</div>}
             </div>
           )}
           {/* status bar */}
@@ -1023,7 +1047,7 @@ export default function X64App() {
   );
 }
 
-function PeReport({ e, stats, log, apiStats, jit }: { e: ExeEntry; stats: RunStats | null; log: string[]; apiStats: string; jit: JitInfo | null }) {
+function PeReport({ e, stats, log, apiStats, jit, runtime }: { e: ExeEntry; stats: RunStats | null; log: string[]; apiStats: string; jit: JitInfo | null; runtime?: { packs: { id: string; label: string }[]; status: (id: string) => string; install: (id: string) => void; busy: boolean } }) {
   const i = e.info; const v = VERDICT[i.ok ? (i.verdict ?? 'invalid') : 'invalid'] ?? VERDICT.invalid;
   return (
     <div className="space-y-3">
@@ -1044,6 +1068,7 @@ function PeReport({ e, stats, log, apiStats, jit }: { e: ExeEntry; stats: RunSta
               <dt className="text-slate-500">Imports</dt><dd>{i.imports} total · {i.knownImports} implemented · <span className={(i.unknownImportsCount ?? 0) ? 'font-semibold text-rose-700' : ''}>{i.unknownImportsCount} missing</span></dd>
               {!!i.privateDllImports && (<><dt className="text-slate-500">Own DLLs</dt><dd>{i.privateDllImports} import(s) come from the program's own DLLs — put those .dll files next to the exe (same folder / C:\nebula) and they are loaded like on Windows: static imports, LoadLibrary, GetProcAddress, DllMain, per-thread TLS.</dd></>)}
               <dt className="text-slate-500">DLLs</dt><dd className="break-words">{i.dlls?.join(', ')}</dd>
+              {vcPacksFor(i.dlls, i.pe32plus).filter(id => id !== 'vc2015-x64').length > 0 && (<><dt className="text-slate-500">Runtime</dt><dd>{vcPacksFor(i.dlls, i.pe32plus).filter(id => id !== 'vc2015-x64').map(id => { const pk = runtime?.packs.find(p => p.id === id); const st = runtime?.status(id) ?? 'available'; return <span key={id} className="mr-2">{pk ? pk.label : id}: {st === 'installed' ? 'installed' : pk && runtime ? <button disabled={runtime.busy} onClick={() => runtime.install(id)} className="rounded border border-indigo-600 px-1 text-indigo-700">install</button> : 'not in this build'}</span>; })}</dd></>)}
               {!!i.unknownImports && (<><dt className="text-slate-500">Missing APIs</dt><dd className="break-words font-mono text-[10px] text-rose-700">{i.unknownImports}</dd></>)}
             </dl>
           </>

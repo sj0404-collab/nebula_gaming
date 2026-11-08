@@ -76,7 +76,7 @@ int pe_is_system_dll(const char *dll) {
  * mingw runtime DLLs, GDI+ and the Direct3D shader compilers. Core OS DLLs (kernel32, ntdll, user32, ws2_32, ucrtbase,
  * vcruntime140, api-ms-*, d3d11/dxgi …) are always the emulator's own. */
 int pe_dll_native_ok(const char *dll) {
-  static const char *pref[] = { "msvcp", "msvcr", "concrt", "vcomp", "vcamp", "vccorlib", "mfc", "vcruntime140_1", "vcruntime140_threads", "libgcc_s", "libstdc++", "libwinpthread", "gdiplus", "d3dcompiler_", "d3dx9_", "d3dx10_", "d3dx11_", "d3dcsx", "x3daudio", "xaudio2_", "xapofx", "xactengine", 0 };
+  static const char *pref[] = { "msvcp", "msvcr", "concrt", "vcomp", "vcamp", "vccorlib", "mfc", "atl8", "atl9", "atl1", "vcruntime140_1", "vcruntime140_threads", "libgcc_s", "libstdc++", "libwinpthread", "gdiplus", "d3dcompiler_", "d3dx9_", "d3dx10_", "d3dx11_", "d3dcsx", "x3daudio", "xaudio2_", "xapofx", "xactengine", 0 };
   char b[64]; int n = 0; for (const char *p = dll; *p && n < 63; p++) { char ch = *p; if (ch >= 'A' && ch <= 'Z') ch += 32; b[n++] = ch; } b[n] = 0;
   for (int i = 0; pref[i]; i++) if (!e_strncmp(b, pref[i], e_strlen(pref[i]))) return 1;
   return 0;
