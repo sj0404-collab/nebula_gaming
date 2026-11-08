@@ -111,8 +111,8 @@ jobs:
           set -o pipefail
           for exe in emu/tests/hello.exe emu/tests/cxxexc.exe emu/tests/cxxexc32.exe emu/tests/audio.exe emu/tests/pthreads.exe; do
             echo "== $exe x3"; rc=0; node emu/tests/wasm_run.mjs --max-ms 120000 --jit 1 --rerun 2 "$exe" 2>&1 | grep -a '\[wasm_run\]' || rc=$?
-  # exit 3 = the guest's own non-zero exit code (hello.exe exits 7 by design); 101 = RERUN MISMATCH, 102 = fault, 4 = timeout
-  if [ "$rc" != 0 ] && [ "$rc" != 3 ]; then echo "::error::$exe restart test failed (rc=$rc)"; exit 1; fi
+            # exit 3 = the guest's own non-zero exit code (hello.exe exits 7 by design); 101 = RERUN MISMATCH, 102 = fault, 4 = timeout
+            if [ "$rc" != 0 ] && [ "$rc" != 3 ]; then echo "::error::$exe restart test failed (rc=$rc)"; exit 1; fi
           done
       - name: .NET on the wasm64 module WITH the x86-64->wasm JIT (node 24 + emu/tests/wasm_run.mjs; the native runner is interpreter-only, JIT bugs only show here and in the browser)
         run: |
