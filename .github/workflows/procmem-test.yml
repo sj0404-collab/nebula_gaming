@@ -9,6 +9,7 @@ on:
       - 'emu/tests/msgthreads.c'
       - 'emu/tests/dinputcom.c'
       - 'emu/tests/audioenum.c'
+      - 'emu/tests/reload-native.c'
       - '.github/workflows/procmem-test.yml'
     branches: [main]
 permissions:
@@ -33,6 +34,7 @@ jobs:
           cd emu/x64
           cc -O2 -Wall -Wno-unused-function -Wno-unused-parameter -Wno-misleading-indentation -o x64run lib.c cpu.c pe.c win32.c gdi.c vfs.c api.c dxbc.c host_native.c main_native.c -lm
           cd ../..
+          cc -O2 -o emu/x64/reload-test emu/tests/reload-native.c emu/x64/{lib,cpu,pe,win32,gdi,vfs,api,dxbc,host_native}.c -lm
           zig cc -target x86_64-windows-gnu -O2 emu/tests/procmem.c -o emu/tests/procmem.exe
           zig cc -target x86-windows-gnu -O2 emu/tests/procmem.c -o emu/tests/procmem32.exe
           zig cc -target x86_64-windows-gnu -O2 emu/tests/layered.c -o emu/tests/layered.exe -lgdi32 -luser32
@@ -74,6 +76,13 @@ jobs:
             emu/x64/x64run --no-stdin --max-ms 30000 "emu/tests/$exe" 2>&1 | tee "$RUNNER_TEMP/$exe.log"
             grep -q 'audioenum: PASS' "$RUNNER_TEMP/$exe.log"
             if grep -q 'stdcall cleanup size unknown' "$RUNNER_TEMP/$exe.log"; then exit 1; fi
+          done
+      - name: Verify audio COM after repeated guest runs
+        run: |
+          set -o pipefail
+          for exe in audioenum.exe audioenum32.exe; do
+            emu/x64/reload-test "emu/tests/$exe" 2>&1 | tee "$RUNNER_TEMP/reload-$exe.log"
+            grep -q 'reload: PASS' "$RUNNER_TEMP/reload-$exe.log"
           done
       - name: Verify layered-window pixels (x86 and x64)
         run: |
