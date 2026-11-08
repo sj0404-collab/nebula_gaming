@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useOS } from '../../lib/os';
 import { AppIcon } from '../icons';
-import { ChevronRight, Monitor, RotateCw, Search, ArrowLeft, ArrowRight, ArrowUp, File as FileIcon, Folder, FolderPlus, List, LayoutGrid, HardDrive, Upload, Download, Trash2, Pencil, Play, FileText, Loader2, Link2, Archive, Image as ImageIcon } from 'lucide-react';
+import { ChevronRight, Monitor, RotateCw, Search, ArrowLeft, ArrowRight, ArrowUp, File as FileIcon, Folder, FolderPlus, List, LayoutGrid, HardDrive, Upload, Download, Trash2, Pencil, Play, FileText, Loader2, Link2, Archive, Image as ImageIcon, Plus, X } from 'lucide-react';
 import { diskList, diskRead, diskWrite, diskMkdir, diskRemove, diskRename, diskUsage, diskAvailable, onDiskChange, joinPath, parentOf, baseName, type DiskEntry } from '../../lib/x64/diskbus';
 import { requestX64Launch } from '../../lib/x64/launch';
 import { requestDocOpen, TEXT_EXT } from '../../lib/docs';
@@ -36,6 +36,32 @@ export default function ExplorerApp() {
   const [path, setPath] = useState<string>(`${HOME}\\Documents`);
   const [history, setHistory] = useState<string[]>([]);
   const [future, setFuture] = useState<string[]>([]);
+  // Each tab keeps its own location and navigation history, all on the real persistent C: drive.
+  type Tab = { id: number; path: string; history: string[]; future: string[] };
+  const [tabs, setTabs] = useState<Tab[]>([{ id: 1, path: `${HOME}\\Documents`, history: [], future: [] }]);
+  const [activeTab, setActiveTab] = useState(1);
+  const nextTab = useRef(2);
+  const saveCurrent = (tab: Tab): Tab => tab.id === activeTab ? { ...tab, path, history, future } : tab;
+  const activate = (tab: Tab) => {
+    setActiveTab(tab.id); setPath(tab.path); setHistory(tab.history); setFuture(tab.future);
+    setQuery(''); setSelected(null); setRenaming(null); setNewFolder(null);
+  };
+  const switchTab = (id: number) => {
+    if (id === activeTab) return;
+    const tab = tabs.find(t => t.id === id); if (!tab) return;
+    setTabs(tabs.map(saveCurrent)); activate(tab);
+  };
+  const addTab = () => {
+    const tab: Tab = { id: nextTab.current++, path: 'C:', history: [], future: [] };
+    setTabs([...tabs.map(saveCurrent), tab]); activate(tab);
+  };
+  const closeTab = (id: number) => {
+    if (tabs.length === 1) return;
+    const index = tabs.findIndex(t => t.id === id);
+    const remaining = tabs.map(saveCurrent).filter(t => t.id !== id);
+    setTabs(remaining);
+    if (id === activeTab) activate(remaining[Math.min(index, remaining.length - 1)]);
+  };
   const [view, setView] = useState<'list' | 'grid'>('list');
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
@@ -169,6 +195,16 @@ export default function ExplorerApp() {
 
       {/* content */}
       <div className="flex min-w-0 flex-1 flex-col">
+        <div className="flex h-10 shrink-0 items-end gap-1 overflow-x-auto border-b border-slate-300 bg-slate-100 px-2 pt-1" role="tablist" aria-label="Explorer tabs">
+          {tabs.map(tab => {
+            const currentPath = tab.id === activeTab ? path : tab.path;
+            return <div key={tab.id} className={`flex h-8 min-w-0 max-w-44 items-center rounded-t-md border px-1 ${tab.id === activeTab ? 'border-slate-300 border-b-white bg-white' : 'border-transparent bg-slate-200 hover:bg-slate-300'}`}>
+              <button role="tab" aria-selected={tab.id === activeTab} data-explorer-tab={tab.id} title={currentPath} onClick={() => switchTab(tab.id)} className="flex min-w-0 items-center gap-1.5 px-1.5 text-left"><Folder size={14} className="shrink-0 text-amber-500" /><span className="truncate">{baseName(currentPath) || 'C:'}</span></button>
+              {tabs.length > 1 && <button aria-label={`Close tab ${baseName(currentPath) || 'C:'}`} data-explorer-close-tab={tab.id} onClick={() => closeTab(tab.id)} className="ml-1 rounded p-1 hover:bg-slate-300"><X size={12} /></button>}
+            </div>;
+          })}
+          <button onClick={addTab} title="New tab" aria-label="New tab" data-explorer-new-tab className="mb-1 rounded p-1.5 hover:bg-slate-300"><Plus size={15} /></button>
+        </div>
         <div className="flex h-11 shrink-0 items-center gap-1 overflow-x-auto whitespace-nowrap border-b border-slate-200 px-2">
           <button onClick={back} className="rounded p-1.5 hover:bg-slate-100 disabled:opacity-30" disabled={!history.length} title="Back"><ArrowLeft size={15} /></button>
           <button onClick={fwd} className="rounded p-1.5 hover:bg-slate-100 disabled:opacity-30" disabled={!future.length} title="Forward"><ArrowRight size={15} /></button>

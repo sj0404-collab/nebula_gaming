@@ -600,6 +600,17 @@ await test('explorer + notepad: File Explorer browses the real C:\\ (the 7-Zip i
   // The C: root must show its real top-level folders, not an empty C:\\ / C: mismatch.
   await w.locator('[data-explorer-quick="This PC"]').click();
   await w.locator('[data-explorer-item="Program Files"]').waitFor({ timeout: 15000 });
+  // Tabs have independent locations and history; closing the active one restores its neighbour.
+  await w.locator('[data-explorer-new-tab]').click();
+  expect(await w.locator('[role="tab"]').count() === 2, 'new explorer tab missing');
+  await w.locator('[data-explorer-quick="Documents"]').click();
+  await w.locator('[data-explorer-tab="1"]').click();
+  expect(await w.locator('[data-explorer]').getAttribute('data-explorer-path') === 'C:', 'first tab did not preserve C:');
+  await w.locator('[data-explorer-tab="2"]').click();
+  expect((await w.locator('[data-explorer]').getAttribute('data-explorer-path')).endsWith('\\Documents'), 'second tab did not preserve Documents');
+  await w.locator('[data-explorer-close-tab="2"]').click();
+  expect(await w.locator('[role="tab"]').count() === 1 && await w.locator('[data-explorer]').getAttribute('data-explorer-path') === 'C:', 'closing active tab did not restore first tab');
+
   // the 7-Zip install from the previous test (if it ran): Program Files → 7-Zip → 7zFM.exe with its real icon; double-click starts it
   await w.locator('[data-explorer-quick="Program Files"]').click(); await sleep(400);
   const sevenZip = w.locator('[data-explorer-item="7-Zip"]');
