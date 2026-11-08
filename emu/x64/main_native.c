@@ -132,7 +132,7 @@ int main(int argc, char **argv) {
     if (stats) fprintf(stderr, "[x64run] api calls: %s\n", x64_api_stats());
    /* the finer in-interpreter sampler (every 1024th instruction) */
   }
-  if (g_prof) { double dt2 = (host_now_ms() - t0) / 1000.0; extern const char *x64_prof_shims(void); fprintf(stderr, "[prof] wall %.1f s: in x64_run %.1f s, host sleeps %.1f s, %llu guest instructions (%.1f MIPS)\n", dt2, t_run / 1000, t_sleep / 1000, (unsigned long long)x64_icount(), dt2 > 0 ? x64_icount() / dt2 / 1e6 : 0); fputs(x64_prof_shims(), stderr); static char pb[8192]; prof_report(pb, sizeof pb, 40); fputs(pb, stderr); }
+  if (g_prof) { double dt2 = (host_now_ms() - t0) / 1000.0; extern const char *x64_prof_shims(void); fprintf(stderr, "[prof] wall %.1f s: in x64_run %.1f s, host sleeps %.1f s, %llu guest instructions (%.1f MIPS)\n", dt2, t_run / 1000, t_sleep / 1000, (unsigned long long)x64_icount(), dt2 > 0 ? x64_icount() / dt2 / 1e6 : 0); fputs(x64_prof_shims(), stderr); static char pb[16384]; prof_report(pb, sizeof pb, 40); fputs(pb, stderr); }
   vfs_sync_all();   /* flush files still open / never closed to the write-back mounts */
   if (list_vfs) { VNodeInfo in; for (int i = 0; i < vfs_node_count(); i++) if (vfs_node_info(i, &in)) fprintf(stderr, "[vfs] %s %llu %s\n", in.is_dir ? "dir" : "file", (unsigned long long)in.size, in.path); }
   return r == RUN_EXIT ? x64_exit_code() : r == -1 ? 0 : 100 + r;

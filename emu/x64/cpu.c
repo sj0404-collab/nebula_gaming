@@ -923,7 +923,9 @@ int prof_report(char *buf, int cap, int top) { int p = 0; g_prof_total = 0; for 
   p = prof_tab_report(buf, cap, p, "module", g_prof_mod, g_prof_nmod, g_prof_total); p = prof_tab_report(buf, cap, p, "thread", g_prof_thr, g_prof_nthr, g_prof_total);
   p += e_snprintf(buf + p, cap - p, "[prof] hottest 64-byte code blocks:\n");
   for (int r = 0; r < top && p < cap - 160; r++) { int best = -1; for (int i = 0; i < PROF_N; i++) if (g_prof_tab[i].key && (best < 0 || g_prof_tab[i].n > g_prof_tab[best].n)) best = i; if (best < 0 || !g_prof_tab[best].n) break;
-    u64 rip = (g_prof_tab[best].key & ~1ull) << 6; p += e_snprintf(buf + p, cap - p, "[prof] %3d.%d%%  0x%llx  %s\n", (int)(1000 * g_prof_tab[best].n / (g_prof_total ? g_prof_total : 1)) / 10, (int)(1000 * g_prof_tab[best].n / (g_prof_total ? g_prof_total : 1)) % 10, (unsigned long long)rip, prof_label(g_prof_cpu, rip)); g_prof_tab[best].n = 0; }
+    u64 rip = (g_prof_tab[best].key & ~1ull) << 6; p += e_snprintf(buf + p, cap - p, "[prof] %3d.%d%%  0x%llx  %s\n", (int)(1000 * g_prof_tab[best].n / (g_prof_total ? g_prof_total : 1)) / 10, (int)(1000 * g_prof_tab[best].n / (g_prof_total ? g_prof_total : 1)) % 10, (unsigned long long)rip, prof_label(g_prof_cpu, rip));
+    if (r < 12 && g_prof_cpu && p < cap - 220) { const u8 *q = mem_ptr(g_prof_cpu->mem, rip, 64, 0); if (q) { p += e_snprintf(buf + p, cap - p, "[prof]        bytes:"); for (int i = 0; i < 64; i++) p += e_snprintf(buf + p, cap - p, " %02x", q[i]); p += e_snprintf(buf + p, cap - p, "\n"); } }   /* the 12 hottest blocks as hex: objdump -D -b binary -m i386:x86-64 */
+    g_prof_tab[best].n = 0; }
   return p; }
 int cpu_run(Cpu *c, u64 max_insns) {
   c->status = RUN_OK; int bstart = 1;
