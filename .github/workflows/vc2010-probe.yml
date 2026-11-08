@@ -38,7 +38,11 @@ jobs:
       - name: Verify real VC10 DLL loading and _malloc_crt
         run: |
           set -o pipefail
-          emu/x64/x64run --no-stdin --max-ms 45000 --mount "$RUNNER_TEMP/vc10=C:\\nebula" "$RUNNER_TEMP/vc10/vc10-test.exe" 2>&1 | tee "$RUNNER_TEMP/vc10.log"
+          mkdir -p "$RUNNER_TEMP/vc10-system"
+          cp "$RUNNER_TEMP/vc10/"*.dll "$RUNNER_TEMP/vc10-system/"
+          emu/x64/x64run --no-stdin --max-ms 45000 --mount "$RUNNER_TEMP/vc10-system=C:\\Windows\\SysWOW64" "$RUNNER_TEMP/vc10/vc10-test.exe" 2>&1 | tee "$RUNNER_TEMP/vc10.log"
+          grep -qi 'loaded DLL msvcr100.dll' "$RUNNER_TEMP/vc10.log"
+          grep -qi 'loaded DLL msvcp100.dll' "$RUNNER_TEMP/vc10.log"
           grep -q 'VC10 PROBE PASS' "$RUNNER_TEMP/vc10.log"
       - uses: actions/upload-artifact@v4
         if: always()
