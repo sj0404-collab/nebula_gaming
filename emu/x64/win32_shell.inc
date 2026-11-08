@@ -189,10 +189,19 @@ static void s_RegFlushKey(Cpu *c) { reg_save(); RET(0); }
 static void reg_value_name(Cpu *c, u64 a, int wide, char *out, size_t cap) { out[0] = 0; if (!a) return; if (wide) wstr_to_utf8(c, a, out, cap, -1); else { const char *p = rd_str(c, a, cap - 1); e_snprintf(out, cap, "%s", p ? p : ""); } }
 static void reg_set_value(Cpu *c, u64 hkey, u64 name_a, int wide, u32 type, u64 data, u32 len) {
   int k = reg_key_of(hkey); if (k < 0) { RET(6); return; } char name[128]; reg_value_name(c, name_a, wide, name, sizeof name);
-  u8 tmp[8192]; const u8 *src = 0; u32 n = len;
-  if (!wide && (type == 1 || type == 2 || type == 7)) { /* ANSI string → UTF-16 storage */ char s[4096]; u32 m = len < 4095 ? len : 4095; const u8 *p = mem_ptr(c->mem, data, m, 0); if (!p) { RET(87); return; } e_memcpy(s, p, m); s[m] = 0; n = 0; for (u32 i = 0; i < m && n + 2 < sizeof tmp; i++) { tmp[n++] = s[i]; tmp[n++] = 0; } if (type == 7 || (n && (tmp[n - 2] | tmp[n - 1]))) { tmp[n++] = 0; tmp[n++] = 0; } src = tmp; }
-  else { if (n > sizeof tmp) n = sizeof tmp; const u8 *p = mem_ptr(c->mem, data, n, 0); if (n && !p) { RET(87); return; } if (n) e_memcpy(tmp, p, n); src = tmp; }
-  reg_val_set(k, name, type, src, n); reg_save(); RET(0);
+  /* Registry values are not limited to 8192 bytes. Reject excessive sizes explicitly
+     instead of reporting success after silently truncating installer data. */
+  if (len > 16u * 1024u * 1024u) { RET(1450); return; }
+  const u8 *src = len ? mem_ptr(c->mem, data, len, 0) : 0;
+  if (len && !src) { RET(87); return; }
+  u8 *converted = 0; u32 n = len;
+  if (!wide && (type == 1 || type == 2 || type == 7)) {
+    n = len * 2; converted = emu_alloc((size_t)n + 2); if (!converted) { RET(14); return; }
+    for (u32 i = 0; i < len; i++) { converted[2*i] = src[i]; converted[2*i+1] = 0; }
+    if (type == 7 || (n && converted[n-2])) { converted[n++] = 0; converted[n++] = 0; }
+    src = converted;
+  }
+  reg_val_set(k, name, type, src, n); if (converted) emu_free(converted); reg_save(); RET(0);
 }
 static void s_RegSetValueExW(Cpu *c) { reg_set_value(c, ARG(0), ARG(1), 1, (u32)ARG(3), ARG(4), (u32)ARG(5)); }
 static void s_RegSetValueExA(Cpu *c) { reg_set_value(c, ARG(0), ARG(1), 0, (u32)ARG(3), ARG(4), (u32)ARG(5)); }

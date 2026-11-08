@@ -10,6 +10,7 @@ on:
       - 'emu/tests/dinputcom.c'
       - 'emu/tests/audioenum.c'
       - 'emu/tests/reload-native.c'
+      - 'emu/tests/registry-large.c'
       - '.github/workflows/procmem-test.yml'
     branches: [main]
 permissions:
@@ -45,6 +46,8 @@ jobs:
           zig cc -target x86-windows-gnu -O2 emu/tests/dinputcom.c -o emu/tests/dinputcom32.exe -lole32
           zig cc -target x86_64-windows-gnu -O2 emu/tests/audioenum.c -o emu/tests/audioenum.exe -lole32
           zig cc -target x86-windows-gnu -O2 emu/tests/audioenum.c -o emu/tests/audioenum32.exe -lole32
+          zig cc -target x86_64-windows-gnu -O2 emu/tests/registry-large.c -o emu/tests/registry-large.exe -ladvapi32
+          zig cc -target x86-windows-gnu -O2 emu/tests/registry-large.c -o emu/tests/registry-large32.exe -ladvapi32
       - name: Execute guest regressions
         run: |
           set -o pipefail
@@ -81,6 +84,13 @@ jobs:
         run: |
           set -o pipefail
           for exe in audioenum.exe audioenum32.exe; do
+            emu/x64/reload-test "emu/tests/$exe" 2>&1 | tee "$RUNNER_TEMP/reload-$exe.log"
+            grep -q 'reload: PASS' "$RUNNER_TEMP/reload-$exe.log"
+          done
+      - name: Verify large registry values on repeated runs
+        run: |
+          set -o pipefail
+          for exe in registry-large.exe registry-large32.exe; do
             emu/x64/reload-test "emu/tests/$exe" 2>&1 | tee "$RUNNER_TEMP/reload-$exe.log"
             grep -q 'reload: PASS' "$RUNNER_TEMP/reload-$exe.log"
           done
