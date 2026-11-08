@@ -2719,6 +2719,7 @@ static const struct { const char *n; unsigned short bytes; } stdcall32_tab[] = {
   { "PathCombine", 12 },
   { "PathCombineA", 12 },
   { "PathCombineW", 12 },
+  { "PathCreateFromUrlW", 16 },
   { "PathFileExists", 4 },
   { "PathFileExistsA", 4 },
   { "PathFileExistsAndAttributesA", 8 },

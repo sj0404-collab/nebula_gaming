@@ -27,6 +27,12 @@ int main(void) {
   StrCpyWFn copy_w = shlwapi ? (StrCpyWFn)GetProcAddress(shlwapi, "StrCpyW") : NULL;
   WCHAR wbuf[32] = {0};
   ok = ok && copy_w && copy_w(wbuf, L"Clover Ω") == wbuf && !wcscmp(wbuf, L"Clover Ω");
+  typedef HRESULT (WINAPI *PathUrlFn)(LPCWSTR, LPWSTR, DWORD *, DWORD);
+  PathUrlFn path_url = shlwapi ? (PathUrlFn)GetProcAddress(shlwapi, "PathCreateFromUrlW") : NULL;
+  WCHAR url_path[128] = {0}; DWORD url_cap = 128;
+  ok = ok && path_url && path_url(L"file:///C:/Program%20Files/Clover", url_path, &url_cap, 0) == S_OK
+    && !wcscmp(url_path, L"C:\\Program Files\\Clover") && url_cap == wcslen(url_path);
+  url_cap = 1; ok = ok && path_url(L"file:///C:/x", url_path, &url_cap, 0) == E_POINTER && url_cap == 5;
   WCHAR profile_value[32] = {0};
   ok = ok && WritePrivateProfileStringW(L"one", L"first", L"value", L"C:\\test-profile.ini")
     && WritePrivateProfileStringW(L"one", L"second", L"other", L"C:\\test-profile.ini")
