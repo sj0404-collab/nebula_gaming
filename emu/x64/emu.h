@@ -169,6 +169,7 @@ struct Cpu {
 };
 
 void cpu_reset(Cpu *c);
+void cpu_session_reset(void);   /* x64_load: drop the decode cache and all JIT regions of the previous session */
 int  cpu_run(Cpu *c, u64 max_insns);  /* returns RUN_* */
 void cpu_fault(Cpu *c, const char *fmt, ...);
 int w32_hw_exception(Cpu *c);   /* dispatch c->exc_code as an SEH exception at c->rip; 1 = dispatched (keep running) */

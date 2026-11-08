@@ -132,7 +132,7 @@ EXPORT(x64_load) int x64_load(const u8 *bytes, size_t len, const char *name, con
   Proc *p = proc_alloc(); if (!p) return 8; g_root = p; g_cur = 0; g_root_w32 = &p->w32;
   p->pid = 4242; p->ppid = HOST_PID; p->state = 1; p->exit_code = 0; p->handles = 0; g_next_pid = 4242;
   e_snprintf(p->name, sizeof p->name, "%s", name ? basename_of(name) : "app.exe");
-  mem_release(&p->mem); cpu_reset(&p->cpu);
+  mem_release(&p->mem); cpu_reset(&p->cpu); cpu_session_reset();
   w32_init(&p->w32, &p->cpu, &p->mem); p->w32.pid = p->pid; p->w32.ppid = HOST_PID;
   vfs_init_proc(p->w32.fs, 0); vfs_use(p->w32.fs);
   if (name && e_strchr(name, '\\')) e_snprintf(p->w32.exe_path, sizeof p->w32.exe_path, "%s", name); else e_snprintf(p->w32.exe_path, sizeof p->w32.exe_path, "C:\\nebula\\%s", p->name);

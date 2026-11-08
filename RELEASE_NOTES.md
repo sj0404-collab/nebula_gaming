@@ -29,6 +29,13 @@ was running); the music decoder alone needs ~28 M instructions per second with C
 screen will still be a few frames per second.  The next speed steps are in the x86→wasm JIT itself (register caching,
 region-to-region chaining) — the game's own work is now known and small.
 
+**A program run a second time ran in the interpreter.** Found by the new restart test: the decode cache and the JIT's block
+table are global, and entries of the previous session (same address, other mapping) were accepted by the interpreter but
+never by the translator, so every hot block of the restarted program was marked "not translatable" — `hello.exe` ran at
+129 MIPS the first time and 33 MIPS the second and third.  On the phone that was every launch after the first one in an app
+session.  `x64_load` now drops both tables and returns all region slots for reuse; the interpreter refreshes a cache entry
+whose bytes still match in a new mapping; a block record from an older mapping generation starts counting again.
+
 **CI and the 61 commits on `main`.** The NSIS wizard test was failing after the INI-lookup fix made the MUI1 Welcome/Finish
 pages real: the test's scripted click schedule was one page short, so the Finish click landed on the still-installing page
 and the run hit the time limit.  The schedule has the extra click (and the page sequence documented).  The Android APK job in

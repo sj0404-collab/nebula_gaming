@@ -825,6 +825,9 @@ static void exec_0f(Ins *i, Cpu *c) {
 }
 
 #include "jit.inc"
+/* x64_load: the decode cache and the JIT's block table are global; entries of the previous session describe other mappings
+   (same rip, other code pointer / generation) and would keep the restarted program in the interpreter */
+void cpu_session_reset(void) { __builtin_memset(g_dc, 0, sizeof g_dc); jit_session_reset(); }
 static int g_bstart;   /* set by cpu_step1 when the instruction transferred control (next rip is a block start) */
 /* one interpreter step at c->rip; returns 1 when cpu_run must return c->status */
 static int cpu_step1(Cpu *c) {
@@ -847,6 +850,7 @@ static int cpu_step1(Cpu *c) {
     const u8 *code = (e->rip == c->rip && e->mem == c->mem && e->gen == c->mem->gen) ? e->code : mem_ptr_fast(c->mem, c->rip, 16, 0);
     if (code) { __builtin_memcpy(&w0, code, 8); __builtin_memcpy(&w1, code + 8, 8); }
     int hit = e->rip == c->rip && code && (w0 & e->m0) == e->b0 && (w1 & e->m1) == e->b1 && e->m32 == c->mode32;
+    if (hit && (e->mem != c->mem || e->gen != c->mem->gen)) { e->code = code; e->mem = c->mem; e->gen = c->mem->gen; }   /* same bytes in a new mapping / generation (a program run again, a DLL remapped): refresh, or the JIT's dc_valid never accepts the entry and the block stays interpreted (nodc) */
     if (hit && e->fast) {   /* specialised handler: no Ins at all */
       u64 start = c->rip, nx = fast_exec(c, e, code, start);
       if (nx) { if (c->status != RUN_OK) { c->hist[c->hist_i++ & 4095] = start; if (c->status == RUN_FAULT) { c->err_rip = start; if (c->exc_code) { c->rip = start; if (w32_hw_exception(c)) { g_bstart = 1; return 0; } } } return 1; }

@@ -38,8 +38,8 @@ static inline Jb *jb_find(u64 rip, void *mem, int m32) {   /* lookup without evi
   return 0;
 }
 int g_jit_on = 0;
-static u32 g_jit_free[4096]; static int g_jit_nfree;
 #define JIT_MAX_FN 65536
+static u32 g_jit_free[JIT_MAX_FN]; static int g_jit_nfree; static u32 g_jit_fn_hi;   /* table slots whose module may be replaced; the highest slot handed out */
 static u16 g_fnref[JIT_MAX_FN];   /* JB entries referencing a table slot; 0 → slot reusable */
 #define JIT_MAX_BLOCKS 160
 #define JIT_MAX_REGION_INSNS 2400
@@ -740,6 +740,7 @@ static int jit_translate(Cpu *c, Jb *b0) {
   u32 reuse = g_jit_nfree ? g_jit_free[--g_jit_nfree] : 0;
   u32 fn = host_jit_compile(mod.b, mod.n, reuse);
   if (!fn || fn >= JIT_MAX_FN) { g_jit_st.fails++; if (reuse) g_jit_free[g_jit_nfree++] = reuse; return 0; }
+  if (fn > g_jit_fn_hi) g_jit_fn_hi = fn;
   /* publish every block start as an entry; the hot one (rip) LAST: jb_lookup evicts 2-way set neighbours, so publishing another
      block of this region could otherwise evict b0's slot and leave it describing a different block (wrong pc -> wrong code run) */
   int hot = -1; g_fnref[fn] = 1;   /* hold: publishing may evict (jit_drop) a block of this very region; the count must not hit 0 and free the slot */
@@ -753,18 +754,26 @@ static int jit_translate(Cpu *c, Jb *b0) {
   g_jit_st.blocks++; g_jit_st.insns += nit; g_jit_st.steps += steps; g_jit_st.bytes += mod.n;
   if (hot >= 0) { Jb *b = jb_lookup(rip, m, m32); if (b->fn) jit_drop(b);
     b->rip = rip; b->mem = m; b->m32 = m32; b->fn = fn; b->pc = (u16)hot; b->code = rbase; b->gen = gen; b->count = JIT_HOT; g_fnref[fn]++; }
-  if (--g_fnref[fn] == 0) { if (g_jit_nfree < 4096) g_jit_free[g_jit_nfree++] = fn; return 0; }   /* release the hold */
+  if (--g_fnref[fn] == 0) { if (g_jit_nfree < JIT_MAX_FN) g_jit_free[g_jit_nfree++] = fn; return 0; }   /* release the hold */
   return hot >= 0;
 }
-static void jit_drop(Jb *b) { if (b->fn && g_fnref[b->fn] && --g_fnref[b->fn] == 0 && g_jit_nfree < 4096) g_jit_free[g_jit_nfree++] = b->fn; b->fn = 0; b->rip = 0; b->count = 0; }
+static void jit_drop(Jb *b) { if (b->fn && g_fnref[b->fn] && --g_fnref[b->fn] == 0 && g_jit_nfree < JIT_MAX_FN) g_jit_free[g_jit_nfree++] = b->fn; b->fn = 0; b->rip = 0; b->count = 0; }
 typedef u64 (*JitFn)(Cpu *c, const u8 *code, int pc, u64 limit);
 /* called by cpu_run at a block start: runs translated blocks back to back while they chain; returns 1 if any block ran */
+/* a new session (x64_load): forget every translated region and every block record of the previous one */
+static void jit_session_reset(void) {
+  for (int i = 0; i < (1 << JB_BITS); i++) if (g_jb[i].fn) jit_drop(&g_jb[i]);
+  __builtin_memset(g_jb, 0, sizeof g_jb);
+  /* every table slot is reusable now (the host replaces the module in a reused slot, so the old regions can be collected) */
+  g_jit_nfree = 0; for (u32 fn = g_jit_fn_hi; fn >= 1 && g_jit_nfree < JIT_MAX_FN; fn--) { g_fnref[fn] = 0; g_jit_free[g_jit_nfree++] = fn; }
+}
 static inline int jit_enter(Cpu *c, u64 budget) {
   int ran = 0; u64 ic0 = c->icount;
   for (;;) {
     Jb *b = jb_lookup(c->rip, c->mem, c->mode32);
-    if (!b->rip) { b->rip = c->rip; b->mem = c->mem; b->m32 = c->mode32; b->count = 1; b->fn = 0; return ran; }
+    if (!b->rip) { b->rip = c->rip; b->mem = c->mem; b->m32 = c->mode32; b->count = 1; b->fn = 0; b->gen = mem_gen(c->mem); return ran; }
     if (!b->fn) {
+      if (b->gen != mem_gen(c->mem)) { b->gen = mem_gen(c->mem); b->count = 1; return ran; }   /* a new mapping generation (another process in this slot, a remapped image): the old "not translatable" verdict (count = -2M) no longer applies */
       if (++b->count < JIT_HOT) return ran;
       if (!jit_translate(c, b)) { b->count = -2000000; g_jit_st.nodc++; return ran; }
       b = jb_lookup(c->rip, c->mem, c->mode32);   /* the entry for rip (publishing may have moved it within its set) */
