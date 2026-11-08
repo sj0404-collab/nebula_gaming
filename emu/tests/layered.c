@@ -31,7 +31,7 @@ int main(void) {
   POINT transparent = {21, 31}, opaque = {30, 40};
   if (WindowFromPoint(transparent) == w || WindowFromPoint(opaque) != w) { puts("layered: HIT FAIL"); return 5; }
   InvalidateRect(w, NULL, TRUE);
-  MSG msg; int notified = 0; while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) { if (msg.message == shell_msg && msg.wParam == 1 && (HWND)msg.lParam == w) notified = 1; TranslateMessage(&msg); DispatchMessageW(&msg); }
-  if (!notified || !unreg(w)) { puts("layered: SHELL NOTIFY FAIL"); return 8; }
+  MSG msg; int notified = 0; while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) { printf("shell: expected=%u msg=%u wp=%llu lp=%p wnd=%p\n", shell_msg, msg.message, (unsigned long long)msg.wParam, (void *)msg.lParam, (void *)w); if (msg.message == shell_msg && msg.wParam == 1 && (HWND)msg.lParam == w) notified = 1; TranslateMessage(&msg); DispatchMessageW(&msg); }
+  int unregistered = unreg(w); if (!notified || !unregistered) { printf("layered: SHELL NOTIFY FAIL notified=%d unregistered=%d\n", notified, unregistered); return 8; }
   printf("layered: PASS\n"); Sleep(1000); return 0;
 }

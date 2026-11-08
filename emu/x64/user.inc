@@ -589,7 +589,7 @@ static void wnd_deactivated(Win32 *w, int i) { if (g_active != i && !(wnd_alive(
   if (!g_wnd[ow].builtin || g_wnd[ow].superclassed) { post_msg_to(w, HWND_OF(ow), 0x06, 1, HWND_OF(i)); post_msg_to(w, HWND_OF(ow), 0x07, HWND_OF(i), 0); } }
 static void wnd_free(int i) { Wnd *n = &g_wnd[i]; if (n->layer_pixels) { emu_free(n->layer_pixels); n->layer_pixels = 0; } items_free(n); if (n->text && n->text != n->tbuf) emu_free(n->text); if (n->stream) { emu_free(n->stream); n->stream = 0; } if (n->cc) { emu_free(n->cc); n->cc = 0; } n->nsub = 0; n->subcur = 0; n->sub_orig = 0; n->edit_wnd = 0; n->combo_wnd = 0; n->himl = 0; n->cbex_exstyle = 0; n->text = n->tbuf; n->textcap = sizeof n->tbuf; n->tbuf[0] = 0; kill_timers_of(i); if (g_focus == i) g_focus = -1; if (g_capture == i) g_capture = -1; if (g_active == i) g_active = -1; n->used = 0; n->destroyed = 1; }
 /* process exit: its windows vanish without WM_DESTROY (no code left to run them) and its window classes are released */
-void user_proc_exit(Win32 *w) { for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].pid == w->pid && w->pid != 0) { g_wnd[k].destroyed = 1; g_wnd[k].visible = 0; wnd_free(k); if (k == 0) sync_main(w); }
+void user_proc_exit(Win32 *w) { for (int k = 0; k < 32; k++) { int i = wnd_of(g_shell_hooks[k]); if (i >= 0 && g_wnd[i].pid == w->pid) g_shell_hooks[k] = 0; } for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].pid == w->pid && w->pid != 0) { g_wnd[k].destroyed = 1; g_wnd[k].visible = 0; wnd_free(k); if (k == 0) sync_main(w); }
   for (int i = 0; i < 64; i++) if (g_cls[i].used && g_cls[i].pid == w->pid && w->pid != 0) g_cls[i].used = 0; wnd_invalidate_all(); }
 static void destroy_step(Cpu *c) {
   Win32 *w = W; int d = g_ndestroy - 1; for (;;) {
@@ -605,6 +605,7 @@ static void destroy_window(Cpu *c, int i) { Win32 *w = W; if (g_ndestroy >= 6) {
   int d = g_ndestroy++; g_destroy[d].n = 0; g_destroy[d].pos = 0; g_destroy[d].phase = 0; g_destroy[d].root = i; destroy_collect(i, g_destroy[d].list, &g_destroy[d].n);
   for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].parent < 0 && g_wnd[k].owner == i && g_destroy[d].n < 64) destroy_collect(k, g_destroy[d].list, &g_destroy[d].n);
   if (g_wnd[i].parent < 0) { if (g_wnd[i].visible) shell_hook_event(w, i, 2); wnd_deactivated(W, i); }
+  for (int k = 0; k < 32; k++) if (g_shell_hooks[k] == HWND_OF(i)) g_shell_hooks[k] = 0;
   w32_push_cont(c, CONT_WNDDESTROY, (u64)i); (void)w; destroy_step(c); }
 static void s_DestroyWindow(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0 || g_wnd[i].destroyed) { W->last_error = 1400; RET(0); return; } destroy_window(c, i); }
 
