@@ -214,7 +214,7 @@ typedef struct {
   int wnd, ox, oy, vw, vh;            /* window DC: window index+1 (-1 = whole screen), framebuffer origin and visible size */
   int lox, loy;                       /* DC: logical → device shift (viewport org − window org) */
   int clip_on, cl, ct, cr, cb;        /* DC: clip rectangle in device coordinates (IntersectClipRect / BeginPaint) */
-  int save_depth, graphics_mode;      /* DC: SaveDC nesting, 0/1 compatible, 2 advanced */
+  int save_depth, graphics_mode, arc_direction;      /* DC: SaveDC nesting, 0/1 compatible, 2 advanced */
   /* BITMAP */ int bw, bh; u64 bits; /* guest address of BGRA pixels */
   int dib_bpp, dib_stride, dib_section; u64 dib_native; u32 *dib_pal; int dib_ncol; u8 *dib_native_prev; u32 *dib_shadow_prev; /* non-32-bpp DIB section: guest-visible native bits + 32-bpp shadow at `bits`, synced in dib_sync() */
   /* BRUSH/PEN */ u32 color; int pen_width;
