@@ -125,16 +125,22 @@ jobs:
         run: |
           set -euo pipefail
           BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          curl -fsSL --retry 3 -o "$RUNNER_TEMP/previous-nebula.apk" https://github.com/sj0404-collab/nebula_gaming/releases/download/v1.45.0/NebulaOS-v1.45.0-android.apk
-          echo "Checking previous APK signature"
-          $BT/apksigner verify --verbose --print-certs "$RUNNER_TEMP/previous-nebula.apk" > "$RUNNER_TEMP/old-certs.txt" || { cat "$RUNNER_TEMP/old-certs.txt"; echo 'Previous APK signature invalid' >&2; exit 1; }
-          echo "Checking new APK signature"
-          $BT/apksigner verify --verbose --print-certs release/*.apk > "$RUNNER_TEMP/new-certs.txt" || { cat "$RUNNER_TEMP/new-certs.txt"; echo 'New APK signature invalid' >&2; exit 1; }
-          cat "$RUNNER_TEMP/old-certs.txt" "$RUNNER_TEMP/new-certs.txt"
-          old_cert=$(grep -i 'certificate SHA-256 digest:' "$RUNNER_TEMP/old-certs.txt" | head -1)
-          new_cert=$(grep -i 'certificate SHA-256 digest:' "$RUNNER_TEMP/new-certs.txt" | head -1)
-          test -n "$old_cert" && test "$old_cert" = "$new_cert" || { echo 'Signing certificate changed; APK cannot update v1.45.0' >&2; exit 1; }
-          old=$($BT/aapt dump badging "$RUNNER_TEMP/previous-nebula.apk" | sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p" | head -1)
+          # Pin captured from the successful v1.45.0 comparison in run 42465880376.
+          # A GitHub release outage must not skip signature or version checks.
+          expected_cert=0ba4cf9330cedfdaf781946bc4c0c2cb9e7194cce1a647411943edbf08bc0603
+          old=14500
+          if curl -fsSL --retry 3 -o "$RUNNER_TEMP/previous-nebula.apk" https://github.com/sj0404-collab/nebula_gaming/releases/download/v1.45.0/NebulaOS-v1.45.0-android.apk; then
+            $BT/apksigner verify --verbose --print-certs "$RUNNER_TEMP/previous-nebula.apk" > "$RUNNER_TEMP/old-certs.txt"
+            old_cert=$(grep -i 'certificate SHA-256 digest:' "$RUNNER_TEMP/old-certs.txt" | head -1 | awk '{print $NF}')
+            test "$old_cert" = "$expected_cert"
+            old=$($BT/aapt dump badging "$RUNNER_TEMP/previous-nebula.apk" | sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p" | head -1)
+          else
+            echo 'Release download failed; comparing against pinned v1.45.0 certificate and versionCode.'
+          fi
+          $BT/apksigner verify --verbose --print-certs release/*.apk > "$RUNNER_TEMP/new-certs.txt"
+          cat "$RUNNER_TEMP/new-certs.txt"
+          new_cert=$(grep -i 'certificate SHA-256 digest:' "$RUNNER_TEMP/new-certs.txt" | head -1 | awk '{print $NF}')
+          test "$new_cert" = "$expected_cert" || { echo 'Signing certificate changed; APK cannot update v1.45.0' >&2; exit 1; }
           new=$($BT/aapt dump badging release/*.apk | sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p" | head -1)
           test -n "$old" && test -n "$new" && (( new > old )) || { echo "APK versionCode does not upgrade $old -> $new" >&2; exit 1; }
           echo "Verified identical signing certificate and upgrade versionCode $old -> $new"
