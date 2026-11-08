@@ -1,4 +1,4 @@
-# v1.46.0 — Android: Shattered Pixel Dungeon 13× faster to the title screen, a JIT that stops re-checking its own code, CI green again
+# v1.46.0 — Android: Shattered Pixel Dungeon 13× faster to the title screen, a JIT that stops re-checking its own code, every Visual C++ runtime 2005–2022 (x86 + x64), CI green again
 
 **Where the game's time went (measured, not guessed).** The sampling profiler now attributes every sample to a module /
 dynamic code and to a process+thread, counts the JIT regions too, prints the hex of the hottest blocks, and can be reset at the
@@ -35,6 +35,20 @@ never by the translator, so every hot block of the restarted program was marked 
 129 MIPS the first time and 33 MIPS the second and third.  On the phone that was every launch after the first one in an app
 session.  `x64_load` now drops both tables and returns all region slots for reuse; the interpreter refreshes a cache entry
 whose bytes still match in a new mapping; a block record from an older mapping generation starts counting again.
+
+**Components: Visual C++ 2005, 2008, 2010, 2012, 2013 and 2015–2022 — x86 and x64.** The build job downloads the official
+Microsoft installers (vcredist_x86/x64 2005 SP1, 2008 SP1, 2010 SP1, 2012 Update 4, 2013 12.0.40664, vc_redist 14.44) and
+unpacks them recursively (IExpress wrappers, MSIs, Burn bundles); every DLL is identified by its own VERSIONINFO and PE
+machine type, not by the installer's internal file names (`emu/tools/runtime-pack.sh` → `/x64/sys32/<pack>/` +
+`packs.json`).  12 packs, 149 DLLs: msvcr/msvcp 80–120, mfc/mfcm 80–140 (ANSI + Unicode), atl 80–120, vcomp, vccorlib,
+vcamp, concrt, msvcm.  The Components tab lists every pack with its DLLs, version and size, has an "install all" button
+and a **persistent install log** (date, pack, files, MB, seconds, or the exact error).  A program is matched to the packs it
+imports by DLL family **for its own bitness** (an x86 exe importing `MSVCP100.dll` gets VC++ 2010 x86 into
+`C:\Windows\SysWOW64`; an x64 exe gets the x64 pack into `System32`) and the pack is installed automatically before the
+first run; the Report tab names the runtime with an install button.  The `atl*` DLLs are now loaded from the disk like the
+other vendor runtimes.  Limits: the DLLs go to System32/SysWOW64, not to WinSxS — programs whose manifest insists on a
+specific side-by-side assembly version still load the DLL by name (the loader ignores SxS policies); the APK grows by the
+size of the packs; nothing is installed into Android.
 
 **CI and the 61 commits on `main`.** The NSIS wizard test was failing after the INI-lookup fix made the MUI1 Welcome/Finish
 pages real: the test's scripted click schedule was one page short, so the Finish click landed on the still-installing page
