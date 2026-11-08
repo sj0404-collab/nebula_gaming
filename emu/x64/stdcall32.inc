@@ -3518,6 +3518,7 @@ static const struct { const char *n; unsigned short bytes; } stdcall32_tab[] = {
   { "SetWindowsHookExA", 16 },
   { "SetWindowsHookExW", 16 },
   { "SetWindowsHookExWrapW", 16 },
+  { "SetWorldTransform", 8 },
   { "SetXStateFeaturesMask", 12 },
   { "ShellDDEInit", 4 },
   { "ShellExecuteA", 24 },
