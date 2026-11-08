@@ -368,6 +368,9 @@ static void s_UnhookWindowsHookEx(Cpu *c) { u64 h = ARG(0); if (h > 0x48000 && h
 static void hooknext_resume(Cpu *c, u64 rax) { hook_cur_pop(); w32_cont_finish(c, rax); }
 static void s_CallNextHookEx(Cpu *c) { int cur = g_nhook_cur ? g_hook_cur[g_nhook_cur - 1] : -1; if (cur < 0) { RET(0); return; } int nx = hook_find(c, g_hooks[cur].type, cur); if (nx < 0) { RET(0); return; }
   w32_push_cont(c, CONT_HOOKNEXT, 0); hook_cur_push(nx); w32_guest_call(c, g_hooks[nx].proc, ARG(1), ARG(2), ARG(3), 0); }
+/* Deliver CallMsgFilter to the current process's WH_MSGFILTER hook chain. */
+static void s_CallMsgFilterW(Cpu *c) { int h = hook_find(c, -1, -1); if (h < 0) { RET(0); return; } u64 msg = ARG(0), code = ARG(1); w32_push_cont(c, CONT_HOOKNEXT, 0); hook_cur_push(h); w32_guest_call(c, g_hooks[h].proc, code, 0, msg, 0); }
+static void s_CallMsgFilterA(Cpu *c) { s_CallMsgFilterW(c); }
 static void send_to(Cpu *c, int i, u32 msg, u64 wp, u64 lp, int cont_kind, u64 cont_val) { Win32 *w = W;
   int h = g_hook_depth[4] ? -1 : hook_find(c, 4, -1);
   if (h >= 0 && g_wnd[i].pid == w->pid) { u64 cwp = w32_heap_alloc(w, 32, 1); if (cwp) { /* CWPSTRUCT: lParam, wParam, message, hwnd */

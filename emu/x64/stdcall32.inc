@@ -103,6 +103,8 @@ static const struct { const char *n; unsigned short bytes; } stdcall32_tab[] = {
   { "CLSIDFromString", 8 },
   { "CLSIDFromStringWrap", 8 },
   { "CallCPLEntry16", 24 },
+  { "CallMsgFilterA", 8 },
+  { "CallMsgFilterW", 8 },
   { "CallMsgFilterWrapW", 8 },
   { "CallNextHookEx", 16 },
   { "CallWindowProcA", 20 },

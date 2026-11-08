@@ -1,6 +1,8 @@
 /* Exercise the real UpdateLayeredWindow bitmap path, not just its return code. */
 #include <windows.h>
 #include <stdio.h>
+static int filtered;
+static LRESULT CALLBACK filterproc(int code, WPARAM wp, LPARAM lp) { MSG *msg = (MSG *)lp; if (code == 7 && wp == 0 && msg && msg->message == WM_USER + 3) filtered++; return 1; }
 static LRESULT CALLBACK proc(HWND w, UINT m, WPARAM a, LPARAM b) { return DefWindowProcW(w,m,a,b); }
 int main(void) {
   RECT rect = {100, 200, 400, 300}; POINT inside = {290, 232}, outside = {290, 50};
@@ -14,6 +16,12 @@ int main(void) {
   HMODULE user32 = LoadLibraryW(L"user32.dll");
   ShellHookFn reg = (ShellHookFn)GetProcAddress(user32, "RegisterShellHookWindow");
   ShellHookFn unreg = (ShellHookFn)GetProcAddress(user32, "DeregisterShellHookWindow");
+  typedef BOOL (WINAPI *FilterFn)(LPMSG, int);
+  FilterFn filter = (FilterFn)GetProcAddress(user32, "CallMsgFilterW");
+  MSG filtered_msg = {0}; filtered_msg.message = WM_USER + 3;
+  if (!filter || filter(&filtered_msg, 7)) { puts("layered: FILTER EMPTY FAIL"); return 9; }
+  HHOOK hh = SetWindowsHookExW(WH_MSGFILTER, filterproc, NULL, GetCurrentThreadId());
+  if (!hh || !filter(&filtered_msg, 7) || filtered != 1 || !UnhookWindowsHookEx(hh)) { puts("layered: FILTER HOOK FAIL"); return 10; }
   UINT shell_msg = RegisterWindowMessageW(L"SHELLHOOK");
   if (!reg || !unreg || !shell_msg || !reg(w)) { puts("layered: SHELL REGISTER FAIL"); return 7; }
   HDC dc = CreateCompatibleDC(NULL); BITMAPINFO bi = {0};
