@@ -29,6 +29,12 @@ on:
       nohle:
         description: 'X64_NOHLE=1: keep the guest LZMA decoder (speed comparison)'
         default: '0'
+      zipexe:
+        description: 'the URL is a .zip: unpack it to C:\game and run this exe inside it (e.g. "Shattered Pixel Dungeon.exe")'
+        default: ''
+      glnull:
+        description: 'X64_GL_NULL=1: null OpenGL driver (the game loop runs without a display; frames are not rendered)'
+        default: '0'
 run-name: "nativeprof · ${{ inputs.filename || inputs.url }} · ${{ inputs.ms }} ms · ${{ inputs.xargs }}"
 permissions:
   contents: read
@@ -46,11 +52,12 @@ jobs:
           mkdir -p /tmp/np/guest_tmp /tmp/np/frames; cd /tmp/np
           NAME="${{ github.event.inputs.filename }}"; [ -n "$NAME" ] || NAME=$(basename "${{ github.event.inputs.url }}")
           curl -fsSL --retry 3 -o "$NAME" "${{ github.event.inputs.url }}"; ls -la /tmp/np; echo "NAME=$NAME" >> $GITHUB_ENV
+          ZIPEXE="${{ github.event.inputs.zipexe }}"; if [ -n "$ZIPEXE" ]; then mkdir -p /tmp/np/game && unzip -q -o "$NAME" -d /tmp/np/game && ls -la /tmp/np/game | head; echo "EXE=/tmp/np/game/$ZIPEXE" >> $GITHUB_ENV; echo "MOUNT=--mount /tmp/np/game=C:\\game" >> $GITHUB_ENV; else echo "EXE=/tmp/np/$NAME" >> $GITHUB_ENV; echo "MOUNT=" >> $GITHUB_ENV; fi
       - name: Run
         run: |
           MS="${{ github.event.inputs.ms }}"; cd /tmp/np/frames
           echo "x64run --max-ms $MS ${{ github.event.inputs.xargs }} $NAME"
-          X64_WNDDUMP=${{ github.event.inputs.wnddump }}; export X64_WNDDUMP; [ "$X64_WNDDUMP" = "1" ] || unset X64_WNDDUMP; quiet=--quiet; [ "${{ github.event.inputs.verbose }}" = "1" ] && quiet=; rc=0; [ "${{ github.event.inputs.nohle }}" = "1" ] && export X64_NOHLE=1; X64_PROF=${{ github.event.inputs.prof }} X64_LOG=${{ github.event.inputs.log }} timeout $((MS / 1000 + 600)) "$GITHUB_WORKSPACE/emu/x64/x64run" $quiet --no-stdin --max-ms $MS --stats --mount-rw "/tmp/np/guest_tmp=C:\\tmp" ${{ github.event.inputs.xargs }} "/tmp/np/$NAME" > /tmp/np/native.txt 2>&1 || rc=$?
+          X64_WNDDUMP=${{ github.event.inputs.wnddump }}; export X64_WNDDUMP; [ "$X64_WNDDUMP" = "1" ] || unset X64_WNDDUMP; quiet=--quiet; [ "${{ github.event.inputs.verbose }}" = "1" ] && quiet=; rc=0; [ "${{ github.event.inputs.nohle }}" = "1" ] && export X64_NOHLE=1; [ "${{ github.event.inputs.glnull }}" = "1" ] && export X64_GL_NULL=1; X64_PROF=${{ github.event.inputs.prof }} X64_LOG=${{ github.event.inputs.log }} timeout $((MS / 1000 + 600)) "$GITHUB_WORKSPACE/emu/x64/x64run" $quiet --no-stdin --max-ms $MS --stats --mount-rw "/tmp/np/guest_tmp=C:\\tmp" $MOUNT ${{ github.event.inputs.xargs }} "$EXE" > /tmp/np/native.txt 2>&1 || rc=$?
           echo "native rc=$rc"; grep -a -v "^\[wnd\]" /tmp/np/native.txt | tail -80 | cut -c1-300
           ls /tmp/np/frames | head; find /tmp/np/guest_tmp -type f | head -40
           find /tmp/np/guest_tmp -maxdepth 1 -name "Setup Log*" -exec sh -c 'echo "--- $1"; sed "1s/^\xEF\xBB\xBF//" "$1" | grep -v "DLL function import\|Function name:\|DLL name:\|Dest DLL name:\|Importing the DLL\|imported the DLL\|Failed to import" | tail -80 | cut -c1-240' _ {} \;

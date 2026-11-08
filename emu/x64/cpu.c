@@ -891,21 +891,46 @@ static int cpu_step1(Cpu *c) {
 
 /* sampling profiler (x64run --prof): every 1024th interpreted instruction drops its RIP into a 64-byte-bucket histogram; prof_report lists the hottest
    buckets with module+offset — enough to see what an installer / game spends its time on (LZMA, CRC, blits …) without a trace */
-int g_prof_on = 0; static u64 g_prof_tick; static u64 g_prof_total;
+int g_prof_on = 0; static u64 g_prof_tick; static u64 g_prof_total; static u64 g_prof_jit_samples;
 #define PROF_N 65536
 static struct { u64 key; u64 n; } g_prof_tab[PROF_N];
-static void prof_sample(u64 rip) { u64 k = (rip >> 6) | 1; u32 h = (u32)((k * 0x9E3779B97F4A7C15ull) >> 48) & (PROF_N - 1); for (int t = 0; t < 64; t++) { u32 j = (h + t) & (PROF_N - 1); if (g_prof_tab[j].key == k) { g_prof_tab[j].n++; return; } if (!g_prof_tab[j].key) { g_prof_tab[j].key = k; g_prof_tab[j].n = 1; return; } } }
-int prof_report(char *buf, int cap, int top) { int p = 0; g_prof_total = 0; for (int i = 0; i < PROF_N; i++) g_prof_total += g_prof_tab[i].n; p += e_snprintf(buf + p, cap - p, "[prof] %llu samples x 1024 insns\n", (unsigned long long)g_prof_total);
-  for (int r = 0; r < top && p < cap - 120; r++) { int best = -1; for (int i = 0; i < PROF_N; i++) if (g_prof_tab[i].key && (best < 0 || g_prof_tab[i].n > g_prof_tab[best].n)) best = i; if (best < 0 || !g_prof_tab[best].n) break;
-    u64 rip = (g_prof_tab[best].key & ~1ull) << 6; p += e_snprintf(buf + p, cap - p, "[prof] %3d.%d%%  0x%llx\n", (int)(1000 * g_prof_tab[best].n / (g_prof_total ? g_prof_total : 1)) / 10, (int)(1000 * g_prof_tab[best].n / (g_prof_total ? g_prof_total : 1)) % 10, (unsigned long long)rip); g_prof_tab[best].n = 0; }
+struct ProfName { char name[64]; u64 n; };
+#define PROF_M 256
+static struct ProfName g_prof_mod[PROF_M], g_prof_thr[PROF_M]; static int g_prof_nmod, g_prof_nthr;
+static void prof_bump(struct ProfName *tab, int *n, const char *name) { for (int i = 0; i < *n; i++) if (!e_strcmp(tab[i].name, name)) { tab[i].n++; return; } if (*n < PROF_M) { e_snprintf(tab[*n].name, sizeof tab[*n].name, "%s", name); tab[*n].n = 1; (*n)++; } }
+static void prof_sample(Cpu *c) { u64 rip = c->rip; u64 k = (rip >> 6) | 1; u32 h = (u32)((k * 0x9E3779B97F4A7C15ull) >> 48) & (PROF_N - 1); for (int t = 0; t < 64; t++) { u32 j = (h + t) & (PROF_N - 1); if (g_prof_tab[j].key == k) { g_prof_tab[j].n++; break; } if (!g_prof_tab[j].key) { g_prof_tab[j].key = k; g_prof_tab[j].n = 1; break; } }
+  /* where (module / dynamic code) and who (process, thread) — the JVM / .NET case: is the time in the runtime's DLLs, in its generated code, or in a spinning helper thread? */
+  Win32 *w = c->w; if (!w) return; char nm[64]; const char *lab = 0;
+  if (rip >= w->image_base && rip < w->image_base + w->image_size) lab = "exe";
+  else { for (int i = 0; i < w->nmods; i++) if (rip >= w->mods[i].base && rip < w->mods[i].base + w->mods[i].size) { lab = w->mods[i].name; break; } }
+  if (!lab) { for (int i = 0; i < w->ndynft; i++) if (rip >= w->dynft[i].lo && rip < w->dynft[i].hi) { lab = "dynamic code (RtlAddFunctionTable region)"; break; } }
+  if (!lab) lab = rip - G_SHIM_BASE < G_SHIM_SIZE ? "shim" : "other dynamic code";
+  prof_bump(g_prof_mod, &g_prof_nmod, lab);
+  e_snprintf(nm, sizeof nm, "pid %d thread %d", w->pid, w->th[w->cur_th].tid); prof_bump(g_prof_thr, &g_prof_nthr, nm); }
+static const char *prof_label(Cpu *c, u64 rip) { Win32 *w = c ? c->w : 0; if (!w) return ""; static char b[96];
+  if (rip >= w->image_base && rip < w->image_base + w->image_size) { e_snprintf(b, sizeof b, "exe+0x%llx", (unsigned long long)(rip - w->image_base)); return b; }
+  for (int i = 0; i < w->nmods; i++) if (rip >= w->mods[i].base && rip < w->mods[i].base + w->mods[i].size) { e_snprintf(b, sizeof b, "%s+0x%llx", w->mods[i].name, (unsigned long long)(rip - w->mods[i].base)); return b; }
+  for (int i = 0; i < w->ndynft; i++) if (rip >= w->dynft[i].lo && rip < w->dynft[i].hi) return "dynamic code";
+  return ""; }
+static Cpu *g_prof_cpu;
+static int prof_tab_report(char *buf, int cap, int p, const char *title, struct ProfName *tab, int n, u64 total) { p += e_snprintf(buf + p, cap - p, "[prof] by %s:\n", title);
+  for (int r = 0; r < 12 && p < cap - 120; r++) { int best = -1; for (int i = 0; i < n; i++) if (tab[i].n && (best < 0 || tab[i].n > tab[best].n)) best = i; if (best < 0) break;
+    p += e_snprintf(buf + p, cap - p, "[prof] %3d.%d%%  %s\n", (int)(1000 * tab[best].n / (total ? total : 1)) / 10, (int)(1000 * tab[best].n / (total ? total : 1)) % 10, tab[best].name); tab[best].n = 0; }
+  return p; }
+int prof_report(char *buf, int cap, int top) { int p = 0; g_prof_total = 0; for (int i = 0; i < PROF_N; i++) g_prof_total += g_prof_tab[i].n; p += e_snprintf(buf + p, cap - p, "[prof] %llu samples x 1024 insns (%llu inside JIT regions)\n", (unsigned long long)g_prof_total, (unsigned long long)g_prof_jit_samples);
+  p = prof_tab_report(buf, cap, p, "module", g_prof_mod, g_prof_nmod, g_prof_total); p = prof_tab_report(buf, cap, p, "thread", g_prof_thr, g_prof_nthr, g_prof_total);
+  p += e_snprintf(buf + p, cap - p, "[prof] hottest 64-byte code blocks:\n");
+  for (int r = 0; r < top && p < cap - 160; r++) { int best = -1; for (int i = 0; i < PROF_N; i++) if (g_prof_tab[i].key && (best < 0 || g_prof_tab[i].n > g_prof_tab[best].n)) best = i; if (best < 0 || !g_prof_tab[best].n) break;
+    u64 rip = (g_prof_tab[best].key & ~1ull) << 6; p += e_snprintf(buf + p, cap - p, "[prof] %3d.%d%%  0x%llx  %s\n", (int)(1000 * g_prof_tab[best].n / (g_prof_total ? g_prof_total : 1)) / 10, (int)(1000 * g_prof_tab[best].n / (g_prof_total ? g_prof_total : 1)) % 10, (unsigned long long)rip, prof_label(g_prof_cpu, rip)); g_prof_tab[best].n = 0; }
   return p; }
 int cpu_run(Cpu *c, u64 max_insns) {
   c->status = RUN_OK; int bstart = 1;
   for (u64 n = 0; n < max_insns; n++) {
-    if (g_prof_on && (((++g_prof_tick) & 1023) == 0)) prof_sample(c->rip);
+    if (g_prof_on && (((++g_prof_tick) & 1023) == 0)) { g_prof_cpu = c; prof_sample(c); }
     if (bstart && g_jit_on && !c->trace && c->rip - G_SHIM_BASE >= G_SHIM_SIZE) {   /* block start: run / count / translate (jit.inc) */
       u64 ic0 = c->icount;
-      if (jit_enter(c, max_insns - n)) { n += c->icount - ic0; if (c->status != RUN_OK) return c->status; continue; }
+      if (jit_enter(c, max_insns - n)) { u64 d = c->icount - ic0; n += d; if (g_prof_on) { u64 t0 = g_prof_tick; g_prof_tick += d; for (u64 e = (g_prof_tick >> 10) - (t0 >> 10); e > 0; e--) { g_prof_cpu = c; g_prof_jit_samples++; prof_sample(c); } }   /* JIT regions count their instructions too (sampled at the region exit) */
+        if (c->status != RUN_OK) return c->status; continue; }
     }
     g_bstart = 0; g_jit_st.dinterp++;
     if (cpu_step1(c)) return c->status;
