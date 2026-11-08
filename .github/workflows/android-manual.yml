@@ -101,8 +101,11 @@ jobs:
       - name: Version from tag
         id: v
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF#refs/tags/v}"; else V="0.0.${GITHUB_RUN_NUMBER}"; fi
-          IFS=. read -r a b c <<< "$V"; CODE=$(( ${a:-0}*10000 + ${b:-0}*100 + ${c%%-*} ))
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF#refs/tags/v}"; else V="1.46.0-ci.${GITHUB_RUN_NUMBER}"; fi
+          # A UTC timestamp is greater than older semver-based codes and grows across both workflows.
+          # Android accepts codes up to 2100000000 (the epoch scheme must be revisited before 2036).
+          CODE=$(date -u +%s)
+          if (( CODE > 2100000000 )); then echo "Android versionCode exceeds limit" >&2; exit 1; fi
           echo "name=$V" >> "$GITHUB_OUTPUT"; echo "code=$CODE" >> "$GITHUB_OUTPUT"
       - name: Build signed release APK
         working-directory: android
@@ -117,6 +120,19 @@ jobs:
           mkdir -p /tmp/apkx && cd /tmp/apkx && unzip -qo "$GITHUB_WORKSPACE"/release/*.apk 2>/dev/null || true
           f=$(find /tmp/apkx -name 'nebula_x64*.wasm' | head -1); [ -n "$f" ] || { echo "no wasm inside the APK"; find /tmp/apkx -maxdepth 3 | head -30; exit 1; }
           echo "APK wasm: $f"; a=$(sha256sum "$f" | cut -d' ' -f1); b=$(cut -d' ' -f1 /tmp/wasm.sha); echo "apk=$a built=$b"; [ "$a" = "$b" ] || { echo "APK wasm differs from the module built in this run"; exit 1; }
+      - name: Verify upgrade compatibility with v1.45.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/previous-nebula.apk" https://github.com/sj0404-collab/nebula_gaming/releases/download/v1.45.0/NebulaOS-v1.45.0-android.apk
+          old_cert=$($BT/apksigner verify --print-certs "$RUNNER_TEMP/previous-nebula.apk" | grep 'Signer #1 certificate SHA-256 digest:')
+          new_cert=$($BT/apksigner verify --print-certs release/*.apk | grep 'Signer #1 certificate SHA-256 digest:')
+          test "$old_cert" = "$new_cert" || { echo 'Signing certificate changed; APK cannot update v1.45.0' >&2; exit 1; }
+          old=$($BT/aapt dump badging "$RUNNER_TEMP/previous-nebula.apk" | sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p" | head -1)
+          new=$($BT/aapt dump badging release/*.apk | sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p" | head -1)
+          test -n "$old" && test -n "$new" && (( new > old )) || { echo "APK versionCode does not upgrade $old -> $new" >&2; exit 1; }
+          echo "Verified identical signing certificate and upgrade versionCode $old -> $new"
       - name: Verify APK signature & manifest
         run: |
           BT=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -1)
