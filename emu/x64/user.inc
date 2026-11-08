@@ -35,7 +35,7 @@ static void combo_sync_list(Cpu *c, int i);
 static int kbd_hook_needed(Cpu *c, GuestMsg *m); static void kbd_hook_start(Cpu *c, GuestMsg *m, int mode, u64 lpmsg);
 static u64 si_create(Cpu *c, const char *path);
 typedef struct {
-  int used, destroyed; int parent, owner; int builtin; int superclassed; /* app-registered class whose wndproc delegates to a built-in proc (VCL TNewButton …): behaves like the built-in for painting but all messages flow through the guest wndproc */ int pid;   /* owning process: messages from other processes are posted to its queue */ char clsname[40]; u64 wndproc; u64 cls_brush; u32 cls_style; int cls_extra;
+  int used, destroyed; int parent, owner; int builtin; int superclassed; /* app-registered class whose wndproc delegates to a built-in proc (VCL TNewButton …): behaves like the built-in for painting but all messages flow through the guest wndproc */ int pid, tid;   /* owning process: messages from other processes are posted to its queue */ char clsname[40]; u64 wndproc; u64 cls_brush; u32 cls_style; int cls_extra;
   u32 style, exstyle; u64 id, inst; int dc_gen;
   int x, y, w, h;            /* relative to the parent's client origin (top-level: framebuffer coordinates) */
   u32 *layer_pixels; int layer_w, layer_h; u32 layer_flags, layer_key, layer_blend;
@@ -180,10 +180,13 @@ static Win32 *w32_owner(Win32 *w, int wi) {
   for (int k = 0; ; k++) { Win32 *o = proc_w32_at(k); if (!o) break; if (o == (Win32 *)1) continue; if (o->pid == g_wnd[wi].pid) return o; }
   return w;
 }
+static int post_msg_tid(Win32 *w, u32 tid, u64 hwnd, u32 msg, u64 wp, u64 lp) {
+  int next = (w->msg_tail + 1) % MAX_MSGS; if (next == w->msg_head) return 0;
+  GuestMsg *m = &w->msgs[w->msg_tail]; m->hwnd = hwnd; m->msg = msg; m->wparam = wp; m->lparam = lp; m->tid = tid; m->time = (u32)(host_now_ms() - w->start_ms); w->msg_tail = next; return 1;
+}
 static void post_msg_to(Win32 *w, u64 hwnd, u32 msg, u64 wp, u64 lp) {
-  w = w32_owner(w, wnd_of(hwnd));
-  int next = (w->msg_tail + 1) % MAX_MSGS; if (next == w->msg_head) return;
-  GuestMsg *m = &w->msgs[w->msg_tail]; m->hwnd = hwnd; m->msg = msg; m->wparam = wp; m->lparam = lp; m->time = (u32)(host_now_ms() - w->start_ms); w->msg_tail = next;
+  int i = wnd_of(hwnd); u32 tid = i >= 0 ? (u32)g_wnd[i].tid : (u32)w->th[w->cur_th].tid;
+  w = w32_owner(w, i); post_msg_tid(w, tid, hwnd, msg, wp, lp);
 }
 /* Shell hook registrations; support top-level window shown/destroyed notifications. */
 static u64 g_shell_hooks[32];
@@ -280,26 +283,30 @@ static int wnd_siblings_topdown(int parent, int skip, int *order);
    subtrees skipped.  One pass over the table builds the parent → children lists; the common case (nothing invalid, a polling
    message loop) costs that single pass and nothing else. */
 static int wnd_shown_chain(int i) { int d = 0; while (i >= 0 && d++ < 64) { if (!g_wnd[i].visible) return 0; i = g_wnd[i].parent; } return 1; }
-static int g_inv_pid;   /* WM_PAINT is synthesised only for windows of the process that is pumping messages — a launcher polling PeekMessage used to receive (and re-post forever) its child's paint messages */
+static int g_inv_pid, g_inv_tid;   /* WM_PAINT is synthesised only for windows of the process that is pumping messages — a launcher polling PeekMessage used to receive (and re-post forever) its child's paint messages */
 static int next_invalid_in(int i, const int *head, const int *next) {
-  if (!g_wnd[i].visible) return -1; if (g_wnd[i].invalid && g_wnd[i].pid == g_inv_pid) return i;
+  if (!g_wnd[i].visible) return -1; if (g_wnd[i].invalid && g_wnd[i].pid == g_inv_pid && g_wnd[i].tid == g_inv_tid) return i;
   int order[MAX_WND], n = 0; for (int k = head[i + 1]; k >= 0; k = next[k]) order[n++] = k;
   for (int a = 1; a < n; a++) { int v = order[a], b = a - 1; while (b >= 0 && g_wnd[order[b]].zseq < g_wnd[v].zseq) { order[b + 1] = order[b]; b--; } order[b + 1] = v; }
   for (int a = 0; a < n; a++) { int r = next_invalid_in(order[a], head, next); if (r >= 0) return r; } return -1; }
-static int next_invalid(int pid) {
-  int head[MAX_WND + 1], next[MAX_WND], any = 0; g_inv_pid = pid; for (int k = 0; k <= MAX_WND; k++) head[k] = -1;
-  for (int k = MAX_WND - 1; k >= 0; k--) { Wnd *n = &g_wnd[k]; if (!n->used || n->destroyed) continue; int p = n->parent >= 0 && n->parent < MAX_WND ? n->parent + 1 : 0; next[k] = head[p]; head[p] = k; if (n->invalid && n->pid == pid && !any && wnd_shown_chain(k)) any = 1; }
+static int next_invalid(int pid, int tid) {
+  int head[MAX_WND + 1], next[MAX_WND], any = 0; g_inv_pid = pid; g_inv_tid = tid; for (int k = 0; k <= MAX_WND; k++) head[k] = -1;
+  for (int k = MAX_WND - 1; k >= 0; k--) { Wnd *n = &g_wnd[k]; if (!n->used || n->destroyed) continue; int p = n->parent >= 0 && n->parent < MAX_WND ? n->parent + 1 : 0; next[k] = head[p]; head[p] = k; if (n->invalid && n->pid == pid && n->tid == tid && !any && wnd_shown_chain(k)) any = 1; }
   if (!any) return -1;
   int order[MAX_WND], n = 0; for (int k = head[0]; k >= 0; k = next[k]) order[n++] = k;
   for (int a = 1; a < n; a++) { int v = order[a], b = a - 1; while (b >= 0 && g_wnd[order[b]].zseq > g_wnd[v].zseq) { order[b + 1] = order[b]; b--; } order[b + 1] = v; }
   for (int a = 0; a < n; a++) { int r = next_invalid_in(order[a], head, next); if (r >= 0) return r; } return -1; }
 static int next_message(Cpu *c, GuestMsg *out, int remove, u64 filter_hwnd) {
   Win32 *w = W; check_timers(w);
-  if (w->msg_head != w->msg_tail) {
-    if (filter_hwnd) { int fi = wnd_of(filter_hwnd); for (int q = w->msg_head; q != w->msg_tail; q = (q + 1) % MAX_MSGS) { int mi = wnd_of(w->msgs[q].hwnd); if (w->msgs[q].hwnd == filter_hwnd || (mi >= 0 && fi >= 0 && wnd_is_child_of(mi, fi))) { *out = w->msgs[q]; if (remove) { for (int r = q; r != w->msg_head; r = (r + MAX_MSGS - 1) % MAX_MSGS) w->msgs[r] = w->msgs[(r + MAX_MSGS - 1) % MAX_MSGS]; w->msg_head = (w->msg_head + 1) % MAX_MSGS; } return 1; } } }
-    else { *out = w->msgs[w->msg_head]; if (remove) w->msg_head = (w->msg_head + 1) % MAX_MSGS; return 1; } }
-  if (w->quit_posted && !filter_hwnd) { out->hwnd = 0; out->msg = 0x12; out->wparam = (u64)(u32)c->exit_code; out->lparam = 0; out->time = 0; if (remove) w->quit_posted = 0; return 1; }
-  int inv = next_invalid(w->pid); if (inv >= 0 && (!filter_hwnd || HWND_OF(inv) == filter_hwnd || wnd_is_child_of(inv, wnd_of(filter_hwnd)))) { out->hwnd = HWND_OF(inv); out->msg = 0xF; out->wparam = out->lparam = 0; out->time = 0; return 1; }
+  u32 tid = (u32)w->th[w->cur_th].tid;
+  for (int q = w->msg_head; q != w->msg_tail; q = (q + 1) % MAX_MSGS) {
+    GuestMsg *m = &w->msgs[q]; if (m->tid != tid) continue;
+    if (filter_hwnd) { int fi = wnd_of(filter_hwnd), mi = wnd_of(m->hwnd); if (m->hwnd != filter_hwnd && !(mi >= 0 && fi >= 0 && wnd_is_child_of(mi, fi))) continue; }
+    *out = *m; if (remove) { for (int r = q; r != w->msg_head; r = (r + MAX_MSGS - 1) % MAX_MSGS) w->msgs[r] = w->msgs[(r + MAX_MSGS - 1) % MAX_MSGS]; w->msg_head = (w->msg_head + 1) % MAX_MSGS; } return 1;
+  }
+  Thread *th = &w->th[w->cur_th];
+  if (th->quit_posted && !filter_hwnd) { out->hwnd = 0; out->msg = 0x12; out->wparam = th->quit_code; out->lparam = 0; out->time = 0; out->tid = tid; if (remove) th->quit_posted = 0; return 1; }
+  int inv = next_invalid(w->pid, (int)tid); if (inv >= 0 && (!filter_hwnd || HWND_OF(inv) == filter_hwnd || wnd_is_child_of(inv, wnd_of(filter_hwnd)))) { out->hwnd = HWND_OF(inv); out->msg = 0xF; out->wparam = out->lparam = 0; out->time = 0; out->tid = tid; return 1; }
   return 0;
 }
 static void s_PeekMessageA(Cpu *c) {
@@ -428,8 +435,8 @@ static void s_SendMessageTimeoutA(Cpu *c) { u64 h = ARG(0); if (ARG(6)) wrp(c, A
 static void s_WinHelpA(Cpu *c) { RET(1); }   /* .hlp viewers do not exist on modern Windows either */
 static void s_WinHelpW(Cpu *c) { RET(1); }
 static void s_PostMessageA(Cpu *c) { u64 h = ARG(0); if (h == 0xffff || h == 0xffffffffull || h == ~0ull) { RET(1); return; } if (h && wnd_of(h) < 0) { W->last_error = 1400; RET(0); return; } post_msg_to(W, h, (u32)ARG(1), ARG(2), ARG(3)); RET(1); }
-static void s_PostThreadMessageW(Cpu *c) { post_msg_to(W, 0, (u32)ARG(1), ARG(2), ARG(3)); RET(1); }
-static void s_PostQuitMessage(Cpu *c) { W->quit_posted = 1; c->exit_code = (int)ARG(0); }
+static void s_PostThreadMessageW(Cpu *c) { u32 tid = (u32)ARG(0); for (int k = 0;; k++) { Win32 *p = proc_w32_at(k); if (!p) break; if (p == (Win32 *)1) continue; for (int t = 0; t < THREAD_MAX; t++) if (p->th[t].used && p->th[t].state == 1 && (u32)p->th[t].tid == tid) { RET(post_msg_tid(p, tid, 0, (u32)ARG(1), ARG(2), ARG(3))); return; } } W->last_error = 1444; RET(0); }
+static void s_PostQuitMessage(Cpu *c) { Thread *t = &W->th[W->cur_th]; t->quit_posted = 1; t->quit_code = (u32)ARG(0); }
 static void s_SetTimer(Cpu *c) { int wi = wnd_of(ARG(0)); u64 id = ARG(1) ? ARG(1) : 1; u32 ms = (u32)ARG(2); if (ms < 10) ms = 10; if (wi < 0 && !ARG(1)) id = 0x1000 + (u64)g_timers_n + 1;
   for (int i = 0; i < g_timers_n; i++) if (g_timers[i].id == id && g_timers[i].wnd == wi) { g_timers[i].ms = ms; g_timers[i].next = host_now_ms() + ms; g_timers[i].proc = ARG(3); RET(id); return; }
   if (g_timers_n < 32) { g_timers[g_timers_n].id = id; g_timers[g_timers_n].wnd = wi; g_timers[g_timers_n].ms = ms; g_timers[g_timers_n].next = host_now_ms() + ms; g_timers[g_timers_n].proc = ARG(3); g_timers_n++; } RET(id); }
@@ -440,15 +447,15 @@ static void kill_timers_of(int wi) { for (int i = 0; i < g_timers_n;) { if (g_ti
 static void msgwait_common(Cpu *c, u32 n, u64 arr, int all, u32 ms) { Win32 *w = W; GuestMsg m; int which = 0; w->sleeping = 0;
   int r = w32_wait_poll(c, n, arr, all, &which); if (r < 0) { w->last_error = 6; w->msgwait_rip = 0; RET(0xffffffffu); return; }
   if (r > 0) { w->msgwait_rip = 0; RET((u32)which); return; }
-  if (next_message(c, &m, 0, 0) || w->quit_posted) { w->msgwait_rip = 0; RET(n); return; }
+  if (next_message(c, &m, 0, 0)) { w->msgwait_rip = 0; RET(n); return; }
   double now = host_now_ms(), until = now + 1.0;
   if (ms != 0xffffffffu) { if (w->msgwait_rip != c->rip) { w->msgwait_rip = c->rip; w->msgwait_dl = now + ms; } if (now >= w->msgwait_dl) { w->msgwait_rip = 0; RET(258); return; } if (w->msgwait_dl < until) until = w->msgwait_dl; }
   w->blits_since_yield = 0; msg_wait_pause(w, until); w32_retry_yield(c); }
 static void s_MsgWaitForMultipleObjects(Cpu *c) { msgwait_common(c, (u32)ARG(0), ARG(1), (u32)ARG(2) != 0, (u32)ARG(3)); }
 static void s_MsgWaitForMultipleObjectsEx(Cpu *c) { msgwait_common(c, (u32)ARG(0), ARG(1), (ARG(4) & 1) != 0, (u32)ARG(3)); }
 static void s_WaitMessage(Cpu *c) { msgwait_common(c, 0, 0, 0, 0xffffffffu); }   /* no arguments: wait for any message (was reading garbage as n/handles/timeout) */
-static void s_GetQueueStatus(Cpu *c) { Win32 *w = W; RET(w->msg_head != w->msg_tail ? 0x00FF00FFull : 0); }
-static void s_GetInputState(Cpu *c) { Win32 *w = W; RET(w->msg_head != w->msg_tail); }
+static void s_GetQueueStatus(Cpu *c) { GuestMsg m; RET(next_message(c, &m, 0, 0) ? 0x00FF00FFull : 0); }
+static void s_GetInputState(Cpu *c) { GuestMsg m; RET(next_message(c, &m, 0, 0) != 0); }
 static void s_InSendMessage(Cpu *c) { RET(0); }
 static void s_ReplyMessage(Cpu *c) { RET(0); }
 static void s_GetMessagePos(Cpu *c) { RET((u64)(u16)(g_mouse_x + SCREEN_X0) | ((u64)(u16)(g_mouse_y + SCREEN_Y0) << 16)); }
@@ -526,8 +533,8 @@ static int wnd_create_obj(Cpu *c, const char *cls, const char *title, u32 style,
   if (cls[0] == '#' && cls[1] >= '0') { u32 ord = 0; for (const char *p = cls + 1; *p >= '0' && *p <= '9'; p++) ord = ord * 10 + (u32)(*p - '0'); if (ord == 32770) cls = "#32770"; else if (ord >= 0x80 && ord <= 0x85) { static const char *names[] = { "Button", "Edit", "Static", "ListBox", "ScrollBar", "ComboBox" }; cls = names[ord - 0x80]; } }
   ci = cls_find(W, cls); if (ci < 0) bi = builtin_of_class(cls); else bi = BI_NONE;
   if (ci < 0 && !bi) { w32_report(w, "CreateWindow: class \"%s\" is not registered", cls); W->last_error = 1407; return -1; }
-  int i; if (!g_wnd[0].used && !(style & 0x40000000u)) i = 0; else i = wnd_alloc(); if (i >= 0) g_wnd[i].pid = W->pid; if (i < 0) { W->last_error = 8; return -1; }
-  if (i == 0) { e_memset(&g_wnd[0], 0, sizeof g_wnd[0]); g_wnd[0].text = g_wnd[0].tbuf; g_wnd[0].textcap = sizeof g_wnd[0].tbuf; g_wnd[0].used = 1; g_wnd[0].pid = W->pid; g_wnd[0].parent = g_wnd[0].owner = -1; g_wnd[0].enabled = 1; g_wnd[0].cursel = -1; g_wnd[0].drop_wnd = -1; g_wnd[0].zseq = ++g_zseq; }
+  int i; if (!g_wnd[0].used && !(style & 0x40000000u)) i = 0; else i = wnd_alloc(); if (i >= 0) { g_wnd[i].pid = W->pid; g_wnd[i].tid = W->th[W->cur_th].tid; } if (i < 0) { W->last_error = 8; return -1; }
+  if (i == 0) { e_memset(&g_wnd[0], 0, sizeof g_wnd[0]); g_wnd[0].text = g_wnd[0].tbuf; g_wnd[0].textcap = sizeof g_wnd[0].tbuf; g_wnd[0].used = 1; g_wnd[0].pid = W->pid; g_wnd[0].tid = W->th[W->cur_th].tid; g_wnd[0].parent = g_wnd[0].owner = -1; g_wnd[0].enabled = 1; g_wnd[0].cursel = -1; g_wnd[0].drop_wnd = -1; g_wnd[0].zseq = ++g_zseq; }
   Wnd *n = &g_wnd[i]; n->builtin = bi; e_snprintf(n->clsname, sizeof n->clsname, "%s", cls); n->style = style; n->exstyle = exstyle; n->inst = inst; n->id = id; n->userdata = 0; n->unicode_wnd = wide;
   if (ci >= 0) { n->wndproc = g_cls[ci].proc; n->cls_brush = g_cls[ci].brush; n->cls_style = g_cls[ci].style; n->cls_extra = g_cls[ci].extra; n->icon = g_cls[ci].icon; } else { n->wndproc = builtin_slot(bi); n->cls_brush = bi == BI_DIALOG ? 0 : 0; n->cls_style = 0x0B; }
   if (bi == BI_DIALOG) n->is_dlg = 1;
@@ -815,7 +822,7 @@ static void child_from_point(Cpu *c, u32 flags) { int p = wnd_of(ARG(0)); if (p 
 static void s_ChildWindowFromPoint(Cpu *c) { child_from_point(c, 0); }
 static void s_RealChildWindowFromPoint(Cpu *c) { child_from_point(c, 1); }
 static void s_ChildWindowFromPointEx(Cpu *c) { child_from_point(c, (u32)(c->mode32 ? ARG(3) : ARG(2))); }
-static void s_GetWindowThreadProcessId(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), (u32)W->pid); RET((u32)W->th[0].tid); }
+static void s_GetWindowThreadProcessId(Cpu *c) { int i = wnd_of(ARG(0)); if (i < 0 || !wnd_alive(i)) { W->last_error = 1400; RET(0); return; } if (ARG(1)) wr32(c, ARG(1), (u32)g_wnd[i].pid); RET((u32)g_wnd[i].tid); }
 static void s_IsHungAppWindow(Cpu *c) { RET(0); }
 static void s_IsWindowUnicode(Cpu *c) { int i = wnd_of(ARG(0)); RET(i < 0 ? 0 : (g_wnd[i].unicode_wnd ? 1 : 0)); }
 static void s_IsGUIThread(Cpu *c) { RET(1); }
@@ -1741,7 +1748,7 @@ static void modal_loop(Cpu *c, int i) {
     g_modal[m].phase = 2; n->visible = 0; desktop_clear(w, g_modal[m].wnd); wnd_invalidate_all(); w->dirty = 1;
     w32_push_cont(c, CONT_MODAL, (u64)i); destroy_window(c, i); return; }   /* destroy finishes → chained CONT_MODAL (phase 2) returns the result */
   GuestMsg msg; if (g_modal_pending_valid) { msg = g_modal_pending; g_modal_pending_valid = 0; } else { if (!next_message(c, &msg, 1, 0)) { w->blits_since_yield = 0; w32_retry_yield(c); return; } if (kbd_hook_needed(c, &msg)) { kbd_hook_start(c, &msg, 0, 0); return; } }
-  if (msg.msg == 0x12) { w->quit_posted = 1; n->ended = 1; n->result = 0; modal_loop(c, i); return; }
+  if (msg.msg == 0x12) { w->th[w->cur_th].quit_posted = 1; w->th[w->cur_th].quit_code = (u32)msg.wparam; n->ended = 1; n->result = 0; modal_loop(c, i); return; }
   if (dlg_key_message(c, i, &msg)) return;
   translate_msg(c, msg.hwnd, msg.msg, msg.wparam, msg.lparam);
   int t = wnd_of(msg.hwnd); if (w->api_trace) e_log("[modal] msg hwnd=%llx msg=%x wp=%llx lp=%llx t=%d proc=%llx\n", (unsigned long long)msg.hwnd, msg.msg, (unsigned long long)msg.wparam, (unsigned long long)msg.lparam, t, t >= 0 ? (unsigned long long)g_wnd[t].wndproc : 0ull);

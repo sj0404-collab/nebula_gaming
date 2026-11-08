@@ -6,6 +6,7 @@ on:
       - 'emu/x64/**'
       - 'emu/tests/procmem.c'
       - 'emu/tests/layered.c'
+      - 'emu/tests/msgthreads.c'
       - '.github/workflows/procmem-test.yml'
     branches: [main]
 permissions:
@@ -34,6 +35,8 @@ jobs:
           zig cc -target x86-windows-gnu -O2 emu/tests/procmem.c -o emu/tests/procmem32.exe
           zig cc -target x86_64-windows-gnu -O2 emu/tests/layered.c -o emu/tests/layered.exe -lgdi32 -luser32
           zig cc -target x86-windows-gnu -O2 emu/tests/layered.c -o emu/tests/layered32.exe -lgdi32 -luser32
+          zig cc -target x86_64-windows-gnu -O2 emu/tests/msgthreads.c -o emu/tests/msgthreads.exe -luser32
+          zig cc -target x86-windows-gnu -O2 emu/tests/msgthreads.c -o emu/tests/msgthreads32.exe -luser32
       - name: Execute guest regressions
         run: |
           set -o pipefail
@@ -43,6 +46,13 @@ jobs:
             grep -q 'procmem: PASS' "$RUNNER_TEMP/$exe.log"
             grep -q '\[vfs\] file .*procmem' "$RUNNER_TEMP/$exe.log"
             if grep -q 'stdcall cleanup size unknown' "$RUNNER_TEMP/$exe.log"; then exit 1; fi
+          done
+      - name: Verify window messages stay on their owning threads (x86 and x64)
+        run: |
+          set -o pipefail
+          for exe in msgthreads.exe msgthreads32.exe; do
+            emu/x64/x64run --no-stdin --max-ms 30000 "emu/tests/$exe" 2>&1 | tee "$RUNNER_TEMP/$exe.log"
+            grep -q 'msgthreads: PASS' "$RUNNER_TEMP/$exe.log"
           done
       - name: Verify layered-window pixels (x86 and x64)
         run: |

@@ -225,7 +225,7 @@ typedef struct {
 
 #define MAX_GDI 2048
 #define MAX_MSGS 256
-typedef struct { u64 hwnd; u32 msg; u64 wparam, lparam; u32 time; } GuestMsg;
+typedef struct { u64 hwnd; u32 msg; u64 wparam, lparam; u32 time, tid; } GuestMsg;
 
 /* ---- per-process file-descriptor / environment state (vfs.c) ---- */
 #define FD_MAX 512
@@ -302,6 +302,7 @@ typedef struct { THREAD_CTX_FIELDS; } ThreadCtx;
 #define MAX_TLS_IMAGES 8
 typedef struct Thread {
   int used, state, tid, suspend, kobj;   /* state 1 running, 2 exited */
+  int quit_posted; u32 quit_code;
   Cpu *cpu; u64 teb, stack, stack_size, tls_blk[MAX_TLS_IMAGES], tls_arr, start, param; u32 exit_code;
   ThreadCtx ctx;                         /* saved while not current */
 } Thread;

@@ -139,7 +139,7 @@ static u64 thread_create(Cpu *c, u64 start, u64 param, u64 stack_size, int suspe
   teb_init(w, c, t->teb, t->stack, t->stack + sz, (u32)w->pid, (u32)tid, arr); t->tls_arr = arr; pe_tls_thread_init(w, k);
   Cpu *tc = &w->tcpu[k]; cpu_reset(tc); tc->mem = w->mem; tc->w = w; tc->fs_base = tc->gs_base = t->teb; tc->trace = c->trace; tc->mode32 = (u8)w->mode32;
   tc->r[RSP] = t->stack + sz - 0x100; tc->rip = SLOT_ADDR(SLOT_STARTUP); cpu_push(tc, 0);
-  t->cpu = tc; t->used = 1; t->state = 1; t->tid = tid; t->suspend = suspended ? 1 : 0; t->exit_code = STILL_ACTIVE_; t->start = start; t->param = param;
+  t->cpu = tc; t->used = 1; t->state = 1; t->tid = tid; t->quit_posted = 0; t->quit_code = 0; t->suspend = suspended ? 1 : 0; t->exit_code = STILL_ACTIVE_; t->start = start; t->param = param;
   e_memset(&t->ctx, 0, sizeof t->ctx); t->ctx.wait_deadline = -1;
   int idx = kobj_new(KO_THREAD, 0, 0); if (idx < 0) { t->used = 0; W->last_error = 8; return 0; }
   KObj *ko = kobj_get(idx); ko->pid = w->pid; ko->tid = tid; ko->state = 1; ko->exit_code = STILL_ACTIVE_; ko->refs = 1;   /* the thread's own reference */
