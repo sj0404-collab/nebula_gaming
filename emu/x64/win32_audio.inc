@@ -703,6 +703,8 @@ static int shell_cocreate(Cpu *c, u32 clsid_d1, u64 riid, u64 ppv);
 static void s_CoCreateInstance(Cpu *c) {
   u64 clsid = ARG(0), riid = ARG(3), ppv = ARG(4); if (!clsid || !riid || !ppv) { RET(E_INVALIDARG_); return; }   /* (rclsid, pUnkOuter, dwClsContext, riid, ppv) */
   u32 d1 = rd32(c, clsid), i1 = rd32(c, riid); wrp(c, ppv, 0);
+  extern int gdi_directinput_cocreate(Cpu *, u64, u64, u64, u64);
+  if (gdi_directinput_cocreate(c, clsid, ARG(1), riid, ppv)) return;
   if (shell_cocreate(c, d1, riid, ppv)) return;
   if (gdi_wic_cocreate(c, d1, riid, ppv)) return;
   if (gdi_filedlg_cocreate(c, d1, riid, ppv)) return;
