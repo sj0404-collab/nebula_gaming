@@ -103,6 +103,18 @@ def ver_strings(d):
             except Exception: pass
     return fv, names
 skip = re.compile(r'^mfc\d+(chs|cht|deu|enu|esn|esp|fra|ita|jpn|kor|rus)\.dll$', re.I)   # MFC resource-only language DLLs
+# the runtime DLLs proper; not the installer's own helpers (setup*.dll, setupengine, sqmapi, msdia*)
+want = re.compile(r'^(msvcr\d+(_\w+)?|msvcp\d+(_\w+)?|msvcm\d+|mfc\d+u?|mfcm\d+u?|atl\d+|vcomp\d*|vccorlib\d+|vcamp\d+|concrt\d+|vcruntime\d+(_\w+)?|ucrtbase|api-ms-win-[\w.-]+|vcomp\d+d?|msvcirt|msvcp\d+d|vcclrit)\.dll$', re.I)
+def name_of(fname, names):
+    # 1. a real file name (msiextract output, .dll_x86 payload names); 2. cabinet member keys F_CENTRAL_<name>_<arch>; 3. VERSIONINFO
+    b = os.path.basename(fname).lower()
+    m = re.match(r'^(.*\.dll)(_x86|_amd64|_ia64|_arm64)?$', b)
+    if m: return m.group(1)
+    m = re.match(r'^f_(?:central|nocentral|[a-z]+)_(.+?)_(x86|x64|amd64|ia64)$', b)
+    if m: return m.group(1) + '.dll'
+    n = (names.get('OriginalFilename') or names.get('InternalName') or '').lower()
+    if n and not n.endswith('.dll'): n += '.dll'
+    return os.path.basename(n.replace('\\', '/')) if n else ''
 picked = {}
 for root, _, files in os.walk(src):
     for n in files:
@@ -112,15 +124,18 @@ for root, _, files in os.walk(src):
         m = pe_machine(d)
         if m != want_machine or not is_dll(d): continue
         fv, names = ver_strings(d)
-        name = (names.get('OriginalFilename') or names.get('InternalName') or n).lower()
-        if not name.endswith('.dll'): name += '.dll'
-        name = os.path.basename(name.replace('\\', '/'))
-        if skip.match(name): continue
+        name = name_of(n, names)
+        if not name or skip.match(name) or not want.match(name): continue
         vt = tuple(int(x) for x in fv.split('.')) if fv else (0,)
         cur = picked.get(name)
         if cur is None or vt > cur[0]: picked[name] = (vt, p, fv, d)
 if not picked:
     print(f'runtime-pack: {pid}: no {arch} DLLs found under {src}', file=sys.stderr); sys.exit(1)
+need = {'vc2005': ['msvcr80.dll', 'msvcp80.dll', 'mfc80.dll'], 'vc2008': ['msvcr90.dll', 'msvcp90.dll', 'mfc90.dll'], 'vc2010': ['msvcr100.dll', 'msvcp100.dll', 'mfc100.dll'],
+        'vc2012': ['msvcr110.dll', 'msvcp110.dll', 'mfc110.dll'], 'vc2013': ['msvcr120.dll', 'msvcp120.dll', 'mfc120.dll'], 'vc2015': ['msvcp140.dll', 'vcruntime140.dll', 'concrt140.dll', 'mfc140.dll']}[pid.split('-')[0]]
+missing = [n for n in need if n not in picked]
+if missing:
+    print(f'runtime-pack: {pid}: required DLLs missing: {missing} (found: {sorted(picked)})', file=sys.stderr); sys.exit(1)
 os.makedirs(out, exist_ok=True)
 files = []
 for name in sorted(picked):
