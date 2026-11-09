@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
   push:
     branches: [wip-dotnet]
-    paths: ['emu/tests/sdl2gl.c', 'emu/tests/crtprobe.c', '.github/workflows/sdl2probe.yml']
+    paths: ['emu/tests/sdl2gl.c', 'emu/tests/crtprobe.c', 'emu/tests/run.sh', 'emu/x64/**', 'emu/tools/runtime-pack.sh', '.github/workflows/sdl2probe.yml']
 permissions:
   contents: read
 jobs:

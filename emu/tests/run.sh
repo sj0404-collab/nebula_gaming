@@ -639,6 +639,7 @@ if command -v zig >/dev/null 2>&1 && [ -f "$SDLB/x86/SDL2.dll" ]; then
     out=$(X64_GL_NULL=1 X64_LOG=1 X64_AUDIO_WAV=/tmp/sdl2gl-$v.wav $X --no-stdin --max-ms 90000 --mount '/tmp/syswow64=C:\Windows\SysWOW64' --mount '/tmp/winsxs=C:\Windows\WinSxS' --mount "$SDLB/$v=C:\nebula" "$SDLB/$v/sdl2gl.exe" 60 2>&1) || out="run failed: $out"
     printf '%s\n' "$out" | grep "^sdl2gl\|SDL2GL\|FAULT\|STOP\|unimplemented\|missing\|loaded DLL" | head -40
     check "sdl2gl $v: SDL_Init"        "sdl2gl: SDL_Init ok video='windows'" "$out"
+    check "sdl2gl $v: desktop format"  "format 0x16161804" "$out"
     check "sdl2gl $v: window"          "sdl2gl: window created" "$out"
     check "sdl2gl $v: GL context"      "sdl2gl: GL '" "$out"
     check "sdl2gl $v: SDL audio"       "sdl2gl: SDL audio device" "$out"

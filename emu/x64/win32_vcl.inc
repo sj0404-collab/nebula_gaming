@@ -74,7 +74,12 @@ static void s_CreateDIBitmap(Cpu *c) { /* (hdc, bmih, flags, bits, bmi, usage) *
   u64 bits = 0; u64 hb = make_bitmap(c, bw, bh, 0, &bits); if (!hb) { RET(0); return; } if ((ARG(2) & 4) && ARG(3) && ARG(4)) { u32 *px = (u32 *)mem_ptr(c->mem, bits, (u64)bw * bh * 4, 1); if (px && !dib_decode(c, ARG(4), ARG(3), px, bw, bh, 0)) w32_report(W, "CreateDIBitmap: compressed DIB not supported"); } RET(hb); }
 static void s_GetDIBits(Cpu *c) { /* (hdc, hbm, start, lines, bits, bmi, usage) */ GdiObj *bm = gdi_get(W, ARG(1)); u64 bmi = ARG(5), bits = ARG(4); if (!bm || bm->kind != K_BITMAP || !bmi) { RET(0); return; } dib_sync(W, bm);
   u32 hs = rd32(c, bmi); u16 bpp = rd16(c, bmi + 14); s32 rh = (s32)rd32(c, bmi + 8);
-  if (!bits) { wr32(c, bmi + 4, (u32)bm->bw); wr32(c, bmi + 8, (u32)bm->bh); wr16(c, bmi + 12, 1); if (!bpp) wr16(c, bmi + 14, 32); wr32(c, bmi + 16, 0); wr32(c, bmi + 20, (u32)(((bm->bw * (bpp ? bpp : 32) + 31) / 32) * 4 * bm->bh)); RET(bm->bh); return; }
+  if (!bits) {   /* query: like Windows for a 32-bpp screen-compatible bitmap — first call (biBitCount 0) reports 32 bpp BI_BITFIELDS, a second call with BI_BITFIELDS already set gets the 00FF0000/0000FF00/000000FF masks (SDL2 derives the desktop pixel format this way) */
+    u32 comp = rd32(c, bmi + 16); wr32(c, bmi + 4, (u32)bm->bw); wr32(c, bmi + 8, (u32)bm->bh); wr16(c, bmi + 12, 1);
+    if (!bpp) { wr16(c, bmi + 14, 32); wr32(c, bmi + 16, 3); }
+    else if ((bpp == 32 || bpp == 16) && comp == 3 && hs >= 40) { wr32(c, bmi + hs, bpp == 32 ? 0x00FF0000u : 0x7C00u); wr32(c, bmi + hs + 4, bpp == 32 ? 0x0000FF00u : 0x03E0u); wr32(c, bmi + hs + 8, bpp == 32 ? 0x000000FFu : 0x001Fu); }
+    else wr32(c, bmi + 16, 0);
+    wr32(c, bmi + 20, (u32)(((bm->bw * (bpp ? bpp : 32) + 31) / 32) * 4 * bm->bh)); RET(bm->bh); return; }
   if (bpp != 32 && bpp != 24) { w32_report(W, "GetDIBits: %u bpp not supported", bpp); RET(0); return; } (void)hs;
   int bottom_up = rh >= 0; u32 start = (u32)ARG(2), lines = (u32)ARG(3); u64 stride = (((u64)bm->bw * bpp + 31) / 32) * 4; const u32 *px = (const u32 *)mem_ptr(c->mem, bm->bits, (u64)bm->bw * bm->bh * 4, 0); if (!px) { RET(0); return; }
   u32 done = 0; for (u32 l = 0; l < lines && start + l < (u32)bm->bh; l++) { int dibrow = (int)(start + l); int srcy = bottom_up ? bm->bh - 1 - dibrow : dibrow; if (bm->font_bold) srcy = bm->bh - 1 - srcy; const u32 *s = px + (size_t)srcy * bm->bw; u64 drow = bits + (u64)l * stride;
