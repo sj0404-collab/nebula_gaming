@@ -1,0 +1,73 @@
+name: JVM start-up experiment (CDS archive for a jpackage game — Shattered Pixel Dungeon)
+on:
+  workflow_dispatch:
+    inputs:
+      frames:
+        description: 'frames to render per measured run (the start-up cost is everything before them)'
+        default: '20'
+      ms:
+        description: 'guest-time budget per run, ms'
+        default: '420000'
+  push:
+    branches: [wip-dotnet]
+    paths: ['.github/workflows/jvmcds.yml']
+permissions:
+  contents: read
+jobs:
+  cds:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build x64run
+        run: cd emu/x64 && cc -O2 -Wall -Wno-unused-function -Wno-unused-parameter -Wno-misleading-indentation -o x64run lib.c cpu.c pe.c win32.c gdi.c vfs.c api.c dxbc.c host_native.c main_native.c -lm
+      - name: Download Shattered Pixel Dungeon v4.0.2 (Windows, jpackage: JDK 17.0.17 runtime without classes.jsa)
+        run: |
+          mkdir -p /tmp/np/game /tmp/np/tmp /tmp/np/frames
+          curl -fsSL --retry 3 -o /tmp/np/spd.zip https://github.com/00-Evan/shattered-pixel-dungeon/releases/download/v4.0.2/ShatteredPD-v4.0.2-Windows.zip
+          unzip -q -o /tmp/np/spd.zip -d /tmp/np/game; ls /tmp/np/game; ls /tmp/np/game/runtime/lib | head; test ! -f /tmp/np/game/runtime/lib/server/classes.jsa && echo "no CDS archive in the bundle (as expected)"
+      - name: Run A — baseline (no CDS) + record the loaded class list (-XX:DumpLoadedClassList)
+        run: |
+          FR="${{ github.event.inputs.frames || '20' }}"; MS="${{ github.event.inputs.ms || '420000' }}"; cd /tmp/np/frames
+          t0=$(date +%s); rc=0
+          X64_GL_NULL=1 timeout $((MS / 1000 + 600)) "$GITHUB_WORKSPACE/emu/x64/x64run" --quiet --no-stdin --stats --max-ms $MS --desktop 1280x720 --frames $FR \
+            --mount-rw "/tmp/np/tmp=C:\\tmp" --mount "/tmp/np/game=C:\\game" \
+            --env 'JAVA_TOOL_OPTIONS=-XX:TieredStopAtLevel=1 -XX:-UsePerfData -XX:+IgnoreUnrecognizedVMOptions -XX:DumpLoadedClassList=C:\tmp\classes.lst' \
+            "/tmp/np/game/Shattered Pixel Dungeon.exe" > /tmp/np/runA.txt 2>&1 || rc=$?
+          echo "rc=$rc wall=$(( $(date +%s) - t0 )) s"; tail -30 /tmp/np/runA.txt | cut -c1-300
+          ls -la /tmp/np/tmp; wc -l /tmp/np/tmp/classes.lst || true; head -5 /tmp/np/tmp/classes.lst || true
+      - name: Dump the static CDS archive with the game's class list (-Xshare:dump, same jvm.dll, inside the emulator)
+        run: |
+          MS="${{ github.event.inputs.ms || '420000' }}"; cd /tmp/np/frames
+          [ -s /tmp/np/tmp/classes.lst ] || { echo "::warning::no class list recorded, dumping with the default lib/classlist"; cp /tmp/np/game/runtime/lib/classlist /tmp/np/tmp/classes.lst; }
+          t0=$(date +%s); rc=0
+          X64_GL_NULL=1 timeout 3300 "$GITHUB_WORKSPACE/emu/x64/x64run" --quiet --no-stdin --stats --max-ms 2700000 --desktop 1280x720 \
+            --mount-rw "/tmp/np/tmp=C:\\tmp" --mount "/tmp/np/game=C:\\game" \
+            --env 'JAVA_TOOL_OPTIONS=-Xshare:dump -XX:SharedClassListFile=C:\tmp\classes.lst -XX:SharedArchiveFile=C:\tmp\spd.jsa -Xlog:cds=info -XX:TieredStopAtLevel=1 -XX:-UsePerfData -XX:+IgnoreUnrecognizedVMOptions' \
+            "/tmp/np/game/Shattered Pixel Dungeon.exe" > /tmp/np/dump.txt 2>&1 || rc=$?
+          echo "rc=$rc wall=$(( $(date +%s) - t0 )) s"; grep -a -v "^\[wnd\]" /tmp/np/dump.txt | tail -60 | cut -c1-300
+          ls -la /tmp/np/tmp
+      - name: Run C — with the CDS archive (-Xshare:on so a mapping failure is loud)
+        run: |
+          FR="${{ github.event.inputs.frames || '20' }}"; MS="${{ github.event.inputs.ms || '420000' }}"; cd /tmp/np/frames
+          test -s /tmp/np/tmp/spd.jsa || { echo "::error::no archive produced"; exit 1; }
+          t0=$(date +%s); rc=0
+          X64_GL_NULL=1 timeout $((MS / 1000 + 600)) "$GITHUB_WORKSPACE/emu/x64/x64run" --quiet --no-stdin --stats --max-ms $MS --desktop 1280x720 --frames $FR \
+            --mount-rw "/tmp/np/tmp=C:\\tmp" --mount "/tmp/np/game=C:\\game" \
+            --env 'JAVA_TOOL_OPTIONS=-Xshare:on -XX:SharedArchiveFile=C:\tmp\spd.jsa -Xlog:cds=info -XX:TieredStopAtLevel=1 -XX:-UsePerfData -XX:+IgnoreUnrecognizedVMOptions' \
+            "/tmp/np/game/Shattered Pixel Dungeon.exe" > /tmp/np/runC.txt 2>&1 || rc=$?
+          echo "rc=$rc wall=$(( $(date +%s) - t0 )) s"; grep -a -v "^\[wnd\]" /tmp/np/runC.txt | tail -40 | cut -c1-300
+      - name: Compare
+        if: always()
+        run: |
+          for r in A C; do echo "== run $r"; grep -a -i "insns\|frames\|MIPS\|swap\|exit" /tmp/np/run$r.txt | tail -8 | cut -c1-200; done
+          grep -a -i "cds\|shared" /tmp/np/runC.txt | head -20 | cut -c1-200
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jvmcds
+          path: |
+            /tmp/np/runA.txt
+            /tmp/np/dump.txt
+            /tmp/np/runC.txt
+            /tmp/np/tmp/classes.lst
