@@ -552,12 +552,19 @@ static int mod_load(Win32 *w, const char *name) {
   char pm[8][600]; int npm = 0;
   for (int i = w->nmods - 1; i >= 0 && npm < 8; i--) { if (!w->mods[i].dir[0]) continue; int dup = 0; for (int k = 0; k < npm; k++) if (!e_strnicmp_(pm[k], w->mods[i].dir, e_strlen(w->mods[i].dir))) { dup = 1; break; } if (dup) continue; e_snprintf(pm[npm], sizeof pm[npm], "%s\\%s", w->mods[i].dir, bn); cands[nc++] = pm[npm++]; }
   char pd[8][600]; for (int i = 0; i < w->ndll_dirs && i < 8; i++) if (w->dll_dirs[i][0]) { e_snprintf(pd[i], sizeof pd[i], "%s\\%s", w->dll_dirs[i], bn); cands[nc++] = pd[i]; }
-  char p32[600]; if (w->mode32) { e_snprintf(p32, sizeof p32, "C:\\Windows\\SysWOW64\\%s", bn); cands[nc++] = p32; }
-  e_snprintf(p3, sizeof p3, "C:\\Windows\\System32\\%s", bn); cands[nc++] = p3;
+  /* the VC++ 2005/2008 runtimes are side-by-side assemblies: never taken from System32/SysWOW64 (their CRT refuses that with R6034; an
+   * older Components install may have left copies there) — WinSxS below, or a copy next to the exe like on Windows */
+  int sxs_only = 0; { char lb[64]; int n = 0; for (const char *q = bn; *q && n < 63; q++) lb[n++] = (*q >= 'A' && *q <= 'Z') ? (char)(*q + 32) : *q; lb[n] = 0;
+    static const char *sxs[] = { "msvcr80", "msvcp80", "msvcm80", "mfc80", "mfcm80", "atl80", "msvcr90", "msvcp90", "msvcm90", "mfc90", "mfcm90", "atl90", "vcomp90", 0 };
+    for (int i = 0; sxs[i]; i++) if (!e_strncmp(lb, sxs[i], e_strlen(sxs[i]))) { sxs_only = 1; break; }
+    if (!e_strcmp(lb, "vcomp.dll") || !e_strcmp(lb, "vcomp")) sxs_only = 1; }
+  char p32[600]; if (w->mode32 && !sxs_only) { e_snprintf(p32, sizeof p32, "C:\\Windows\\SysWOW64\\%s", bn); cands[nc++] = p32; }
+  if (!sxs_only) { e_snprintf(p3, sizeof p3, "C:\\Windows\\System32\\%s", bn); cands[nc++] = p3; }
   e_snprintf(p1, sizeof p1, "%s\\%s", vfs_cwd(), bn); cands[nc++] = p1; e_snprintf(p2, sizeof p2, "C:\\nebula\\%s", bn); cands[nc++] = p2;
   { const char *pv = env_get("PATH"); while (pv && *pv && np < 8) { const char *e = pv; while (*e && *e != ';') e++; size_t l = (size_t)(e - pv); if (l && l < 500) { e_memcpy(pbuf[np], pv, l); if (pbuf[np][l - 1] == '\\') l--; e_snprintf(pbuf[np] + l, sizeof pbuf[np] - l, "\\%s", bn); cands[nc++] = pbuf[np]; np++; } pv = *e ? e + 1 : e; } }
   for (int k = 0; k < nc; k++) {
     e_snprintf(path, sizeof path, "%s", cands[k]);
+    if (sxs_only && (!e_strnicmp_(path, "C:\\Windows\\System32\\", 20) || !e_strnicmp_(path, "C:\\Windows\\SysWOW64\\", 20))) continue;   /* PATH entries too */
     int node = vfs_find_node(path); if (node < 0) { size_t l = e_strlen(path); if (l + 4 < sizeof path && e_stricmp(path + (l > 4 ? l - 4 : 0), ".dll")) { e_memcpy(path + l, ".dll", 5); node = vfs_find_node(path); } }
     if (node < 0) continue;
     VNodeInfo vi; if (!vfs_node_info(node, &vi) || vi.is_dir) continue; const u8 *img = vfs_node_data(node); if (!img) continue;
