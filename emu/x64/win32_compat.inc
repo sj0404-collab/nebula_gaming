@@ -279,7 +279,44 @@ static void s_CM_Get_Device_IDW(Cpu *c) { if (ARG(1) && ARG(2)) wr16(c, ARG(1), 
 static void s_CM_Get_Device_ID_Size(Cpu *c) { if (ARG(0)) wr32(c, ARG(0), 0); RET(0x0D); }
 /* winmm capture: there is no microphone device, so every waveIn handle is invalid (MMSYSERR_INVALHANDLE = 5) */
 static void s_waveInInvalHandle(Cpu *c) { RET(5); }
-#define SDLPROBE_SHIMS \
+/* ---- NLS / side-by-side bits that MFC 8/9 and the VC8/VC9 CRTs touch at DllMain ---- */
+static void s_ConvertDefaultLocale(Cpu *c) {   /* LOCALE_SYSTEM_DEFAULT / LOCALE_USER_DEFAULT / neutral → the real locale (en-US); language-only ids get their default sublanguage */
+  u32 l = (u32)ARG(0);
+  if (l == 0x800 || l == 0x400 || l == 0 || l == 0x1000 /*LOCALE_CUSTOM_DEFAULT*/) { RET(0x409); return; }
+  if ((l & 0xFFFF) == 0x0C00 /*LOCALE_CUSTOM_UI_DEFAULT*/) { RET(0x409); return; }
+  if (((l >> 10) & 0x3F) == 0) { RET(l | 0x400); return; }   /* SUBLANG_NEUTRAL → SUBLANG_DEFAULT */
+  RET(l);
+}
+/* Activation contexts: every redistributable DLL lives in the system directory here (no WinSxS), so a context created from
+ * a manifest is accepted and activating it is a no-op; the CRT's "am I loaded through a manifest?" probe (R6034) finds
+ * the Microsoft runtime names and nothing else. */
+static void s_CreateActCtxW(Cpu *c) { RET(0xAC7C7); }
+static void s_CreateActCtxA(Cpu *c) { RET(0xAC7C7); }
+static void s_ActivateActCtx(Cpu *c) { if (ARG(1)) wrp(c, ARG(1), 0xC00C1E); RET(1); }
+static void s_DeactivateActCtx(Cpu *c) { RET(1); }
+static void s_ReleaseActCtx(Cpu *c) { }
+static void s_AddRefActCtx(Cpu *c) { }
+static void s_GetCurrentActCtx(Cpu *c) { if (ARG(0)) wrp(c, ARG(0), 0); RET(1); }
+static void s_ZombifyActCtx(Cpu *c) { RET(1); }
+static void s_QueryActCtxW(Cpu *c) { W->last_error = 50; RET(0); }   /* ERROR_NOT_SUPPORTED */
+static void s_FindActCtxSectionStringW(Cpu *c) {   /* (flags, guid, section, name, ACTCTX_SECTION_KEYED_DATA*) */
+  u64 np = ARG(3); char nm[96] = ""; if (np) { int i; for (i = 0; i < 95; i++) { u16 ch = rd16(c, np + 2 * i); if (!ch) break; nm[i] = (char)(ch < 128 ? ch : '?'); } nm[i] = 0; }
+  for (char *q = nm; *q; q++) if (*q >= 'A' && *q <= 'Z') *q += 32;
+  int sxs = (!e_strncmp(nm, "msvcr", 5) || !e_strncmp(nm, "msvcp", 5) || !e_strncmp(nm, "msvcm", 5) || !e_strncmp(nm, "mfc", 3) || !e_strncmp(nm, "atl", 3) || !e_strncmp(nm, "vcomp", 5)) && (u32)ARG(2) == 2 /*ACTIVATION_CONTEXT_SECTION_DLL_REDIRECTION*/;
+  if (!sxs) { W->last_error = 14007; RET(0); return; }   /* ERROR_SXS_KEY_NOT_FOUND */
+  u64 d = ARG(4); if (d) { u32 cb = rd32(c, d); if (cb >= 8) wr32(c, d + 4, 0); if (cb >= 12) { wr32(c, d + 8, 0); } }   /* ulDataFormatVersion / lpData = none (callers only test the return) */
+  RET(1);
+}
+static void s_FindActCtxSectionStringA(Cpu *c) { W->last_error = 14007; RET(0); }
+static void s_GetTextCharsetInfo(Cpu *c) {   /* (hdc, FONTSIGNATURE*, flags): the selected fonts are Latin TrueType faces → ANSI_CHARSET with the Latin Unicode subranges */
+  u64 p = ARG(1); if (p) { for (int i = 0; i < 24; i += 4) wr32(c, p + i, 0); wr32(c, p, 0x8000002F); wr32(c, p + 16, 0x1); }   /* fsUsb[0]: Basic Latin, Latin-1, Latin Ext A/B, IPA, spacing modifiers; fsCsb[0]: ANSI Latin */
+  RET(0);
+}
+static void s_GetTextCharset(Cpu *c) { RET(0); }
+#define ACTCTX_SHIMS S(GetTextCharsetInfo), S(GetTextCharset), \
+  S(ConvertDefaultLocale), S(CreateActCtxW), S(CreateActCtxA), S(ActivateActCtx), S(DeactivateActCtx), S(ReleaseActCtx), S(AddRefActCtx), S(GetCurrentActCtx), S(ZombifyActCtx), S(QueryActCtxW), \
+  S(FindActCtxSectionStringW), S(FindActCtxSectionStringA),
+#define SDLPROBE_SHIMS ACTCTX_SHIMS \
   S(GetSystemPowerStatus), S(AttachThreadInput), S(GetDeviceGammaRamp), S(SetDeviceGammaRamp), S(GetICMProfileW), S(GetICMProfileA), \
   S(SetupDiGetClassDevsA), S(SetupDiGetClassDevsW), S(SetupDiEnumDeviceInfo), S(SetupDiEnumDeviceInterfaces), S(SetupDiGetDeviceInterfaceDetailA), S(SetupDiGetDeviceInterfaceDetailW), \
   S(SetupDiGetDeviceRegistryPropertyA), S(SetupDiGetDeviceRegistryPropertyW), S(SetupDiDestroyDeviceInfoList), \

@@ -64,10 +64,10 @@ vc2012-x86|Microsoft Visual C++ 2012 Redistributable (x86) Update 4|x86|C:\Windo
 vc2012-x64|Microsoft Visual C++ 2012 Redistributable (x64) Update 4|x64|C:\Windows\System32|https://download.microsoft.com/download/1/6/B/16B06F60-3B20-4FF2-B699-5E9B7962F9AE/VSU_4/vcredist_x64.exe
 vc2010-x86|Microsoft Visual C++ 2010 SP1 Redistributable (x86)|x86|C:\Windows\SysWOW64|https://download.microsoft.com/download/1/6/5/165255E7-1014-4D0A-B094-B6A430A6BFFC/vcredist_x86.exe
 vc2010-x64|Microsoft Visual C++ 2010 SP1 Redistributable (x64)|x64|C:\Windows\System32|https://download.microsoft.com/download/1/6/5/165255E7-1014-4D0A-B094-B6A430A6BFFC/vcredist_x64.exe
-vc2008-x86|Microsoft Visual C++ 2008 SP1 Redistributable (x86)|x86|C:\Windows\SysWOW64|https://download.microsoft.com/download/5/D/8/5D8C65CB-C849-4025-8E95-C3966CAFD8AE/vcredist_x86.exe
-vc2008-x64|Microsoft Visual C++ 2008 SP1 Redistributable (x64)|x64|C:\Windows\System32|https://download.microsoft.com/download/5/D/8/5D8C65CB-C849-4025-8E95-C3966CAFD8AE/vcredist_x64.exe
-vc2005-x86|Microsoft Visual C++ 2005 SP1 Redistributable (x86)|x86|C:\Windows\SysWOW64|https://download.microsoft.com/download/8/B/4/8B42259F-5D70-43F4-AC2E-4B208FD8D66A/vcredist_x86.EXE
-vc2005-x64|Microsoft Visual C++ 2005 SP1 Redistributable (x64)|x64|C:\Windows\System32|https://download.microsoft.com/download/8/B/4/8B42259F-5D70-43F4-AC2E-4B208FD8D66A/vcredist_x64.EXE
+vc2008-x86|Microsoft Visual C++ 2008 SP1 Redistributable (x86)|x86|C:\Windows\WinSxS\x86_microsoft.vc90.crt_1fc8b3b9a1e18e3b_{ver}_none_50934f2ebcb7eb57|https://download.microsoft.com/download/5/D/8/5D8C65CB-C849-4025-8E95-C3966CAFD8AE/vcredist_x86.exe
+vc2008-x64|Microsoft Visual C++ 2008 SP1 Redistributable (x64)|x64|C:\Windows\WinSxS\amd64_microsoft.vc90.crt_1fc8b3b9a1e18e3b_{ver}_none_08e61857a83bc251|https://download.microsoft.com/download/5/D/8/5D8C65CB-C849-4025-8E95-C3966CAFD8AE/vcredist_x64.exe
+vc2005-x86|Microsoft Visual C++ 2005 SP1 Redistributable (x86)|x86|C:\Windows\WinSxS\x86_microsoft.vc80.crt_1fc8b3b9a1e18e3b_{ver}_none_d09154e044272b9a|https://download.microsoft.com/download/8/B/4/8B42259F-5D70-43F4-AC2E-4B208FD8D66A/vcredist_x86.EXE
+vc2005-x64|Microsoft Visual C++ 2005 SP1 Redistributable (x64)|x64|C:\Windows\WinSxS\amd64_microsoft.vc80.crt_1fc8b3b9a1e18e3b_{ver}_none_88dcbb0d9c27d8fd|https://download.microsoft.com/download/8/B/4/8B42259F-5D70-43F4-AC2E-4B208FD8D66A/vcredist_x64.EXE
 '
 echo "$PACKS" | while IFS='|' read -r id label arch gdir url; do
   [ -n "$id" ] || continue
@@ -142,6 +142,10 @@ for name in sorted(picked):
     _, p, fv, d = picked[name]
     open(os.path.join(out, name), 'wb').write(d)
     files.append({'name': name, 'size': len(d), 'sha256': hashlib.sha256(d).hexdigest(), 'version': fv})
+# VC++ 2005/2008 live under WinSxS like on Windows (their CRT refuses System32 without a manifest, R6034); the folder carries the CRT's file version
+if '{ver}' in gdir:
+    crt = [picked[n] for n in picked if re.match(r'^msvcr(80|90)\.dll$', n, re.I)]
+    gdir = gdir.replace('{ver}', crt[0][2] if crt and crt[0][2] else ('8.0.50727.6195' if 'vc80' in gdir else '9.0.30729.6161'))
 man = {'id': pid, 'pack': label, 'arch': arch, 'guest_dir': gdir, 'source': url, 'bundle_sha256': hashlib.sha256(open(setup, 'rb').read()).hexdigest(),
        'built': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'files': files}
 json.dump(man, open(os.path.join(out, 'manifest.json'), 'w'), indent=1)

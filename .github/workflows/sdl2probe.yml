@@ -38,8 +38,8 @@ jobs:
         if: always()
         run: |
           cd emu; X=./x64/x64run
-          for v in x86-old x86 x64; do echo "===== sdl2gl $v"; X64_GL_NULL=1 X64_LOG=1 $X --quiet --no-stdin --max-ms 90000 --mount '/tmp/syswow64=C:\Windows\SysWOW64' /tmp/sdl2bin/$v/sdl2gl.exe 20 2>&1 | grep -av '^\[x64\] \(api\|sched\)' | tail -80; done
-          echo "===== crtprobe32"; X64_LOG=1 $X --quiet --no-stdin --max-ms 120000 --mount '/tmp/syswow64=C:\Windows\SysWOW64' /tmp/crtprobe32.exe 2>&1 | grep -av '^\[x64\] \(api\|sched\)' | tail -120
+          for v in x86-old x86 x64; do echo "===== sdl2gl $v"; X64_GL_NULL=1 X64_LOG=1 $X --quiet --no-stdin --max-ms 90000 --mount '/tmp/syswow64=C:\Windows\SysWOW64' --mount '/tmp/winsxs=C:\Windows\WinSxS' --mount "/tmp/sdl2bin/$v=C:\nebula" /tmp/sdl2bin/$v/sdl2gl.exe 20 2>&1 | grep -av '^\[x64\] \(api\|sched\)' | tail -80; done
+          echo "===== crtprobe32"; X64_LOG=1 $X --quiet --no-stdin --max-ms 120000 --mount '/tmp/syswow64=C:\Windows\SysWOW64' --mount '/tmp/winsxs=C:\Windows\WinSxS' /tmp/crtprobe32.exe 2>&1 | grep -av '^\[x64\] \(api\|sched\)' | tail -120
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: sdl2probe-log, path: /tmp/probe.log }

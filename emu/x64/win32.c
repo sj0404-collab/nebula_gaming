@@ -566,6 +566,20 @@ static int mod_load(Win32 *w, const char *name) {
     if (idx >= 0) { char msg[400]; e_snprintf(msg, sizeof msg, "[x64] loaded DLL %s at 0x%llx (%llu KB)\n", w->mods[idx].name, (unsigned long long)w->mods[idx].base, (unsigned long long)(w->mods[idx].size >> 10)); host_write(3, msg, e_strlen(msg)); }
     return idx;
   }
+  /* side-by-side assemblies: C:\Windows\WinSxS\<x86|amd64>_<assembly>_<token>_<version>_... (the VC++ 2005/2008 runtimes live there, as on
+   * Windows — their CRT refuses to run from System32 without a manifest). Without manifests to consult we take the highest version. */
+  { int best = -1; char bestdir[600] = ""; const char *pre = w->mode32 ? "x86_" : "amd64_"; size_t bl = e_strlen(bn); int wantdll = bl > 4 && !e_stricmp(bn + bl - 4, ".dll");
+    for (int i = 0, n = vfs_node_count(); i < n; i++) { VNodeInfo vi; if (!vfs_node_info(i, &vi) || vi.is_dir || !vi.path) continue;
+      if (e_strnicmp_(vi.path, "C:\\Windows\\WinSxS\\", 18)) continue; const char *f = vi.path + 18; if (e_strnicmp_(f, pre, e_strlen(pre))) continue;
+      const char *sl = 0; for (const char *q = f; *q; q++) if (*q == '\\') sl = q; if (!sl) continue; const char *fn = sl + 1;
+      if (e_stricmp(fn, bn) && !(!wantdll && !e_strnicmp_(fn, bn, bl) && !e_stricmp(fn + bl, ".dll"))) continue;
+      char dir[600]; size_t dl = (size_t)(sl - f); if (dl >= sizeof dir) continue; e_memcpy(dir, f, dl); dir[dl] = 0;
+      if (best < 0 || e_stricmp(dir, bestdir) > 0) { best = i; e_snprintf(bestdir, sizeof bestdir, "%s", dir); } }
+    if (best >= 0) { VNodeInfo vi; vfs_node_info(best, &vi); const u8 *img = vfs_node_data(best);
+      if (img) { int idx = pe_load_dll(w, img, (size_t)vi.size, mod_basename(vi.path));
+        if (idx >= 0) { size_t dl = (size_t)(mod_basename(vi.path) - vi.path); if (dl && dl < sizeof w->mods[idx].dir) { e_memcpy(w->mods[idx].dir, vi.path, dl - 1); w->mods[idx].dir[dl - 1] = 0; }
+          char msg[700]; e_snprintf(msg, sizeof msg, "[x64] loaded DLL %s from WinSxS\\%s at 0x%llx (%llu KB)\n", w->mods[idx].name, bestdir, (unsigned long long)w->mods[idx].base, (unsigned long long)(w->mods[idx].size >> 10)); host_write(3, msg, e_strlen(msg)); }
+        return idx; } } }
   return -1;
 }
 /* export lookup by name or ordinal; follows forwarders ("KERNEL32.Foo") into the shim table */

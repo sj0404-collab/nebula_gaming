@@ -259,7 +259,7 @@ await test('components persist across closing Programs and reloading the app', a
   await page.waitForFunction(() => { const l = [...document.querySelectorAll('[data-x64-vcpack-status]')]; return l.length > 0 && l.every(e => e.getAttribute('data-x64-vcpack-status') === 'installed'); }, null, { timeout: 600000 });
   const logText = await w.locator('[data-x64-complog]').innerText();
   expect(/2005 .*x86.*installed: \d+ DLLs/.test(logText) && /2013 .*x64.*installed: \d+ DLLs/.test(logText), 'components log lacks pack results: ' + logText.slice(0, 300));
-  const vcDlls = await page.evaluate(() => { const rt = window.__x64; return ['C:\\Windows\\SysWOW64\\msvcr80.dll', 'C:\\Windows\\SysWOW64\\msvcp90.dll', 'C:\\Windows\\System32\\msvcr100.dll', 'C:\\Windows\\SysWOW64\\msvcr110.dll', 'C:\\Windows\\System32\\msvcp120.dll'].map(p => (rt.vfsRead(p)?.length ?? 0) > 1000); });
+  const vcDlls = await page.evaluate(() => { const rt = window.__x64; return ['C:\\Windows\\WinSxS\\x86_microsoft.vc80.crt_1fc8b3b9a1e18e3b_8.0.50727.6195_none_d09154e044272b9a\\msvcr80.dll', 'C:\\Windows\\WinSxS\\x86_microsoft.vc90.crt_1fc8b3b9a1e18e3b_9.0.30729.6161_none_50934f2ebcb7eb57\\msvcp90.dll', 'C:\\Windows\\System32\\msvcr100.dll', 'C:\\Windows\\SysWOW64\\msvcr110.dll', 'C:\\Windows\\System32\\msvcp120.dll'].map(p => (rt.vfsRead(p)?.length ?? 0) > 1000); });
   expect(vcDlls.every(Boolean), 'VC++ 2005–2013 DLLs missing on the disk: ' + JSON.stringify(vcDlls));
   await page.screenshot({ path: resolve(SHOTS, 'components-installed.png') });
   await closeAll(); await openFromDesktop('Programs');
