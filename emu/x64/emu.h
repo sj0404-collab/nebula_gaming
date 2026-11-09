@@ -233,7 +233,7 @@ typedef struct { u64 hwnd; u32 msg; u64 wparam, lparam; u32 time, tid; } GuestMs
 enum { FD_FILE = 1, FD_CONSOLE, FD_PIPE, FD_MAP, FD_PROC, FD_NULL, FD_KOBJ, FD_SOCK };   /* FD_SOCK: winsock socket (win32_net.inc table) */   /* FD_KOBJ: event / mutex / semaphore / thread (kobj table) */
 typedef struct { int kind; int node; u64 pos; int append, eof, err, unget, alias, obj, wend; int noinherit; } FdEnt;   /* noinherit: not copied into children */
 typedef struct { int used; char dir[512]; char pat[128]; int cursor; int dots; u64 last_mtime; } VFind;
-typedef struct { u64 addr, size; int fd; } MapView;
+typedef struct { u64 addr, size, off; int fd, writable; } MapView;   /* off: file offset of the view; writable: FILE_MAP_WRITE (a FILE_MAP_READ / FILE_MAP_COPY view is never written back) */
 typedef struct {
   FdEnt fd[FD_MAX]; int redir[3]; char cwd[512]; VFind find[32];
   char *env[512]; int nenv, env_dirty; u64 strtok_next;
@@ -243,7 +243,7 @@ extern ProcFs *vfs_P;
 void vfs_use(ProcFs *p); ProcFs *vfs_root_fs(void); void vfs_init_proc(ProcFs *p, const ProcFs *parent); void vfs_release_proc(ProcFs *p);
 int  vfs_kind(int fd); int vfs_fd_obj(int fd);
 int  vfs_pipe(int *rfd, int *wfd); int vfs_pipe_avail(int fd); int vfs_pipe_id(int fd); int vfs_pipe_would_block(int pi, int for_write);
-int  vfs_map_create(int file_fd, u64 size); u8 *vfs_map_data(int fd, u64 *size); int vfs_map_write_back(int fd, const u8 *src, u64 n);
+int  vfs_map_create(int file_fd, u64 size); u8 *vfs_map_data(int fd, u64 *size); int vfs_map_write_back(int fd, u64 off, const u8 *src, u64 n);
 int  vfs_proc_handle(int pid); int vfs_fd_pid(int fd);
 /* ---- kernel objects (vfs.c): global, refcounted, referenced from fd tables as FD_KOBJ so inheritance/dup/close are uniform ---- */
 enum { KO_EVENT = 1, KO_MUTEX, KO_SEM, KO_THREAD, KO_TIMER, KO_IOCP };

@@ -315,11 +315,11 @@ static void s_MapViewOfFile(Cpu *c) {
      os::unmap_memory inspects it (CDS bitmap region) and fails hard when the base is a heap sub-block */
   u64 a = w32_heap_alloc(W, n + 0x10000, 1); if (!a) { W->last_error = 8; RET(0); return; } u64 r = (a + 0xffff) & ~0xffffull; u8 *p = mem_ptr(c->mem, r, n, 1); if (p && n) e_memcpy(p, src + off, (size_t)n);
   vm_add_view(r, (n + 0xfff) & ~0xfffull, a);
-  ProcFs *P = vfs_P; if (P->nviews < 32) { P->views[P->nviews].addr = r; P->views[P->nviews].size = n; P->views[P->nviews].fd = vfs_dup(fd); P->nviews++; }
+  ProcFs *P = vfs_P; if (P->nviews < 32) { MapView *v = &P->views[P->nviews++]; v->addr = r; v->size = n; v->off = off; v->writable = !!(ARG(1) & 0x2); v->fd = vfs_dup(fd); }   /* FILE_MAP_WRITE; FILE_MAP_COPY (HotSpot's CDS bitmap) and FILE_MAP_READ stay private */
   RET(r);
 }
 static void s_MapViewOfFileEx(Cpu *c) { s_MapViewOfFile(c); }
-static void view_flush(Cpu *c, int i) { ProcFs *P = vfs_P; const u8 *p = mem_ptr(c->mem, P->views[i].addr, P->views[i].size, 0); if (p) vfs_map_write_back(P->views[i].fd, p, P->views[i].size); }
+static void view_flush(Cpu *c, int i) { ProcFs *P = vfs_P; if (!P->views[i].writable) return; const u8 *p = mem_ptr(c->mem, P->views[i].addr, P->views[i].size, 0); if (p) vfs_map_write_back(P->views[i].fd, P->views[i].off, p, P->views[i].size); }
 static void views_flush_all(Cpu *c) { for (int i = 0; i < vfs_P->nviews; i++) view_flush(c, i); }
 static void s_UnmapViewOfFile(Cpu *c) { ProcFs *P = vfs_P; int found = 0; for (int i = 0; i < P->nviews; i++) if (P->views[i].addr == ARG(0)) { view_flush(c, i); vfs_close(P->views[i].fd); P->views[i] = P->views[--P->nviews]; found = 1; break; }
   if (!found) { W->last_error = 487; RET(0); return; } vm_release_view(W, ARG(0)); RET(1); }
