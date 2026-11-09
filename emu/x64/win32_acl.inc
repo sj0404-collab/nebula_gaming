@@ -83,7 +83,42 @@ static void s_MakeAbsoluteSD(Cpu *c) { /* (self, abs, *absLen, dacl, *daclLen, s
   if (small) { wr32(c, ARG(2), abs_need); for (int k = 0; k < 4; k++) if (lenp[k]) wr32(c, lenp[k], lens[k]); W->last_error = 122; RET(0); return; }
   u8 *p = mem_ptr(c->mem, ARG(1), abs_need, 1); if (!p) { RET(0); return; } e_memset(p, 0, abs_need); wr8(c, ARG(1), 1); wr16(c, ARG(1) + 2, rd16(c, sd + 2) & ~SD_CTRL_SELF_RELATIVE);
   for (int k = 0; k < 4; k++) { if (!lens[k] || !outs[k]) continue; const u8 *s = mem_ptr(c->mem, sd_field(c, sd, k), lens[k], 0); u8 *d = mem_ptr(c->mem, outs[k], lens[k], 1); if (s && d) e_memcpy(d, s, lens[k]); sd_set_field(c, ARG(1), k, outs[k]); } RET(1); }
+/* access checks: the token of the one logged-on user (TOKEN_USER S-1-5-21-1000-2000-3000-500, Administrators, Users, Everyone, Authenticated
+   Users, INTERACTIVE) evaluated against a DACL exactly like AccessCheck does - ACEs in order, DENY wins when it covers a still-wanted right,
+   no DACL = everything, empty DACL = nothing, the owner always has READ_CONTROL | WRITE_DAC, MAXIMUM_ALLOWED collects every allowed right */
+static int acl_token_sid(Cpu *c, u64 sid) {   /* does this SID belong to our token? */
+  if (!sid) return 0; u8 n = rd8(c, sid + 1); if (rd8(c, sid) != 1 || n > 15) return 0; u8 auth = rd8(c, sid + 7); u32 sub[15]; for (u32 i = 0; i < n; i++) sub[i] = rd32(c, sid + 8 + 4 * i);
+  if (auth == 1 && n == 1 && sub[0] == 0) return 1;                                     /* Everyone */
+  if (auth != 5) return 0;
+  if (n == 1 && (sub[0] == 11 || sub[0] == 4)) return 1;                                 /* Authenticated Users, INTERACTIVE */
+  if (n == 2 && sub[0] == 32 && (sub[1] == 544 || sub[1] == 545)) return 1;              /* Administrators, Users */
+  if (n == 5 && sub[0] == 21 && sub[1] == 1000 && sub[2] == 2000 && sub[3] == 3000 && sub[4] == 500) return 1;   /* the user */
+  return 0;
+}
+static void s_MapGenericMask(Cpu *c) { /* (DWORD *mask, GENERIC_MAPPING *map) */ u64 pm = ARG(0), gm = ARG(1); if (!pm || !gm) return; u32 m = rd32(c, pm);
+  if (m & 0x80000000u) m |= rd32(c, gm); if (m & 0x40000000u) m |= rd32(c, gm + 4); if (m & 0x20000000u) m |= rd32(c, gm + 8); if (m & 0x10000000u) m |= rd32(c, gm + 12);
+  wr32(c, pm, m & 0x0fffffffu); }
+static void s_AccessCheck(Cpu *c) { /* (sd, token, desired, mapping, privset, *privlen, *granted, *status) */
+  u64 sd = ARG(0), gm = ARG(3), ps = ARG(4), ppl = ARG(5), pg = ARG(6), pst = ARG(7); u32 desired = (u32)ARG(2);
+  if (!sd || !pg || !pst || !ppl) { W->last_error = 87; RET(0); return; }
+  if (rd32(c, ppl) < 20) { wr32(c, ppl, 20); W->last_error = 122; RET(0); return; }   /* PRIVILEGE_SET with one LUID_AND_ATTRIBUTES */
+  if (ps) { wr32(c, ps, 0); wr32(c, ps + 4, 0); } wr32(c, ppl, 20);
+  if (gm) { if (desired & 0x80000000u) desired |= rd32(c, gm); if (desired & 0x40000000u) desired |= rd32(c, gm + 4); if (desired & 0x20000000u) desired |= rd32(c, gm + 8); if (desired & 0x10000000u) desired |= rd32(c, gm + 12); desired &= 0x0fffffffu; }
+  int maxallowed = (desired & 0x02000000u) != 0; u32 want = desired & ~0x02000000u, granted = 0, denied = 0; u16 ctrl = rd16(c, sd + 2); u64 dacl = (ctrl & SD_CTRL_DACL_PRESENT) ? sd_field(c, sd, 3) : 0;
+  if (acl_token_sid(c, sd_field(c, sd, 0))) granted |= 0x00020000u | 0x00040000u;   /* the owner: READ_CONTROL | WRITE_DAC */
+  if (!(ctrl & SD_CTRL_DACL_PRESENT) || !dacl) granted = 0x1fffffffu;   /* no DACL: unrestricted */
+  else { u32 n = rd16(c, dacl + 4), off = 8;
+    for (u32 i = 0; i < n; i++) { u8 type = rd8(c, dacl + off), flags = rd8(c, dacl + off + 1); u16 sz = rd16(c, dacl + off + 2); u32 mask = rd32(c, dacl + off + 4); u64 sid = dacl + off + 8;
+      if (!(flags & 0x8) && (type == 0 || type == 1) && acl_token_sid(c, sid)) { if (type == 0) granted |= mask & ~denied; else denied |= mask & ~granted; }
+      if (sz < 8) break; off += sz; } }
+  u32 result = maxallowed ? granted : (want & granted) == want ? want : 0; int ok = maxallowed ? granted != 0 : result != 0 || want == 0;
+  wr32(c, pg, ok ? result : 0); wr32(c, pst, ok ? 1 : 0); if (!ok) W->last_error = 5; RET(1); }
+static void s_DuplicateTokenEx(Cpu *c) { /* (token, access, sa, impersonation level, type, *new) */ if (!ARG(5)) { W->last_error = 87; RET(0); return; } wrp(c, ARG(5), 0x7002 + (u32)ARG(4)); RET(1); }   /* a token handle of the same user */
+static void s_DuplicateToken(Cpu *c) { if (!ARG(2)) { W->last_error = 87; RET(0); return; } wrp(c, ARG(2), 0x7003); RET(1); }
+static void s_ImpersonateLoggedOnUser(Cpu *c) { RET(1); }
+static void s_ImpersonateSelf(Cpu *c) { RET(1); }
 #define ACL_SHIMS \
+  S(MapGenericMask), S(AccessCheck), S(DuplicateTokenEx), S(DuplicateToken), S(ImpersonateLoggedOnUser), S(ImpersonateSelf), \
   S(InitializeSecurityDescriptor), S(SetSecurityDescriptorDacl), S(GetSecurityDescriptorDacl), S(SetSecurityDescriptorOwner), S(SetSecurityDescriptorGroup), S(GetSecurityDescriptorOwner), S(GetSecurityDescriptorGroup), S(GetSecurityDescriptorControl), S(IsValidSecurityDescriptor), S(GetSecurityDescriptorLength), \
   S(InitializeAcl), S(IsValidAcl), S(GetAclInformation), S(GetAce), S(AddAccessAllowedAce), S(AddAccessAllowedAceEx), S(AddAccessDeniedAce), S(AddAccessDeniedAceEx), S(AddAce), S(DeleteAce), \
   S(GetFileSecurityW), S(GetFileSecurityA), S(SetFileSecurityW), S(SetFileSecurityA), S(GetKernelObjectSecurity), S(SetKernelObjectSecurity), S(GetSecurityInfo), S(GetNamedSecurityInfoW), S(GetNamedSecurityInfoA), S(SetSecurityInfo), S(SetNamedSecurityInfoW), S(SetNamedSecurityInfoA), S(MakeSelfRelativeSD), S(MakeAbsoluteSD),
