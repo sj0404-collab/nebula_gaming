@@ -54,6 +54,8 @@ static void s_VirtualQuery(Cpu *c) {
     u64 page = addr & ~0xfffull; int guard = page < lo + 0x2000;
     wr64(c, mbi, page); wr64(c, mbi + 8, lo); wr32(c, mbi + 16, 4); wr64(c, mbi + 24, guard ? lo + 0x2000 - page : hi - page); wr32(c, mbi + 32, 0x1000); wr32(c, mbi + 36, guard ? 0x104 : 4); wr32(c, mbi + 40, 0x20000); RET(48); return;
   }
+  { u64 vb, ve; int view; if (vm_query(addr, &vb, &ve, &view)) { u64 page = addr & ~0xfffull; u32 prot = view ? 4 : 0x40;   /* a VirtualAlloc reservation or a file view: AllocationBase is the reservation itself */
+      wr64(c, mbi, page); wr64(c, mbi + 8, vb); wr32(c, mbi + 16, prot); wr64(c, mbi + 24, ve - page); wr32(c, mbi + 32, 0x1000); wr32(c, mbi + 36, prot); wr32(c, mbi + 40, view ? 0x40000 : 0x20000); RET(48); return; } }
   Region *r = mem_region(c->mem, addr);
   if (!r) { wr64(c, mbi, addr & ~0xfffull); wr64(c, mbi + 24, 0x1000); wr32(c, mbi + 32, 0x10000); wr32(c, mbi + 36, 1); RET(48); return; }
   wr64(c, mbi, addr & ~0xfffull); wr64(c, mbi + 8, r->base); wr32(c, mbi + 16, 0x40); wr64(c, mbi + 24, r->base + r->size - (addr & ~0xfffull)); wr32(c, mbi + 32, 0x1000); wr32(c, mbi + 36, 0x40); wr32(c, mbi + 40, r->base == W->image_base ? 0x1000000 : 0x20000); RET(48);

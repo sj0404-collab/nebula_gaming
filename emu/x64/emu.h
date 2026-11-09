@@ -345,6 +345,7 @@ struct Win32 {
   char con[65536]; int con_len;
   u64 at_exit[64]; int n_at_exit;
   int exited;
+  int cds_dump_pass; char cds_jsa[700];   /* HotSpot: this launch only builds the class-data archive (-Xshare:dump); on success the host relaunches the program */
   u64 loc_c, loc_wc, sys_nerr, sys_errlist;
   int api_trace;
   struct { u64 base, table, lo, hi; u32 count, growable; } dynft[32]; int ndynft;   /* RtlAddFunctionTable / RtlAddGrowableFunctionTable: unwind data for JIT code (HotSpot code cache, V8) */

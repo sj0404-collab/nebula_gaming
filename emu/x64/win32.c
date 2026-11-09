@@ -184,7 +184,9 @@ static void cont_finish(Cpu *c, u64 rax) {
   if (w->api_trace) e_log("[cont] finish kind=%d depth=%d rsp=%llx clean=%d ret=%llx rax=%llx\n", w->cont[i].kind, i + 1, (unsigned long long)w->cont[i].rsp, w->cont[i].clean32, (unsigned long long)w->cont[i].ret_addr, (unsigned long long)rax);
   c->r[RSP] = w->cont[i].rsp + w->cont[i].clean32; c->rip = w->cont[i].ret_addr; c->r[RAX] = rax; if (c->mode32) c->r[RDX] = rax >> 32; w->cont_seq++;
 }
-static void do_exit(Cpu *c, int code) { W->exited = 1; c->exit_code = code; c->status = RUN_EXIT; }
+int g_relaunch;   /* set when a CDS dump pass finished: the host should start the same program again (api: x64_relaunch) */
+static void do_exit(Cpu *c, int code) { W->exited = 1; c->exit_code = code; c->status = RUN_EXIT;
+  if (W->cds_dump_pass) { u64 sz = 0; if (vfs_stat(W->cds_jsa, &sz) && sz > 65536) { g_relaunch = 1; char msg[900]; e_snprintf(msg, sizeof msg, "[java] class-data archive ready: %s (%llu KB) — starting the program again\n", W->cds_jsa, (unsigned long long)(sz >> 10)); host_write(2, msg, e_strlen(msg)); } else host_write(2, "[java] the class-data archive was not produced; the program starts without it next time\n", 88); W->cds_dump_pass = 0; } }
 static void retry_and_yield(Cpu *c, u64 slot) { cpu_push(c, c->rip); c->rip = slot; c->status = RUN_YIELD; }
 static u64 g_cur_slot, g_entry_eax;
 extern int g_prof_on;
@@ -417,6 +419,7 @@ static u32 nt_to_dos(u32 st) { u32 e;
 static void s_RtlNtStatusToDosError(Cpu *c) { RET(nt_to_dos((u32)ARG(0))); }
 static int iocp_rw(Cpu *c, int fd, int write, u64 buf, u32 len, u64 bytes_out, u64 ov);   /* win32_iocp.inc */
 static void iocp_handle_closed(int pid, int fd); static void iocp_kobj_closed(int kobj); static int iocp_has_packets(int kobj);
+static void vm_add_view(u64 base, u64 size, u64 heap); static void vm_release_view(Win32 *w, u64 base);
 #include "win32_fs.inc"
 #include "win32_ini.inc"
 #include "win32_nt.inc"
@@ -836,13 +839,13 @@ static void s_LocalFree(Cpu *c) { w32_heap_free(W, ARG(0)); RET(0); }
  * that points into the image / stack / heap FAILS with ERROR_INVALID_ADDRESS like on Windows (V8 probes hints near its embedded
  * builtins and would otherwise build its code-range bookkeeping on top of node.exe's .text), (c) a hint at a free address is honoured. */
 #define VM_MAX 2048
-static struct { u64 base, size, heap; int released, mapped; } g_vm[VM_MAX]; static int g_nvm;   /* heap: backing heap block (small), mapped: own region (large) */
+static struct { u64 base, size, heap; int released, mapped, view; } g_vm[VM_MAX]; static int g_nvm;   /* heap: backing heap block (small), mapped: own region (large) */
 static u64 g_vm_cursor = 0x600000000ull;   /* where large anonymous reservations are placed */
 static u64 g_vm_cursor32 = 0x48000000ull;  /* 32-bit process: reservations between the heap (0x20000000+) and the DLL area (0x60000000) */
 static int vm_find(u64 a) { int rel = -1; for (int i = 0; i < g_nvm; i++) if (a - g_vm[i].base < g_vm[i].size) { if (!g_vm[i].released) return i; rel = i; } return rel; }
 static int vm_range_free(Mem *m, u64 a, u64 size) { for (int i = 0; i < m->n; i++) { Region *r = &m->r[i]; if (a < r->base + r->size && r->base < a + size) return 0; } return 1; }
 static void vm_recycle(Win32 *w); static void vm_discard(Cpu *c, u64 addr, u64 size);
-static int vm_add(u64 base, u64 size, u64 heap) { if (g_nvm >= VM_MAX) return -1; g_vm[g_nvm].base = base; g_vm[g_nvm].size = size; g_vm[g_nvm].heap = heap; g_vm[g_nvm].released = 0; g_vm[g_nvm].mapped = 0; return g_nvm++; }
+static int vm_add(u64 base, u64 size, u64 heap) { if (g_nvm >= VM_MAX) return -1; g_vm[g_nvm].base = base; g_vm[g_nvm].size = size; g_vm[g_nvm].heap = heap; g_vm[g_nvm].released = 0; g_vm[g_nvm].mapped = 0; g_vm[g_nvm].view = 0; return g_nvm++; }
 static void s_VirtualAlloc(Cpu *c) { u64 addr = ARG(0), size = ARG(1);
   if (addr) {
     u64 a0 = addr & ~0xfffull, end = (addr + size + 0xfff) & ~0xfffull; int vi = vm_find(a0);
@@ -871,6 +874,10 @@ static void s_VirtualAlloc(Cpu *c) { u64 addr = ARG(0), size = ARG(1);
   u64 a = w32_heap_alloc(W, size + 0x10000, 1); if (!a) { e_log("[x64] VirtualAlloc(NULL, %llu) failed: regions=%d vm=%d\n", (unsigned long long)size, c->mem->n, g_nvm); W->last_error = 8; RET(0); return; }
   u64 r = (a + 0xffff) & ~0xffffull; if (vm_add(r, size, a) < 0) e_log("[x64] VM table full (%d)\n", g_nvm);
   RET(r); }
+static void vm_add_view(u64 base, u64 size, u64 heap) { int vi = vm_add(base, size, heap); if (vi >= 0) g_vm[vi].view = 1; }
+static void vm_release_view(Win32 *w, u64 base) { int vi = vm_find(base); if (vi >= 0 && !g_vm[vi].released && g_vm[vi].base == base) { g_vm[vi].released = 1; vm_recycle(w); } }
+/* VirtualQuery helper: the reservation an address belongs to (AllocationBase = its base, like Windows), and whether it is a file view (MEM_MAPPED, PAGE_READWRITE) */
+static int vm_query(u64 addr, u64 *base, u64 *end, int *view) { int vi = vm_find(addr); if (vi < 0 || g_vm[vi].released) return 0; *base = g_vm[vi].base; *end = g_vm[vi].base + g_vm[vi].size; *view = g_vm[vi].view; return 1; }
 static void s_VirtualAllocEx(Cpu *c) { call_shim(c, s_VirtualAlloc, ARG(1), ARG(2), ARG(3), ARG(4)); }
 static void vm_recycle(Win32 *w) {   /* free released heap-backed reservations that no active reservation overlaps (deferred, so a hint can re-reserve a just-freed range) */
   for (int i = 0; i < g_nvm; i++) { if (!g_vm[i].released || (!g_vm[i].heap && !g_vm[i].mapped)) continue; int busy = 0;
@@ -1629,10 +1636,24 @@ void w32_start(Win32 *w, const char *cmdline) {
   static const char *base_envs[] = { "PATH=C:\\Windows\\System32;C:\\Windows\\System32\\WindowsPowerShell\\v1.0", "SYSTEMROOT=C:\\Windows", "TEMP=C:\\tmp", "TMP=C:\\tmp", "USERPROFILE=C:\\Users\\user", "HOMEPATH=\\Users\\user", "USERNAME=user", "COMPUTERNAME=NEBULA", "OS=Windows_NT", "NEBULA_X64=1", "BUN_JSC_useConcurrentGC=false", "BUN_JSC_useConcurrentJIT=false", "PROCESSOR_ARCHITECTURE=AMD64", "PROCESSOR_IDENTIFIER=Intel64 Family 6 Model 158 Stepping 10, GenuineIntel", "PROCESSOR_LEVEL=6", "PROCESSOR_REVISION=9e0a", "NUMBER_OF_PROCESSORS=1", "PATHEXT=.COM;.EXE;.BAT;.CMD", "HOMEDRIVE=C:", "WINDIR=C:\\Windows", "COMSPEC=C:\\Windows\\System32\\cmd.exe", 0 };
   /* defaults for the official .NET runtime (CoreCLR) — overridable with --env: no W^X double mapping (we have no MapViewOfFile3 aliasing),
      GC regions in a fixed 768 MB reservation, invariant globalization (no ICU on the virtual disk), no telemetry/first-run noise */
+  /* HotSpot class-data sharing for jpackage apps (<dir>\runtime\bin\server\jvm.dll, no classes.jsa in the bundle): launch 1 records the loaded classes
+     (-XX:DumpLoadedClassList, free), launch 2 is the one-time dump pass (-Xshare:dump, exits, the host relaunches), every later launch maps the archive —
+     class loading/verification, the bulk of JVM start-up under emulation, comes pre-parsed from <dir>\app\nebula-cds.jsa */
+  static char java_opts[2400];
+  { e_snprintf(java_opts, sizeof java_opts, "JAVA_TOOL_OPTIONS=-XX:TieredStopAtLevel=1 -XX:-UsePerfData -XX:+IgnoreUnrecognizedVMOptions"); w->cds_dump_pass = 0; w->cds_jsa[0] = 0;
+    if (!w->mode32 && w->exe_path[0]) { char dir[600]; e_snprintf(dir, sizeof dir, "%s", w->exe_path); char *sl = 0; for (char *q = dir; *q; q++) if (*q == '\\') sl = q; if (sl) *sl = 0;
+      char jvm[700]; e_snprintf(jvm, sizeof jvm, "%s\\runtime\\bin\\server\\jvm.dll", dir); u64 sz = 0;
+      if (sl && vfs_stat(jvm, &sz)) {
+        char lst[700]; e_snprintf(w->cds_jsa, sizeof w->cds_jsa, "%s\\app\\nebula-cds.jsa", dir); e_snprintf(lst, sizeof lst, "%s\\app\\nebula-cds.lst", dir); size_t l = e_strlen(java_opts);
+        if (vfs_stat(w->cds_jsa, &sz) && sz > 65536) e_snprintf(java_opts + l, sizeof java_opts - l, " -XX:SharedArchiveFile=%s -Xshare:auto", w->cds_jsa);
+        else if (vfs_stat(lst, &sz) && sz > 1000) { e_snprintf(java_opts + l, sizeof java_opts - l, " -Xshare:dump -XX:SharedClassListFile=%s -XX:SharedArchiveFile=%s", lst, w->cds_jsa); w->cds_dump_pass = 1;
+          host_write(2, "[java] one-time preparation: building the class-data archive for this program (the next starts are faster); it starts by itself afterwards\n", 139); }
+        else e_snprintf(java_opts + l, sizeof java_opts - l, " -XX:DumpLoadedClassList=%s", lst);
+      } } }
   static const char *dotnet_envs[] = { "DOTNET_EnableWriteXorExecute=0", "DOTNET_GCRegionRange=0x30000000", "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1", "DOTNET_SYSTEM_GLOBALIZATION_PREDEFINED_CULTURES_ONLY=0", "DOTNET_CLI_TELEMETRY_OPTOUT=1", "DOTNET_NOLOGO=1", "DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1", "DOTNET_TieredPGO=0", "DOTNET_ROOT=C:\\Program Files\\dotnet",
     /* HotSpot (jpackage launchers, java.exe): C1 only — on an emulated CPU the C2 compiler thread eats ~40 % of all instructions and methods wait in the slow profiled tier 3 meanwhile
        (Shattered Pixel Dungeon, native runner, 240 s: 64 frames with the default tiered compilation vs 860 with C1 only); no hsperfdata file. The JVM reports it: "Picked up JAVA_TOOL_OPTIONS" */
-    "JAVA_TOOL_OPTIONS=-XX:TieredStopAtLevel=1 -XX:-UsePerfData -XX:+IgnoreUnrecognizedVMOptions", 0 };   /* no GC choice here: an app that selects its own collector would get "multiple garbage collectors selected"; with 1 reported CPU HotSpot picks SerialGC itself */
+    java_opts, 0 };   /* no GC choice here: an app that selects its own collector would get "multiple garbage collectors selected"; with 1 reported CPU HotSpot picks SerialGC itself */
   const char *envs[128]; int ne = 0; for (int i = 0; base_envs[i] && ne < 64; i++) envs[ne++] = base_envs[i];
   for (int i = 0; dotnet_envs[i] && ne < 90; i++) { const char *eq = dotnet_envs[i]; size_t nl = 0; while (eq[nl] && eq[nl] != '=') nl++; int dup = 0; for (int k = 0; k < g_nextra_env; k++) if (e_strncmp(g_extra_env[k], dotnet_envs[i], nl) == 0 && g_extra_env[k][nl] == '=') dup = 1; if (!dup) envs[ne++] = dotnet_envs[i]; }
   for (int i = 0; i < g_nextra_env && ne < 127; i++) envs[ne++] = g_extra_env[i]; envs[ne] = 0;

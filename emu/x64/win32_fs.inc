@@ -311,14 +311,18 @@ static void s_MapViewOfFile(Cpu *c) {
   int fd = handle_fd(ARG(0)); if (fd < 3 || vfs_kind(fd) != FD_MAP) { W->last_error = 6; RET(0); return; }
   u64 sz; u8 *src = vfs_map_data(fd, &sz); if (!src) { RET(0); return; }
   u64 off = ((u64)(u32)ARG(2) << 32) | (u32)ARG(3); if (off > sz) off = sz; u64 n = ARG(4) ? ARG(4) : sz - off; if (off + n > sz) n = sz - off;
-  u64 a = w32_heap_alloc(W, n ? n : 1, 1); u8 *p = mem_ptr(c->mem, a, n, 1); if (p && n) e_memcpy(p, src + off, (size_t)n);
-  ProcFs *P = vfs_P; if (P->nviews < 32) { P->views[P->nviews].addr = a; P->views[P->nviews].size = n; P->views[P->nviews].fd = vfs_dup(fd); P->nviews++; }
-  RET(a);
+  /* a view is its own 64 KB-aligned allocation that VirtualQuery reports as MEM_MAPPED / PAGE_READWRITE with the view as AllocationBase: HotSpot's
+     os::unmap_memory inspects it (CDS bitmap region) and fails hard when the base is a heap sub-block */
+  u64 a = w32_heap_alloc(W, n + 0x10000, 1); if (!a) { W->last_error = 8; RET(0); return; } u64 r = (a + 0xffff) & ~0xffffull; u8 *p = mem_ptr(c->mem, r, n, 1); if (p && n) e_memcpy(p, src + off, (size_t)n);
+  vm_add_view(r, (n + 0xfff) & ~0xfffull, a);
+  ProcFs *P = vfs_P; if (P->nviews < 32) { P->views[P->nviews].addr = r; P->views[P->nviews].size = n; P->views[P->nviews].fd = vfs_dup(fd); P->nviews++; }
+  RET(r);
 }
 static void s_MapViewOfFileEx(Cpu *c) { s_MapViewOfFile(c); }
 static void view_flush(Cpu *c, int i) { ProcFs *P = vfs_P; const u8 *p = mem_ptr(c->mem, P->views[i].addr, P->views[i].size, 0); if (p) vfs_map_write_back(P->views[i].fd, p, P->views[i].size); }
 static void views_flush_all(Cpu *c) { for (int i = 0; i < vfs_P->nviews; i++) view_flush(c, i); }
-static void s_UnmapViewOfFile(Cpu *c) { ProcFs *P = vfs_P; for (int i = 0; i < P->nviews; i++) if (P->views[i].addr == ARG(0)) { view_flush(c, i); vfs_close(P->views[i].fd); P->views[i] = P->views[--P->nviews]; break; } w32_heap_free(W, ARG(0)); RET(1); }
+static void s_UnmapViewOfFile(Cpu *c) { ProcFs *P = vfs_P; int found = 0; for (int i = 0; i < P->nviews; i++) if (P->views[i].addr == ARG(0)) { view_flush(c, i); vfs_close(P->views[i].fd); P->views[i] = P->views[--P->nviews]; found = 1; break; }
+  if (!found) { W->last_error = 487; RET(0); return; } vm_release_view(W, ARG(0)); RET(1); }
 static void s_FlushViewOfFile(Cpu *c) { ProcFs *P = vfs_P; for (int i = 0; i < P->nviews; i++) if (ARG(0) >= P->views[i].addr && ARG(0) < P->views[i].addr + P->views[i].size) view_flush(c, i); RET(1); }
 /* MinGW inlines getc/putc: getc = (--f->_cnt >= 0 ? *f->_ptr++ : _filbuf(f)); so FILE needs a real guest buffer:
    _ptr +0, _cnt +8, _base +16, _flag +24, _file +28.  file_sync() discards an unread buffer (seeking back) before any

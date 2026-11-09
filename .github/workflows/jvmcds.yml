@@ -26,48 +26,49 @@ jobs:
           mkdir -p /tmp/np/game /tmp/np/tmp /tmp/np/frames
           curl -fsSL --retry 3 -o /tmp/np/spd.zip https://github.com/00-Evan/shattered-pixel-dungeon/releases/download/v4.0.2/ShatteredPD-v4.0.2-Windows.zip
           unzip -q -o /tmp/np/spd.zip -d /tmp/np/game; ls /tmp/np/game; ls /tmp/np/game/runtime/lib | head; test ! -f /tmp/np/game/runtime/lib/server/classes.jsa && echo "no CDS archive in the bundle (as expected)"
-      - name: Run A — baseline (no CDS) + record the loaded class list (-XX:DumpLoadedClassList)
+      - name: "Launch 1 (first start: records the loaded class list) — the emulator picks the HotSpot CDS mode by itself from <game>\\app\\nebula-cds.*"
         run: |
-          FR="${{ github.event.inputs.frames || '20' }}"; MS="${{ github.event.inputs.ms || '420000' }}"; cd /tmp/np/frames
+          FR="${{ github.event.inputs.frames || '20' }}"; MS="${{ github.event.inputs.ms || '420000' }}"; mkdir -p /tmp/np/frames1; cd /tmp/np/frames1
           t0=$(date +%s); rc=0
-          X64_GL_NULL=1 timeout $((MS / 1000 + 600)) "$GITHUB_WORKSPACE/emu/x64/x64run" --quiet --no-stdin --stats --max-ms $MS --desktop 1280x720 --frames $FR \
-            --mount-rw "/tmp/np/tmp=C:\\tmp" --mount "/tmp/np/game=C:\\game" \
-            --env 'JAVA_TOOL_OPTIONS=-XX:TieredStopAtLevel=1 -XX:-UsePerfData -XX:+IgnoreUnrecognizedVMOptions -XX:DumpLoadedClassList=C:\tmp\classes.lst' \
-            "/tmp/np/game/Shattered Pixel Dungeon.exe" > /tmp/np/runA.txt 2>&1 || rc=$?
-          echo "rc=$rc wall=$(( $(date +%s) - t0 )) s"; tail -30 /tmp/np/runA.txt | cut -c1-300
-          ls -la /tmp/np/tmp; wc -l /tmp/np/tmp/classes.lst || true; head -5 /tmp/np/tmp/classes.lst || true
-      - name: Dump the static CDS archive with the game's class list (-Xshare:dump, same jvm.dll, inside the emulator)
+          X64_GL_NULL=1 timeout $((MS / 1000 + 600)) "$GITHUB_WORKSPACE/emu/x64/x64run" --no-stdin --stats --max-ms $MS --desktop 1280x720 --frames $FR \
+            --mount-rw "/tmp/np/tmp=C:\\tmp" --mount-rw "/tmp/np/game=C:\\game" \
+            "/tmp/np/game/Shattered Pixel Dungeon.exe" > /tmp/np/run1.txt 2>&1 || rc=$?
+          echo "rc=$rc wall=$(( $(date +%s) - t0 )) s"; grep -a -v "^\[wnd\]" /tmp/np/run1.txt | grep -a -i "java\]\|cds\|instructions in\|exit code\|FAULT\|Picked up\|error\|LWJGL\|Controllers" | head -40 | cut -c1-300
+          echo "frames (seconds after start):"; for f in frame_*.ppm; do [ -f "$f" ] && echo "  $f +$(( $(stat -c %Y "$f") - t0 )) s"; done | head -12
+          ls -la /tmp/np/game/app | grep -i "nebula-cds" || echo "(no nebula-cds files yet)"
+      - name: "Launch 2 (second start: the one-time -Xshare:dump pass, exits by itself and asks for a relaunch) — the emulator picks the HotSpot CDS mode by itself from <game>\\app\\nebula-cds.*"
         run: |
-          MS="${{ github.event.inputs.ms || '420000' }}"; cd /tmp/np/frames
-          [ -s /tmp/np/tmp/classes.lst ] || { echo "::warning::no class list recorded, dumping with the default lib/classlist"; cp /tmp/np/game/runtime/lib/classlist /tmp/np/tmp/classes.lst; }
+          FR="${{ github.event.inputs.frames || '20' }}"; MS="${{ github.event.inputs.ms || '420000' }}"; mkdir -p /tmp/np/frames2; cd /tmp/np/frames2
           t0=$(date +%s); rc=0
-          X64_GL_NULL=1 timeout 3300 "$GITHUB_WORKSPACE/emu/x64/x64run" --quiet --no-stdin --stats --max-ms 2700000 --desktop 1280x720 \
-            --mount-rw "/tmp/np/tmp=C:\\tmp" --mount "/tmp/np/game=C:\\game" \
-            --env 'JAVA_TOOL_OPTIONS=-Xshare:dump -XX:SharedClassListFile=C:\tmp\classes.lst -XX:SharedArchiveFile=C:\tmp\spd.jsa -Xlog:cds=info -XX:TieredStopAtLevel=1 -XX:-UsePerfData -XX:+IgnoreUnrecognizedVMOptions' \
-            "/tmp/np/game/Shattered Pixel Dungeon.exe" > /tmp/np/dump.txt 2>&1 || rc=$?
-          echo "rc=$rc wall=$(( $(date +%s) - t0 )) s"; grep -a -v "^\[wnd\]" /tmp/np/dump.txt | tail -60 | cut -c1-300
-          ls -la /tmp/np/tmp
-      - name: Run C — with the CDS archive (-Xshare:on so a mapping failure is loud)
+          X64_GL_NULL=1 timeout $((MS / 1000 + 600)) "$GITHUB_WORKSPACE/emu/x64/x64run" --no-stdin --stats --max-ms $MS --desktop 1280x720 --frames $FR \
+            --mount-rw "/tmp/np/tmp=C:\\tmp" --mount-rw "/tmp/np/game=C:\\game" \
+            "/tmp/np/game/Shattered Pixel Dungeon.exe" > /tmp/np/run2.txt 2>&1 || rc=$?
+          echo "rc=$rc wall=$(( $(date +%s) - t0 )) s"; grep -a -v "^\[wnd\]" /tmp/np/run2.txt | grep -a -i "java\]\|cds\|instructions in\|exit code\|FAULT\|Picked up\|error\|LWJGL\|Controllers" | head -40 | cut -c1-300
+          echo "frames (seconds after start):"; for f in frame_*.ppm; do [ -f "$f" ] && echo "  $f +$(( $(stat -c %Y "$f") - t0 )) s"; done | head -12
+          ls -la /tmp/np/game/app | grep -i "nebula-cds" || echo "(no nebula-cds files yet)"
+      - name: "Launch 3 (third start: maps the archive, -Xlog:cds=info added to prove it) — the emulator picks the HotSpot CDS mode by itself from <game>\\app\\nebula-cds.*"
         run: |
-          FR="${{ github.event.inputs.frames || '20' }}"; MS="${{ github.event.inputs.ms || '420000' }}"; cd /tmp/np/frames
-          test -s /tmp/np/tmp/spd.jsa || { echo "::error::no archive produced"; exit 1; }
+          FR="${{ github.event.inputs.frames || '20' }}"; MS="${{ github.event.inputs.ms || '420000' }}"; mkdir -p /tmp/np/frames3; cd /tmp/np/frames3
           t0=$(date +%s); rc=0
-          X64_GL_NULL=1 timeout $((MS / 1000 + 600)) "$GITHUB_WORKSPACE/emu/x64/x64run" --quiet --no-stdin --stats --max-ms $MS --desktop 1280x720 --frames $FR \
-            --mount-rw "/tmp/np/tmp=C:\\tmp" --mount "/tmp/np/game=C:\\game" \
-            --env 'JAVA_TOOL_OPTIONS=-Xshare:on -XX:SharedArchiveFile=C:\tmp\spd.jsa -Xlog:cds=info -XX:TieredStopAtLevel=1 -XX:-UsePerfData -XX:+IgnoreUnrecognizedVMOptions' \
-            "/tmp/np/game/Shattered Pixel Dungeon.exe" > /tmp/np/runC.txt 2>&1 || rc=$?
-          echo "rc=$rc wall=$(( $(date +%s) - t0 )) s"; grep -a -v "^\[wnd\]" /tmp/np/runC.txt | tail -40 | cut -c1-300
-      - name: Compare
+          X64_GL_NULL=1 timeout $((MS / 1000 + 600)) "$GITHUB_WORKSPACE/emu/x64/x64run" --no-stdin --stats --max-ms $MS --desktop 1280x720 --frames $FR \
+            --mount-rw "/tmp/np/tmp=C:\\tmp" --mount-rw "/tmp/np/game=C:\\game" --env 'JAVA_TOOL_OPTIONS=-XX:TieredStopAtLevel=1 -XX:-UsePerfData -XX:+IgnoreUnrecognizedVMOptions -Xshare:on -XX:SharedArchiveFile=C:\game\app\nebula-cds.jsa -Xlog:cds=info' \
+            "/tmp/np/game/Shattered Pixel Dungeon.exe" > /tmp/np/run3.txt 2>&1 || rc=$?
+          echo "rc=$rc wall=$(( $(date +%s) - t0 )) s"; grep -a -v "^\[wnd\]" /tmp/np/run3.txt | grep -a -i "java\]\|cds\|instructions in\|exit code\|FAULT\|Picked up\|error\|LWJGL\|Controllers" | head -40 | cut -c1-300
+          echo "frames (seconds after start):"; for f in frame_*.ppm; do [ -f "$f" ] && echo "  $f +$(( $(stat -c %Y "$f") - t0 )) s"; done | head -12
+          ls -la /tmp/np/game/app | grep -i "nebula-cds" || echo "(no nebula-cds files yet)"
+      - name: Compare (launch 1 = cold, launch 3 = with the archive)
         if: always()
         run: |
-          for r in A C; do echo "== run $r"; grep -a -i "insns\|frames\|MIPS\|swap\|exit" /tmp/np/run$r.txt | tail -8 | cut -c1-200; done
-          grep -a -i "cds\|shared" /tmp/np/runC.txt | head -20 | cut -c1-200
+          for r in 1 2 3; do echo "== launch $r"; grep -a "instructions in\|exit code\|FAULT\|\[java\]" /tmp/np/run$r.txt | tail -5 | cut -c1-200; echo "  first frames:"; (cd /tmp/np/frames$r 2>/dev/null && ls -la --time-style=+%T frame_*.ppm 2>/dev/null | head -3); done
+          grep -a -i "cds\]" /tmp/np/run3.txt | head -12 | cut -c1-200
+          test -s /tmp/np/game/app/nebula-cds.jsa && echo "archive: $(stat -c %s /tmp/np/game/app/nebula-cds.jsa) bytes" || { echo "::error::no nebula-cds.jsa was produced"; exit 1; }
+          grep -a -q "Unable to use shared archive\|fatal error" /tmp/np/run3.txt && { echo "::error::launch 3 did not use the archive"; exit 1; } || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: jvmcds
           path: |
-            /tmp/np/runA.txt
-            /tmp/np/dump.txt
-            /tmp/np/runC.txt
-            /tmp/np/tmp/classes.lst
+            /tmp/np/run1.txt
+            /tmp/np/run2.txt
+            /tmp/np/run3.txt
+            /tmp/np/game/app/nebula-cds.lst

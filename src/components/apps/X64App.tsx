@@ -254,7 +254,9 @@ export default function X64App() {
     rt.onPresent = (px, w, h) => { presenterRef.current?.present(px, w, h); setFrames(f => { if (f === 0 && autoTabRef.current) setTab('screen'); return f + 1; }); };
     rt.onGlPresent = (cv, x, y, w, h) => presenterRef.current?.setGl(cv, x, y, w, h) ?? false;
     rt.onGlFlip = () => { presenterRef.current?.redraw(); setFrames(f => f + 1); };
-    rt.onStop = (s) => { void rt.syncDisk().then(notifyDiskChange); if (s.status === 'fault') { setFs(false); if (document.fullscreenElement) void document.exitFullscreen().catch(() => {}); } setStats(s); setApiStats(rt.apiStats()); setJitInfo(rt.jitStats()); setFiles(rt.vfsList()); rescanRef.current(true); if (s.status !== 'exited' || !s.hasWindow) setTab(t => (s.hasWindow && s.status === 'exited') ? t : (s.status === 'fault' ? 'report' : t === 'screen' && !s.hasWindow ? 'console' : t)); };
+    rt.onStop = (s) => { void rt.syncDisk().then(notifyDiskChange);
+      if (s.status === 'exited' && rt.relaunchRequested() && relaunches.current < 2 && curRef.current) { relaunches.current++; setLog(l => [...l, 'Java: class-data archive built — starting the program again']); setTimeout(() => void runRef.current(curRef.current ?? undefined, argsRef.current), 300); return; }
+      if (s.status === 'fault') { setFs(false); if (document.fullscreenElement) void document.exitFullscreen().catch(() => {}); } setStats(s); setApiStats(rt.apiStats()); setJitInfo(rt.jitStats()); setFiles(rt.vfsList()); rescanRef.current(true); if (s.status !== 'exited' || !s.hasWindow) setTab(t => (s.hasWindow && s.status === 'exited') ? t : (s.status === 'fault' ? 'report' : t === 'screen' && !s.hasWindow ? 'console' : t)); };
     rt.onDisk = () => setDisk({ files: rt.diskFiles, writes: rt.disk.writes, bytes: rt.disk.bytes, queued: rt.disk.queued() });
     rt.init().then(async () => {
       if (!alive) return;
@@ -591,6 +593,7 @@ export default function X64App() {
     setTimeout(() => screenRef.current?.focus(), 50);
   }, [pack, installPack, dotnet, installDotnet, dx, installDx, dx32, installDx32]);
   const curRef = useRef<ExeEntry | null>(null); curRef.current = current;
+  const runRef = useRef(run); runRef.current = run; const relaunches = useRef(0);
   const argsRef = useRef(''); argsRef.current = args;
 
   /** the library's Play button: the installed exe from the persistent disk, started in its own folder with the shortcut's arguments */
