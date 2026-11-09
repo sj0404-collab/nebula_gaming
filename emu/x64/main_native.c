@@ -9,7 +9,7 @@
 int x64_load(const u8 *bytes, size_t len, const char *name, const char *cmdline);
 static int g_apitrace;
 int x64_run(u64 budget); void x64_set_desktop(int dw, int dh); extern int g_prof_on; int prof_report(char *buf, int cap, int top); void x64_set_hle(int on); void x64_trace(int on); const char *x64_inspect(const u8 *b, size_t n); const char *x64_error(void); u64 x64_error_rip(void); const char *x64_report(void); u64 x64_icount(void); int x64_exit_code(void); const char *x64_error_bytes(void); const char *x64_regs(void); const char *x64_history(void); int x64_mem_copy(u64 addr, unsigned char *dst, unsigned n); void x64_key(int vk, int down); void x64_mouse(int x, int y, int ev); double x64_sleep_ms(void); const char *x64_api_stats(void); int x64_has_window(void);
-int x64_vfs_add(const char *path, const u8 *data, size_t n); int x64_vfs_mkdir(const char *path); const char *x64_vfs_list(void); void x64_stdin_write(const u8 *data, size_t n); void x64_stdin_eof(void); int x64_wants_stdin(void);
+int x64_vfs_add(const char *path, const u8 *data, size_t n); int x64_vfs_set_mtime(const char *path, double unix_ms); int x64_vfs_mkdir(const char *path); const char *x64_vfs_list(void); void x64_stdin_write(const u8 *data, size_t n); void x64_stdin_eof(void); int x64_wants_stdin(void);
 void host_set_dump(int every, const char *prefix); int host_frames(void); double host_now_ms(void);
 
 
@@ -33,7 +33,7 @@ static int mount_dir(const char *host, const char *guest, int depth) {   /* copi
     struct stat st; if (stat(hp, &st)) continue;
     if (S_ISDIR(st.st_mode)) { if (depth < 40) n += mount_dir(hp, gp, depth + 1); continue; }
     size_t got = 0; u8 *buf = map_file(hp, &got); if (!buf) continue;
-    x64_vfs_add(gp, buf, got); n++;   /* the VFS references the mapping (copy-on-write pages, clean ones are reclaimable) */
+    x64_vfs_add(gp, buf, got); x64_vfs_set_mtime(gp, (double)st.st_mtime * 1000.0); n++;   /* the VFS references the mapping (copy-on-write pages, clean ones are reclaimable); host mtime → stable file dates */
   }
   closedir(d); return n;
 }

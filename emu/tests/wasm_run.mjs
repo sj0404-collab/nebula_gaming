@@ -82,7 +82,7 @@ for (const m of mounts) {
     for (const e of fs.readdirSync(h, { withFileTypes: true })) {
       const hp = path.join(h, e.name), gp = g + '\\' + e.name;
       if (e.isDirectory()) { ex.x64_vfs_mkdir(putStr(gp)); walk(hp, gp); }
-      else { const b = fs.readFileSync(hp); ex.x64_vfs_add(putStr(gp), put(b), BigInt(b.length)); }
+      else { const b = fs.readFileSync(hp); ex.x64_vfs_add(putStr(gp), put(b), BigInt(b.length)); ex.x64_vfs_set_mtime?.(putStr(gp), fs.statSync(hp).mtimeMs); }
     }
   };
   ex.x64_vfs_mkdir(putStr(guest)); walk(host, guest);

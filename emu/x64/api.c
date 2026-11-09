@@ -212,6 +212,7 @@ EXPORT(x64_run) int x64_run(u64 budget) {
 /* ---- virtual file system / stdin (host side) ---- */
 EXPORT(x64_vfs_add) int x64_vfs_add(const char *path, const u8 *data, size_t n) { return vfs_add_ref(path, (u8 *)data, n) >= 0; }   /* host-owned buffer, referenced not copied */
 EXPORT(x64_chdir) int x64_chdir(const char *path) { return vfs_chdir(path); }   /* working directory of the loaded process (a shortcut's "Start in"); call after x64_load */
+EXPORT(x64_vfs_set_mtime) int x64_vfs_set_mtime(const char *path, double unix_ms) { if (!(unix_ms > 0)) return 0; return vfs_set_mtime_path(path, ((u64)(unix_ms / 1000.0) + 11644473600ull) * 10000000ull + ((u64)unix_ms % 1000ull) * 10000ull); }   /* stable modification times across sessions: HotSpot's CDS validates the class-path jars by mtime+size, installers compare file dates */
 EXPORT(x64_vfs_add_lazy) int x64_vfs_add_lazy(const char *path, size_t n) { return vfs_add_lazy(path, n) >= 0; }   /* bytes stay in JS until a program opens the file (host_fs_size / host_fs_read) */
 EXPORT(x64_vfs_sync) void x64_vfs_sync(void) { vfs_sync_all(); }   /* flush written files (open or never closed) to the persistent disk */
 /* OpenGL bridge: guest memory access for the host during host_gl_call (pointer arguments are guest addresses) */

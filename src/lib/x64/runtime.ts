@@ -36,7 +36,7 @@ type Exports = {
   x64_icount(): bigint; x64_exit_code(): number; x64_error(): bigint; x64_error_rip(): bigint; x64_rip(): bigint; x64_report(): bigint; x64_console(): bigint;
   x64_screen_w(): number; x64_screen_h(): number; x64_set_desktop?(w: number, h: number): void; x64_screen(): bigint; x64_title(): bigint; x64_subsystem(): number; x64_sleep_ms(): number; x64_mem_used(): bigint; x64_has_window(): number; x64_proc_count(): number; x64_thread_count(): number; x64_audio_frames(): bigint;
   x64_api_stats(): bigint; x64_error_bytes(): bigint;
-  x64_vfs_add(path: bigint, data: bigint, n: bigint): number; x64_vfs_mkdir(path: bigint): number;
+  x64_vfs_add(path: bigint, data: bigint, n: bigint): number; x64_vfs_mkdir(path: bigint): number; x64_vfs_set_mtime?(path: bigint, unixMs: number): number;
   x64_gl_ptr(addr: bigint, len: bigint, write: number): bigint; x64_gl_strlen(addr: bigint): bigint; x64_gl_alloc(len: bigint): bigint; x64_gl_free(addr: bigint): void; x64_gl_psize(): number; x64_vfs_remove(path: bigint): number;
   x64_vfs_size(path: bigint): bigint; x64_vfs_data(path: bigint): bigint; x64_vfs_list(): bigint; x64_vfs_add_lazy?(path: bigint, n: bigint): number; x64_vfs_written?(path: bigint): number;
   x64_stdin_write(data: bigint, n: bigint): void; x64_stdin_eof(): void; x64_wants_stdin(): number;
@@ -227,6 +227,7 @@ export class X64Runtime {
       if (f.data === null) ex.x64_vfs_mkdir(this.putStr(f.path));
       else if (ex.x64_vfs_add_lazy) { this.cache.set(diskKey(f.path), f.data); ex.x64_vfs_add_lazy(this.putStr(f.path), BigInt(f.data.length)); }
       else ex.x64_vfs_add(this.putStr(f.path), this.put(f.data), BigInt(f.data.length));
+      if (f.mtime > 0) ex.x64_vfs_set_mtime?.(this.putStr(f.path), f.mtime);   // the stored date, not 'now': CDS archives / installers compare file dates across sessions
     }
     this.diskFiles = files.length;
   }

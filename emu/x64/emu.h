@@ -443,7 +443,7 @@ int  vfs_remove(const char *path);
 int  vfs_rename(const char *from, const char *to);
 int  vfs_chdir(const char *path);
 int  vfs_stat(const char *path, u64 *size);
-u64  vfs_now_filetime(void); u64 vfs_find_mtime(int h); u64 vfs_mtime_path(const char *path); u64 vfs_mtime_fd(int fd); int vfs_set_mtime_fd(int fd, u64 ft);
+u64  vfs_now_filetime(void); u64 vfs_find_mtime(int h); u64 vfs_mtime_path(const char *path); int vfs_set_mtime_path(const char *path, u64 ft); u64 vfs_mtime_fd(int fd); int vfs_set_mtime_fd(int fd, u64 ft);
 const VNodeInfo *vfs_node_info(int i, VNodeInfo *out);
 void w32_hle_scan(Win32 *w, u8 *img, u64 base, u64 size);   /* hle_lzma.inc: signature-patch hot library code (LZMA decoder) in a freshly mapped 32-bit exe */
 void w32_set_desktop(int dw, int dh); void w32_desktop_apply(Win32 *w); extern int g_desk_w, g_desk_h;   /* desktop mode (user.inc): fixed desk_w x desk_h framebuffer / display metrics */

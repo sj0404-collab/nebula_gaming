@@ -148,6 +148,7 @@ int vfs_stat(const char *path, u64 *size) { if (vfs_is_null_dev(path)) { if (siz
 /* real per-file times: a file keeps the time of its creation / last write (programs compare them to detect outside changes) */
 u64 vfs_now_filetime(void) { return ((u64)(host_wall_ms() / 1000.0) + 11644473600ull) * 10000000ull + ((u64)host_wall_ms() % 1000ull) * 10000ull; }
 static u64 node_mtime(int i) { if (i < 0 || i >= g_ncap || !g_nodes[i].used) return vfs_now_filetime(); if (!g_nodes[i].mtime) g_nodes[i].mtime = vfs_now_filetime(); return g_nodes[i].mtime; }
+int vfs_set_mtime_path(const char *path, u64 ft) { int i = vfs_find_node(path); if (i < 0) return 0; g_nodes[i].mtime = ft ? ft : vfs_now_filetime(); return 1; }
 u64 vfs_mtime_path(const char *path) { int i = vfs_find_node(path); if (i < 0) { static u64 boot; if (!boot) boot = vfs_now_filetime(); return boot; } return node_mtime(i); }
 const VNodeInfo *vfs_node_info(int i, VNodeInfo *out) { if (i < 0 || i >= g_ncap || !g_nodes[i].used) return 0; out->path = g_nodes[i].path; out->data = g_nodes[i].data; out->size = g_nodes[i].size; out->is_dir = g_nodes[i].is_dir; out->written = g_nodes[i].written; return out; }
 const u8 *vfs_node_data(int i) { if (i < 0 || i >= g_ncap || !g_nodes[i].used || g_nodes[i].is_dir) return 0; node_load(i); g_nodes[i].pinned = 1; return g_nodes[i].data; }
