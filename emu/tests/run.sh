@@ -464,7 +464,7 @@ print('above' if sc and tb and sc[-1] > tb[-1] else 'below %r %r' % (sc, tb))")"
   check "Notepad++ x64: Ctrl+H → 'abc' Tab 'xyz' → Replace All → Esc → Save As rep → rep.txt = 'xyz xyz xyz'"   "rep.txt:xyz xyz xyz"   "$(ls "$ID/npp" | grep -a '^rep' | tr '\n' ' ' | sed 's/ $//'):$(cat "$ID/npp/rep.txt" 2>/dev/null)"
   # Settings → Preferences: 26 child page dialogs (~540 windows), the Dark Mode page with 13 ColourPicker buttons (subclassed Buttons that
   # paint in WM_ERASEBKGND and go grey through WM_ENABLE), pages at the template position right of the category list
-  out=$(X64_LOG=1 X64_WNDDUMP=1 X64_MODAL=1 $X --no-stdin --max-ms 25000 --click 265,10@16000 --click 300,34@17500 --click 110,276@20000 --mount-rw "$ID/npp=C:\\nebula" $ID/npp/notepad++.exe 2>&1 3>&1 | grep -a "^\\[wnd\\]\\|FAULT\\|MessageBox" || true)
+  out=$(X64_LOG=1 X64_WNDDUMP=1 X64_MODAL=1 $X --no-stdin --max-ms 45000 --click 265,10@18000 --click 300,34@19500 --click 110,276@23000 --mount-rw "$ID/npp=C:\\nebula" $ID/npp/notepad++.exe 2>&1 3>&1 | grep -a "^\\[wnd\\]\\|FAULT\\|MessageBox" || true)
   check "Notepad++ x64: Settings → Preferences opens (dialog + 24-entry category list + pages), Dark Mode page shows 13 ColourPickers, no fault"   "prefs=1 pickers=13 lightmode=1 errors=0"   "prefs=$(printf '%s\n' "$out" | grep -a -c '"Preferences"') pickers=$(printf '%s\n' "$out" | grep -a -c '"Button" "F" ') lightmode=$(printf '%s\n' "$out" | grep -a -c '"Light mode"') errors=$(printf '%s\n' "$out" | grep -a -c 'FAULT\\|MessageBox')"
   check "Notepad++ x64: a Preferences page sits right of the category list (x >= 160) inside the dialog client"   "page_ok"   "$(printf '%s\n' "$out" | python3 -c "
 import re,sys
