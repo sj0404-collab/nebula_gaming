@@ -56,6 +56,16 @@ jobs:
           echo "rc=$rc wall=$(( $(date +%s) - t0 )) s"; grep -a -v "^\[wnd\]" /tmp/np/run3.txt | grep -a -i "java\]\|cds\|instructions in\|exit code\|FAULT\|Picked up\|error\|LWJGL\|Controllers" | head -40 | cut -c1-300
           echo "frames (seconds after start):"; for f in frame_*.ppm; do [ -f "$f" ] && echo "  $f +$(( $(stat -c %Y "$f") - t0 )) s"; done | head -12
           ls -la /tmp/np/game/app | grep -i "nebula-cds" || echo "(no nebula-cds files yet)"
+      - name: "Launch 4 (diagnostics: launch 3 again with X64_LOG=1 for 90 s — hardware exceptions, SEH dispatch, module bases)"
+        if: always()
+        run: |
+          mkdir -p /tmp/np/frames4; cd /tmp/np/frames4; rc=0
+          X64_LOG=1 X64_GL_NULL=1 timeout 600 "$GITHUB_WORKSPACE/emu/x64/x64run" --no-stdin --max-ms 90000 --desktop 1280x720 \
+            --mount-rw "/tmp/np/tmp=C:\\tmp" --mount-rw "/tmp/np/game=C:\\game" \
+            --env 'JAVA_TOOL_OPTIONS=-XX:TieredStopAtLevel=1 -XX:-UsePerfData -XX:+IgnoreUnrecognizedVMOptions -Xshare:on -XX:SharedArchiveFile=C:\game\app\nebula-cds.jsa -Xlog:cds=info' \
+            "/tmp/np/game/Shattered Pixel Dungeon.exe" > /tmp/np/run4.txt 2>&1 || rc=$?
+          echo "rc=$rc"; grep -a "loaded DLL\|hw exception\|unhandled\|top-level\|frame pc\|exit code\|FAULT\|instructions in" /tmp/np/run4.txt | grep -a -v "frame pc" | head -60 | cut -c1-260
+          echo "--- last 40 lines before the exit:"; grep -a -v "^\[wnd\]" /tmp/np/run4.txt | grep -a -n "exit code\|hw exception" | head -3; grep -a -v "^\[wnd\]" /tmp/np/run4.txt | grep -a -B40 "exit code" | head -60 | cut -c1-260
       - name: Compare (launch 1 = cold, launch 3 = with the archive)
         if: always()
         run: |
@@ -71,4 +81,5 @@ jobs:
             /tmp/np/run1.txt
             /tmp/np/run2.txt
             /tmp/np/run3.txt
+            /tmp/np/run4.txt
             /tmp/np/game/app/nebula-cds.lst
