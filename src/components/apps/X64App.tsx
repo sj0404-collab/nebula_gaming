@@ -255,6 +255,7 @@ export default function X64App() {
     rt.onGlPresent = (cv, x, y, w, h) => presenterRef.current?.setGl(cv, x, y, w, h) ?? false;
     rt.onGlFlip = () => { presenterRef.current?.redraw(); setFrames(f => f + 1); };
     rt.onStop = (s) => { void rt.syncDisk().then(notifyDiskChange);
+      setFetching(f => f && f.startsWith('Java: one-time') ? null : f);
       if (s.status === 'exited' && rt.relaunchRequested() && relaunches.current < 2 && curRef.current) { relaunches.current++; setLog(l => [...l, 'Java: class-data archive built — starting the program again']); setTimeout(() => void runRef.current(curRef.current ?? undefined, argsRef.current), 300); return; }
       if (s.status === 'fault') { setFs(false); if (document.fullscreenElement) void document.exitFullscreen().catch(() => {}); } setStats(s); setApiStats(rt.apiStats()); setJitInfo(rt.jitStats()); setFiles(rt.vfsList()); rescanRef.current(true); if (s.status !== 'exited' || !s.hasWindow) setTab(t => (s.hasWindow && s.status === 'exited') ? t : (s.status === 'fault' ? 'report' : t === 'screen' && !s.hasWindow ? 'console' : t)); };
     rt.onDisk = () => setDisk({ files: rt.diskFiles, writes: rt.disk.writes, bytes: rt.disk.bytes, queued: rt.disk.queued() });
@@ -589,8 +590,9 @@ export default function X64App() {
     const err = rt.start(current.bytes, current.path ?? base, args.trim() ? `${argv0} ${args.trim()}` : argv0, current.cwd);
     if (err) { setLog(l => [...l, 'LOADER: ' + err]); setStats(rt.stats()); setTab('report'); return; }
     cur.current = { x: -1, y: -1 };
+    if (rt.cdsDumpPass()) setFetching('Java: one-time preparation — building the class-data archive for this program (a few minutes on a phone); it starts by itself afterwards');
     setStats(rt.stats()); setFiles(rt.vfsList()); setFrames(0);
-    setTab(current.info.subsystem === 'GUI' ? 'screen' : 'console'); autoTabRef.current = true;
+    setTab(current.info.subsystem === 'GUI' && !rt.cdsDumpPass() ? 'screen' : 'console'); autoTabRef.current = true;
     setTimeout(() => screenRef.current?.focus(), 50);
   }, [pack, installPack, dotnet, installDotnet, dx, installDx, dx32, installDx32]);
   const curRef = useRef<ExeEntry | null>(null); curRef.current = current;

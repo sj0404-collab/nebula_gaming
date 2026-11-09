@@ -33,7 +33,7 @@ type Exports = {
   memory: WebAssembly.Memory;
   x64_alloc(n: bigint): bigint; x64_inspect(p: bigint, n: bigint): bigint; x64_load(p: bigint, n: bigint, name: bigint, cmd: bigint): number;
   x64_reserve(n: bigint): number; x64_run(budget: bigint): number; x64_key(vk: number, down: number): void; x64_char(cp: number): void; x64_mouse(x: number, y: number, ev: number): void;
-  x64_icount(): bigint; x64_exit_code(): number; x64_relaunch?(): number; x64_error(): bigint; x64_error_rip(): bigint; x64_rip(): bigint; x64_report(): bigint; x64_console(): bigint;
+  x64_icount(): bigint; x64_exit_code(): number; x64_relaunch?(): number; x64_cds_dump_pass?(): number; x64_error(): bigint; x64_error_rip(): bigint; x64_rip(): bigint; x64_report(): bigint; x64_console(): bigint;
   x64_screen_w(): number; x64_screen_h(): number; x64_set_desktop?(w: number, h: number): void; x64_screen(): bigint; x64_title(): bigint; x64_subsystem(): number; x64_sleep_ms(): number; x64_mem_used(): bigint; x64_has_window(): number; x64_proc_count(): number; x64_thread_count(): number; x64_audio_frames(): bigint;
   x64_api_stats(): bigint; x64_error_bytes(): bigint;
   x64_vfs_add(path: bigint, data: bigint, n: bigint): number; x64_vfs_mkdir(path: bigint): number; x64_vfs_set_mtime?(path: bigint, unixMs: number): number;
@@ -352,6 +352,8 @@ export class X64Runtime {
   apiStats(): string { return this.ex ? this.cstr(this.ex.x64_api_stats()) : ''; }
   /** true once after a HotSpot class-data-sharing dump pass: the program asked to be started again */
   relaunchRequested(): boolean { return !!this.ex?.x64_relaunch?.(); }
+  /** the launch that was just started is HotSpot's one-time -Xshare:dump pass (no window will appear; it relaunches by itself) */
+  cdsDumpPass(): boolean { return !!this.ex?.x64_cds_dump_pass?.(); }
   screenSize(): { w: number; h: number } { return this.ex ? { w: this.ex.x64_screen_w(), h: this.ex.x64_screen_h() } : { w: 0, h: 0 }; }
   /** desktop mode: a fixed w x h desktop (the device screen) instead of a framebuffer that follows the program's windows; 0,0 = legacy.
    *  Remembered and re-applied by start() so a program created after the view was measured gets it from its first window on. */

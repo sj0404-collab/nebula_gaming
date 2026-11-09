@@ -255,7 +255,8 @@ EXPORT(x64_pad) void x64_pad(int idx, int connected, u32 buttons, int lt, int rt
 }
 EXPORT(x64_icount) u64 x64_icount(void) { u64 n = 0; for (int i = 0; i < g_nprocs; i++) if (g_procs[i]) { n += g_procs[i]->cpu.icount; for (int t = 1; t < THREAD_MAX; t++) n += g_procs[i]->w32.tcpu[t].icount; } return n; }
 EXPORT(x64_exit_code) int x64_exit_code(void) { return g_cpu.exit_code; }
-extern int g_relaunch; EXPORT(x64_relaunch) int x64_relaunch(void) { int r = g_relaunch; g_relaunch = 0; return r; }   /* 1 once after a HotSpot CDS dump pass: start the same program again */
+extern int g_relaunch; EXPORT(x64_relaunch) int x64_relaunch(void) { int r = g_relaunch; g_relaunch = 0; return r; }
+EXPORT(x64_cds_dump_pass) int x64_cds_dump_pass(void) { return g_w32.cds_dump_pass; }   /* 1 while the current launch only builds the HotSpot class-data archive */   /* 1 once after a HotSpot CDS dump pass: start the same program again */
 EXPORT(x64_error) const char *x64_error(void) { return g_cpu.err; }
 EXPORT(x64_error_rip) u64 x64_error_rip(void) { return g_cpu.err_rip; }
 static char g_regs[512];
