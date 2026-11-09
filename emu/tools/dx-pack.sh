@@ -12,8 +12,9 @@
 # guest_dir, encoding, files:[{path,size,gz,gzsize,sha256,version}]} — the same layout as the .NET pack.
 #
 # Usage: emu/tools/dx-pack.sh [outdir=public/x64/dx] [plaindir]      (needs curl + cabextract + gzip + python3)
+#        DX_ARCH=x86 emu/tools/dx-pack.sh public/x64/dx/x86 [plaindir]   — the 32-bit DLLs (→ C:\Windows\SysWOW64) for x86 programs
 set -euo pipefail
-OUT=${1:-public/x64/dx}; PLAIN=${2:-}
+OUT=${1:-public/x64/dx}; PLAIN=${2:-}; ARCH=${DX_ARCH:-x64}; GDIR='C:\Windows\System32'; [ "$ARCH" = x86 ] && GDIR='C:\Windows\SysWOW64'
 URL=${DX_REDIST_URL:-https://download.microsoft.com/download/8/4/A/84A35BF1-DAFE-4AE8-82AF-AD2AE20B6B14/directx_Jun2010_redist.exe}
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 if [ -n "${DX_REDIST_FILE:-}" ] && [ -f "$DX_REDIST_FILE" ]; then cp "$DX_REDIST_FILE" "$work/redist.exe"; else
@@ -21,7 +22,7 @@ if [ -n "${DX_REDIST_FILE:-}" ] && [ -f "$DX_REDIST_FILE" ]; then cp "$DX_REDIST
 ls -la "$work/redist.exe"
 cabextract -q -d "$work/s1" "$work/redist.exe"
 mkdir -p "$work/dll"
-for cab in "$work"/s1/*_x64.cab; do
+for cab in "$work"/s1/*_$ARCH.cab; do
   case "$(basename "$cab")" in
     *D3DCompiler_*|*d3dx9_*|*d3dx10_*|*d3dx11_*|*d3dcsx_*|*X3DAudio_*|*XAudio_*|*XACT_*|*xact_*) cabextract -q -d "$work/dll" "$cab" 2>/dev/null || true ;;
   esac
@@ -33,10 +34,10 @@ for f in "$work"/dll/*.dll; do
   case "$b" in xactengine2_*.dll|xinput*.dll) continue ;; esac   # XACT2 / XInput stay out (see the header)
   gzip -9 -n -c "$f" > "$OUT/$b.gz"; [ -n "$PLAIN" ] && cp "$f" "$PLAIN/$b"; n=$((n + 1))
 done
-[ "$n" -gt 0 ] || { echo "dx-pack: no x64 DLLs found in the redistributable" >&2; exit 1; }
-python3 - "$OUT" "$URL" "$work/redist.exe" "$work/dll" <<'EOF'
+[ "$n" -gt 0 ] || { echo "dx-pack: no $ARCH DLLs found in the redistributable" >&2; exit 1; }
+python3 - "$OUT" "$URL" "$work/redist.exe" "$work/dll" "$ARCH" "$GDIR" <<'EOF'
 import sys, os, json, hashlib, struct, time
-out, url, bundle, plain = sys.argv[1:5]
+out, url, bundle, plain, arch, gdir = sys.argv[1:7]
 def file_version(data):
     key = 'VS_VERSION_INFO'.encode('utf-16-le'); i = data.find(key)
     while i >= 0:
@@ -50,8 +51,8 @@ for name in sorted(os.listdir(plain), key=str.lower):
     if not name.lower().endswith('.dll') or not os.path.exists(os.path.join(out, name + '.gz')): continue
     d = open(os.path.join(plain, name), 'rb').read(); gz = os.path.getsize(os.path.join(out, name + '.gz'))
     files.append({ 'path': name, 'size': len(d), 'gz': name + '.gz', 'gzsize': gz, 'sha256': hashlib.sha256(d).hexdigest(), 'version': file_version(d) })
-man = { 'pack': 'Microsoft DirectX End-User Runtimes (June 2010), x64 user-mode DLLs', 'source': url, 'bundle_sha256': hashlib.sha256(open(bundle, 'rb').read()).hexdigest(),
-        'built': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'guest_dir': 'C:\\Windows\\System32', 'encoding': 'gzip', 'files': files }
+man = { 'pack': f'Microsoft DirectX End-User Runtimes (June 2010), {arch} user-mode DLLs', 'arch': arch, 'source': url, 'bundle_sha256': hashlib.sha256(open(bundle, 'rb').read()).hexdigest(),
+        'built': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'guest_dir': gdir, 'encoding': 'gzip', 'files': files }
 json.dump(man, open(os.path.join(out, 'manifest.json'), 'w'), indent=1)
 tot = sum(f['size'] for f in files); gz = sum(f['gzsize'] for f in files)
 print(f"dx-pack: {len(files)} DLLs, {tot / 1048576:.1f} MB ({gz / 1048576:.1f} MB gzipped) → {out}")

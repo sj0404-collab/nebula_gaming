@@ -123,8 +123,10 @@ const DOTNET_DIR = 'C:\\Program Files\\dotnet\\';
    and installed on demand into C:\Windows\System32 when a program imports one of them (or asks for it with LoadLibrary). */
 const DX_URL = '/x64/dx/';
 const DX_DIR = 'C:\\Windows\\System32\\';
-type GzPack = { key: 'dotnet' | 'dx'; url: string; dir: string; label: string };
-const GZ_PACKS: Record<'dotnet' | 'dx', GzPack> = { dotnet: { key: 'dotnet', url: DOTNET_URL, dir: DOTNET_DIR, label: '.NET pack' }, dx: { key: 'dx', url: DX_URL, dir: DX_DIR, label: 'DirectX pack' } };
+type GzPack = { key: 'dotnet' | 'dx' | 'dx32'; url: string; dir: string; label: string };
+const DX32_URL = '/x64/dx/x86/';
+const DX32_DIR = 'C:\\Windows\\SysWOW64\\';
+const GZ_PACKS: Record<'dotnet' | 'dx' | 'dx32', GzPack> = { dotnet: { key: 'dotnet', url: DOTNET_URL, dir: DOTNET_DIR, label: '.NET pack' }, dx32: { key: 'dx32', url: DX32_URL, dir: DX32_DIR, label: 'DirectX pack (x86)' }, dx: { key: 'dx', url: DX_URL, dir: DX_DIR, label: 'DirectX pack' } };
 const exeWantsDx = (dlls: string[] | undefined, man: DotnetManifest | undefined) => !!man && !!dlls && dlls.some(d => man.files.some(f => f.path.toLowerCase() === d.toLowerCase()));
 async function fetchGz(url: string, attempt = 0, plainUrl?: string): Promise<Uint8Array> {   // some static servers (vite preview, nginx gzip_static) send .gz files with Content-Encoding: gzip → the browser already inflated them
   const ac = new AbortController(); const timer = setTimeout(() => ac.abort(), 90_000); let raw: Uint8Array<ArrayBuffer>;
@@ -429,7 +431,7 @@ export default function X64App() {
   useEffect(() => { if (!running) { autoFs.current = false; return; } if (touch && stats?.hasWindow && !fs && !autoFs.current) { autoFs.current = true; setTab('screen'); toggleFullscreen(); } }, [running, stats?.hasWindow, touch, fs, toggleFullscreen]);
 
   const [fetching, setFetching] = useState<string | null>(null);
-  const attempted = useRef({ pack: false, dx: false, dotnet: false });
+  const attempted = useRef({ pack: false, dx: false, dx32: false, dotnet: false });
   const [pack, setPack] = useState<PackState>({ status: 'probing' });
   useEffect(() => { let alive = true; (async () => {
     try { const r = await fetch(PACK_URL + 'manifest.json'); if (!r.ok) throw new Error('HTTP ' + r.status); const man = await r.json() as PackManifest; if (alive) setPack({ status: 'available', manifest: man }); }
@@ -456,10 +458,11 @@ export default function X64App() {
   }, [pack]);
   const [dotnet, setDotnet] = useState<DotnetState>({ status: 'probing' });
   const [dx, setDx] = useState<DotnetState>({ status: 'probing' });
+  const [dx32, setDx32] = useState<DotnetState>({ status: 'probing' });
   useEffect(() => { let alive = true; const probe = async (url: string, set: (st: DotnetState) => void) => {
     try { const r = await fetch(url + 'manifest.json'); if (!r.ok) throw new Error('HTTP ' + r.status); const man = await r.json() as DotnetManifest; if (alive) set({ status: 'available', manifest: man }); }
     catch (e) { if (alive) set({ status: 'unavailable', note: 'not built into this deployment (' + String(e) + ')' }); } };
-  void probe(DOTNET_URL, setDotnet); void probe(DX_URL, setDx); return () => { alive = false; }; }, []);
+  void probe(DOTNET_URL, setDotnet); void probe(DX_URL, setDx); void probe(DX32_URL, setDx32); return () => { alive = false; }; }, []);
   /* shared installer for the per-file-gzip packs (.NET, DirectX): parallel fetch → inflate → virtual disk, one memory.grow up front */
   const installGz = useCallback(async (rt: X64Runtime, pk: GzPack, st: DotnetState, set: (v: DotnetState) => void): Promise<boolean> => {
     if (st.status === 'installed') return true;
@@ -543,11 +546,13 @@ export default function X64App() {
     const complete = (items: { path: string; size: number }[]) => items.length > 0 && items.every(f => rt.cache.get(diskKey(f.path))?.length === f.size);
     if (!attempted.current.pack && pack.status === 'available' && pack.manifest && complete(pack.manifest.files.map(f => ({ path: 'C:\\Windows\\System32\\' + f.name, size: f.size })))) setPack({ ...pack, status: 'installed', done: pack.manifest.files.length });
     if (!attempted.current.dx && dx.status === 'available' && dx.manifest && complete(dx.manifest.files.map(f => ({ path: DX_DIR + f.path, size: f.size })))) setDx({ ...dx, status: 'installed', done: dx.manifest.files.length });
+    if (!attempted.current.dx32 && dx32.status === 'available' && dx32.manifest && complete(dx32.manifest.files.map(f => ({ path: DX32_DIR + f.path, size: f.size })))) setDx32({ ...dx32, status: 'installed', done: dx32.manifest.files.length });
     if (!attempted.current.dotnet && dotnet.status === 'available' && dotnet.manifest && complete(dotnet.manifest.files.map(f => ({ path: DOTNET_DIR + f.path, size: f.size })))) setDotnet({ ...dotnet, status: 'installed', done: dotnet.manifest.files.length });
     for (const pk of vcPacks) if (!vcAttempted.current.has(pk.id) && !vcInstalled.current.has(pk.id) && complete(pk.files.map(f => ({ path: `${pk.guest_dir}\\${f.name}`, size: f.size })))) { vcInstalled.current.add(pk.id); setVcState(st => ({ ...st, [pk.id]: { status: 'installed', done: pk.files.length } })); }
-  }, [ready, pack, dx, dotnet, vcPacks]);
+  }, [ready, pack, dx, dx32, dotnet, vcPacks]);
   const installDotnet = useCallback((rt: X64Runtime) => installGz(rt, GZ_PACKS.dotnet, dotnet, setDotnet), [installGz, dotnet]);
   const installDx = useCallback((rt: X64Runtime) => installGz(rt, GZ_PACKS.dx, dx, setDx), [installGz, dx]);
+  const installDx32 = useCallback((rt: X64Runtime) => installGz(rt, GZ_PACKS.dx32, dx32, setDx32), [installGz, dx32]);
   const run = useCallback(async (entry?: ExeEntry, argv?: string) => {
     const rt = rtRef.current; const current = entry ?? curRef.current; if (!rt || !current) return;
     const args = argv ?? argsRef.current;
@@ -570,7 +575,8 @@ export default function X64App() {
     if (!await ensureVC10Ref.current(rt, current)) { setTab('report'); return; }
     const sample = current.source === 'sample' ? SAMPLES.find(x => x.name === current.name) : undefined;
     if (current.info.pe32plus && pack.status !== 'installed' && (sample?.needsPack || exeWantsPack(current.info.dlls, pack.manifest))) await installPack(rt);   // the program imports a vendor-runtime DLL we ship
-    if (dx.status !== 'installed' && (sample?.needsDx || exeWantsDx(current.info.dlls, dx.manifest))) await installDx(rt);   // the program imports a DirectX DLL we ship (D3DX, D3DCompiler …)
+    if (current.info.pe32plus !== false && dx.status !== 'installed' && (sample?.needsDx || exeWantsDx(current.info.dlls, dx.manifest))) await installDx(rt);
+    if (current.info.pe32plus === false && dx32.status !== 'installed' && exeWantsDx(current.info.dlls, dx32.manifest)) await installDx32(rt);   // a 32-bit program: the x86 DLLs into SysWOW64   // the program imports a DirectX DLL we ship (D3DX, D3DCompiler …)
     if (current.info.dotnet && dotnet.status !== 'installed' && !(await installDotnet(rt))) {   // managed code needs the real runtime
       setLog(l => [...l, `${current.name} is a .NET program (${current.info.dotnet}): the .NET runtime pack could not be installed, so it cannot run here`]); setStats(rt.stats()); setTab('report'); return;
     }
@@ -583,7 +589,7 @@ export default function X64App() {
     setStats(rt.stats()); setFiles(rt.vfsList()); setFrames(0);
     setTab(current.info.subsystem === 'GUI' ? 'screen' : 'console'); autoTabRef.current = true;
     setTimeout(() => screenRef.current?.focus(), 50);
-  }, [pack, installPack, dotnet, installDotnet, dx, installDx]);
+  }, [pack, installPack, dotnet, installDotnet, dx, installDx, dx32, installDx32]);
   const curRef = useRef<ExeEntry | null>(null); curRef.current = current;
   const argsRef = useRef(''); argsRef.current = args;
 
@@ -855,6 +861,7 @@ export default function X64App() {
               <div className="space-y-3">
                 <div className="rounded border p-3"><b>Visual C++ 2015–2022 x64</b><p className="text-sm">Библиотеки Microsoft для 64-битных программ. Статус: {pack.status}{pack.note ? ` — ${pack.note}` : ''}</p><button data-x64-vc14x64={pack.status} disabled={ready !== 'ready' || pack.status !== 'available' || !!running || !!fetching} onClick={() => { const rt = rtRef.current; if (rt) void installPack(rt); }} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button></div>
                 <div className="rounded border p-3"><b>DirectX June 2010 x64</b><p className="text-sm">Пользовательские DLL; не драйвер и не полная реализация DirectX. Статус: {dx.status}{dx.note ? ` — ${dx.note}` : ''}</p><button data-x64-component-dx={dx.status} disabled={ready !== 'ready' || dx.status !== 'available' || !!running || !!fetching} onClick={() => { const rt = rtRef.current; if (rt) void installDx(rt); }} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button></div>
+<div className="rounded border p-3"><b>DirectX June 2010 x86</b><p className="text-sm">Те же DLL (D3DX, D3DCompiler, XAudio2, X3DAudio) в 32-битном варианте → C:\\Windows\\SysWOW64 для 32-битных игр и программ. Статус: {dx32.status}{dx32.note ? ` — ${dx32.note}` : ''}</p><button data-x64-component-dx32={dx32.status} disabled={ready !== 'ready' || dx32.status !== 'available' || !!running || !!fetching} onClick={() => { const rt = rtRef.current; if (rt) void installDx32(rt); }} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button></div>
                 <div className="rounded border p-3"><b>.NET 10 x64</b><p className="text-sm">Среда Microsoft для поддерживаемых управляемых программ. Статус: {dotnet.status}{dotnet.note ? ` — ${dotnet.note}` : ''}</p><button data-x64-component-dotnet={dotnet.status} disabled={ready !== 'ready' || dotnet.status !== 'available' || !!running || !!fetching} onClick={() => { const rt = rtRef.current; if (rt) void installDotnet(rt); }} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button></div>
                 {vcPacks.map(pk => { const st = vcState[pk.id] ?? { status: 'available' as const }; const mb = pk.files.reduce((a, f) => a + f.size, 0) / 1048576; return (
                   <div key={pk.id} className="rounded border p-3" data-x64-vcpack={pk.id} data-x64-vcpack-status={st.status}>

@@ -240,7 +240,7 @@ await test('components persist across closing Programs and reloading the app', a
   await openFromDesktop('Programs');
   let w = page.locator('[data-window][aria-label*="Programs"]');
   await w.locator('[data-x64-tab="components"]').click();
-  const names = ['data-x64-vc10','data-x64-vc14x86','data-x64-vc14x64','data-x64-component-dx','data-x64-component-dotnet'];
+  const names = ['data-x64-vc10','data-x64-vc14x86','data-x64-vc14x64','data-x64-component-dx','data-x64-component-dx32','data-x64-component-dotnet'];
   for (const attr of names) {
     await w.locator(`[${attr}]`).waitFor({ timeout: 120000 });
     await page.waitForFunction(a => { const s=document.querySelector(`[${a}]`)?.getAttribute(a); return s && s!=='probing'; }, attr, { timeout: 120000 });
@@ -268,7 +268,7 @@ await test('components persist across closing Programs and reloading the app', a
   await page.reload({ waitUntil: 'load' }); await page.waitForSelector('[aria-label="Start"]');
   await openFromDesktop('Programs'); w = page.locator('[data-window][aria-label*="Programs"]'); await w.locator('[data-x64-tab="components"]').click();
   for (const attr of names) await page.waitForFunction(a => document.querySelector(`[${a}]`)?.getAttribute(a)==='installed', attr, { timeout: 120000 });
-  const verified = await page.evaluate(async () => { const rt=window.__x64; const paths=['C:\\Windows\\SysWOW64\\msvcr100.dll','C:\\Windows\\SysWOW64\\msvcp140.dll','C:\\Windows\\System32\\msvcp140.dll','C:\\Windows\\System32\\d3dcompiler_33.dll','C:\\Program Files\\dotnet\\dotnet.exe']; return Promise.all(paths.map(async p => { const f=await rt.disk.read(p); const v=rt.vfsRead(p); return !!f?.data?.length && !!v?.length && f.data.length===v.length; })); });
+  const verified = await page.evaluate(async () => { const rt=window.__x64; const paths=['C:\\Windows\\SysWOW64\\msvcr100.dll','C:\\Windows\\SysWOW64\\msvcp140.dll','C:\\Windows\\System32\\msvcp140.dll','C:\\Windows\\System32\\d3dcompiler_33.dll','C:\\Windows\\SysWOW64\\d3dx9_43.dll','C:\\Program Files\\dotnet\\dotnet.exe']; return Promise.all(paths.map(async p => { const f=await rt.disk.read(p); const v=rt.vfsRead(p); return !!f?.data?.length && !!v?.length && f.data.length===v.length; })); });
   expect(verified.every(Boolean), 'persistent DLL/runtime content missing after reload: '+JSON.stringify(verified));
   await page.screenshot({ path: resolve(SHOTS, 'components-restored.png') });
   // Remove one stored file, reopen, then simulate unavailable persistent storage.

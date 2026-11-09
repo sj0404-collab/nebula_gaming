@@ -660,7 +660,7 @@ static void load_library(Cpu *c, const char *n) {
   if (!pe_is_system_dll(n) || pe_dll_native_ok(n)) {
     int m = mod_load(W, n);
     if (m >= 0) { u64 base = W->mods[m].base; if (!W->mods[m].attached || W->nmods > m + 1) { int i = cont_push(c, CONT_DLLMAIN); if (i < 0) return; W->cont[i].data[0] = base; w32_cont_resume(c); return; } RET(base); return; }
-    if (pe_dll_native_only(n)) { char msg[400]; e_snprintf(msg, sizeof msg, "[x64] LoadLibrary(%s): not on the virtual disk and not shimmed — install the DirectX pack (C:\\Windows\\System32)\n", n); host_write(3, msg, e_strlen(msg)); W->last_error = 126; RET(0); return; }
+    if (pe_dll_native_only(n)) { char msg[400]; e_snprintf(msg, sizeof msg, "[x64] LoadLibrary(%s): not on the virtual disk and not shimmed — install the DirectX pack (%s)\n", n, W->mode32 ? "x86, C:\\Windows\\SysWOW64" : "x64, C:\\Windows\\System32"); host_write(3, msg, e_strlen(msg)); W->last_error = 126; RET(0); return; }
     /* not on the virtual disk: behave like a system DLL (shims by name); a real miss shows up as "unimplemented API dll!name" */
     if (!pe_is_system_dll(n)) { char msg[400]; e_snprintf(msg, sizeof msg, "[x64] LoadLibrary(%s): not found on the virtual disk, using shims\n", n); host_write(3, msg, e_strlen(msg)); }
   }
