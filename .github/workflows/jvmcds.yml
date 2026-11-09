@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build x64run
         run: cd emu/x64 && cc -O2 -Wall -Wno-unused-function -Wno-unused-parameter -Wno-misleading-indentation -o x64run lib.c cpu.c pe.c win32.c gdi.c vfs.c api.c dxbc.c host_native.c main_native.c -lm
-      - name: Download Shattered Pixel Dungeon v4.0.2 (Windows, jpackage: JDK 17.0.17 runtime without classes.jsa)
+      - name: "Download Shattered Pixel Dungeon v4.0.2 (Windows, jpackage, JDK 17.0.17 runtime without classes.jsa)"
         run: |
           mkdir -p /tmp/np/game /tmp/np/tmp /tmp/np/frames
           curl -fsSL --retry 3 -o /tmp/np/spd.zip https://github.com/00-Evan/shattered-pixel-dungeon/releases/download/v4.0.2/ShatteredPD-v4.0.2-Windows.zip
