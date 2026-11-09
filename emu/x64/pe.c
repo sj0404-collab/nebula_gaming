@@ -249,7 +249,7 @@ int pe_load(Win32 *w, const u8 *bytes, size_t len, const char *name) {
 }
 
 /* ---------- static inspection ---------- */
-typedef struct { char *out; size_t sz, pos; int n, known, unknown, priv, pack; char dlls[64][48]; int ndll; int unknown_listed; } InsCtx;
+typedef struct { char *out; size_t sz, pos; int n, known, unknown, priv, pack, rt; char dlls[64][48]; int ndll; int unknown_listed; } InsCtx;
 static void ins_put(InsCtx *x, const char *fmt, ...) { if (x->pos >= x->sz) return; __builtin_va_list ap; __builtin_va_start(ap, fmt); int n = e_vsnprintf(x->out + x->pos, x->sz - x->pos, fmt, ap); __builtin_va_end(ap); x->pos += n; if (x->pos > x->sz - 1) x->pos = x->sz - 1; }
 int w32_have_shim(const char *dll, const char *name);
 static void ins_import(void *ctx, const char *dll, const char *name, u32 ordinal, u32 iat_rva) {
@@ -260,6 +260,7 @@ static void ins_import(void *ctx, const char *dll, const char *name, u32 ordinal
   if (w32_have_shim(dll, name) || (name && w32_data_import_off(name))) x->known++;
   else if (!pe_is_system_dll(dll)) { x->priv++; x->known++; }   /* resolved from the private DLL next to the exe at load time */
   else if (pe_dll_native_only(dll)) { x->pack++; x->known++; }   /* real DLL from the DirectX pack (installed on demand) */
+  else if (pe_dll_native_ok(dll)) { x->rt++; x->known++; }   /* msvcr/msvcp/mfc/atl/vcomp…: the real Microsoft DLL of the matching VC++ redistributable pack (installed on demand, preferred over shims) */
   else { x->unknown++; if (x->unknown_listed < 200) { ins_put(x, "%s%s!%s", x->unknown_listed ? ", " : "", dll, name); x->unknown_listed++; } else if (x->unknown_listed == 200) { ins_put(x, ", ..."); x->unknown_listed++; } }
 }
 int pe_inspect(const u8 *bytes, size_t len, char *out, size_t out_sz) {
@@ -283,7 +284,7 @@ int pe_inspect(const u8 *bytes, size_t len, char *out, size_t out_sz) {
   size_t mark = x.pos;
   pe_walk_imports(&h, ins_import, &x);
   (void)mark;
-  ins_put(&x, "\",\"imports\":%d,\"knownImports\":%d,\"unknownImportsCount\":%d,\"privateDllImports\":%d,\"dlls\":[", x.n, x.known, x.unknown, x.priv);
+  ins_put(&x, "\",\"imports\":%d,\"knownImports\":%d,\"unknownImportsCount\":%d,\"privateDllImports\":%d,\"runtimeImports\":%d,\"dlls\":[", x.n, x.known, x.unknown, x.priv, x.rt);
   for (int i = 0; i < x.ndll; i++) ins_put(&x, "%s\"%s\"", i ? "," : "", x.dlls[i]);
   /* verdict */
   const char *verdict; const char *why;
@@ -304,6 +305,7 @@ int pe_inspect(const u8 *bytes, size_t len, char *out, size_t out_sz) {
     else if (d3d11) { verdict = "partial"; why = "Direct3D 11 through the WebGL2 translation layer (device, swap chain, buffers, textures, SM4/5 vertex + pixel shaders, Draw/DrawIndexed); compute/geometry/tessellation and many state paths are not implemented and stop with the method name"; }
     else if (x.unknown == 0 && x.pack) { verdict = "partial"; why = x.priv ? "needs DLLs from the DirectX pack (D3DCompiler/D3DX, installed on demand into C:\\Windows\\System32) and its own DLLs next to the exe; the rest of the imports have shims" : "needs DLLs from the DirectX pack (D3DCompiler/D3DX — installed on demand into C:\\Windows\\System32); the rest of the imports have shims"; }
     else if (x.unknown == 0 && x.priv) { verdict = "partial"; why = "all system imports have shims; the program also imports its own DLLs, which are loaded from the virtual disk if you add them next to the exe"; }
+    else if (x.unknown == 0 && x.rt) { verdict = "likely"; why = "all system imports have shims; the Visual C++ runtime imports are served by the real Microsoft DLLs of the runtime pack (installed on demand)"; }
     else if (x.unknown == 0) { verdict = "likely"; why = "all imports have shims"; }
     else if (x.unknown * 5 <= x.n * 2) { verdict = "partial"; why = "most imports have shims (no network/GPU/audio); the program runs until the first unimplemented call"; }
     else { verdict = "unlikely"; why = "most imports are not implemented"; }

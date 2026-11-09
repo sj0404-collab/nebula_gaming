@@ -1,0 +1,45 @@
+name: SDL2 / VC++ CRT quick probe (native runner only)
+on:
+  workflow_dispatch:
+  push:
+    branches: [wip-dotnet]
+    paths: ['emu/tests/sdl2gl.c', 'emu/tests/crtprobe.c', '.github/workflows/sdl2probe.yml']
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with: { version: 0.17.0 }
+      - name: Native runner
+        run: cd emu/x64 && cc -O2 -Wall -Wno-unused-function -Wno-unused-parameter -Wno-misleading-indentation -o x64run lib.c cpu.c pe.c win32.c gdi.c vfs.c api.c dxbc.c host_native.c main_native.c -lm
+      - name: x86 + x64 runtime packs (VC++ 2005–2013) → public/x64/sys32
+        run: sudo apt-get install -y -q cabextract p7zip-full msitools >/dev/null && ./emu/tools/runtime-pack.sh public/x64/sys32
+      - name: Download official SDL2 / OpenAL-Soft binaries
+        run: |
+          set -e; mkdir -p /tmp/sdl2bin/x86-old /tmp/sdl2bin/x86 /tmp/sdl2bin/x64 /tmp/sdl2dl
+          curl -fsSL --retry 3 -o /tmp/sdl2dl/old.zip https://www.libsdl.org/release/SDL2-2.0.1-win32-x86.zip
+          curl -fsSL --retry 3 -o /tmp/sdl2dl/x86.zip https://github.com/libsdl-org/SDL/releases/download/release-2.30.12/SDL2-2.30.12-win32-x86.zip
+          curl -fsSL --retry 3 -o /tmp/sdl2dl/x64.zip https://github.com/libsdl-org/SDL/releases/download/release-2.30.12/SDL2-2.30.12-win32-x64.zip
+          curl -fsSL --retry 3 -o /tmp/sdl2dl/al.zip https://github.com/kcat/openal-soft/releases/download/1.23.1/openal-soft-1.23.1-bin.zip
+          unzip -qo /tmp/sdl2dl/old.zip SDL2.dll -d /tmp/sdl2bin/x86-old; unzip -qo /tmp/sdl2dl/x86.zip SDL2.dll -d /tmp/sdl2bin/x86; unzip -qo /tmp/sdl2dl/x64.zip SDL2.dll -d /tmp/sdl2bin/x64
+          unzip -qo /tmp/sdl2dl/al.zip '*/bin/Win32/soft_oal.dll' '*/bin/Win64/soft_oal.dll' -d /tmp/sdl2dl
+          cp "$(find /tmp/sdl2dl -path '*Win32/soft_oal.dll')" /tmp/sdl2bin/x86/OpenAL32.dll; cp /tmp/sdl2bin/x86/OpenAL32.dll /tmp/sdl2bin/x86-old/OpenAL32.dll
+          cp "$(find /tmp/sdl2dl -path '*Win64/soft_oal.dll')" /tmp/sdl2bin/x64/OpenAL32.dll
+      - name: Only the [crt32] and [sdl2] sections of run.sh
+        run: |
+          cd emu
+          { echo '#!/bin/sh'; echo 'set -e'; sed -n '5,8p' tests/run.sh; sed -n '/^echo "\[crt32\]/,$p' tests/run.sh; } > /tmp/probe.sh
+          X64_PROBE_VERBOSE=1 SDL2_BIN=/tmp/sdl2bin sh /tmp/probe.sh 2>&1 | tee /tmp/probe.log
+      - name: Full logs of the failing runs
+        if: always()
+        run: |
+          cd emu; X=./x64/x64run
+          for v in x86-old x86 x64; do echo "===== sdl2gl $v"; X64_GL_NULL=1 X64_LOG=1 $X --quiet --no-stdin --max-ms 90000 --mount '/tmp/syswow64=C:\Windows\SysWOW64' /tmp/sdl2bin/$v/sdl2gl.exe 20 2>&1 | grep -av '^\[x64\] \(api\|sched\)' | tail -80; done
+          echo "===== crtprobe32"; X64_LOG=1 $X --quiet --no-stdin --max-ms 120000 --mount '/tmp/syswow64=C:\Windows\SysWOW64' /tmp/crtprobe32.exe 2>&1 | grep -av '^\[x64\] \(api\|sched\)' | tail -120
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: sdl2probe-log, path: /tmp/probe.log }

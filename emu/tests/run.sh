@@ -611,4 +611,37 @@ if command -v zig >/dev/null 2>&1 && [ -f tests/inst/putty.exe ]; then
   check "MsiGetFileVersionW (x64)"   "fileversionW rc=0 ver=0."   "$out"
   check "msi (x64)"   "MSI OK"   "$out"
 else echo "  skip msi (no zig or no putty.exe)"; fi
+echo "[crt32] REAL Visual C++ 2005/2008/2010/2012/2013 runtimes (msvcrXX/msvcpXX from the x86 AND x64 packs: heap, printf, strtod, qsort, stdio, _beginthreadex, time)"
+if command -v zig >/dev/null 2>&1 && ls ../public/x64/sys32/vc2010-x86/msvcr100.dll >/dev/null 2>&1; then
+  rm -rf /tmp/syswow64 /tmp/system32vc; mkdir -p /tmp/syswow64 /tmp/system32vc
+  for d in ../public/x64/sys32/vc20*-x86; do cp "$d"/*.dll /tmp/syswow64/ 2>/dev/null || true; done
+  for d in ../public/x64/sys32/vc20*-x64; do cp "$d"/*.dll /tmp/system32vc/ 2>/dev/null || true; done
+  echo "  SysWOW64: $(ls /tmp/syswow64 | wc -l) DLLs, System32: $(ls /tmp/system32vc | wc -l) DLLs"
+  zig cc -target x86-windows-gnu -O1 -o /tmp/crtprobe32.exe tests/crtprobe.c && out=$(X64_LOG=1 $X --quiet --no-stdin --max-ms 120000 --mount '/tmp/syswow64=C:\Windows\SysWOW64' /tmp/crtprobe32.exe 2>&1) || out="build/run failed: $out"
+  printf '%s\n' "$out" | grep "^crtprobe" | head -60
+  for v in 80 90 100 110 120; do check "x86 msvcr$v/msvcp$v real" "crtprobe $v: OK" "$out"; done
+  check "crtprobe (x86)"   "CRTPROBE PASS"   "$out"
+  zig cc -target x86_64-windows-gnu -O1 -o /tmp/crtprobe64.exe tests/crtprobe.c && out=$(X64_LOG=1 $X --quiet --no-stdin --max-ms 120000 --mount '/tmp/system32vc=C:\Windows\System32' /tmp/crtprobe64.exe 2>&1) || out="build/run failed: $out"
+  printf '%s\n' "$out" | grep "^crtprobe" | head -60
+  for v in 80 90 100 110 120; do check "x64 msvcr$v/msvcp$v real" "crtprobe $v: OK" "$out"; done
+  check "crtprobe (x64)"   "CRTPROBE PASS"   "$out"
+else echo "  skip crtprobe (no zig or no x86 runtime packs in public/x64/sys32)"; fi
+SDLB=${SDL2_BIN:-/tmp/sdl2bin}
+echo "[sdl2] official SDL2.dll + OpenAL32.dll (openal-soft) loaded at run time like SteamWorld Dig / FTL / Bastion do: SDL_Init video+audio, OpenGL window, swap loop, SDL audio callback, OpenAL tone (SDL2_BIN=$SDLB)"
+if command -v zig >/dev/null 2>&1 && [ -f "$SDLB/x86/SDL2.dll" ]; then
+  zig cc -target x86-windows-gnu -O1 -o "$SDLB/x86/sdl2gl.exe" tests/sdl2gl.c && zig cc -target x86_64-windows-gnu -O1 -o "$SDLB/x64/sdl2gl.exe" tests/sdl2gl.c || { echo "  FAIL sdl2gl build"; fail=1; }
+  for v in x86-old x86 x64; do
+    [ -f "$SDLB/$v/SDL2.dll" ] || continue
+    [ -f "$SDLB/$v/sdl2gl.exe" ] || cp "$SDLB/x86/sdl2gl.exe" "$SDLB/$v/sdl2gl.exe"
+    out=$(X64_GL_NULL=1 X64_LOG=1 X64_AUDIO_WAV=/tmp/sdl2gl-$v.wav $X --quiet --no-stdin --max-ms 90000 --mount '/tmp/syswow64=C:\Windows\SysWOW64' "$SDLB/$v/sdl2gl.exe" 60 2>&1) || out="run failed: $out"
+    printf '%s\n' "$out" | grep "^sdl2gl\|SDL2GL\|fault\|STOP\|unimplemented\|missing" | head -40
+    check "sdl2gl $v: SDL_Init"        "sdl2gl: SDL_Init ok video='windows'" "$out"
+    check "sdl2gl $v: window"          "sdl2gl: window created" "$out"
+    check "sdl2gl $v: GL context"      "sdl2gl: GL '" "$out"
+    check "sdl2gl $v: SDL audio"       "sdl2gl: SDL audio device" "$out"
+    check "sdl2gl $v: 60 frames"       "sdl2gl: rendered 60 frames" "$out"
+    check "sdl2gl $v: OpenAL tone"     "sdl2gl: OpenAL tone played" "$out"
+    check "sdl2gl $v: PASS"            "SDL2GL PASS" "$out"
+  done
+else echo "  skip sdl2gl (no zig or no $SDLB/x86/SDL2.dll — see ci.yml 'Download official SDL2 / OpenAL-Soft binaries')"; fi
 [ $fail = 0 ] && echo "ALL OK" || { echo "FAILURES"; exit 1; }

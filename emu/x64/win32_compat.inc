@@ -250,7 +250,43 @@ static void s_XInputEnable(Cpu *c) { RET(0); }
   SA("??2@YAPEAX_K@Z", cxx_new), SA("??_U@YAPEAX_K@Z", cxx_new), SA("??2@YAPEAX_KAEBUnothrow_t@std@@@Z", cxx_new), SA("??_U@YAPEAX_KAEBUnothrow_t@std@@@Z", cxx_new), \
   SA("??3@YAXPEAX@Z", cxx_delete), SA("??_V@YAXPEAX@Z", cxx_delete), SA("??3@YAXPEAX_K@Z", cxx_delete), SA("??_V@YAXPEAX_K@Z", cxx_delete), \
   SA("??3@YAXPEAXAEBUnothrow_t@std@@@Z", cxx_delete), SA("??_V@YAXPEAXAEBUnothrow_t@std@@@Z", cxx_delete), S(_mbstrlen), S(_fpclass),
-#define COMPAT_SHIMS CXX_NEWDELETE_SHIMS \
+/* ---- SDL2 / OpenAL-Soft host probes (device enumeration, power, gamma, colour profiles): the honest answers of a machine
+ * without those devices — the same codes real Windows gives on a VM / remote-desktop session, no fake hardware ---- */
+static void s_GetSystemPowerStatus(Cpu *c) {   /* SYSTEM_POWER_STATUS: mains power, no battery (BatteryFlag 128), unknown lifetimes */
+  u64 p = ARG(0); if (!p) { W->last_error = 87; RET(0); return; }
+  wr8(c, p, 1); wr8(c, p + 1, 128); wr8(c, p + 2, 255); wr8(c, p + 3, 0); wr32(c, p + 4, 0xFFFFFFFFu); wr32(c, p + 8, 0xFFFFFFFFu); RET(1);
+}
+static void s_AttachThreadInput(Cpu *c) { RET(1); }   /* one input queue for all guest threads already */
+static void s_GetDeviceGammaRamp(Cpu *c) { u64 p = ARG(1); if (!p) { RET(0); return; } for (int ch = 0; ch < 3; ch++) for (int i = 0; i < 256; i++) wr16(c, p + (ch * 256 + i) * 2, (u16)(i * 257)); RET(1); }
+static void s_SetDeviceGammaRamp(Cpu *c) { W->last_error = 50; RET(0); }   /* ERROR_NOT_SUPPORTED: the display has no gamma table (as on RDP / basic display adapters) */
+static void s_GetICMProfileW(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), 0); W->last_error = 2; RET(0); }   /* no colour profile assigned */
+static void s_GetICMProfileA(Cpu *c) { if (ARG(1)) wr32(c, ARG(1), 0); W->last_error = 2; RET(0); }
+/* setupapi / cfgmgr32: an empty device information set (no PnP devices to enumerate) */
+static void s_SetupDiGetClassDevsA(Cpu *c) { RET(0x5E7D1); }
+static void s_SetupDiGetClassDevsW(Cpu *c) { RET(0x5E7D1); }
+static void s_SetupDiEnumDeviceInfo(Cpu *c) { W->last_error = 259; RET(0); }          /* ERROR_NO_MORE_ITEMS */
+static void s_SetupDiEnumDeviceInterfaces(Cpu *c) { W->last_error = 259; RET(0); }
+static void s_SetupDiGetDeviceInterfaceDetailA(Cpu *c) { W->last_error = 87; RET(0); }
+static void s_SetupDiGetDeviceInterfaceDetailW(Cpu *c) { W->last_error = 87; RET(0); }
+static void s_SetupDiGetDeviceRegistryPropertyA(Cpu *c) { W->last_error = 87; RET(0); }
+static void s_SetupDiGetDeviceRegistryPropertyW(Cpu *c) { W->last_error = 87; RET(0); }
+static void s_SetupDiDestroyDeviceInfoList(Cpu *c) { RET(ARG(0) == 0x5E7D1); }
+static void s_CM_Locate_DevNodeA(Cpu *c) { if (ARG(0)) wr32(c, ARG(0), 0); RET(0x0D); }   /* CR_NO_SUCH_DEVNODE */
+static void s_CM_Locate_DevNodeW(Cpu *c) { if (ARG(0)) wr32(c, ARG(0), 0); RET(0x0D); }
+static void s_CM_Get_Parent(Cpu *c) { if (ARG(0)) wr32(c, ARG(0), 0); RET(0x0D); }
+static void s_CM_Get_Device_IDA(Cpu *c) { if (ARG(1) && ARG(2)) wr8(c, ARG(1), 0); RET(0x0D); }
+static void s_CM_Get_Device_IDW(Cpu *c) { if (ARG(1) && ARG(2)) wr16(c, ARG(1), 0); RET(0x0D); }
+static void s_CM_Get_Device_ID_Size(Cpu *c) { if (ARG(0)) wr32(c, ARG(0), 0); RET(0x0D); }
+/* winmm capture: there is no microphone device, so every waveIn handle is invalid (MMSYSERR_INVALHANDLE = 5) */
+static void s_waveInInvalHandle(Cpu *c) { RET(5); }
+#define SDLPROBE_SHIMS \
+  S(GetSystemPowerStatus), S(AttachThreadInput), S(GetDeviceGammaRamp), S(SetDeviceGammaRamp), S(GetICMProfileW), S(GetICMProfileA), \
+  S(SetupDiGetClassDevsA), S(SetupDiGetClassDevsW), S(SetupDiEnumDeviceInfo), S(SetupDiEnumDeviceInterfaces), S(SetupDiGetDeviceInterfaceDetailA), S(SetupDiGetDeviceInterfaceDetailW), \
+  S(SetupDiGetDeviceRegistryPropertyA), S(SetupDiGetDeviceRegistryPropertyW), S(SetupDiDestroyDeviceInfoList), \
+  S(CM_Locate_DevNodeA), S(CM_Locate_DevNodeW), S(CM_Get_Parent), S(CM_Get_Device_IDA), S(CM_Get_Device_IDW), S(CM_Get_Device_ID_Size), \
+  SA("waveInClose", waveInInvalHandle), SA("waveInPrepareHeader", waveInInvalHandle), SA("waveInUnprepareHeader", waveInInvalHandle), SA("waveInAddBuffer", waveInInvalHandle), \
+  SA("waveInStart", waveInInvalHandle), SA("waveInStop", waveInInvalHandle), SA("waveInReset", waveInInvalHandle), SA("waveInGetPosition", waveInInvalHandle), SA("waveInGetID", waveInInvalHandle),
+#define COMPAT_SHIMS SDLPROBE_SHIMS CXX_NEWDELETE_SHIMS \
   SA("FileTimeToSystemTime", FileTimeToSystemTime2), SA("SystemTimeToFileTime", SystemTimeToFileTime2), S(SystemTimeToTzSpecificLocalTime), S(TzSpecificLocalTimeToSystemTime), \
   S(FileTimeToDosDateTime), S(DosDateTimeToFileTime), S(CompareFileTime), SA("_mkgmtime64", mkgmtime64), SA("_mkgmtime", mkgmtime64), \
   S(SysAllocString), S(SysAllocStringLen), S(SysAllocStringByteLen), S(SysFreeString), S(SysStringLen), S(SysStringByteLen), S(SysReAllocStringLen), S(VariantInit), S(VariantClear), S(VariantCopy), \

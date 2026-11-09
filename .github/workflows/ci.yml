@@ -110,8 +110,20 @@ jobs:
         run: |
           zig cc -target x86_64-windows-gnu -O2 emu/tests/procmem.c -o emu/tests/procmem.exe
           zig cc -target x86-windows-gnu -O2 emu/tests/procmem.c -o emu/tests/procmem32.exe
-      - name: Native capability tests (hello, bench, busybox-w32 incl. virtual disk + stdin, plink, NebulaStrike, cmd.exe/system()/subprocess, real msvcp140 via runtime pack, rejections)
-        run: DX_PACK=/tmp/dx/sys32 ./emu/tests/run.sh
+      - name: Download official SDL2 / OpenAL-Soft binaries (libsdl.org 2.0.1 x86, github libsdl-org 2.30.12 x86+x64, openal-soft 1.23.1) for the legal SDL2-game stack test
+        run: |
+          set -e; mkdir -p /tmp/sdl2bin/x86-old /tmp/sdl2bin/x86 /tmp/sdl2bin/x64 /tmp/sdl2dl
+          curl -fsSL --retry 3 -o /tmp/sdl2dl/old.zip https://www.libsdl.org/release/SDL2-2.0.1-win32-x86.zip
+          curl -fsSL --retry 3 -o /tmp/sdl2dl/x86.zip https://github.com/libsdl-org/SDL/releases/download/release-2.30.12/SDL2-2.30.12-win32-x86.zip
+          curl -fsSL --retry 3 -o /tmp/sdl2dl/x64.zip https://github.com/libsdl-org/SDL/releases/download/release-2.30.12/SDL2-2.30.12-win32-x64.zip
+          curl -fsSL --retry 3 -o /tmp/sdl2dl/al.zip https://github.com/kcat/openal-soft/releases/download/1.23.1/openal-soft-1.23.1-bin.zip
+          unzip -qo /tmp/sdl2dl/old.zip SDL2.dll -d /tmp/sdl2bin/x86-old; unzip -qo /tmp/sdl2dl/x86.zip SDL2.dll -d /tmp/sdl2bin/x86; unzip -qo /tmp/sdl2dl/x64.zip SDL2.dll -d /tmp/sdl2bin/x64
+          unzip -qo /tmp/sdl2dl/al.zip '*/bin/Win32/soft_oal.dll' '*/bin/Win64/soft_oal.dll' -d /tmp/sdl2dl
+          cp "$(find /tmp/sdl2dl -path '*Win32/soft_oal.dll')" /tmp/sdl2bin/x86/OpenAL32.dll; cp /tmp/sdl2bin/x86/OpenAL32.dll /tmp/sdl2bin/x86-old/OpenAL32.dll
+          cp "$(find /tmp/sdl2dl -path '*Win64/soft_oal.dll')" /tmp/sdl2bin/x64/OpenAL32.dll
+          ls -la /tmp/sdl2bin/*
+      - name: Native capability tests (hello, bench, busybox-w32 incl. virtual disk + stdin, plink, NebulaStrike, cmd.exe/system()/subprocess, real msvcp140 via runtime pack, real VC++ 2005–2013 CRTs x86+x64, SDL2+OpenGL+OpenAL stack, rejections)
+        run: DX_PACK=/tmp/dx/sys32 SDL2_BIN=/tmp/sdl2bin ./emu/tests/run.sh
       - name: .NET tests (REAL CoreCLR 10 + RyuJIT on the emulator — LINQ/exceptions/JSON/reflection/Regex/GC, apphost, GC with spinning + pool threads, HttpClient, direct .dll start, net48 exe, Roslyn csc compiles + runs a program, rejection without the pack)
         run: |
           mkdir -p /tmp/dn/pack && (cd public/x64/dotnet && find . -name '*.gz' -print0 | while IFS= read -r -d '' f; do mkdir -p "/tmp/dn/pack/$(dirname "$f")"; gunzip -c "$f" > "/tmp/dn/pack/${f%.gz}"; done)
