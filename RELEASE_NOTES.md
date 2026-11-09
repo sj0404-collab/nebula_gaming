@@ -1,3 +1,60 @@
+# v1.47.0 — Android: real Visual C++ 2005–2013 runtimes initialise (x86 + x64), SDL2/OpenAL games verified, Java games start from a class-data archive, Windows access checks
+
+**Visual C++ 2005 / 2008 runtimes: real DLLs, placed where Windows places them.** v1.46.0 shipped msvcr80/msvcr90 + MFC 8/9,
+but a program importing them died silently: these CRTs run `_check_manifest` in `DllMain` and refuse to initialise
+(R6034 → `DllMain` returns FALSE) when loaded from `System32`/`SysWOW64` without an activation context.  Now, like on
+Windows, the 2005/2008 packs are installed into `C:\Windows\WinSxS\<x86|amd64>_microsoft.vc80/vc90.crt_…` (the real
+assembly folder names and version 8.0.50727.6195 / 9.0.30729.6161), the loader searches WinSxS for a DLL that is not next
+to the exe, `FindActCtxSectionString(W/A)` reports the VC redirections as present (`ActivateActCtx`,
+`QueryActCtxW`, `CreateActCtx*` follow), and a VC 8/9 CRT name is never taken from `System32`, `SysWOW64` or `PATH` (a
+stale copy there from an earlier release would trigger the same R6034).  `GetSystemWindowsDirectoryW`,
+`GetLongPathNameW` and the other calls on that path exist for both bitnesses (44 32-bit stdcall sizes added).
+Proof, `emu/tests/crtprobe.c` on the GitHub runner, x86 **and** x64: msvcr80, msvcr90, msvcr100, msvcr110, msvcr120 load,
+`DllMain` runs, `malloc`/`printf`/`_initterm`-dependent code works, and `mfc80u`/`mfc90u`/`mfc100u`/`mfc110u`/`mfc120u`
+initialise — **5/5 + 5/5**.
+
+**SDL2 + OpenAL games (the libraries most indie/Steam-era games ship).**  `emu/tests/sdl2gl.c` with the *official*
+SDL2 binaries (2.0.1 from 2013 — what older games bundle — and 2.30.12, x86 and x64) and OpenAL-soft 1.23.1:
+`SDL_Init(VIDEO|AUDIO|JOYSTICK|GAMECONTROLLER)`, a window, an OpenGL context + draw + swap, `SDL_GetDesktopDisplayMode`,
+`SDL_OpenAudioDevice` with a callback that is actually called, and an OpenAL source playing a tone — **all pass**
+(`.github/workflows/sdl2probe.yml`, 36 checks, 0 failures).  What was missing: the exe's own folder was not mounted for
+native runs (SDL2.dll "export miss"), and `GetDIBits` with a `BI_BITFIELDS` query did not return the channel masks, so
+SDL saw the desktop as "format 0x0"; it is 32-bit RGB888 now (`SDL_PIXELFORMAT_RGB888`).
+
+**Java (jpackage) games start from a class-data-sharing archive — automatically.**  Shattered Pixel Dungeon's bundled
+JDK 17 has no `classes.jsa`, so every start parsed and verified ~1800 classes in the interpreter.  The emulator now
+recognises a jpackage layout (`<dir>\runtime\bin\server\jvm.dll`) and does what the JDK tooling would do by hand:
+the first start records the loaded classes (`-XX:DumpLoadedClassList`, free), the second start is a one-time
+`-Xshare:dump` pass (announced in the status line: "Java: one-time preparation…", 57 s on the runner, a few minutes on a
+phone; the program exits and is relaunched by itself), every later start maps `<dir>\app\nebula-cds.jsa` with
+`-Xshare:auto`.  Measured on the runner (`jvmcds.yml`, same build, 200 s each): first frame **57 s instead of 80 s**,
+title screen **107 s instead of 132 s**, 1691 frames instead of 1230.  Three emulator bugs stood in the way, all fixed:
+1. file mtimes were "now" in every process, so HotSpot rejected the archive ("A jar file is not the one used while building
+   the shared archive") — mounted and disk files keep their real modification time (`x64_vfs_set_mtime`);
+2. `MapViewOfFile` returned a heap sub-block and `VirtualQuery` described it as a private heap region → HotSpot's
+   `os::unmap_memory` failed hard; a view is now its own 64 KB-aligned reservation reported as `MEM_MAPPED`, and
+   `VirtualQuery` reports `AllocationBase` = the reservation (as Windows does) for every `VirtualAlloc` block;
+3. a `FILE_MAP_COPY` view (the archive's relocation bitmap) was written back to the file **at offset 0** on unmap and
+   destroyed the archive header ("bad magic number" on the next start) — a view remembers its offset and access, and only
+   `FILE_MAP_WRITE` views are written back.
+
+**Windows access checks (advapi32).**  With the archive the game reached `java.nio`'s `Files.isReadable/isWritable`
+path within 5 s and faulted on `DuplicateTokenEx`.  `AccessCheck` now evaluates a DACL exactly as Windows does (ACEs in
+order, a DENY wins for the rights it covers, no DACL = everything, empty DACL = nothing, the owner always has
+`READ_CONTROL|WRITE_DAC`, `MAXIMUM_ALLOWED` collects the allowed rights, `PRIVILEGE_SET` sizing), plus `MapGenericMask`,
+`DuplicateToken(Ex)`, `ImpersonateLoggedOnUser`/`ImpersonateSelf`.  `emu/tests/aclcheck.c` (x86 + x64) checks the nio
+sequence on the exe's own descriptor and a hand-built DACL with a DENY ace.
+
+**Components.** The install log in the Components tab now also records the DirectX, .NET and VC++ 2015–2022 x64 packs
+(files, MB, seconds or the exact error), not only the 2005–2013 packs.
+
+**Honest limits.** WinSxS is a highest-version folder scan, not manifest/policy parsing — a program whose manifest
+pins an exact older CRT build still gets the installed one.  The CDS pass needs the game folder to be writable (it is, on
+the persistent disk); if the archive cannot be produced the game simply starts as before.  The class list is taken from
+whatever the first run loaded — a longer first session gives a more complete archive.  32-bit JVMs are not given an
+archive (the layout check is x64-only).  The remaining Java start-up time is C1 compilation and the game's own asset
+loading; the next step there is the x86→wasm JIT itself.
+
 # v1.46.0 — Android: Shattered Pixel Dungeon 13× faster to the title screen, a JIT that stops re-checking its own code, every Visual C++ runtime 2005–2022 (x86 + x64), CI green again
 
 **Where the game's time went (measured, not guessed).** The sampling profiler now attributes every sample to a module /
