@@ -439,6 +439,12 @@ export default function X64App() {
     try { const r = await fetch(PACK_URL + 'manifest.json'); if (!r.ok) throw new Error('HTTP ' + r.status); const man = await r.json() as PackManifest; if (alive) setPack({ status: 'available', manifest: man }); }
     catch (e) { if (alive) setPack({ status: 'unavailable', note: 'not built into this deployment (' + String(e) + ')' }); }
   })(); return () => { alive = false; }; }, []);
+  /* Components log: the result of every runtime-pack install (VC++, DirectX, .NET), kept in localStorage and shown in the Components tab */
+  const [compLog, setCompLog] = useState<CompLogEntry[]>(loadCompLog);
+  const logComp = useCallback((pack: string, ok: boolean, text: string) => {
+    setCompLog(l => { const n = [...l, { t: Date.now(), pack, ok, text }].slice(-200); try { localStorage.setItem(COMP_LOG_KEY, JSON.stringify(n)); } catch { /* quota */ } return n; });
+    setLog(l => [...l, `${pack}: ${text}`]);
+  }, []);
   const installPack = useCallback(async (rt: X64Runtime): Promise<boolean> => {
     if (pack.status === 'installed') return true;
     if (pack.status !== 'available' || !pack.manifest) { setLog(l => [...l, 'RUNTIME PACK: ' + (pack.note ?? pack.status)]); return false; }
@@ -453,11 +459,11 @@ export default function X64App() {
         setPack({ status: 'installing', manifest: man, done }); setFetching(`installing runtime pack: ${done}/${man.files.length}, ${(bytes / 1048576).toFixed(1)} MB`);
       }
       await rt.disk.flushChecked();
-    } catch (e) { setFetching(null); setPack({ status: 'available', manifest: man, note: String(e) }); setLog(l => [...l, 'RUNTIME PACK: ' + String(e)]); return false; }
+    } catch (e) { setFetching(null); setPack({ status: 'available', manifest: man, note: String(e) }); logComp('Visual C++ 2015–2022 x64', false, `failed after ${done}/${man.files.length} DLLs: ${String(e)}`); return false; }
     setFetching(null); setPack({ status: 'installed', manifest: man, done }); setFiles(rt.vfsList());
-    setLog(l => [...l, `runtime pack installed: ${done} DLLs, ${(bytes / 1048576).toFixed(1)} MB → C:\\Windows\\System32 (${man.pack})`]);
+    logComp('Visual C++ 2015–2022 x64', true, `installed: ${done} DLLs, ${(bytes / 1048576).toFixed(1)} MB → C:\\Windows\\System32 (${man.pack})`);
     return true;
-  }, [pack]);
+  }, [pack, logComp]);
   const [dotnet, setDotnet] = useState<DotnetState>({ status: 'probing' });
   const [dx, setDx] = useState<DotnetState>({ status: 'probing' });
   const [dx32, setDx32] = useState<DotnetState>({ status: 'probing' });
@@ -470,11 +476,11 @@ export default function X64App() {
     if (st.status === 'installed') return true;
     if (st.status !== 'available' || !st.manifest) { setLog(l => [...l, pk.label.toUpperCase() + ': ' + (st.note ?? st.status)]); return false; }
     attempted.current[pk.key] = true;
-    const man = st.manifest; let done = 0, bytes = 0;
+    const man = st.manifest; let done = 0, bytes = 0; const t0 = performance.now();
     set({ status: 'installing', manifest: man, done: 0 }); setFetching(`installing ${pk.label} (${man.files.length} files)…`); setTab('console');
     try {
       // the files stay on the page side (lazy nodes); only the DLLs a program actually loads enter wasm memory
-      const queue = man.files.slice(); const PAR = 6; const t0 = performance.now(); const inflight = new Set<string>(); let failed = false;
+      const queue = man.files.slice(); const PAR = 6; const inflight = new Set<string>(); let failed = false;
       const label = () => `installing ${pk.label}: ${done}/${man.files.length}, ${(bytes / 1048576).toFixed(1)} MB` + (done + inflight.size >= man.files.length ? ` — waiting for ${[...inflight].join(', ')}` : '');
       const worker = async () => { for (;;) { const f = queue.shift(); if (!f || failed) return; inflight.add(f.gz.slice(f.gz.lastIndexOf('/') + 1));
         let b: Uint8Array;
@@ -487,21 +493,16 @@ export default function X64App() {
         set({ status: 'installing', manifest: man, done }); setFetching(label()); } };
       await Promise.all(Array.from({ length: PAR }, worker));
       await rt.disk.flushChecked();
-    } catch (e) { setFetching(null); set({ status: 'available', manifest: man, note: String(e) }); setLog(l => [...l, pk.label.toUpperCase() + ': ' + String(e)]); return false; }
+    } catch (e) { setFetching(null); set({ status: 'available', manifest: man, note: String(e) }); logComp(pk.label, false, `failed after ${done}/${man.files.length} files: ${String(e)}`); return false; }
     setFetching(null); set({ status: 'installed', manifest: man, done }); setFiles(rt.vfsList());
-    setLog(l => [...l, `${pk.label} installed: ${done} files, ${(bytes / 1048576).toFixed(1)} MB → ${pk.dir} (${man.pack})`]);
+    logComp(pk.label, true, `installed: ${done} files, ${(bytes / 1048576).toFixed(1)} MB → ${pk.dir} in ${((performance.now() - t0) / 1000).toFixed(1)} s (${man.pack})`);
     return true;
-  }, []);
+  }, [logComp]);
   /* ---- Visual C++ redistributables 2005…2022, x86 and x64, from /x64/sys32/packs.json ---- */
   const [vcPacks, setVcPacks] = useState<VcPack[]>([]);
   const [vcState, setVcState] = useState<Record<string, VcState>>({});
   const vcInstalled = useRef<Set<string>>(new Set());
   const vcAttempted = useRef<Set<string>>(new Set());
-  const [compLog, setCompLog] = useState<CompLogEntry[]>(loadCompLog);
-  const logComp = useCallback((pack: string, ok: boolean, text: string) => {
-    setCompLog(l => { const n = [...l, { t: Date.now(), pack, ok, text }].slice(-200); try { localStorage.setItem(COMP_LOG_KEY, JSON.stringify(n)); } catch { /* quota */ } return n; });
-    setLog(l => [...l, `${pack}: ${text}`]);
-  }, []);
   useEffect(() => { let alive = true; (async () => {
     try { const r = await fetch(PACK_URL + 'packs.json'); if (!r.ok) throw new Error('HTTP ' + r.status); const idx = await r.json() as { packs: VcPack[] };
       if (alive && Array.isArray(idx.packs)) setVcPacks(idx.packs.filter(p => p.id !== 'vc2015-x64' && Array.isArray(p.files) && p.files.length > 0)); }
