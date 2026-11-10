@@ -1,0 +1,37 @@
+name: UCRT WinMain command line regression
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - uses: mlugg/setup-zig@v2
+        with: { version: 0.17.0 }
+      - name: Build WASM and Windows guests
+        run: |
+          ZIG=zig ./emu/x64/build.sh
+          zig cc -target x86-windows-gnu -O2 emu/tests/winmain-command.c -o /tmp/winmain32.exe
+          zig cc -target x86_64-windows-gnu -O2 emu/tests/winmain-command.c -o /tmp/winmain64.exe
+      - name: Test both architectures, JIT modes and argument cases
+        run: |
+          set -o pipefail
+          for exe in /tmp/winmain32.exe /tmp/winmain64.exe; do
+            for jit in 0 1; do
+              for arg in empty args; do
+                if [ "$arg" = args ]; then
+                  node emu/tests/wasm_run.mjs --max-ms 30000 --jit "$jit" "$exe" alpha beta | tee /tmp/winmain.log
+                else
+                  node emu/tests/wasm_run.mjs --max-ms 30000 --jit "$jit" "$exe" | tee /tmp/winmain.log
+                fi
+                grep -q 'winmain-command: PASS' /tmp/winmain.log
+              done
+            done
+          done

@@ -523,6 +523,21 @@ static void s_FlushFileBuffers(Cpu *c) { RET(1); }
 
 static void s_GetCommandLineA(Cpu *c) { RET(W->cmdline_a); }
 static void s_GetCommandLineW(Cpu *c) { RET(W->cmdline_w); }
+/* UCRT WinMain helpers return a pointer into the command line after argv[0], not the full line. */
+static u64 winmain_command_line(Cpu *c, u64 p, int wide) {
+  u64 step = wide ? 2 : 1; int quoted = 0; u32 ch;
+  if (!p) return 0;
+  for (;;) {
+    ch = wide ? rd16(c, p) : rd8(c, p);
+    if (!ch || (!quoted && (ch == ' ' || ch == '\t'))) break;
+    if (ch == '"') quoted = !quoted;
+    p += step;
+  }
+  while ((ch = wide ? rd16(c, p) : rd8(c, p)) == ' ' || ch == '\t') p += step;
+  return p;
+}
+static void s__get_narrow_winmain_command_line(Cpu *c) { RET(winmain_command_line(c, W->cmdline_a, 0)); }
+static void s__get_wide_winmain_command_line(Cpu *c) { RET(winmain_command_line(c, W->cmdline_w, 1)); }
 static void s_FreeEnvironmentStringsW(Cpu *c) { RET(1); }
 static void s_FreeEnvironmentStringsA(Cpu *c) { RET(1); }
 static void s_GetStartupInfoA(Cpu *c) { u64 a = ARG(0);
@@ -1502,7 +1517,7 @@ static const ShimDef shims[] = {
   S(GetTickCount), S(GetTickCount64), S(QueryPerformanceCounter), S(QueryPerformanceFrequency), S(GetSystemTimeAsFileTime), S(GetSystemTimePreciseAsFileTime), S(GetSystemTime), S(GetLocalTime), S(Sleep), S(SleepEx),
   S(GetStdHandle), S(WriteFile), S(WriteConsoleA), S(WriteConsoleW), S(ReadFile), S(ReadConsoleA), S(GetConsoleMode), S(SetConsoleMode), S(GetConsoleOutputCP), S(GetConsoleCP), S(SetConsoleOutputCP), S(SetConsoleCP), S(GetConsoleScreenBufferInfo), S(SetConsoleTextAttribute), S(SetConsoleTitleA), S(SetConsoleTitleW), S(GetConsoleTitleW), S(GetConsoleTitleA), S(GetConsoleCursorInfo), S(SetConsoleCursorInfo), S(SetConsoleCursorPosition), S(FillConsoleOutputCharacterW), S(FillConsoleOutputCharacterA), S(FillConsoleOutputAttribute), S(ScrollConsoleScreenBufferW), S(ScrollConsoleScreenBufferA), S(SetConsoleScreenBufferSize), S(SetConsoleWindowInfo), S(WriteConsoleOutputW), S(WriteConsoleOutputA), S(WriteConsoleOutputCharacterW), S(WriteConsoleOutputAttribute), S(ReadConsoleOutputW), S(ReadConsoleOutputCharacterW), S(ReadConsoleOutputAttribute), S(GetLargestConsoleWindowSize), S(WriteConsoleInputW), S(GetConsoleProcessList), S(GetConsoleDisplayMode), S(GetConsoleOriginalTitleW), S(GetConsoleAliasesLengthW), S(GetConsoleScreenBufferInfoEx), S(SetConsoleScreenBufferInfoEx), S(GetCurrentConsoleFontEx), S(GetCurrentConsoleFont), S(SetCurrentConsoleFontEx), S(GetConsoleFontSize), S(GetConsoleWindow), S(AllocConsole), S(SetConsoleCtrlHandler), S(FlushFileBuffers), S(GetFileType), S(CloseHandle),
   S(CreateFileA), S(CreateFileW), S(GetFileAttributesA), S(GetFileAttributesW), S(GetFileAttributesExW), S(FindFirstFileA), S(FindFirstFileW), S(FindClose), S(DeleteFileA), S(GetFullPathNameA), S(GetFinalPathNameByHandleA), S(GetLongPathNameW), S(GetLongPathNameA), S(GetShortPathNameW), S(GetShortPathNameA), S(GetVolumePathNameW), S(PathCchSkipRoot), S(PathCchCombineEx), S(PathCchCanonicalizeEx), S(CreateWaitableTimerW), S(CreateWaitableTimerA), S(CreateWaitableTimerExW), S(CreateWaitableTimerExA), S(SetWaitableTimer), S(SetWaitableTimerEx), S(CancelWaitableTimer), S(NtReadFile), S(NtWriteFile), S(GetFinalPathNameByHandleW), S(GetCurrentDirectoryA), S(GetCurrentDirectoryW), S(GetTempPathA), S(SetFilePointer), S(GetFileSize),
-  S(GetCommandLineA), S(GetCommandLineW), S(GetEnvironmentStrings), S(GetEnvironmentStringsW), S(FreeEnvironmentStringsW), S(FreeEnvironmentStringsA), S(GetEnvironmentVariableA), S(GetEnvironmentVariableW), S(SetEnvironmentVariableA), S(ExpandEnvironmentStringsA), S(GetStartupInfoA), S(GetStartupInfoW),
+  S(GetCommandLineA), S(GetCommandLineW), S(_get_narrow_winmain_command_line), S(_get_wide_winmain_command_line), S(GetEnvironmentStrings), S(GetEnvironmentStringsW), S(FreeEnvironmentStringsW), S(FreeEnvironmentStringsA), S(GetEnvironmentVariableA), S(GetEnvironmentVariableW), S(SetEnvironmentVariableA), S(ExpandEnvironmentStringsA), S(GetStartupInfoA), S(GetStartupInfoW),
   S(GetModuleHandleA), S(GetModuleHandleW), S(GetModuleHandleExW), S(GetModuleHandleExA), S(LoadLibraryA), S(LoadLibraryW), S(LoadLibraryExA), S(LoadLibraryExW), S(FreeLibrary), S(GetProcAddress), S(GetModuleFileNameA), S(GetModuleFileNameW), S(GetSystemDirectoryA), S(GetWindowsDirectoryA),
   S(GetVersion), S(GetVersionExA), S(GetVersionExW), S(GetProductInfo), S(GetApplicationRestartSettings), S(RegisterApplicationRestart), S(UnregisterApplicationRestart), S(IsProcessorFeaturePresent), S(IsDebuggerPresent), S(IsDBCSLeadByte), S(IsDBCSLeadByteEx), S(GetACP), S(GetOEMCP), S(GetCPInfo), S(GetSystemInfo), S(GetNativeSystemInfo), S(GlobalMemoryStatusEx),
   NODE_SHIMS,
