@@ -6,6 +6,8 @@ import android.content.UriPermission;
 import android.database.Cursor;
 import android.net.Uri;
 import android.provider.DocumentsContract;
+import java.io.File;
+import com.getcapacitor.JSArray;
 import androidx.activity.result.ActivityResult;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -44,6 +46,28 @@ public class NebulaStoragePlugin extends Plugin {
         if (value == null) { JSObject out = new JSObject(); out.put("selected", false); call.resolve(out); return; }
         try { call.resolve(describe(Uri.parse(value))); }
         catch (Exception e) { JSObject out = new JSObject(); out.put("selected", false); out.put("error", "Папка больше недоступна: " + e.getMessage()); call.resolve(out); }
+    }
+
+    // Read-only recovery clues: enumerate WebView IndexedDB directory names, never open or change database files.
+    private void listIndexedDbDirs(File dir, int depth, JSArray result) {
+        if (depth > 4 || !dir.isDirectory() || result.length() >= 40) return;
+        File[] files = dir.listFiles(); if (files == null) return;
+        for (File child : files) {
+            if (!child.isDirectory() || result.length() >= 40) continue;
+            String name = child.getName();
+            if (name.endsWith(".indexeddb.leveldb") || name.endsWith(".indexeddb.blob")) {
+                File[] entries = child.listFiles(); JSObject item = new JSObject();
+                item.put("directory", name); item.put("entries", entries == null ? -1 : entries.length);
+                result.put(item);
+            } else if (!name.startsWith(".")) listIndexedDbDirs(child, depth + 1, result);
+        }
+    }
+
+    @PluginMethod
+    public void storageDiagnostics(PluginCall call) {
+        JSArray dirs = new JSArray();
+        listIndexedDbDirs(new File(getContext().getApplicationInfo().dataDir, "app_webview"), 0, dirs);
+        JSObject out = new JSObject(); out.put("webviewIndexedDbDirectories", dirs); call.resolve(out);
     }
 
     @PluginMethod

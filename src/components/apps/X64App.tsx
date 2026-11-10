@@ -18,7 +18,7 @@ import { type PadState } from '../../lib/x64/pad';
 import { takeX64Launch, onX64Launch, type X64Launch } from '../../lib/x64/launch';
 
 interface FolderInfo { selected: boolean; name?: string; error?: string }
-const NebulaStorage = registerPlugin<{ folderInfo(): Promise<FolderInfo>; chooseFolder(): Promise<FolderInfo> }>('NebulaStorage');
+const NebulaStorage = registerPlugin<{ folderInfo(): Promise<FolderInfo>; chooseFolder(): Promise<FolderInfo>; storageDiagnostics(): Promise<{ webviewIndexedDbDirectories: { directory: string; entries: number }[] }> }>('NebulaStorage');
 
 interface ExeEntry { id: number; name: string; bytes: Uint8Array; info: PeInfo; source: 'sample' | 'file' | 'disk'; pending?: string[]; path?: string; kind?: 'installer' | 'program'; cwd?: string }   // path: guest path when not C:\nebula\<name>   // pending: companion files fetched on first Run (big runtimes)
 
@@ -176,6 +176,14 @@ export default function X64App() {
   const [storageFolder, setStorageFolder] = useState<FolderInfo>({ selected: false });
   const [storageBusy, setStorageBusy] = useState(false);
   const [storageMessage, setStorageMessage] = useState('');
+  const [storageDiag, setStorageDiag] = useState('');
+  const inspectStorage = async () => {
+    const lines = [`Адрес приложения: ${location.origin}`, `Восстановлено записей: ${rtRef.current?.diskFiles ?? 'неизвестно'}`, `Ошибка диска: ${rtRef.current?.disk.lastError ?? initError ?? 'нет'}`];
+    try { const dbs = typeof indexedDB.databases === 'function' ? await indexedDB.databases() : null; lines.push(`Базы текущего адреса: ${dbs ? dbs.map(d => `${d.name} (v${d.version})`).join(', ') || 'не найдены' : 'список не поддерживается'}`); } catch (e) { lines.push(`Список баз: ${String(e)}`); }
+    try { const q = await navigator.storage?.estimate(); if (q) lines.push(`Место WebView: ${q.usage ?? '?'} / ${q.quota ?? '?'} байт`); } catch { /* optional */ }
+    if (nativePlatform() === 'android') try { const info = await NebulaStorage.storageDiagnostics(); lines.push(`Каталоги IndexedDB WebView: ${info.webviewIndexedDbDirectories.map(x => `${x.directory} (${x.entries} файлов)`).join(', ') || 'не обнаружены'}`); } catch (e) { lines.push(`Android-диагностика: ${String(e)}`); }
+    lines.push('Только диагностика: базы и игровые данные не изменяются.'); setStorageDiag(lines.join('\n'));
+  };
   useEffect(() => {
     if (nativePlatform() !== 'android') return;
     let active = true;
@@ -1086,6 +1094,7 @@ export default function X64App() {
                 <div>Доступ сохраняется Android. Перенос и использование папки ещё не подключены: все текущие игры и системные файлы остаются на прежнем виртуальном диске.</div>
                 {(storageFolder.error || storageMessage) && <div role="status" className="text-rose-800">{storageMessage || storageFolder.error}</div>}
               </div>}
+              <div className="border-b bg-white px-3 py-2 text-xs"><button data-storage-diagnostic onClick={() => void inspectStorage()} className="rounded border border-indigo-600 px-2 py-1 text-indigo-700">Диагностика сохранённых данных</button>{storageDiag && <pre data-storage-diagnostic-result className="mt-2 whitespace-pre-wrap break-all">{storageDiag}</pre>}</div>
               <div className="min-h-0 flex-1 overflow-auto">
                 {files.length === 0 && <div className="p-4 text-slate-400">Empty. Use “Open folder…” to mount a directory, drop files here, or run a program that creates files.</div>}
                 <table className="w-full text-[11px]">
