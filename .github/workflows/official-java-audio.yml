@@ -1,0 +1,26 @@
+name: Official Windows Java and OpenAL component archives
+on:
+  workflow_dispatch:
+    inputs:
+      java_feature:
+        description: 'Temurin JRE major version (17 or 21)'
+        required: true
+        type: choice
+        options: ['17', '21']
+permissions:
+  contents: read
+jobs:
+  vendor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download official archives, verify JRE and PE architectures
+        env:
+          JAVA_FEATURE: ${{ inputs.java_feature }}
+        run: python3 emu/tools/official-java-audio.py official-components
+      - uses: actions/upload-artifact@v4
+        with:
+          name: official-windows-java-${{ inputs.java_feature }}-openal
+          path: official-components/
+          if-no-files-found: error
