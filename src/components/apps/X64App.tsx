@@ -1104,8 +1104,6 @@ function PeReport({ e, stats, log, apiStats, jit, runtime }: { e: ExeEntry; stat
       .catch(() => { if (!cancelled) setDigest({ bytes, value: 'не удалось вычислить' }); });
     return () => { cancelled = true; };
   }, [e.bytes]);
-  return () => { cancelled = true; };
-  }, [e.bytes]);
   return (
     <div className="space-y-3">
       <div className="rounded-lg border border-slate-200 bg-white p-3">
