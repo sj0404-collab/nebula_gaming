@@ -252,12 +252,13 @@ int pe_load(Win32 *w, const u8 *bytes, size_t len, const char *name) {
 typedef struct { char *out; size_t sz, pos; int n, known, unknown, priv, pack, rt; char dlls[64][48]; int ndll; int unknown_listed; } InsCtx;
 static void ins_put(InsCtx *x, const char *fmt, ...) { if (x->pos >= x->sz) return; __builtin_va_list ap; __builtin_va_start(ap, fmt); int n = e_vsnprintf(x->out + x->pos, x->sz - x->pos, fmt, ap); __builtin_va_end(ap); x->pos += n; if (x->pos > x->sz - 1) x->pos = x->sz - 1; }
 int w32_have_shim(const char *dll, const char *name);
+int w32_have_import(const char *dll, const char *name, u32 ordinal);
 static void ins_import(void *ctx, const char *dll, const char *name, u32 ordinal, u32 iat_rva) {
   (void)iat_rva; InsCtx *x = ctx; x->n++;
   char tmp[32]; if (!name) { e_snprintf(tmp, sizeof tmp, "#%u", ordinal); name = tmp; }
   int found = 0; for (int i = 0; i < x->ndll; i++) if (!e_stricmp(x->dlls[i], dll)) { found = 1; break; }
   if (!found && x->ndll < 64) { e_snprintf(x->dlls[x->ndll++], 48, "%s", dll); }
-  if (w32_have_shim(dll, name) || (name && w32_data_import_off(name))) x->known++;
+  if (w32_have_import(dll, name, ordinal) || (name && w32_data_import_off(name))) x->known++;
   else if (!pe_is_system_dll(dll)) { x->priv++; x->known++; }   /* resolved from the private DLL next to the exe at load time */
   else if (pe_dll_native_only(dll)) { x->pack++; x->known++; }   /* real DLL from the DirectX pack (installed on demand) */
   else if (pe_dll_native_ok(dll)) { x->rt++; x->known++; }   /* msvcr/msvcp/mfc/atl/vcomp…: the real Microsoft DLL of the matching VC++ redistributable pack (installed on demand, preferred over shims) */

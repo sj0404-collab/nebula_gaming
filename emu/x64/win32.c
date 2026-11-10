@@ -1590,6 +1590,7 @@ static ShimFn find_shim(const char *dll, const char *name) {
   for (size_t i = 0; i < sizeof shims / sizeof shims[0]; i++) if (!e_strcmp(shims[i].name, name)) return shims[i].fn; extern ShimFn gdi_find_shim(const char *name); return gdi_find_shim(name); }
 void w32_api_trace(int on) { g_fs_w->api_trace = on; }
 int w32_have_shim(const char *dll, const char *name) { return find_shim(dll, name) != 0; }
+int w32_have_import(const char *dll, const char *name, u32 ordinal) { const char *n = name; if (name && name[0] == '#') { const char *resolved = ordinal_name(dll, ordinal); if (resolved) n = resolved; } return n && w32_have_shim(dll, n); }
 
 /* ---------- init ---------- */
 void w32_init(Win32 *w, Cpu *c, Mem *m) { g_fs_w = w;

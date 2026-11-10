@@ -1,0 +1,28 @@
+name: MSVC x86 RTTI pointer-cast regression
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - uses: mlugg/setup-zig@v2
+        with: { version: 0.17.0 }
+      - name: Build emulator and x86 test image
+        run: |
+          ZIG=zig ./emu/x64/build.sh
+          zig cc -target x86-windows-gnu -O2 emu/tests/rtti-single.c -o /tmp/rtti-single.exe
+      - name: Test x86 RTTI metadata and cdecl with and without JIT
+        run: |
+          set -o pipefail
+          for jit in 0 1; do
+            node emu/tests/wasm_run.mjs --max-ms 30000 --jit "$jit" /tmp/rtti-single.exe 2>&1 | tee /tmp/rtti.log
+            grep -q 'rtti-single: PASS' /tmp/rtti.log
+          done

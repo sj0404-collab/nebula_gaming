@@ -201,5 +201,32 @@ static int cxx_cont_resume(Cpu *c, int kind, u64 rax) {
   if (kind == CONT_CXXCATCH) { cxxcatch_step(c, ci, rax); return 1; }
   return 0;
 }
+/* MSVC PE32 RTTI pointer casts: conservative single, public, non-virtual inheritance.
+   Do not silently manufacture a result for unsupported hierarchies or failed reference casts. */
+static void s_RTDynamicCast(Cpu *c) {
+  u64 obj = ARG(0), src = ARG(2), dst = ARG(3); int byref = (int)ARG(4);
+  if (!obj) { RET(0); return; }
+  if (!c->mode32) { cpu_fault(c, "__RTDynamicCast: x64 RTTI layout not implemented"); return; }
+  u64 vt = rd32(c, obj), col = rd32(c, vt - 4);
+  if (c->status != RUN_OK) return;
+  u32 sig = rd32(c, col), displacement = rd32(c, col + 8);
+  if (sig != 0 || displacement || (s32)ARG(1) != 0) { cpu_fault(c, "__RTDynamicCast: unsupported RTTI locator or vfptr displacement"); return; }
+  u64 top = obj - rd32(c, col + 4); u64 hierarchy = rd32(c, col + 16);
+  u32 attrs = rd32(c, hierarchy + 4), count = rd32(c, hierarchy + 8); u64 array = rd32(c, hierarchy + 12);
+  if (c->status != RUN_OK) return;
+  if (attrs || !count || count > 1024) { cpu_fault(c, "__RTDynamicCast: unsupported multiple/virtual RTTI hierarchy or invalid count"); return; }
+  int have_src = 0, have_dst = 0; u64 answer = 0;
+  for (u32 i = 0; i < count; i++) {
+    u64 d = rd32(c, array + (u64)i * 4), type = rd32(c, d); s32 mdisp = (s32)rd32(c, d + 8), pdisp = (s32)rd32(c, d + 12); u32 flags = rd32(c, d + 20);
+    if (c->status != RUN_OK) return;
+    if (pdisp != -1 || flags) { cpu_fault(c, "__RTDynamicCast: non-public, ambiguous or virtual base not implemented"); return; }
+    if (type == src || cxx_str_eq(c, type + 8, src + 8)) have_src = 1;
+    if (type == dst || cxx_str_eq(c, type + 8, dst + 8)) { have_dst = 1; answer = top + (s64)mdisp; }
+    if (c->status != RUN_OK) return;
+  }
+  if (!have_src) { cpu_fault(c, "__RTDynamicCast: source type absent from RTTI hierarchy"); return; }
+  if (!have_dst && byref) { cpu_fault(c, "__RTDynamicCast: failed reference cast (bad_cast not implemented)"); return; }
+  RET(have_dst ? answer : 0);
+}
 #define CXX_SHIMS \
-  SA("__CxxFrameHandler", __CxxFrameHandler), SA("__CxxFrameHandler2", __CxxFrameHandler), SA("__CxxFrameHandler3", __CxxFrameHandler), SA("__nebula_cxx_catch", __nebula_cxx_catch),
+  SA("__RTDynamicCast", RTDynamicCast), SA("__CxxFrameHandler", __CxxFrameHandler), SA("__CxxFrameHandler2", __CxxFrameHandler), SA("__CxxFrameHandler3", __CxxFrameHandler), SA("__nebula_cxx_catch", __nebula_cxx_catch),
