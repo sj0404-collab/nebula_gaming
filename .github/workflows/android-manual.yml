@@ -25,7 +25,9 @@ jobs:
       - uses: actions/checkout@v4
       - run: sudo apt-get install -y -q cabextract
       - name: Download directx_Jun2010_redist.exe, extract the x64 cabinets (D3DCompiler_33…43, d3dx9/10/11, d3dcsx, X3DAudio), gzip per file + manifest (nothing modified)
-        run: ./emu/tools/dx-pack.sh public/x64/dx /tmp/dx/pack
+        run: |
+          DX_REDIST_FILE=/tmp/dx/redist.exe ./emu/tools/dx-pack.sh public/x64/dx /tmp/dx/pack
+          DX_REDIST_FILE=/tmp/dx/redist.exe DX_ARCH=x86 ./emu/tools/dx-pack.sh public/x64/dx/x86 /tmp/dx/pack32
       - uses: actions/upload-artifact@v4
         with:
           name: dx-pack
@@ -101,7 +103,7 @@ jobs:
       - name: Version from tag
         id: v
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF#refs/tags/v}"; else V="1.46.0-ci.${GITHUB_RUN_NUMBER}"; fi
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF#refs/tags/v}"; else V="$(node -p "require('./package.json').version")-test.${GITHUB_RUN_NUMBER}"; fi
           # A UTC timestamp is greater than older semver-based codes and grows across both workflows.
           # Android accepts codes up to 2100000000 (the epoch scheme must be revisited before 2036).
           CODE=$(date -u +%s)
@@ -126,7 +128,7 @@ jobs:
           import json, zipfile, glob
           with zipfile.ZipFile(glob.glob('release/*.apk')[0]) as z:
               names=set(z.namelist())
-              for pack in ('dx','dotnet'):
+              for pack in ('dx','dx/x86','dotnet'):
                   prefix='assets/public/x64/'+pack+'/'
                   manifest=json.loads(z.read(prefix+'manifest.json'))
                   for f in manifest['files']:

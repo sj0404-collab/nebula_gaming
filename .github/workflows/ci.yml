@@ -106,6 +106,17 @@ jobs:
             # exit 3 = the guest's own non-zero exit code (hello.exe exits 7 by design); 101 = RERUN MISMATCH, 102 = fault, 4 = timeout
             if [ "$rc" != 0 ] && [ "$rc" != 3 ]; then echo "::error::$exe restart test failed (rc=$rc)"; exit 1; fi
           done
+      - name: Repeated window shim regression (WASM x86/x64, JIT on and off)
+        run: |
+          set -o pipefail
+          zig cc -target x86-windows-gnu -O2 emu/tests/shim-reload.c -o /tmp/shim32.exe -luser32
+          zig cc -target x86_64-windows-gnu -O2 emu/tests/shim-reload.c -o /tmp/shim64.exe -luser32
+          for exe in /tmp/shim32.exe /tmp/shim64.exe; do
+            for jit in 0 1; do
+              node emu/tests/wasm_run.mjs --max-ms 30000 --jit "$jit" --rerun 2 "$exe" 2>&1 | tee /tmp/shim-result.log
+              test "$(grep -c 'shim-reload: PASS' /tmp/shim-result.log)" -eq 3
+            done
+          done
       - name: Build process-memory regression programs (x86 and x64)
         run: |
           zig cc -target x86_64-windows-gnu -O2 emu/tests/procmem.c -o emu/tests/procmem.exe
@@ -223,8 +234,6 @@ jobs:
           if-no-files-found: ignore
 
   android:
-    # Hold automatic APK builds until the targeted WASM regressions pass.
-    if: ${{ false }}
     name: Android APK (Capacitor)
     runs-on: ubuntu-latest
     needs: test
@@ -251,7 +260,7 @@ jobs:
       - name: Version from tag
         id: v
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF#refs/tags/v}"; else V="1.46.0-ci.${GITHUB_RUN_NUMBER}"; fi
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF#refs/tags/v}"; else V="$(node -p "require('./package.json').version")-ci.${GITHUB_RUN_NUMBER}"; fi
           # A UTC timestamp is greater than older semver-based codes and grows across both workflows.
           # Android accepts codes up to 2100000000 (the epoch scheme must be revisited before 2036).
           CODE=$(date -u +%s)
