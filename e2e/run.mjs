@@ -250,16 +250,36 @@ await test('components persist across closing Programs and reloading the app', a
   for (const attr of names) {
     await w.locator(`[${attr}]`).waitFor({ timeout: 120000 });
     await page.waitForFunction(a => { const s=document.querySelector(`[${a}]`)?.getAttribute(a); return s && s!=='probing'; }, attr, { timeout: 120000 });
-    if (await w.locator(`[${attr}]`).getAttribute(attr) !== 'installed') await w.locator(`[${attr}]`).click({ timeout: 120000 });
+    if (await w.locator(`[${attr}]`).getAttribute(attr) !== 'installed') {
+      // the card list re-renders while the previous pack finishes (status text, Components log): a click can land in the gap between
+      // Playwright's hit-target check and the mouse event — verify the installer really started (status left 'available' or the card
+      // left the DOM because the installer switched to the Console tab) and re-click otherwise
+      for (let k = 0; ; k++) {
+        await w.locator(`[${attr}]`).click({ timeout: 120000 });
+        const started = await page.waitForFunction(a => { const el = document.querySelector(`[${a}]`); return !el || el.getAttribute(a) !== 'available'; }, attr, { timeout: 4000 }).then(() => true, () => false);
+        if (started) break;
+        expect(k < 5, `${attr}: the Install button did not start the installer after ${k + 1} clicks`);
+        console.log(`    [components] ${attr}: click did not start the installer, retrying`);
+        await w.locator('[data-x64-tab="components"]').click();
+      }
+    }
     // The .NET and DX installer opens Console. Wait on the toolbar state for
     // those packs, then return to the components view.
     const toolbar = attr === 'data-x64-component-dx' ? 'data-x64-dx' : attr === 'data-x64-component-dotnet' ? 'data-x64-dotnet' : null;
-    if (toolbar) await page.waitForFunction(a => document.querySelector(`[${a}]`)?.getAttribute(a)==='installed', toolbar, { timeout: 300000 });
-    else {   // the x86 DirectX card has no toolbar badge and the installer shows the Console tab: poll the card by re-opening the Components tab
-      const t0 = Date.now();
-      for (;;) { await w.locator('[data-x64-tab="components"]').click(); try { await page.waitForFunction(a => document.querySelector(`[${a}]`)?.getAttribute(a)==='installed', attr, { timeout: 10000 }); break; }
-        catch (e) { if (Date.now() - t0 > 300000) throw e; } }
-    }
+    // diagnostics on failure: the Components log (localStorage), the toolbar notes and the last IndexedDB error
+    const diag = async () => await page.evaluate(() => { const log = JSON.parse(localStorage.getItem('nebula_x64_components_log') ?? '[]').slice(-3).map(e => `${e.pack}: ${e.ok ? 'ok' : 'FAIL'} ${e.text}`); return { log, dxNote: document.querySelector('[data-x64-dx-note]')?.getAttribute('data-x64-dx-note'), dotnetNote: document.querySelector('[data-x64-dotnet-note]')?.getAttribute('data-x64-dotnet-note'), diskError: window.__x64?.disk?.lastError ?? null, status: document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') }; }).catch(e => String(e));
+    const t0 = Date.now();
+    try {
+      if (toolbar) {   // installed, or back to 'available' with a note = the installer reported a failure → fail fast with the reason
+        await page.waitForFunction(a => { const el = document.querySelector(`[${a}]`); const st = el?.getAttribute(a); return st === 'installed' || (st === 'available' && !!el?.getAttribute(a + '-note')); }, toolbar, { timeout: 300000 });
+        const st = await page.evaluate(a => document.querySelector(`[${a}]`)?.getAttribute(a), toolbar);
+        expect(st === 'installed', `${attr}: installer failed: ${JSON.stringify(await diag())}`);
+      } else {   // the x86 DirectX card has no toolbar badge and the installer shows the Console tab: poll the card by re-opening the Components tab
+        for (;;) { await w.locator('[data-x64-tab="components"]').click(); try { await page.waitForFunction(a => document.querySelector(`[${a}]`)?.getAttribute(a)==='installed', attr, { timeout: 10000 }); break; }
+          catch (e) { if (Date.now() - t0 > 300000) throw e; } }
+      }
+    } catch (e) { console.log(`    [components] ${attr} not installed after ${Date.now() - t0} ms:`, JSON.stringify(await diag())); throw e; }
+    console.log(`    [components] ${attr} installed in ${Date.now() - t0} ms`);
     await w.locator('[data-x64-tab="components"]').click();
   }
   // every other VC++ pack (2005/2008/2010 x64/2012/2013, both bitnesses) through "install all"; the log must record each one
