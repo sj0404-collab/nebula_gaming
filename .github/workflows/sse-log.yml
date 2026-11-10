@@ -29,5 +29,6 @@ jobs:
               node emu/tests/wasm_run.mjs --max-ms 30000 --jit "$jit" "/tmp/sse-$arch.exe" 2>&1 | tee /tmp/sse-log.txt
               grep -q 'sse-log: PASS' /tmp/sse-log.txt
               grep -q 'sse-sqrt: PASS' /tmp/sse-log.txt
+              grep -q 'sse-extra: PASS' /tmp/sse-log.txt
             done
           done
