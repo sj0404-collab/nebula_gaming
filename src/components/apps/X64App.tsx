@@ -908,7 +908,7 @@ export default function X64App() {
               <div className="space-y-3">
                 {(['jdk17-x64', 'openal-x86', 'openal-x64'] as OfficialId[]).map(id => {
                   const st = official[id]; const man = st?.manifest; const rt = rtRef.current;
-                  const installed = !!man && !!rt && ready === 'ready' && officialComplete(rt, man);
+                  const installed = !!man && !!rt && ready === 'ready' && st?.status !== 'error' && st?.status !== 'installing' && officialComplete(rt, man);
                   return <div key={id} className="rounded border p-3" data-official-component={id} data-official-status={installed ? 'installed' : st?.status ?? 'probing'}>
                     <b>{man?.pack ?? id}</b><p className="text-sm">{installed ? 'Установлено на виртуальный диск.' : st?.status === 'unavailable' ? 'Не включено в эту сборку.' : st?.status ?? 'Проверка…'} {st?.note}</p>
                     {man && <><p className="break-all text-xs">Версия архива: {man.version}; источник: {man.source}; SHA-256: {man.archive_sha256}. {man.checksum_verified_against ? `Контрольная сумма поставщика: ${man.checksum_verified_against}.` : 'Независимая контрольная сумма поставщика не проверена.'}</p><p className="break-all text-xs">Папка: {officialDir(man)}</p></>}

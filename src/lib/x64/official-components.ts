@@ -23,6 +23,8 @@ export function officialComplete(rt: X64Runtime, m: OfficialManifest): boolean {
 }
 export async function installOfficial(rt: X64Runtime, m: OfficialManifest, fetchFile: (f: OfficialManifest['files'][number]) => Promise<Uint8Array>, progress: (n: number) => void): Promise<void> {
   validateOfficial(m, m.id); const root = officialDir(m);
+  const marker = root + '.nebula-complete.json';
+  rt.vfsRemove(marker); rt.disk.remove(marker); await rt.disk.flushChecked();
   for (let i = 0; i < m.files.length; i++) {
     const f = m.files[i]; const b = await fetchFile(f);
     if (b.length !== f.size) throw new Error(`${f.path}: incorrect size`);
@@ -35,6 +37,6 @@ export async function installOfficial(rt: X64Runtime, m: OfficialManifest, fetch
     progress(i + 1);
   }
   await rt.disk.flushChecked();
-  if (!rt.vfsAddPersistent(root + '.nebula-complete.json', new TextEncoder().encode(JSON.stringify(m)))) throw new Error('Could not write completion marker');
-  await rt.disk.flushChecked();
+  if (!rt.vfsAddPersistent(marker, new TextEncoder().encode(JSON.stringify(m)))) throw new Error('Could not write completion marker');
+  try { await rt.disk.flushChecked(); } catch (e) { rt.vfsRemove(marker); rt.disk.remove(marker); throw e; }
 }
