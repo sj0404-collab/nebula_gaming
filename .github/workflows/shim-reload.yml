@@ -1,0 +1,31 @@
+name: WASM window shim reload regression
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  reload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - uses: mlugg/setup-zig@v2
+        with: { version: 0.17.0 }
+      - name: Build WASM and x86/x64 Windows guests
+        run: |
+          ZIG=zig ./emu/x64/build.sh
+          zig cc -target x86-windows-gnu -O2 emu/tests/shim-reload.c -o /tmp/shim32.exe -luser32
+          zig cc -target x86_64-windows-gnu -O2 emu/tests/shim-reload.c -o /tmp/shim64.exe -luser32
+      - name: Run three times in one WASM instance with and without JIT
+        run: |
+          set -o pipefail
+          for exe in /tmp/shim32.exe /tmp/shim64.exe; do
+            for jit in 0 1; do
+              node emu/tests/wasm_run.mjs --max-ms 30000 --jit "$jit" --rerun 2 "$exe" 2>&1 | tee /tmp/result.log
+              test "$(grep -c 'shim-reload: PASS' /tmp/result.log)" -eq 3
+            done
+          done

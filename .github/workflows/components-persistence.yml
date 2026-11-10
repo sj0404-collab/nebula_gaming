@@ -19,7 +19,8 @@ jobs:
       - name: Build official runtime packs
         run: |
           ./emu/tools/runtime-pack.sh public/x64/sys32
-          ./emu/tools/dx-pack.sh public/x64/dx /tmp/dx/pack
+          DX_REDIST_FILE=/tmp/dx/redist.exe ./emu/tools/dx-pack.sh public/x64/dx /tmp/dx/pack
+          DX_REDIST_FILE=/tmp/dx/redist.exe DX_ARCH=x86 ./emu/tools/dx-pack.sh public/x64/dx/x86 /tmp/dx/pack32
           ./emu/tools/dotnet-pack.sh public/x64/dotnet /tmp/dn/pack
       - name: Build WASM emulator
         run: ZIG=zig ./emu/x64/build.sh

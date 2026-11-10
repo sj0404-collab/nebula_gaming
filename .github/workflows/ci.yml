@@ -223,6 +223,8 @@ jobs:
           if-no-files-found: ignore
 
   android:
+    # Hold automatic APK builds until the targeted WASM regressions pass.
+    if: ${{ false }}
     name: Android APK (Capacitor)
     runs-on: ubuntu-latest
     needs: test
