@@ -9,6 +9,7 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         // on-device opencode agent: shell, files and streaming HTTPS without a PC bridge
         registerPlugin(NebulaNativePlugin.class);
+        registerPlugin(NebulaStoragePlugin.class);
         super.onCreate(savedInstanceState);
     }
 }

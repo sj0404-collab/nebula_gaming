@@ -1,5 +1,7 @@
 // x64 Runner — runs real Windows x86-64 executables inside Nebula OS through the wasm64 emulator (emu/x64) and presents them with WebGL.
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { registerPlugin } from '@capacitor/core';
+import { nativePlatform } from '../../lib/bridge';
 import { Cpu, FolderOpen, FolderInput, Play, Square, Terminal as TerminalIcon, Monitor, FileSearch, AlertTriangle, CheckCircle2, HelpCircle, XCircle, Gamepad2, HardDrive, Download, Trash2, SendHorizontal, Keyboard, LayoutGrid, Maximize2, Minimize2, Image as ImageIcon, FlaskConical, Loader2, PackagePlus, X, Mouse, MousePointerClick, Expand } from 'lucide-react';
 import { scanLibrary, classifyExe, loadPrefs, savePrefs, makeLnk, type LibraryItem, type LibraryPrefs } from '../../lib/x64/library';
 import { peIconDataUrl } from '../../lib/x64/peicon';
@@ -13,6 +15,9 @@ import { VirtualPad } from './VirtualPad';
 import { TouchMouse, type MouseBtn } from './TouchMouse';
 import { type PadState } from '../../lib/x64/pad';
 import { takeX64Launch, onX64Launch, type X64Launch } from '../../lib/x64/launch';
+
+interface FolderInfo { selected: boolean; name?: string; error?: string }
+const NebulaStorage = registerPlugin<{ folderInfo(): Promise<FolderInfo>; chooseFolder(): Promise<FolderInfo> }>('NebulaStorage');
 
 interface ExeEntry { id: number; name: string; bytes: Uint8Array; info: PeInfo; source: 'sample' | 'file' | 'disk'; pending?: string[]; path?: string; kind?: 'installer' | 'program'; cwd?: string }   // path: guest path when not C:\nebula\<name>   // pending: companion files fetched on first Run (big runtimes)
 
@@ -167,6 +172,21 @@ export default function X64App() {
   const [disk, setDisk] = useState({ files: 0, writes: 0, bytes: 0, queued: 0 });
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [diskReady, setDiskReady] = useState(false);
+  const [storageFolder, setStorageFolder] = useState<FolderInfo>({ selected: false });
+  const [storageBusy, setStorageBusy] = useState(false);
+  const [storageMessage, setStorageMessage] = useState('');
+  useEffect(() => {
+    if (nativePlatform() !== 'android') return;
+    let active = true;
+    void NebulaStorage.folderInfo().then(info => { if (active) setStorageFolder(info); }).catch(() => { if (active) setStorageMessage('Не удалось проверить разрешение на папку.'); });
+    return () => { active = false; };
+  }, []);
+  const chooseStorageFolder = async () => {
+    setStorageBusy(true); setStorageMessage('');
+    try { setStorageFolder(await NebulaStorage.chooseFolder()); }
+    catch (error) { setStorageMessage(String(error)); }
+    finally { setStorageBusy(false); }
+  };
   const rescanRef = useRef<(announce: boolean) => void>(() => {});
   const [files, setFiles] = useState<VfsEntry[]>([]);
   const [stdinLine, setStdinLine] = useState('');
@@ -1023,6 +1043,12 @@ export default function X64App() {
                 <label className="ml-auto flex cursor-pointer items-center gap-1 rounded border border-slate-300 bg-white px-2 py-0.5 hover:bg-slate-50"><FolderOpen size={12} /> Add files…<input type="file" multiple className="hidden" data-x64-addfiles onChange={e => { if (e.target.files) void addDataFiles(e.target.files); e.target.value = ''; }} /></label>
                 <button onClick={() => setFiles(rtRef.current?.vfsList() ?? [])} className="rounded border border-slate-300 bg-white px-2 py-0.5 hover:bg-slate-50">Refresh</button>
               </div>
+              {nativePlatform() === 'android' && <div className="border-b border-amber-200 bg-amber-50 px-3 py-2 text-xs" data-x64-storage-folder>
+                <b>Папка Nebula:</b> {storageFolder.selected ? storageFolder.name : 'не выбрана'}
+                <button disabled={storageBusy || !!running} onClick={() => { void chooseStorageFolder(); }} className="ml-2 rounded border border-indigo-600 px-2 py-1 text-indigo-700 disabled:opacity-40">{storageBusy ? 'Выбор…' : 'Выбрать папку'}</button>
+                <div>Доступ сохраняется Android. Перенос и использование папки ещё не подключены: все текущие игры и системные файлы остаются на прежнем виртуальном диске.</div>
+                {(storageFolder.error || storageMessage) && <div role="status" className="text-rose-800">{storageMessage || storageFolder.error}</div>}
+              </div>}
               <div className="min-h-0 flex-1 overflow-auto">
                 {files.length === 0 && <div className="p-4 text-slate-400">Empty. Use “Open folder…” to mount a directory, drop files here, or run a program that creates files.</div>}
                 <table className="w-full text-[11px]">
