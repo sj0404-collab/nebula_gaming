@@ -25,29 +25,29 @@ def pe_machine(blob):
     if p + 6 > len(blob) or blob[p:p+4] != b'PE\0\0': raise ValueError('not a PE image')
     return struct.unpack_from('<H', blob, p+4)[0]
 
-api = f'https://api.adoptium.net/v3/assets/latest/{feature}/hotspot?architecture=x64&image_type=jre&os=windows&vendor=eclipse'
+api = f'https://api.adoptium.net/v3/assets/latest/{feature}/hotspot?architecture=x64&image_type=jdk&os=windows&vendor=eclipse'
 meta = out / 'adoptium-api.json'
 fetch(api, meta)
 assets = json.loads(meta.read_text())
-if not assets: raise SystemExit('Adoptium returned no matching Windows x64 JRE')
+if not assets: raise SystemExit('Adoptium returned no matching Windows x64 JDK')
 pkg = assets[0]['binary']['package']
 url = pkg['link']
 if not url.startswith(f'https://github.com/adoptium/temurin{feature}-binaries/releases/download/'):
-    raise SystemExit('Unexpected JRE download origin')
+    raise SystemExit('Unexpected JDK download origin')
 expected = pkg['checksum'].lower()
 if len(expected) != 64: raise SystemExit('Missing upstream SHA-256')
 jre = out / pkg['name']
 fetch(url, jre)
 actual = digest(jre)
-if actual != expected: raise SystemExit('JRE SHA-256 does not match Adoptium')
+if actual != expected: raise SystemExit('JDK SHA-256 does not match Adoptium')
 with zipfile.ZipFile(jre) as z:
     java = [n for n in z.namelist() if n.endswith('/bin/java.exe')]
     if len(java) != 1 or pe_machine(z.read(java[0])) != 0x8664:
-        raise SystemExit('JRE archive does not contain exactly one Windows x64 java.exe')
-    if not any(n.endswith('/release') for n in z.namelist()): raise SystemExit('JRE release metadata missing')
+        raise SystemExit('JDK archive does not contain exactly one Windows x64 java.exe')
+    if not any(n.endswith('/release') for n in z.namelist()): raise SystemExit('JDK release metadata missing')
 
 # Project's official binary distribution. The archive hash below identifies the received
-# file; unlike the JRE checksum, it is NOT an independently supplied publisher digest.
+# file; unlike the JDK checksum, it is NOT an independently supplied publisher digest.
 openal_url = 'https://openal-soft.org/openal-binaries/openal-soft-1.25.2-bin.zip'
 openal = out / 'openal-soft-1.25.2-bin.zip'
 fetch(openal_url, openal)

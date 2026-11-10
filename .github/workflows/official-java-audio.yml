@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       java_feature:
-        description: 'Temurin JRE major version (17 or 21)'
+        description: 'Temurin JDK major version (17 or 21)'
         required: true
         type: choice
         options: ['17', '21']
@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Download official archives, verify JRE and PE architectures
+      - name: Download official archives, verify JDK and PE architectures
         env:
           JAVA_FEATURE: ${{ inputs.java_feature }}
         run: python3 emu/tools/official-java-audio.py official-components
