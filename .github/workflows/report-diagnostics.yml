@@ -1,0 +1,32 @@
+name: WASM large library persistence
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - uses: mlugg/setup-zig@v2
+        with: { version: 0.17.0 }
+      - name: Build WASM
+        run: ZIG=zig ./emu/x64/build.sh
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - name: Restore games from a large disk
+        run: |
+          E2E_GREP='report copying and read-only storage diagnostics' node e2e/run.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: large-library-screenshots
+          path: e2e/shots/
+          if-no-files-found: ignore

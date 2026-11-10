@@ -1116,7 +1116,7 @@ export default function X64App() {
           )}
           {tab === 'report' && (
             <div className="min-h-0 flex-1 overflow-auto p-4" data-x64-report>
-              {current ? <PeReport e={current} stats={stats} log={log} apiStats={apiStats} jit={jitInfo} runtime={{ packs: vcPacks, status: id => vcState[id]?.status ?? 'available', install: id => { const rt = rtRef.current; if (rt) void installVcPack(rt, id); }, busy: !!running || !!fetching }} /> : <div className="text-slate-400">Select an executable to see its compatibility report.</div>}
+              {current ? <PeReport e={current} stats={stats} log={log} apiStats={apiStats} jit={jitInfo} consoleText={consoleText} storageDiag={storageDiag} runtime={{ packs: vcPacks, status: id => vcState[id]?.status ?? 'available', install: id => { const rt = rtRef.current; if (rt) void installVcPack(rt, id); }, busy: !!running || !!fetching }} /> : <div className="text-slate-400">Select an executable to see its compatibility report.</div>}
             </div>
           )}
           {/* status bar */}
@@ -1132,7 +1132,22 @@ export default function X64App() {
   );
 }
 
-function PeReport({ e, stats, log, apiStats, jit, runtime }: { e: ExeEntry; stats: RunStats | null; log: string[]; apiStats: string; jit: JitInfo | null; runtime?: { packs: { id: string; label: string }[]; status: (id: string) => string; install: (id: string) => void; busy: boolean } }) {
+function PeReport({ e, stats, log, apiStats, jit, consoleText, storageDiag, runtime }: { e: ExeEntry; stats: RunStats | null; log: string[]; apiStats: string; jit: JitInfo | null; consoleText: string; storageDiag: string; runtime?: { packs: { id: string; label: string }[]; status: (id: string) => string; install: (id: string) => void; busy: boolean } }) {
+  const [copyMessage, setCopyMessage] = useState('');
+  const [manualCopy, setManualCopy] = useState(false);
+  const reportText = () => [
+    'Nebula OS — диагностический отчёт', `Время: ${new Date().toISOString()}`,
+    `EXE: ${e.name}`, `Путь: ${e.path ?? 'неизвестен'}`, `Размер: ${e.bytes.length}`, `SHA-256: ${sha256 || 'ещё вычисляется'}`,
+    'PE:', JSON.stringify(e.info, null, 2), 'Последний запуск:', JSON.stringify(stats, null, 2),
+    'JIT:', JSON.stringify(jit, null, 2), 'Win32 API calls:', apiStats || '(нет)',
+    `Emulator log (последние ${log.length} строк; ограничено приложением):`, log.join('\n') || '(нет)',
+    'Console (последние 60000 символов):', consoleText || '(нет)',
+    'Диагностика хранилища:', storageDiag || '(не запускалась)',
+  ].join('\n');
+  const copyReport = async () => {
+    try { await navigator.clipboard.writeText(reportText()); setCopyMessage('Отчёт скопирован. Проверьте его перед отправкой: он может содержать пути и данные программы.'); setManualCopy(false); }
+    catch { setManualCopy(true); setCopyMessage('Буфер обмена недоступен. Выделите и скопируйте текст ниже.'); }
+  };
   const i = e.info; const v = VERDICT[i.ok ? (i.verdict ?? 'invalid') : 'invalid'] ?? VERDICT.invalid;
   const exceptionExit = stats?.status === 'exited' && (stats.exitCode >>> 0) === 0xc0000005;
   const [digest, setDigest] = useState<{ bytes: Uint8Array; value: string } | null>(null);
@@ -1152,6 +1167,12 @@ function PeReport({ e, stats, log, apiStats, jit, runtime }: { e: ExeEntry; stat
   }, [e.bytes]);
   return (
     <div className="space-y-3">
+      <div className="rounded-lg border border-slate-200 bg-white p-3 text-xs">
+        <button data-copy-report onClick={() => void copyReport()} className="rounded border border-indigo-600 px-3 py-2 text-indigo-700">Копировать отчёт</button>
+        <span className="ml-2 text-slate-600">Отчёт может содержать пути и данные программы.</span>
+        {copyMessage && <p role="status" className="mt-2">{copyMessage}</p>}
+        {manualCopy && <textarea data-manual-report readOnly value={reportText()} onFocus={event => event.currentTarget.select()} className="mt-2 h-40 w-full border p-2 font-mono" aria-label="Текст отчёта для копирования" />}
+      </div>
       <div className="rounded-lg border border-slate-200 bg-white p-3">
         <div className="flex items-center gap-2">
           <v.Icon size={16} className={v.cls.split(' ')[1]} />

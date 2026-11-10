@@ -241,6 +241,30 @@ const x64Open = async () => {
   await w.locator('[data-x64-samples="ready"]').waitFor({ timeout: 120_000 });
   return w;
 };
+await test('report copying and read-only storage diagnostics', async () => {
+  const w = await x64Open();
+  await page.evaluate(async () => { const rt = window.__x64; rt.vfsAddPersistent('C:\\report-test.txt', new Uint8Array([17,42,99])); await rt.disk.flushChecked(); });
+  await w.locator('[data-x64-tab="files"]').click();
+  await w.locator('[data-storage-diagnostic]').click();
+  await w.locator('[data-storage-diagnostic-result]').waitFor();
+  const contents = await page.evaluate(async () => [...(await window.__x64.disk.read('C:\\report-test.txt')).data]);
+  expect(JSON.stringify(contents) === '[17,42,99]', 'diagnostics modified persisted data');
+  await w.locator('[data-x64-tab="report"]').click();
+  await page.evaluate(() => { Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async text => { window.__copiedReport = text; } } }); });
+  await w.locator('[data-copy-report]').click();
+  const text = await page.evaluate(() => window.__copiedReport);
+  expect(text.includes('Nebula OS — диагностический отчёт') && text.includes('Emulator log') && text.includes('Диагностика хранилища:') && text.includes('Адрес приложения:'), 'copied report missing sections');
+  await page.evaluate(() => { Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async () => { throw Error('denied'); } } }); });
+  await w.locator('[data-copy-report]').click();
+  expect((await w.locator('[data-manual-report]').inputValue()).includes('Emulator log'), 'manual copy fallback missing');
+  await closeAll(); await page.reload({ waitUntil: 'load' }); await page.waitForSelector('[aria-label="Start"]');
+  await openFromDesktop('Programs'); await page.waitForFunction(() => !!window.__x64?.ex);
+  const restored = await page.evaluate(async () => [...(await window.__x64.disk.read('C:\\report-test.txt')).data]);
+  expect(JSON.stringify(restored) === '[17,42,99]', 'data missing after diagnostics and reload');
+  await page.evaluate(async () => { window.__x64.disk.remove('C:\\report-test.txt'); await window.__x64.disk.flushChecked(); });
+  await closeAll();
+});
+
 await test('disk restore error is visible instead of showing an empty disk', async () => {
   await page.evaluate(() => {
     window.__originalCursor = IDBObjectStore.prototype.openCursor;
