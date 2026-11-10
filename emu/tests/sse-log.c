@@ -15,5 +15,12 @@ int main(void) {
   sse_log_call(fn, 0.0, &y); if (bits(y) != UINT64_C(0xfff0000000000000)) { puts("sse-log: log(0) FAIL"); return 4; }
   sse_log_call(fn, -1.0, &y); if ((bits(y) & UINT64_C(0x7ff0000000000000)) != UINT64_C(0x7ff0000000000000) || !(bits(y) & UINT64_C(0x000fffffffffffff))) { puts("sse-log: log(-1) FAIL"); return 5; }
   sse_log_call(fn, frombits(UINT64_C(0x7ff0000000000000)), &y); if (bits(y) != UINT64_C(0x7ff0000000000000)) { puts("sse-log: log(inf) FAIL"); return 6; }
+  fn = m ? (void *)GetProcAddress(m, "_libm_sse2_sqrt_precise") : NULL;
+  if (!fn) { puts("sse-sqrt: missing FAIL"); return 7; }
+  sse_log_call(fn, 4.0, &y); if (y != 2.0) { puts("sse-sqrt: sqrt(4) FAIL"); return 8; }
+  sse_log_call(fn, -0.0, &y); if (bits(y) != UINT64_C(0x8000000000000000)) { puts("sse-sqrt: sqrt(-0) FAIL"); return 9; }
+  sse_log_call(fn, -1.0, &y); if ((bits(y) & UINT64_C(0x7ff0000000000000)) != UINT64_C(0x7ff0000000000000) || !(bits(y) & UINT64_C(0x000fffffffffffff))) { puts("sse-sqrt: sqrt(-1) FAIL"); return 10; }
+  sse_log_call(fn, frombits(UINT64_C(0x7ff0000000000000)), &y); if (bits(y) != UINT64_C(0x7ff0000000000000)) { puts("sse-sqrt: sqrt(inf) FAIL"); return 11; }
+  puts("sse-sqrt: PASS");
   puts("sse-log: PASS"); return 0;
 }
