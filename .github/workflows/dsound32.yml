@@ -1,0 +1,28 @@
+name: DirectSound x86 stack and pointer regression
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - uses: mlugg/setup-zig@v2
+        with: { version: 0.17.0 }
+      - name: Build WASM and x86 guest
+        run: |
+          ZIG=zig ./emu/x64/build.sh
+          zig cc -target x86-windows-gnu -O2 emu/tests/dsound32.c emu/tests/dsound32-stack.S -o /tmp/dsound32.exe
+      - name: Verify COM stack and output pointer guards
+        run: |
+          set -o pipefail
+          for jit in 0 1; do
+            node emu/tests/wasm_run.mjs --max-ms 30000 --jit "$jit" /tmp/dsound32.exe 2>&1 | tee /tmp/dsound32.log
+            grep -q 'dsound32: PASS' /tmp/dsound32.log
+          done
