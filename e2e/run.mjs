@@ -241,6 +241,32 @@ const x64Open = async () => {
   await w.locator('[data-x64-samples="ready"]').waitFor({ timeout: 120_000 });
   return w;
 };
+await test('official components verify install and persist', async () => {
+  await openFromDesktop('Programs'); let w = page.locator('[data-window][aria-label*="Programs"]');
+  await w.locator('[data-x64-tab="components"]').click();
+  await page.waitForFunction(() => window.__x64?.ex && ['jdk17-x64','openal-x86','openal-x64'].every(id => document.querySelector(`[data-official-component="${id}"]`)?.getAttribute('data-official-status') === 'available'), null, { timeout: 120000 });
+  // A modified response must fail the checksum before it can be marked as installed.
+  await page.route('**/x64/official/openal-x86/OpenAL32.dll.gz', route => route.fulfill({ status: 200, body: 'corrupt' }));
+  await w.locator('[data-official-component="openal-x86"] button').click();
+  await page.waitForFunction(() => document.querySelector('[data-official-component="openal-x86"]')?.getAttribute('data-official-status') === 'error', null, { timeout: 120000 });
+  await page.unroute('**/x64/official/openal-x86/OpenAL32.dll.gz');
+  for (const id of ['openal-x86', 'openal-x64', 'jdk17-x64']) {
+    await w.locator(`[data-official-component="${id}"] button`).click({ timeout: 120000 });
+    await page.waitForFunction(id => ['installed','error'].includes(document.querySelector(`[data-official-component="${id}"]`)?.getAttribute('data-official-status')), id, { timeout: 900000 });
+    const card = w.locator(`[data-official-component="${id}"]`);
+    expect(await card.getAttribute('data-official-status') === 'installed', `${id} failed: ${await card.innerText()}`);
+  }
+  await page.screenshot({ path: resolve(SHOTS, 'official-components-installed.png') });
+  await closeAll(); await page.reload({ waitUntil: 'load' }); await page.waitForSelector('[aria-label="Start"]');
+  await openFromDesktop('Programs'); w = page.locator('[data-window][aria-label*="Programs"]'); await w.locator('[data-x64-tab="components"]').click();
+  await page.waitForFunction(() => ['jdk17-x64','openal-x86','openal-x64'].every(id => document.querySelector(`[data-official-component="${id}"]`)?.getAttribute('data-official-status') === 'installed'), null, { timeout: 180000 });
+  const found = await page.evaluate(() => window.__x64.vfsList().map(f => f.path.toLowerCase()));
+  expect(found.some(p => p.includes('jdk17-x64') && p.endsWith('\\bin\\java.exe')), 'persisted JDK java.exe missing');
+  expect(found.some(p => p.includes('openal-x86') && p.endsWith('\\openal32.dll')), 'persisted x86 OpenAL missing');
+  expect(found.some(p => p.includes('openal-x64') && p.endsWith('\\openal32.dll')), 'persisted x64 OpenAL missing');
+  await page.screenshot({ path: resolve(SHOTS, 'official-components-restored.png') }); await closeAll();
+});
+
 await test('components persist across closing Programs and reloading the app', async () => {
   await openFromDesktop('Programs');
   let w = page.locator('[data-window][aria-label*="Programs"]');
