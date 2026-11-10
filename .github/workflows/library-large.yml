@@ -22,7 +22,8 @@ jobs:
       - run: npm run build
       - run: npx playwright install --with-deps chromium
       - name: Restore games from a large disk
-        run: E2E_GREP='library: large disks' node e2e/run.mjs
+        run: |
+          E2E_GREP='library: large disks' node e2e/run.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
