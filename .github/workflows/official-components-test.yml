@@ -28,7 +28,7 @@ jobs:
       - run: npm run build
       - run: npx playwright install --with-deps chromium
       - name: Verify checksums, real installs and reload
-        run: E2E_GREP='official components verify' node e2e/run.mjs
+        run: E2E_GREP='/disk restore error|official components verify/' node e2e/run.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:

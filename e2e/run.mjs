@@ -241,6 +241,21 @@ const x64Open = async () => {
   await w.locator('[data-x64-samples="ready"]').waitFor({ timeout: 120_000 });
   return w;
 };
+await test('disk restore error is visible instead of showing an empty disk', async () => {
+  await page.evaluate(() => {
+    window.__originalCursor = IDBObjectStore.prototype.openCursor;
+    IDBObjectStore.prototype.openCursor = function (...args) {
+      if (this.name === 'files') throw new Error('simulated read failure');
+      return window.__originalCursor.apply(this, args);
+    };
+  });
+  await openFromDesktop('Programs');
+  await page.waitForFunction(() => document.body.textContent.includes('Не удалось восстановить виртуальный диск'), null, { timeout: 120000 });
+  expect(!await page.locator('[data-x64-disk="persistent"]').count(), 'failed restore presented as an empty healthy disk');
+  await page.evaluate(() => { IDBObjectStore.prototype.openCursor = window.__originalCursor; });
+  await closeAll();
+});
+
 await test('official components verify install and persist', async () => {
   await openFromDesktop('Programs'); let w = page.locator('[data-window][aria-label*="Programs"]');
   await w.locator('[data-x64-tab="components"]').click();
