@@ -12,6 +12,8 @@ const DB_NAME = 'nebula-x64-disk', STORE = 'files', VERSION = 1;
 export function diskKey(path: string) { return path.replace(/\//g, '\\').toLowerCase(); }
 export function isScratch(path: string) { const k = diskKey(path); return k.startsWith('c:\\tmp\\') || k === 'c:\\tmp' || k.includes('\\temp\\') || k.endsWith('\\temp') || k.startsWith('c:\\nebula\\'); }
 
+const CHUNK_BYTES = 16 << 20, CHUNK_FILES = 64;
+
 export class Disk {
   private db: IDBDatabase | null = null;
   private pending = new Map<string, DiskFile | null>();   // key → file to write, or null → delete
@@ -20,10 +22,14 @@ export class Disk {
   writes = 0; bytes = 0;                                   // counters for the UI ("disk activity")
   onActivity: (() => void) | null = null;
   available = typeof indexedDB !== 'undefined';
+  private persistAsked = false;
+  lastError: string | null = null;                         // last IndexedDB failure (e.g. QuotaExceededError), shown by the installers
 
   async open(): Promise<boolean> {
     if (this.db || !this.available) return !!this.db;
     try {
+      // ask the browser/WebView not to evict the virtual disk under storage pressure (best effort, result ignored)
+      if (!this.persistAsked) { this.persistAsked = true; try { void navigator.storage?.persist?.().catch(() => undefined); } catch { /* unsupported */ } }
       this.db = await new Promise<IDBDatabase>((res, rej) => {
         const r = indexedDB.open(DB_NAME, VERSION);
         r.onupgradeneeded = () => { const d = r.result; if (!d.objectStoreNames.contains(STORE)) d.createObjectStore(STORE); };
@@ -79,19 +85,33 @@ export class Disk {
     this.flushing = (async () => {
       if (!(await this.open())) { for (const [k, v] of batch) if (!this.pending.has(k)) this.pending.set(k, v); return; }
       const db = this.db!;
-      await new Promise<void>((res, rej) => {
-        const tx = db.transaction(STORE, 'readwrite'); const st = tx.objectStore(STORE);
-        for (const [k, v] of batch) { if (v) st.put(v, k); else st.delete(k); }
-        tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error ?? new Error('aborted'));
-      }).catch(() => { for (const [k, v] of batch) if (!this.pending.has(k)) this.pending.set(k, v); });
-      this.onActivity?.();
+      // Write in chunks of <= CHUNK_BYTES / CHUNK_FILES per transaction: a whole runtime pack (DirectX = 77 files, 93 MB) in one
+      // transaction is rejected with QuotaExceededError by WebView/Chromium when the remaining quota is tight, even though the
+      // files fit one by one. A failed chunk (and everything after it) is re-queued so flushChecked() reports the failure.
+      const entries = [...batch]; let i = 0;
+      while (i < entries.length) {
+        const chunk: [string, DiskFile | null][] = []; let bytes = 0;
+        while (i < entries.length && chunk.length < CHUNK_FILES && (chunk.length === 0 || bytes + (entries[i][1]?.data?.length ?? 0) <= CHUNK_BYTES)) { bytes += entries[i][1]?.data?.length ?? 0; chunk.push(entries[i++]); }
+        const err = await new Promise<string | null>(res => {
+          const tx = db.transaction(STORE, 'readwrite'); const st = tx.objectStore(STORE);
+          for (const [k, v] of chunk) { if (v) st.put(v, k); else st.delete(k); }
+          const fail = () => res(tx.error ? `${tx.error.name}: ${tx.error.message}` : 'transaction aborted');
+          tx.oncomplete = () => res(null); tx.onerror = fail; tx.onabort = fail;
+        });
+        if (err) {
+          this.lastError = err; console.warn('[disk] IndexedDB write failed:', err);
+          for (const [k, v] of [...chunk, ...entries.slice(i)]) if (!this.pending.has(k)) this.pending.set(k, v);
+          break;
+        }
+        this.onActivity?.();
+      }
     })().finally(() => { this.flushing = null; });
     return this.flushing;
   }
   /** Only report an installation as durable after IndexedDB accepted its whole batch. */
   async flushChecked(): Promise<void> {
     await this.flush();
-    if (!this.available || this.queued() !== 0) throw new Error('IndexedDB не сохранил файлы; проверьте доступность и свободное место');
+    if (!this.available || this.queued() !== 0) throw new Error('IndexedDB не сохранил файлы; проверьте доступность и свободное место' + (this.lastError ? ` (${this.lastError})` : ''));
   }
   queued() { return this.pending.size + (this.flushing ? 1 : 0); }
 

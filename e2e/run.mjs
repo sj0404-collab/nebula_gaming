@@ -10,7 +10,8 @@
  */
 import { chromium } from 'playwright';
 import { spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, readFileSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 
 const PORT = 4199;
@@ -57,11 +58,15 @@ async function test(name, fn) {
 const expect = (cond, msg) => { if (!cond) throw new Error(msg); };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });   // Web Audio may start without a tap (the audio test also passes when it stays suspended)
-const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+// The main context is a PERSISTENT profile on disk (like the installed app / Android WebView): an incognito context keeps
+// IndexedDB in memory with a cap of ~100-300 MB that the runtime packs (DirectX x64 + x86 = 186 MB, VC++ 150 MB, .NET 35 MB)
+// exceed with QuotaExceededError — the on-disk quota is the real one.
+const profileDir = mkdtempSync(resolve(tmpdir(), 'nebula-e2e-profile-'));
+const ctx = await chromium.launchPersistentContext(profileDir, { args: ['--autoplay-policy=no-user-gesture-required'], viewport: { width: 1400, height: 900 } });   // Web Audio may start without a tap (the audio test also passes when it stays suspended)
+const browser = ctx.browser();
 page = await ctx.newPage();
 page.on('pageerror', e => errors.push(`pageerror: ${e.message}`));
-page.on('console', m => { if (m.type() === 'error' && !/favicon|net::ERR|designarena|rrweb|Failed to load resource/i.test(m.text())) errors.push(`console: ${m.text()}`); });
+page.on('console', m => { if (m.type() === 'error' && !/favicon|net::ERR|designarena|rrweb|Failed to load resource/i.test(m.text())) errors.push(`console: ${m.text()}`); if (m.type() === 'warning' && m.text().startsWith('[disk]')) console.log('      ' + m.text()); });
 
 const win = (title) => page.locator(`[aria-label="${title}"]`);
 const windowsCount = () => page.locator('[data-window]').count();
@@ -240,6 +245,7 @@ await test('components persist across closing Programs and reloading the app', a
   await openFromDesktop('Programs');
   let w = page.locator('[data-window][aria-label*="Programs"]');
   await w.locator('[data-x64-tab="components"]').click();
+  const tStart = Date.now();
   const names = ['data-x64-vc10','data-x64-vc14x86','data-x64-vc14x64','data-x64-component-dx','data-x64-component-dx32','data-x64-component-dotnet'];
   for (const attr of names) {
     await w.locator(`[${attr}]`).waitFor({ timeout: 120000 });
@@ -249,7 +255,11 @@ await test('components persist across closing Programs and reloading the app', a
     // those packs, then return to the components view.
     const toolbar = attr === 'data-x64-component-dx' ? 'data-x64-dx' : attr === 'data-x64-component-dotnet' ? 'data-x64-dotnet' : null;
     if (toolbar) await page.waitForFunction(a => document.querySelector(`[${a}]`)?.getAttribute(a)==='installed', toolbar, { timeout: 300000 });
-    else await page.waitForFunction(a => document.querySelector(`[${a}]`)?.getAttribute(a)==='installed', attr, { timeout: 300000 });
+    else {   // the x86 DirectX card has no toolbar badge and the installer shows the Console tab: poll the card by re-opening the Components tab
+      const t0 = Date.now();
+      for (;;) { await w.locator('[data-x64-tab="components"]').click(); try { await page.waitForFunction(a => document.querySelector(`[${a}]`)?.getAttribute(a)==='installed', attr, { timeout: 10000 }); break; }
+        catch (e) { if (Date.now() - t0 > 300000) throw e; } }
+    }
     await w.locator('[data-x64-tab="components"]').click();
   }
   // every other VC++ pack (2005/2008/2010 x64/2012/2013, both bitnesses) through "install all"; the log must record each one
@@ -262,12 +272,15 @@ await test('components persist across closing Programs and reloading the app', a
   const vcDlls = await page.evaluate(() => { const rt = window.__x64; return ['C:\\Windows\\WinSxS\\x86_microsoft.vc80.crt_1fc8b3b9a1e18e3b_8.0.50727.6195_none_d09154e044272b9a\\msvcr80.dll', 'C:\\Windows\\WinSxS\\x86_microsoft.vc90.crt_1fc8b3b9a1e18e3b_9.0.30729.6161_none_50934f2ebcb7eb57\\msvcp90.dll', 'C:\\Windows\\System32\\msvcr100.dll', 'C:\\Windows\\SysWOW64\\msvcr110.dll', 'C:\\Windows\\System32\\msvcp120.dll'].map(p => (rt.vfsRead(p)?.length ?? 0) > 1000); });
   expect(vcDlls.every(Boolean), 'VC++ 2005–2013 DLLs missing on the disk: ' + JSON.stringify(vcDlls));
   await page.screenshot({ path: resolve(SHOTS, 'components-installed.png') });
+  console.log('    [components] all packs installed in', Date.now()-tStart, 'ms');
   await closeAll(); await openFromDesktop('Programs');
   w = page.locator('[data-window][aria-label*="Programs"]'); await w.locator('[data-x64-tab="components"]').click();
-  for (const attr of names) await page.waitForFunction(a => document.querySelector(`[${a}]`)?.getAttribute(a)==='installed', attr, { timeout: 120000 });
+  for (const attr of names) { try { await page.waitForFunction(a => document.querySelector(`[${a}]`)?.getAttribute(a)==='installed', attr, { timeout: 120000 }); } catch (e) { console.log('    [components] after reopen', attr, '=', await page.evaluate(a => document.querySelector(`[${a}]`)?.getAttribute(a), attr), 'disk.available=', await page.evaluate(() => window.__x64?.disk?.available)); throw e; } }
+  console.log('    [components] reopen verified in', Date.now()-tStart, 'ms');
   await page.reload({ waitUntil: 'load' }); await page.waitForSelector('[aria-label="Start"]');
   await openFromDesktop('Programs'); w = page.locator('[data-window][aria-label*="Programs"]'); await w.locator('[data-x64-tab="components"]').click();
-  for (const attr of names) await page.waitForFunction(a => document.querySelector(`[${a}]`)?.getAttribute(a)==='installed', attr, { timeout: 120000 });
+  for (const attr of names) { try { await page.waitForFunction(a => document.querySelector(`[${a}]`)?.getAttribute(a)==='installed', attr, { timeout: 120000 }); } catch (e) { console.log('    [components] after reload', attr, '=', await page.evaluate(a => document.querySelector(`[${a}]`)?.getAttribute(a), attr)); throw e; } }
+  console.log('    [components] reload verified in', Date.now()-tStart, 'ms');
   const verified = await page.evaluate(async () => { const rt=window.__x64; const paths=['C:\\Windows\\SysWOW64\\msvcr100.dll','C:\\Windows\\SysWOW64\\msvcp140.dll','C:\\Windows\\System32\\msvcp140.dll','C:\\Windows\\System32\\d3dcompiler_33.dll','C:\\Windows\\SysWOW64\\d3dx9_43.dll','C:\\Program Files\\dotnet\\dotnet.exe']; return Promise.all(paths.map(async p => { const f=await rt.disk.read(p); const v=rt.vfsRead(p); return !!f?.data?.length && !!v?.length && f.data.length===v.length; })); });
   expect(verified.every(Boolean), 'persistent DLL/runtime content missing after reload: '+JSON.stringify(verified));
   await page.screenshot({ path: resolve(SHOTS, 'components-restored.png') });
