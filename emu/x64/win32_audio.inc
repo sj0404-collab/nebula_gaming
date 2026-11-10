@@ -450,12 +450,12 @@ static void aud_ok(Cpu *c) { RET(0); }   /* accepted, nothing to do (3-D paramet
 #define DSERR_BUFFERLOST 0x88780096u
 #define DSERR_CONTROLUNAVAIL 0x8878001Eu
 static void ds_create_common(Cpu *c, u64 pp, int v8) {
-  if (!pp) { RET(DSERR_INVALIDPARAM); return; } u64 a; AObj *o = aobj_new(c, AK_DS, &a); if (!o) { RET(DSERR_OUTOFMEMORY); return; } o->inited = 1; o->ds = v8; wr64(c, pp, a);
+  if (!pp) { RET(DSERR_INVALIDPARAM); return; } u64 a; AObj *o = aobj_new(c, AK_DS, &a); if (!o) { RET(DSERR_OUTOFMEMORY); return; } o->inited = 1; o->ds = v8; wrp(c, pp, a);
   aud_log("[audio] DirectSoundCreate%s → host audio output\n", v8 ? "8" : ""); RET(0);
 }
 static void s_DirectSoundCreate(Cpu *c) { ds_create_common(c, ARG(1), 0); }
 static void s_DirectSoundCreate8(Cpu *c) { ds_create_common(c, ARG(1), 1); }
-static void s_DirectSoundCaptureCreate(Cpu *c) { aud_log("[audio] DirectSoundCaptureCreate: no capture device\n"); if (ARG(1)) wr64(c, ARG(1), 0); RET(DSERR_NODRIVER); }
+static void s_DirectSoundCaptureCreate(Cpu *c) { aud_log("[audio] DirectSoundCaptureCreate: no capture device\n"); if (ARG(1)) wrp(c, ARG(1), 0); RET(DSERR_NODRIVER); }
 static void s_DirectSoundCaptureCreate8(Cpu *c) { s_DirectSoundCaptureCreate(c); }
 static void s_DirectSoundCaptureEnumerateA(Cpu *c) { RET(0); }
 static void s_DirectSoundCaptureEnumerateW(Cpu *c) { RET(0); }
@@ -471,14 +471,14 @@ static void s_DirectSoundEnumerateA(Cpu *c) { ds_enum(c, 0); }
 static void s_DirectSoundEnumerateW(Cpu *c) { ds_enum(c, 1); }
 static void ds_CreateSoundBuffer(Cpu *c) {
   AObj *d = aobj_of(c, ARG(0), AK_DS); u64 desc = ARG(1), pp = ARG(2); if (!d || !desc || !pp) { RET(DSERR_INVALIDPARAM); return; }
-  u32 dsize = rd32(c, desc), flags = rd32(c, desc + 4), bytes = rd32(c, desc + 8); u64 fmtp = rd64(c, desc + 16); (void)dsize;
+  u32 dsize = rd32(c, desc), flags = rd32(c, desc + 4), bytes = rd32(c, desc + 8); u64 fmtp = rdp(c, desc + 16); (void)dsize;
   int primary = (flags & 1) != 0; WFmt f;
   if (primary) { e_memset(&f, 0, sizeof f); f.tag = 1; f.ch = 2; f.rate = 44100; f.bits = 16; f.block = 4; f.ok = 1; bytes = 44100 * 4 / 10; }
   else { f = wfmt_read(c, fmtp); if (!f.ok) { aud_log("[audio] CreateSoundBuffer: unsupported format (tag %d, %d ch, %d Hz, %d bit)\n", f.tag, f.ch, f.rate, f.bits); RET(DSERR_INVALIDPARAM); return; } if (bytes < (u32)f.block * 4 || bytes > 0x0FFFFFFFu) { RET(DSERR_INVALIDPARAM); return; } }
   AStream *s = astr_new(c, AS_RING, &f); if (!s) { RET(DSERR_OUTOFMEMORY); return; }
   bytes = bytes / f.block * f.block; s->buf = w32_heap_alloc(W, bytes, 1); if (!s->buf) { astr_free(s); RET(DSERR_OUTOFMEMORY); return; } s->size = bytes; s->primary = primary;
   u64 a; AObj *o = aobj_new(c, AK_DSBUF, &a); if (!o) { w32_heap_free(W, s->buf); astr_free(s); RET(DSERR_OUTOFMEMORY); return; } o->stream = astr_idx(s); o->ds = (int)flags;
-  wr64(c, pp, a); aud_log("[audio] CreateSoundBuffer: %s %u bytes, %d Hz %d ch %d bit, flags %#x\n", primary ? "PRIMARY" : "secondary", bytes, f.rate, f.ch, f.bits, flags); RET(0);
+  wrp(c, pp, a); aud_log("[audio] CreateSoundBuffer: %s %u bytes, %d Hz %d ch %d bit, flags %#x\n", primary ? "PRIMARY" : "secondary", bytes, f.rate, f.ch, f.bits, flags); RET(0);
 }
 static void ds_GetCaps(Cpu *c) { u64 p = ARG(1); if (!p) { RET(DSERR_INVALIDPARAM); return; } u32 sz = rd32(c, p); for (u32 i = 4; i + 4 <= sz && i < 96; i += 4) wr32(c, p + i, 0);
   wr32(c, p + 4, 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40 | 0x80 | 0x100 /* PRIMARYMONO/STEREO/8/16, SECONDARY*, CONTINUOUSRATE */); wr32(c, p + 8, 100); wr32(c, p + 12, 200000); wr32(c, p + 16, 1); wr32(c, p + 20, 0); wr32(c, p + 24, AUD_MAX); wr32(c, p + 28, AUD_MAX); RET(0); }
@@ -489,7 +489,7 @@ static void ds_DuplicateSoundBuffer(Cpu *c) {
   AObj *src = aobj_of(c, ARG(1), AK_DSBUF); AStream *s0 = aobj_stream(src); u64 pp = ARG(2); if (!s0 || !pp) { RET(DSERR_INVALIDPARAM); return; }
   WFmt f; f.tag = s0->isfloat ? 3 : 1; f.ch = s0->ch; f.rate = s0->rate; f.bits = s0->bits; f.block = (int)s0->block; f.isfloat = s0->isfloat; f.ok = 1;
   AStream *s = astr_new(c, AS_RING, &f); if (!s) { RET(DSERR_OUTOFMEMORY); return; } s->buf = s0->buf; s->size = s0->size;   /* shares the sample memory, like Windows */
-  u64 a; AObj *o = aobj_new(c, AK_DSBUF, &a); if (!o) { astr_free(s); RET(DSERR_OUTOFMEMORY); return; } o->stream = astr_idx(s); o->ds = src->ds | 0x40000000; wr64(c, pp, a); RET(0);
+  u64 a; AObj *o = aobj_new(c, AK_DSBUF, &a); if (!o) { astr_free(s); RET(DSERR_OUTOFMEMORY); return; } o->stream = astr_idx(s); o->ds = src->ds | 0x40000000; wrp(c, pp, a); RET(0);
 }
 static void dsb_GetCaps(Cpu *c) { AObj *o = aobj_of(c, ARG(0), AK_DSBUF); AStream *s = aobj_stream(o); u64 p = ARG(1); if (!s || !p) { RET(DSERR_INVALIDPARAM); return; } wr32(c, p + 4, (u32)o->ds | 8 /* LOCSOFTWARE */); wr32(c, p + 8, s->size); wr32(c, p + 12, 0); wr32(c, p + 16, 0); RET(0); }
 static void dsb_GetCurrentPosition(Cpu *c) { AStream *s = aobj_stream(aobj_of(c, ARG(0), AK_DSBUF)); if (!s) { RET(DSERR_INVALIDPARAM); return; }
@@ -509,8 +509,8 @@ static void dsb_Lock(Cpu *c) {
   if (fl & 2) { off = 0; n = s->size; }                                                                                             /* DSBLOCK_ENTIREBUFFER */
   if (off >= s->size || n > s->size) { RET(DSERR_INVALIDPARAM); return; }
   u32 first = s->size - off < n ? s->size - off : n;
-  wr64(c, p1, s->buf + off); wr32(c, n1, first);
-  if (p2) wr64(c, p2, n > first ? s->buf : 0); if (n2) wr32(c, n2, n > first ? n - first : 0);
+  wrp(c, p1, s->buf + off); wr32(c, n1, first);
+  if (p2) wrp(c, p2, n > first ? s->buf : 0); if (n2) wr32(c, n2, n > first ? n - first : 0);
   RET(0);
 }
 static void dsb_Unlock(Cpu *c) { RET(aobj_stream(aobj_of(c, ARG(0), AK_DSBUF)) ? 0 : DSERR_INVALIDPARAM); }
@@ -532,7 +532,7 @@ static void dsb_GetObjectInPath(Cpu *c) { RET(0x88780032u); }
 static void dsn_SetNotificationPositions(Cpu *c) {
   AStream *s = aobj_stream(aobj_of(c, ARG(0), AK_DSNOTIFY)); u32 n = (u32)ARG(1); u64 arr = ARG(2); if (!s || (n && !arr)) { RET(DSERR_INVALIDPARAM); return; }
   if (n > 32) { aud_log("[audio] SetNotificationPositions: %u positions, keeping the first 32\n", n); n = 32; }
-  s->notif_n = 0; for (u32 i = 0; i < n; i++) { u32 off = rd32(c, arr + 16 * i); int k = kobj_of_event(c, rd64(c, arr + 16 * i + 8)); if (k < 0) { s->notif_n = 0; RET(DSERR_INVALIDPARAM); return; } s->notif[s->notif_n].off = off; s->notif[s->notif_n].kobj = k; s->notif_n++; }
+  s->notif_n = 0; for (u32 i = 0; i < n; i++) { u64 stride = c->mode32 ? 8 : 16, handle_off = c->mode32 ? 4 : 8; u32 off = rd32(c, arr + stride * i); int k = kobj_of_event(c, rdp(c, arr + stride * i + handle_off)); if (k < 0) { s->notif_n = 0; RET(DSERR_INVALIDPARAM); return; } s->notif[s->notif_n].off = off; s->notif[s->notif_n].kobj = k; s->notif_n++; }
   RET(0);
 }
 

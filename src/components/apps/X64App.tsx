@@ -1088,7 +1088,7 @@ export default function X64App() {
 
 function PeReport({ e, stats, log, apiStats, jit, runtime }: { e: ExeEntry; stats: RunStats | null; log: string[]; apiStats: string; jit: JitInfo | null; runtime?: { packs: { id: string; label: string }[]; status: (id: string) => string; install: (id: string) => void; busy: boolean } }) {
   const i = e.info; const v = VERDICT[i.ok ? (i.verdict ?? 'invalid') : 'invalid'] ?? VERDICT.invalid;
-  const exceptionExit = stats?.status === 'exited' && (stats.exitCode >>> 0) >= 0xc0000000;
+  const exceptionExit = stats?.status === 'exited' && (stats.exitCode >>> 0) === 0xc0000005;
   const [digest, setDigest] = useState<{ bytes: Uint8Array; value: string } | null>(null);
   const sha256 = digest?.bytes === e.bytes ? digest.value : '';
   useEffect(() => {
@@ -1134,7 +1134,7 @@ function PeReport({ e, stats, log, apiStats, jit, runtime }: { e: ExeEntry; stat
       </div>
       {stats && (
         <div className="rounded-lg border border-slate-200 bg-white p-3 text-[11px]">
-          <div className="font-semibold">Last run: <span className={stats.status === 'fault' || exceptionExit ? 'text-rose-700' : 'text-emerald-700'}>{exceptionExit ? 'exited with Windows exception' : stats.status}</span>{stats.status === 'exited' ? ` with code ${stats.exitCode}${exceptionExit ? ` (0x${(stats.exitCode >>> 0).toString(16).padStart(8, '0')})` : ''}` : ''}</div>
+          <div className="font-semibold">Last run: <span className={stats.status === 'fault' || exceptionExit ? 'text-rose-700' : 'text-emerald-700'}>{exceptionExit ? 'exited with possible Windows access violation' : stats.status}</span>{stats.status === 'exited' ? ` with code ${stats.exitCode}${exceptionExit ? ` (0x${(stats.exitCode >>> 0).toString(16).padStart(8, '0')})` : ''}` : ''}</div>
           <div className="mt-1 text-slate-600">{stats.icount.toLocaleString()} instructions in {(stats.elapsedMs / 1000).toFixed(2)} s ({stats.mips.toFixed(1)} MIPS) · {stats.frames} frames presented · {stats.memMB.toFixed(1)} MB host memory reserved this session{stats.title ? ` · window “${stats.title}”` : ''}</div>
           {stats.status === 'fault' && <div className="mt-1 rounded bg-rose-50 p-2 font-mono text-[10px] text-rose-800" data-x64-fault>STOP at RIP {stats.errorRip}: {stats.error}<br />bytes: {stats.errorBytes}</div>}
           {stats.report && <pre className="mt-2 whitespace-pre-wrap rounded bg-amber-50 p-2 font-mono text-[10px] text-amber-900">{stats.report}</pre>}
