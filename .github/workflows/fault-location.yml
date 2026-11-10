@@ -1,0 +1,48 @@
+name: Fault module identification
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - uses: mlugg/setup-zig@v2
+        with: { version: 0.17.0 }
+      - name: Build WASM and test images
+        run: |
+          ZIG=zig ./emu/x64/build.sh
+          for arch in x86 x86_64; do
+            mkdir -p "/tmp/fault-$arch"
+            zig cc -target "$arch-windows-gnu" -O0 -shared emu/tests/fault-location-dll.c -o "/tmp/fault-$arch/faultprobe.dll"
+            zig cc -target "$arch-windows-gnu" -O0 emu/tests/fault-location.c -o "/tmp/fault-$arch/faultprobe.exe"
+          done
+      - name: Identify EXE and DLL fault locations with and without JIT
+        run: |
+          for arch in x86 x86_64; do
+            for jit in 0 1; do
+              for kind in exe dll; do
+                set +e
+                if [ "$kind" = dll ]; then
+                  node emu/tests/wasm_run.mjs --jit "$jit" --max-ms 30000 --mount "/tmp/fault-$arch=C:\\game" "/tmp/fault-$arch/faultprobe.exe" dll > /tmp/fault.log 2>&1
+                else
+                  node emu/tests/wasm_run.mjs --jit "$jit" --max-ms 30000 --mount "/tmp/fault-$arch=C:\\game" "/tmp/fault-$arch/faultprobe.exe" > /tmp/fault.log 2>&1
+                fi
+                rc=$?
+                set -e
+                cat /tmp/fault.log
+                test "$rc" -eq 102
+                if [ "$kind" = dll ]; then
+                  grep -Eiq 'Fault location: DLL .*faultprobe.dll \+ 0x[0-9a-f]+' /tmp/fault.log
+                else
+                  grep -Eiq 'Fault location: EXE .*faultprobe.exe \+ 0x[0-9a-f]+' /tmp/fault.log
+                fi
+              done
+            done
+          done

@@ -175,6 +175,24 @@ EXPORT(x64_set_jit) void x64_set_jit(int on) { g_jit_on = on != 0; if (on > 1) g
 EXPORT(x64_jit_stats) const char *x64_jit_stats(void) { return jit_stats_text(); }
 extern int g_jit_skip_lo, g_jit_skip_hi;
 EXPORT(x64_jit_skip) void x64_jit_skip(int lo, int hi) { g_jit_skip_lo = lo; g_jit_skip_hi = hi; }
+/* An address identifies where execution stopped, not necessarily the cause of the fault. */
+static void report_fault_location(Proc *p) {
+  Win32 *w = &p->w32; u64 a = p->cpu.err_rip;
+  for (int i = 0; i < w->nmods; i++) {
+    GuestModule *m = &w->mods[i];
+    if (m->size && a >= m->base && a - m->base < m->size) {
+      w32_report(w, "Fault location: DLL %s%s%s + 0x%llx (base 0x%llx, image size 0x%llx); location does not establish cause", m->dir, m->dir[0] ? "\\" : "", m->name, (unsigned long long)(a - m->base), (unsigned long long)m->base, (unsigned long long)m->size);
+      return;
+    }
+  }
+  if (w->image_size && a >= w->image_base && a - w->image_base < w->image_size) {
+    w32_report(w, "Fault location: EXE %s + 0x%llx (base 0x%llx, image size 0x%llx); location does not establish cause", w->exe_path, (unsigned long long)(a - w->image_base), (unsigned long long)w->image_base, (unsigned long long)w->image_size);
+  } else if (a >= G_SHIM_BASE && a - G_SHIM_BASE < G_SHIM_SIZE) {
+    w32_report(w, "Fault location: emulator shim region at 0x%llx; not an on-disk DLL", (unsigned long long)a);
+  } else {
+    w32_report(w, "Fault location: unknown or unmapped address 0x%llx", (unsigned long long)a);
+  }
+}
 EXPORT(x64_run) int x64_run(u64 budget) {
   if (!g_loaded) return RUN_FAULT;
   g_want_stdin = 0;
@@ -200,6 +218,7 @@ EXPORT(x64_run) int x64_run(u64 budget) {
       continue;
     }
     if (r == RUN_FAULT || r == RUN_BREAK) {
+      if (r == RUN_FAULT) { report_fault_location(p); if (p != g_root) { host_write(3, p->w32.report, e_strlen(p->w32.report)); } }
       if (p == g_root) return r;
       { char msg[512]; e_snprintf(msg, sizeof msg, "[x64] child %s (pid %d) %s at rip=0x%llx: %s\n", p->name, p->pid, r == RUN_FAULT ? "faulted" : "hit a breakpoint", (unsigned long long)p->cpu.err_rip, p->cpu.err); host_write(3, msg, e_strlen(msg)); }
       proc_exit(p, 0xC0000005); continue;
