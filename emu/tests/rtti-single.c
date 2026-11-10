@@ -15,7 +15,7 @@ int main(void) {
   if (!cast || sizeof(void *) != 4) { puts("rtti-single: missing FAIL"); return 1; }
   Type derived = {0,0,".?AVDerived@@"}, base = {0,0,".?AVBase@@"}, other = {0,0,".?AVOther@@"};
   Type clone = {0,0,".?AVDerived@@"};
-  Base ds = {p(&derived),1,0,-1,0,0}, bs = {p(&base),0,0,-1,0,0};
+  Base ds = {p(&derived),1,0,-1,0,0x40}, bs = {p(&base),0,0,-1,0,0};
   uint32_t list[] = {p(&ds),p(&bs)};
   Hier h = {0,0,2,p(list)}; Locator col = {0,0,0,p(&derived),p(&h)};
   uint32_t table[] = {p(&col),0}; uint32_t obj[] = {p(&table[1])};

@@ -219,7 +219,7 @@ static void s_RTDynamicCast(Cpu *c) {
   for (u32 i = 0; i < count; i++) {
     u64 d = rd32(c, array + (u64)i * 4), type = rd32(c, d); s32 mdisp = (s32)rd32(c, d + 8), pdisp = (s32)rd32(c, d + 12); u32 flags = rd32(c, d + 20);
     if (c->status != RUN_OK) return;
-    if (pdisp != -1 || flags) { cpu_fault(c, "__RTDynamicCast: non-public, ambiguous or virtual base not implemented"); return; }
+    if (pdisp != -1 || (flags & ~0x40u)) { cpu_fault(c, "__RTDynamicCast: non-public, ambiguous or virtual base not implemented"); return; }
     if (type == src || cxx_str_eq(c, type + 8, src + 8)) have_src = 1;
     if (type == dst || cxx_str_eq(c, type + 8, dst + 8)) { have_dst = 1; answer = top + (s64)mdisp; }
     if (c->status != RUN_OK) return;
