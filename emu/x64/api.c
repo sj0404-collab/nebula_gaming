@@ -227,6 +227,7 @@ EXPORT(x64_vfs_size) s64 x64_vfs_size(const char *path) { u64 sz; int k = vfs_st
 EXPORT(x64_vfs_written) int x64_vfs_written(const char *path) { int i = vfs_find_node(path); VNodeInfo in; if (i < 0 || !vfs_node_info(i, &in) || in.is_dir) return 0; return in.written ? 1 : 0; }   /* 1: the wasm copy is newer than the page's (open / not yet flushed) */
 EXPORT(x64_vfs_data) const u8 *x64_vfs_data(const char *path) { int i = vfs_find_node(path); VNodeInfo in; if (i < 0 || !vfs_node_info(i, &in) || in.is_dir) return 0; return vfs_node_data(i); }
 static char g_vfs_json[65536];
+static int g_vfs_page_next = -1;
 EXPORT(x64_vfs_list) const char *x64_vfs_list(void) {
   size_t o = 0; g_vfs_json[o++] = '['; int first = 1; VNodeInfo in;
   for (int i = 0; i < vfs_node_count(); i++) {
@@ -237,6 +238,24 @@ EXPORT(x64_vfs_list) const char *x64_vfs_list(void) {
   }
   g_vfs_json[o++] = ']'; g_vfs_json[o] = 0; return g_vfs_json;
 }
+/* Paged listing: a fixed 64 KB JSON buffer cannot hold a large installed game.
+   next is a VFS node index, not the number of emitted files (there may be holes). */
+EXPORT(x64_vfs_list_page) const char *x64_vfs_list_page(int start) {
+  size_t o = 0; int first = 1, i = start < 0 ? 0 : start, count = vfs_node_count(); VNodeInfo in;
+  g_vfs_json[o++] = '[';
+  for (; i < count; i++) {
+    if (!vfs_node_info(i, &in)) continue;
+    char esc[2200]; size_t e = 0;
+    for (const char *p = in.path; *p && e + 3 < sizeof esc; p++) { if (*p == '\\' || *p == '"') esc[e++] = '\\'; esc[e++] = *p; } esc[e] = 0;
+    int n = e_snprintf(g_vfs_json + o, sizeof g_vfs_json - o, "%s{\"path\":\"%s\",\"size\":%llu,\"dir\":%d,\"written\":%d}", first ? "" : ",", esc, (unsigned long long)in.size, in.is_dir, in.written);
+    if (n < 0 || o + (size_t)n + 2 >= sizeof g_vfs_json) break;
+    o += (size_t)n; first = 0;
+  }
+  g_vfs_json[o++] = ']'; g_vfs_json[o] = 0;
+  g_vfs_page_next = i < count ? i : -1;
+  return g_vfs_json;
+}
+EXPORT(x64_vfs_page_next) int x64_vfs_page_next(void) { return g_vfs_page_next; }
 EXPORT(x64_stdin_write) void x64_stdin_write(const u8 *data, size_t n) { vfs_stdin_push(data, n); }
 EXPORT(x64_stdin_eof) void x64_stdin_eof(void) { vfs_stdin_eof(); }
 EXPORT(x64_trace) void x64_trace(int on) { g_trace = on; }

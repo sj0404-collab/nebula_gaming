@@ -315,6 +315,31 @@ await test('components persist across closing Programs and reloading the app', a
   await page.waitForFunction(() => document.querySelector('[data-x64-vc10]')?.getAttribute('data-x64-vc10')==='error', null, { timeout: 120000 });
   await closeAll();
 });
+await test('library: large disks retain every installed game after reopen and reload', async () => {
+  await openFromDesktop('Programs'); let w = page.locator('[data-window][aria-label*="Programs"]');
+  await page.waitForFunction(() => !!window.__x64?.ex, null, { timeout: 120000 });
+  const count = await page.evaluate(async () => {
+    const rt = window.__x64; const data = new Uint8Array([42]);
+    for (let i=0; i<1800; i++) {
+      const path = `C:\\Games\\PaginationTest\\folder\\file_${String(i).padStart(4,'0')}_data.dat`;
+      if (!rt.vfsAddPersistent(path, data)) throw Error('cannot add '+path);
+    }
+    for (const name of ['FirstGame.exe','SecondGame.exe','LastGame.exe']) {
+      const path = `C:\\Games\\PaginationTest\\${name}`;
+      if (!rt.vfsAddPersistent(path, data)) throw Error('cannot add '+path);
+    }
+    await rt.disk.flushChecked(); return rt.vfsList().filter(f => f.path.toLowerCase().includes('paginationtest')).length;
+  });
+  expect(count >= 1803, `large VFS list omitted entries: ${count}`);
+  await closeAll(); await openFromDesktop('Programs'); w=page.locator('[data-window][aria-label*="Programs"]');
+  for (const name of ['FirstGame','SecondGame','LastGame']) await w.locator(`[data-x64-item="${name}"]`).waitFor({ timeout: 120000 });
+  await page.reload({ waitUntil: 'load' }); await page.waitForSelector('[aria-label="Start"]');
+  await openFromDesktop('Programs'); w=page.locator('[data-window][aria-label*="Programs"]');
+  for (const name of ['FirstGame','SecondGame','LastGame']) await w.locator(`[data-x64-item="${name}"]`).waitFor({ timeout: 120000 });
+  await page.screenshot({ path: resolve(SHOTS, 'library-large-disk.png') });
+  await page.evaluate(async () => { const rt=window.__x64; for (const f of rt.vfsList()) if (!f.dir && f.path.toLowerCase().includes('paginationtest')) { rt.disk.remove(f.path); rt.vfsRemove(f.path); } await rt.disk.flushChecked(); });
+  await closeAll();
+});
 await test('x64: emulator loads (wasm64), scans the bundled samples and reports verdicts', async () => {
   const w = await x64Open();
   for (const n of ['NebulaStrike.exe', 'hello.exe', 'bench.exe'])

@@ -38,7 +38,7 @@ type Exports = {
   x64_api_stats(): bigint; x64_error_bytes(): bigint;
   x64_vfs_add(path: bigint, data: bigint, n: bigint): number; x64_vfs_mkdir(path: bigint): number; x64_vfs_set_mtime?(path: bigint, unixMs: number): number;
   x64_gl_ptr(addr: bigint, len: bigint, write: number): bigint; x64_gl_strlen(addr: bigint): bigint; x64_gl_alloc(len: bigint): bigint; x64_gl_free(addr: bigint): void; x64_gl_psize(): number; x64_vfs_remove(path: bigint): number;
-  x64_vfs_size(path: bigint): bigint; x64_vfs_data(path: bigint): bigint; x64_vfs_list(): bigint; x64_vfs_add_lazy?(path: bigint, n: bigint): number; x64_vfs_written?(path: bigint): number;
+  x64_vfs_size(path: bigint): bigint; x64_vfs_data(path: bigint): bigint; x64_vfs_list(): bigint; x64_vfs_list_page?(start: number): bigint; x64_vfs_page_next?(): number; x64_vfs_add_lazy?(path: bigint, n: bigint): number; x64_vfs_written?(path: bigint): number;
   x64_stdin_write(data: bigint, n: bigint): void; x64_stdin_eof(): void; x64_wants_stdin(): number;
   x64_vfs_sync(): void; x64_chdir(path: bigint): number;
   /** game controller slot (XInput layout) from the host */
@@ -325,7 +325,21 @@ export class X64Runtime {
   }
   vfsMkdir(path: string): boolean { return !!this.ex!.x64_vfs_mkdir(this.putStr(path)); }
   vfsRemove(path: string): boolean { const ok = !!this.ex!.x64_vfs_remove(this.putStr(path)); if (ok) this.cache.delete(diskKey(path)); return ok; }
-  vfsList(): VfsEntry[] { if (!this.ex) return []; try { return JSON.parse(this.cstr(this.ex.x64_vfs_list())) as VfsEntry[]; } catch { return []; } }
+  vfsList(): VfsEntry[] {
+    const ex = this.ex; if (!ex) return [];
+    try {
+      if (!ex.x64_vfs_list_page || !ex.x64_vfs_page_next) return JSON.parse(this.cstr(ex.x64_vfs_list())) as VfsEntry[];
+      const all: VfsEntry[] = []; let start = 0;
+      for (;;) {
+        const entries = JSON.parse(this.cstr(ex.x64_vfs_list_page(start))) as VfsEntry[];
+        all.push(...entries); const next = ex.x64_vfs_page_next();
+        if (next < 0) break;
+        if (next <= start) throw new Error('VFS pagination did not advance');
+        start = next;
+      }
+      return all;
+    } catch (e) { this.onLog?.(`VFS listing failed: ${String(e)}`); return []; }
+  }
   vfsRead(path: string): Uint8Array | null {
     const ex = this.ex!; const n = Number(ex.x64_vfs_size(this.putStr(path))); if (n < 0) return null;
     // the page's copy is authoritative unless a program has written the file and it is not flushed yet (x64_vfs_data would also pull the bytes into wasm memory and pin them there)
