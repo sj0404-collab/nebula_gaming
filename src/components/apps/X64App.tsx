@@ -1088,17 +1088,22 @@ export default function X64App() {
 
 function PeReport({ e, stats, log, apiStats, jit, runtime }: { e: ExeEntry; stats: RunStats | null; log: string[]; apiStats: string; jit: JitInfo | null; runtime?: { packs: { id: string; label: string }[]; status: (id: string) => string; install: (id: string) => void; busy: boolean } }) {
   const i = e.info; const v = VERDICT[i.ok ? (i.verdict ?? 'invalid') : 'invalid'] ?? VERDICT.invalid;
-  const [sha256, setSha256] = useState('');
+  const [digest, setDigest] = useState<{ bytes: Uint8Array; value: string } | null>(null);
+  const sha256 = digest?.bytes === e.bytes ? digest.value : '';
   useEffect(() => {
     let cancelled = false;
-    setSha256('');
-    if (!globalThis.crypto?.subtle) { setSha256('недоступен в этой среде'); return; }
     // Hash the actual loaded executable bytes, not the filename or a manifest entry.
-    const bytes = new Uint8Array(e.bytes);
-    void globalThis.crypto.subtle.digest('SHA-256', bytes.buffer).then(hash => {
-      if (!cancelled) setSha256(Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, '0')).join(''));
-    }).catch(() => { if (!cancelled) setSha256('не удалось вычислить'); });
+    const bytes = e.bytes;
+    void Promise.resolve().then(async () => {
+      if (!globalThis.crypto?.subtle) return 'недоступен в этой среде';
+      const copy = new Uint8Array(bytes);
+      const hash = await globalThis.crypto.subtle.digest('SHA-256', copy.buffer);
+      return Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, '0')).join('');
+    }).then(value => { if (!cancelled) setDigest({ bytes, value }); })
+      .catch(() => { if (!cancelled) setDigest({ bytes, value: 'не удалось вычислить' }); });
     return () => { cancelled = true; };
+  }, [e.bytes]);
+  return () => { cancelled = true; };
   }, [e.bytes]);
   return (
     <div className="space-y-3">

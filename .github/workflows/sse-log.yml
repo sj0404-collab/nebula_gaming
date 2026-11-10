@@ -1,0 +1,32 @@
+name: UCRT SSE log regression
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - uses: mlugg/setup-zig@v2
+        with: { version: 0.17.0 }
+      - name: Build emulator and test guests
+        run: |
+          ZIG=zig ./emu/x64/build.sh
+          for arch in x86 x86_64; do
+            zig cc -target "$arch-windows-gnu" -O2 emu/tests/sse-log.c emu/tests/sse-log.S -o "/tmp/sse-$arch.exe"
+          done
+      - name: Check SSE calling convention and numerical edge cases
+        run: |
+          set -o pipefail
+          for arch in x86 x86_64; do
+            for jit in 0 1; do
+              node emu/tests/wasm_run.mjs --max-ms 30000 --jit "$jit" "/tmp/sse-$arch.exe" 2>&1 | tee /tmp/sse-log.txt
+              grep -q 'sse-log: PASS' /tmp/sse-log.txt
+            done
+          done
