@@ -15,6 +15,13 @@ jobs:
         with: { version: 0.17.0 }
       - run: python3 emu/tools/official-java-audio.py /tmp/vendor
       - run: python3 emu/tools/pack-official-components.py /tmp/vendor public/x64/official
+      - name: Mimic Capacitor decompressed APK assets
+        run: |
+          python3 - <<'PYCODE'
+          import gzip, pathlib
+          for p in pathlib.Path('public/x64/official').rglob('*.gz'):
+              p.with_suffix('').write_bytes(gzip.decompress(p.read_bytes()))
+          PYCODE
       - run: ZIG=zig ./emu/x64/build.sh
       - run: npm ci
       - run: npm run typecheck

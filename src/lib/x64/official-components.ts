@@ -12,7 +12,7 @@ export function validateOfficial(m: OfficialManifest, id: OfficialId): void {
   if (!m || m.id !== id || !/^[a-f0-9]{16}$/.test(m.version) || !/^[a-f0-9]{64}$/.test(m.archive_sha256) || m.version !== m.archive_sha256.slice(0, 16) || !Array.isArray(m.files) || !m.files.length || m.files.length > 10000) throw new Error('Invalid component manifest');
   const seen = new Set<string>();
   for (const f of m.files) {
-    if (!validPath(f.path) || f.gz !== f.path + '.gz' || !Number.isSafeInteger(f.size) || f.size < 0 || f.size > 400 * 1024 * 1024 || !/^[a-f0-9]{64}$/.test(f.sha256) || seen.has(f.path.toLowerCase())) throw new Error('Invalid component file: ' + f.path);
+    if (!validPath(f.path) || f.gz !== f.path + '.nebula-asset.gz' || !Number.isSafeInteger(f.size) || f.size < 0 || f.size > 400 * 1024 * 1024 || !/^[a-f0-9]{64}$/.test(f.sha256) || seen.has(f.path.toLowerCase())) throw new Error('Invalid component file: ' + f.path);
     seen.add(f.path.toLowerCase());
   }
 }

@@ -221,8 +221,8 @@ export class X64Runtime {
   /** total wasm linear memory of this emulator instance (never shrinks: the number to keep small on a phone) */
   memoryBytes() { return this.ex?.memory.buffer.byteLength ?? 0; }
   private async restoreDisk() {
-    const ex = this.ex!; let files: Awaited<ReturnType<Disk['loadAll']>> = [];
-    try { files = await this.disk.loadAll(); } catch { return; }
+    const ex = this.ex!; let files: Awaited<ReturnType<Disk['loadAll']>>;
+    try { files = await this.disk.loadAll(); } catch (e) { throw new Error('Не удалось восстановить виртуальный диск; данные не очищались. Не удаляйте приложение. ' + String(e)); }
     for (const f of files) {
       if (f.data === null) ex.x64_vfs_mkdir(this.putStr(f.path));
       else if (ex.x64_vfs_add_lazy) { this.cache.set(diskKey(f.path), f.data); ex.x64_vfs_add_lazy(this.putStr(f.path), BigInt(f.data.length)); }

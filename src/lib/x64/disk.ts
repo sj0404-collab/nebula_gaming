@@ -38,12 +38,12 @@ export class Disk {
       // another context wants to delete/upgrade the database (Settings → reset, tests): let go of the connection and reopen lazily
       this.db.onversionchange = () => { this.db?.close(); this.db = null; };
       return true;
-    } catch { this.available = false; return false; }
+    } catch (e) { this.lastError = String(e); this.available = false; return false; }
   }
 
   /** every stored entry (directories first, then files) */
   async loadAll(): Promise<DiskFile[]> {
-    if (!(await this.open())) return [];
+    if (!(await this.open())) throw new Error('Не удалось открыть IndexedDB: ' + (this.lastError ?? 'хранилище недоступно'));
     const db = this.db!;
     const list = await new Promise<DiskFile[]>((res, rej) => {
       const out: DiskFile[] = []; const tx = db.transaction(STORE, 'readonly'); const req = tx.objectStore(STORE).openCursor();

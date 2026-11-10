@@ -534,7 +534,13 @@ export default function X64App() {
     const rt = rtRef.current; const m = official[id]?.manifest; if (!rt || !m) return;
     setOfficial(o => ({ ...o, [id]: { manifest: m, status: 'installing' } })); setFetching(`Установка ${m.pack}…`);
     try {
-      await installOfficial(rt, m, f => fetchGz(`/x64/official/${id}/` + f.gz.split('/').map(encodeURIComponent).join('/'), 0, `/x64/official/${id}/` + f.path.split('/').map(encodeURIComponent).join('/')), n => setFetching(`${m.pack}: ${n}/${m.files.length}`));
+      await installOfficial(rt, m, f => {
+        const base = `/x64/official/${id}/`; const packed = f.gz.split('/').map(encodeURIComponent).join('/');
+        const plain = f.gz.slice(0, -3).split('/').map(encodeURIComponent).join('/');
+        // Capacitor expands .gz assets during copy. The explicit .nebula-asset suffix prevents
+        // extensionless legal files being mistaken for SPA navigation by the Android asset server.
+        return nativePlatform() ? fetchGz(base + plain) : fetchGz(base + packed, 0, base + plain);
+      }, n => setFetching(`${m.pack}: ${n}/${m.files.length}`));
       setFiles(rt.vfsList()); setOfficial(o => ({ ...o, [id]: { manifest: m, status: 'installed' } }));
       logComp(m.pack, true, `Установлено ${m.files.length} файлов в ${officialDir(m)}; SHA-256 архива ${m.archive_sha256}`);
     } catch (e) { setOfficial(o => ({ ...o, [id]: { manifest: m, status: 'error', note: String(e) } })); logComp(m.pack, false, String(e)); }

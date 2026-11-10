@@ -11,10 +11,10 @@ def emit(key, title, archive, selected, provenance):
             if any(not p or p in ('.', '..') or any(c in p for c in '\\:*?"<>|') for p in parts): raise ValueError('unsafe path: ' + rel)
             if rel.lower() in seen: raise ValueError('duplicate path: ' + rel)
             seen.add(rel.lower()); b = z.read(original)
-            target = dest / (rel + '.gz'); target.parent.mkdir(parents=True, exist_ok=True)
+            target = dest / (rel + '.nebula-asset.gz'); target.parent.mkdir(parents=True, exist_ok=True)
             with target.open('wb') as raw:
                 with gzip.GzipFile(filename='', mode='wb', fileobj=raw, mtime=0) as f: f.write(b)
-            files.append({'path': rel, 'size': len(b), 'gz': rel + '.gz', 'sha256': hashlib.sha256(b).hexdigest()})
+            files.append({'path': rel, 'size': len(b), 'gz': rel + '.nebula-asset.gz', 'sha256': hashlib.sha256(b).hexdigest()})
     if not files: raise ValueError('empty pack')
     man = {'id': key, 'pack': title, 'version': provenance['sha256'][:16], 'source': provenance['source'], 'archive_sha256': provenance['sha256'], 'checksum_verified_against': provenance['checksum_verified_against'], 'files': files}
     (dest / 'manifest.json').write_text(json.dumps(man, indent=2) + '\n')

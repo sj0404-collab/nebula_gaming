@@ -246,16 +246,20 @@ await test('official components verify install and persist', async () => {
   await w.locator('[data-x64-tab="components"]').click();
   await page.waitForFunction(() => window.__x64?.ex && ['jdk17-x64','openal-x86','openal-x64'].every(id => document.querySelector(`[data-official-component="${id}"]`)?.getAttribute('data-official-status') === 'available'), null, { timeout: 120000 });
   // A modified response must fail the checksum before it can be marked as installed.
-  await page.route('**/x64/official/openal-x86/OpenAL32.dll.gz', route => route.fulfill({ status: 200, body: 'corrupt' }));
+  await page.route('**/x64/official/openal-x86/OpenAL32.dll.nebula-asset.gz', route => route.fulfill({ status: 200, body: 'corrupt' }));
   await w.locator('[data-official-component="openal-x86"] button').click();
   await page.waitForFunction(() => document.querySelector('[data-official-component="openal-x86"]')?.getAttribute('data-official-status') === 'error', null, { timeout: 120000 });
-  await page.unroute('**/x64/official/openal-x86/OpenAL32.dll.gz');
+  await page.unroute('**/x64/official/openal-x86/OpenAL32.dll.nebula-asset.gz');
+  // Capacitor copies inflated assets to names without .gz. Simulate Android's
+  // missing gzip URLs; installation must fetch the explicit-extension alias.
+  await page.route('**/x64/official/**/*.gz', route => route.fulfill({ status: 404, body: '' }));
   for (const id of ['openal-x86', 'openal-x64', 'jdk17-x64']) {
     await w.locator(`[data-official-component="${id}"] button`).click({ timeout: 120000 });
     await page.waitForFunction(id => ['installed','error'].includes(document.querySelector(`[data-official-component="${id}"]`)?.getAttribute('data-official-status')), id, { timeout: 900000 });
     const card = w.locator(`[data-official-component="${id}"]`);
     expect(await card.getAttribute('data-official-status') === 'installed', `${id} failed: ${await card.innerText()}`);
   }
+  await page.unroute('**/x64/official/**/*.gz');
   await page.screenshot({ path: resolve(SHOTS, 'official-components-installed.png') });
   await closeAll(); await page.reload({ waitUntil: 'load' }); await page.waitForSelector('[aria-label="Start"]');
   await openFromDesktop('Programs'); w = page.locator('[data-window][aria-label*="Programs"]'); await w.locator('[data-x64-tab="components"]').click();
