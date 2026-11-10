@@ -7,7 +7,7 @@ export interface OfficialManifest {
   files: { path: string; size: number; gz: string; sha256: string }[];
 }
 const ROOT = 'C:\\ProgramData\\Nebula\\Components\\';
-const validPath = (s: string) => s.length < 700 && s.split('/').every(p => !!p && p !== '.' && p !== '..' && !/[\\:*?"<>|\x00-\x1f]/.test(p));
+const validPath = (s: string) => s.length < 700 && s.split('/').every(p => !!p && p !== '.' && p !== '..' && !/[\\:*?"<>|]/.test(p) && [...p].every(c => c.charCodeAt(0) >= 32));
 export function validateOfficial(m: OfficialManifest, id: OfficialId): void {
   if (!m || m.id !== id || !/^[a-f0-9]{16}$/.test(m.version) || !/^[a-f0-9]{64}$/.test(m.archive_sha256) || m.version !== m.archive_sha256.slice(0, 16) || !Array.isArray(m.files) || !m.files.length || m.files.length > 10000) throw new Error('Invalid component manifest');
   const seen = new Set<string>();
