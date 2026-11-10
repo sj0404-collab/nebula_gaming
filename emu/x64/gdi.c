@@ -515,6 +515,8 @@ ShimFn gdi_find_shim(const char *name) { for (size_t i = 0; i < sizeof gdi_shims
 void gdi_init(Win32 *w) {
   /* Process slots are recycled; do not reuse DirectInput guest pointers. */
   if (g_divt_owner == w) { e_memset(g_divt, 0, sizeof g_divt); g_divt_owner = 0; }
+  if (g_slot_w == w) g_slot_w = 0;  /* built-in wndprocs are shim slots in this process, not global across reloads */
+  if (g_shiml_vt_owner == w) g_shiml_vt_owner = 0;
   if (g_cm_vt_owner == w) g_cm_vt_owner = 0;
   if (g_sv_vt_owner == w) g_sv_vt_owner = 0;
   if (g_wvt_owner == w) g_wvt_owner = 0;   /* guest vtables hold shim-slot addresses that are renumbered by the new process */
