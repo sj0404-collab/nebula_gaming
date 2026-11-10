@@ -250,6 +250,17 @@ static void s_EnterCriticalSection(Cpu *c) { u64 a = ARG(0); if (cs_try(c, a)) {
 static void s_TryEnterCriticalSection(Cpu *c) { RET(cs_try(c, ARG(0)) ? 1 : 0); }
 static void s_LeaveCriticalSection(Cpu *c) { u64 a = ARG(0); if (rdp(c, a + CS_OWNER) != cur_tid(W)) return; int rec = (int)rd32(c, a + CS_REC) - 1; if (rec <= 0) { wr32(c, a + CS_REC, 0); wrp(c, a + CS_OWNER, 0); wr32(c, a + CS_LOCK, (u32)-1); } else { wr32(c, a + CS_REC, (u32)rec); wr32(c, a + CS_LOCK, rd32(c, a + CS_LOCK) - 1); } }
 
+/* MSVC STL in-situ mutex layout: type, legacy reserved critical-section storage,
+   owner and recursion count. The modern storage begins with two pointers, the
+   second of which is the SRW lock. This implements initialization only; lock
+   operations remain separately resolved and are not reported as successful. */
+static void s_Mtx_init_in_situ(Cpu *c) {
+  u64 a = ARG(0); u32 n = c->mode32 ? 48 : 80, cs = c->mode32 ? 4 : 8, tid = c->mode32 ? 40 : 72;
+  if (!mem_ptr(c->mem, a, n, 1)) return;
+  wr32(c, a, (u32)ARG(1)); wrp(c, a + cs, 0); wrp(c, a + cs + (c->mode32 ? 4 : 8), 0);
+  wr32(c, a + tid, 0xffffffffu); wr32(c, a + tid + 4, 0);
+}
+
 /* SRW lock: one 64-bit word — bit 0 exclusive, shared holders counted from bit 4 */
 static void s_InitializeSRWLock(Cpu *c) { wrp(c, ARG(0), 0); }
 static void s_AcquireSRWLockExclusive(Cpu *c) { u64 a = ARG(0); if (rdp(c, a) == 0) { wrp(c, a, 1); wait_end(W); return; } W->block_addr = a; W->block_flag = 1; W->wait_deadline = -1; park(c, BLOCK_SRW); }

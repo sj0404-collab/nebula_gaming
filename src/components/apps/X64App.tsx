@@ -539,7 +539,7 @@ export default function X64App() {
         const plain = f.gz.slice(0, -3).split('/').map(encodeURIComponent).join('/');
         // Capacitor expands .gz assets during copy. The explicit .nebula-asset suffix prevents
         // extensionless legal files being mistaken for SPA navigation by the Android asset server.
-        return nativePlatform() ? fetchGz(base + plain) : fetchGz(base + packed, 0, base + plain);
+        return nativePlatform() === 'android' ? fetchGz(base + plain) : fetchGz(base + packed, 0, base + plain);
       }, n => setFetching(`${m.pack}: ${n}/${m.files.length}`));
       setFiles(rt.vfsList()); setOfficial(o => ({ ...o, [id]: { manifest: m, status: 'installed' } }));
       logComp(m.pack, true, `Установлено ${m.files.length} файлов в ${officialDir(m)}; SHA-256 архива ${m.archive_sha256}`);
