@@ -7,6 +7,7 @@ import { scanLibrary, classifyExe, loadPrefs, savePrefs, makeLnk, type LibraryIt
 import { peIconDataUrl } from '../../lib/x64/peicon';
 import { notifyDiskChange } from '../../lib/x64/diskbus';
 import { diskKey } from '../../lib/x64/disk';
+import { validateOfficial, officialDir, officialComplete, installOfficial, type OfficialId, type OfficialManifest } from '../../lib/x64/official-components';
 import { zipEntries, zipRead } from '../../lib/x64/zip';
 import { useOS } from '../../lib/os';
 import { X64Runtime, vkFromEvent, wasm64Supported, type JitInfo, type PeInfo, type RunStats, type VfsEntry } from '../../lib/x64/runtime';
@@ -519,6 +520,26 @@ export default function X64App() {
     logComp(pk.label, true, `installed: ${done} files, ${(bytes / 1048576).toFixed(1)} MB → ${pk.dir} in ${((performance.now() - t0) / 1000).toFixed(1)} s (${man.pack})`);
     return true;
   }, [logComp]);
+  /* Optional official components are isolated by architecture and archive hash; never write into games. */
+  const [official, setOfficial] = useState<Partial<Record<OfficialId, { manifest?: OfficialManifest; status: string; note?: string }>>>({});
+  useEffect(() => { let active = true; const ids: OfficialId[] = ['jdk17-x64', 'openal-x86', 'openal-x64'];
+    for (const id of ids) void (async () => {
+      try { const r = await fetch(`/x64/official/${id}/manifest.json`); if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const manifest = await r.json() as OfficialManifest; validateOfficial(manifest, id);
+        if (active) setOfficial(o => ({ ...o, [id]: { manifest, status: 'available' } }));
+      } catch (e) { if (active) setOfficial(o => ({ ...o, [id]: { status: 'unavailable', note: String(e) } })); }
+    })(); return () => { active = false; };
+  }, []);
+  const installVendor = useCallback(async (id: OfficialId) => {
+    const rt = rtRef.current; const m = official[id]?.manifest; if (!rt || !m) return;
+    setOfficial(o => ({ ...o, [id]: { manifest: m, status: 'installing' } })); setFetching(`Установка ${m.pack}…`);
+    try {
+      await installOfficial(rt, m, f => fetchGz(`/x64/official/${id}/` + f.gz.split('/').map(encodeURIComponent).join('/'), 0, `/x64/official/${id}/` + f.path.split('/').map(encodeURIComponent).join('/')), n => setFetching(`${m.pack}: ${n}/${m.files.length}`));
+      setFiles(rt.vfsList()); setOfficial(o => ({ ...o, [id]: { manifest: m, status: 'installed' } }));
+      logComp(m.pack, true, `Установлено ${m.files.length} файлов в ${officialDir(m)}; SHA-256 архива ${m.archive_sha256}`);
+    } catch (e) { setOfficial(o => ({ ...o, [id]: { manifest: m, status: 'error', note: String(e) } })); logComp(m.pack, false, String(e)); }
+    finally { setFetching(null); }
+  }, [official, logComp]);
   /* ---- Visual C++ redistributables 2005…2022, x86 and x64, from /x64/sys32/packs.json ---- */
   const [vcPacks, setVcPacks] = useState<VcPack[]>([]);
   const [vcState, setVcState] = useState<Record<string, VcState>>({});
@@ -885,6 +906,16 @@ export default function X64App() {
               <h2 className="mb-2 text-lg font-bold">Системные компоненты</h2>
               <p className="mb-4 text-sm text-slate-600">Установка в виртуальный диск Nebula, а не в Android. Некоторые компоненты устанавливаются автоматически при запуске программы. Файлы сохраняются на виртуальном диске между запусками.</p>
               <div className="space-y-3">
+                {(['jdk17-x64', 'openal-x86', 'openal-x64'] as OfficialId[]).map(id => {
+                  const st = official[id]; const man = st?.manifest; const rt = rtRef.current;
+                  const installed = !!man && !!rt && ready === 'ready' && officialComplete(rt, man);
+                  return <div key={id} className="rounded border p-3" data-official-component={id} data-official-status={installed ? 'installed' : st?.status ?? 'probing'}>
+                    <b>{man?.pack ?? id}</b><p className="text-sm">{installed ? 'Установлено на виртуальный диск.' : st?.status === 'unavailable' ? 'Не включено в эту сборку.' : st?.status ?? 'Проверка…'} {st?.note}</p>
+                    {man && <><p className="break-all text-xs">Версия архива: {man.version}; источник: {man.source}; SHA-256: {man.archive_sha256}. {man.checksum_verified_against ? `Контрольная сумма поставщика: ${man.checksum_verified_against}.` : 'Независимая контрольная сумма поставщика не проверена.'}</p><p className="break-all text-xs">Папка: {officialDir(man)}</p></>}
+                    <p className="text-xs">{id === 'jdk17-x64' ? 'Отдельный Windows JDK; установленная игрой Java не заменяется автоматически.' : 'Пользовательская библиотека, не драйвер Android. Игра не переключается на неё автоматически.'}</p>
+                    <button disabled={ready !== 'ready' || !man || installed || st?.status === 'installing' || !!running || !!fetching} onClick={() => void installVendor(id)} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button>
+                  </div>;
+                })}
                 <div className="rounded border p-3"><b>Visual C++ 2015–2022 x64</b><p className="text-sm">Библиотеки Microsoft для 64-битных программ. Статус: {pack.status}{pack.note ? ` — ${pack.note}` : ''}</p><button data-x64-vc14x64={pack.status} disabled={ready !== 'ready' || pack.status !== 'available' || !!running || !!fetching} onClick={() => { const rt = rtRef.current; if (rt) void installPack(rt); }} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button></div>
                 <div className="rounded border p-3"><b>DirectX June 2010 x64</b><p className="text-sm">Пользовательские DLL; не драйвер и не полная реализация DirectX. Статус: {dx.status}{dx.note ? ` — ${dx.note}` : ''}</p><button data-x64-component-dx={dx.status} disabled={ready !== 'ready' || dx.status !== 'available' || !!running || !!fetching} onClick={() => { const rt = rtRef.current; if (rt) void installDx(rt); }} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button></div>
 <div className="rounded border p-3"><b>DirectX June 2010 x86</b><p className="text-sm">Те же DLL (D3DX, D3DCompiler, XAudio2, X3DAudio) в 32-битном варианте → C:\\Windows\\SysWOW64 для 32-битных игр и программ. Статус: {dx32.status}{dx32.note ? ` — ${dx32.note}` : ''}</p><button data-x64-component-dx32={dx32.status} disabled={ready !== 'ready' || dx32.status !== 'available' || !!running || !!fetching} onClick={() => { const rt = rtRef.current; if (rt) void installDx32(rt); }} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button></div>
