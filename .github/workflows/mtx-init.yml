@@ -1,0 +1,31 @@
+name: MSVC mutex initialization ABI
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - uses: mlugg/setup-zig@v2
+        with: { version: 0.17.0 }
+      - name: Build WASM emulator and x86/x64 guests
+        run: |
+          ZIG=zig ./emu/x64/build.sh
+          zig cc -target x86-windows-gnu -O2 emu/tests/mtx-init.c -o /tmp/mtx32.exe
+          zig cc -target x86_64-windows-gnu -O2 emu/tests/mtx-init.c -o /tmp/mtx64.exe
+      - name: Verify mutex in-situ layout and guards with interpreter and JIT
+        run: |
+          set -o pipefail
+          for exe in /tmp/mtx32.exe /tmp/mtx64.exe; do
+            for jit in 0 1; do
+              node emu/tests/wasm_run.mjs --max-ms 30000 --jit "$jit" "$exe" 2>&1 | tee /tmp/mtx-init.log
+              grep -q 'mtx-init: PASS' /tmp/mtx-init.log
+            done
+          done
