@@ -66,6 +66,9 @@ export class X64Runtime {
   private ex: Exports | null = null;
   private dec = new TextDecoder(); private enc = new TextEncoder();
   private padsPolled = 0;
+  /** host-loop counters (diagnostics): slices = frame() calls, hops = MessageChannel continuations, runs = x64_run calls, yields by kind, ms inside x64_run */
+  readonly loop = { slices: 0, hops: 0, runs: 0, yieldSleep: 0, yieldHop: 0, yieldInput: 0, budget: 0, runMs: 0 };
+  loopStats() { return { ...this.loop }; }
   private t0 = 0; private frames = 0; private raf = 0; private timer = 0; private running = false;
   /** zero-delay continuation for a busy guest: a MessageChannel task is not clamped to 4 ms like nested timers and still
    *  lets input events and painting run between slices (rAF alone would cap a 12 ms slice at ~70% of the CPU) */
@@ -271,7 +274,7 @@ export class X64Runtime {
   private schedule(busy = false) {
     if (busy && typeof MessageChannel !== 'undefined') {
       if (!this.chan) { this.chan = new MessageChannel(); this.chan.port1.onmessage = () => { if (this.pending) { this.pending = false; this.frame(); } }; }
-      this.pending = true; this.chan.port2.postMessage(0); return;
+      this.pending = true; this.loop.hops++; this.chan.port2.postMessage(0); return;
     }
     if (this.audio.active() || document.hidden) { this.timer = window.setTimeout(() => this.frame(), document.hidden ? 4 : 2); return; }   /* rAF stops in hidden tabs; audible tabs keep their timers */
     this.raf = requestAnimationFrame(() => this.frame());
@@ -280,17 +283,17 @@ export class X64Runtime {
    *  millisecond at a time, SwapBuffers waits for the GPU) is re-polled through a MessageChannel hop instead of a 4-16 ms host timer. */
   private frame() {
     if (!this.running || !this.ex) return;
-    const ex = this.ex; const start = performance.now(); let r = RUN_OK, more = false;
+    const ex = this.ex; const start = performance.now(); let r = RUN_OK, more = false; this.loop.slices++;
     if (start - this.padsPolled > 4) { this.padsPolled = start; this.pads.poll(); }   /* navigator.getGamepads() is not free: not on every MessageChannel hop */
     for (;;) {
-      r = ex.x64_run(400_000n);
+      r = ex.x64_run(400_000n); this.loop.runs++;
       if (r === RUN_YIELD) {
         if (ex.x64_wants_stdin()) { this.waitingStdin = true; this.status = 'waiting-stdin'; this.onStdinWait?.(true); return; }
         const s = ex.x64_sleep_ms();
-        if (s < 0 || s > 1.5) break;                     /* waiting for input, or a real sleep: come back on the next host frame */
-        if (s > 0) { more = true; break; }                /* a sub-millisecond pause: come back after one MessageChannel hop (~0.05 ms) instead of spinning on performance.now() — rendering and input get the gap, and the GPU process gets the core */
+        if (s < 0 || s > 1.5) { if (s < 0) this.loop.yieldInput++; else this.loop.yieldSleep++; break; }   /* waiting for input, or a real sleep: come back on the next host frame */
+        if (s > 0) { more = true; this.loop.yieldHop++; break; }   /* a sub-millisecond pause: come back after one MessageChannel hop (~0.05 ms) instead of spinning on performance.now() — rendering and input get the gap, and the GPU process gets the core */
       } else if (r !== RUN_OK) break;
-      if (performance.now() - start > 12) { more = true; break; }
+      if (performance.now() - start > 12) { more = true; this.loop.budget++; break; }
     }
     if (r === RUN_EXIT || r === RUN_FAULT || r === RUN_BREAK) {
       this.running = false; this.status = r === RUN_EXIT ? 'exited' : r === RUN_FAULT ? 'fault' : 'break';
@@ -298,6 +301,7 @@ export class X64Runtime {
       this.onStop?.(this.stats());
       return;
     }
+    this.loop.runMs += performance.now() - start;
     this.schedule(more);
   }
 

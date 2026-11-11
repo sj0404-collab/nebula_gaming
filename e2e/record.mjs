@@ -137,7 +137,8 @@ const wantProfile = process.argv.includes('--profile'); let cdp = null;
 if (wantProfile) { try { cdp = await page.context().newCDPSession(page); await cdp.send('Profiler.enable'); await cdp.send('Profiler.setSamplingInterval', { interval: 500 }); await cdp.send('Profiler.start'); console.log('profiler started'); } catch (e) { console.log('profiler unavailable: ' + e); cdp = null; } }
 const icAt = () => page.evaluate(() => { const rt = window.__x64; try { return Number(rt?.ex?.x64_icount?.() ?? 0); } catch { return 0; } });
 const jsAt = () => page.evaluate(() => { const rt = window.__x64; try { const o = {}; for (const m of String(rt?.jitStats?.().stats ?? '').matchAll(/([a-z_]+)=(\d+)/g)) o[m[1]] = Number(m[2]); return o; } catch { return {}; } });
-const ic0 = await icAt(); const fr0 = await framesNow(); const js0 = await jsAt();
+const lsAt = () => page.evaluate(() => { try { return window.__x64?.loopStats?.() ?? {}; } catch { return {}; } });
+const ic0 = await icAt(); const fr0 = await framesNow(); const js0 = await jsAt(); const ls0 = await lsAt();
 const tStart = Date.now(); const stamps = []; let n = 0;
 while (Date.now() - tStart < seconds * 1000) {
   const t = Date.now() - tStart;
@@ -155,6 +156,7 @@ const acT1 = await page.evaluate(() => (window.__acs[0] ? window.__acs[0].curren
 const wallSec = (Date.now() - tStart) / 1000;
 { const js1 = await jsAt(); const d = Object.fromEntries(Object.keys(js1).map(k => [k, js1[k] - (js0[k] || 0)])); const ins = (await icAt()) - ic0;
   console.log(`jit over the recording: exits=${d.exec} (${(ins / Math.max(1, d.exec)).toFixed(1)} insns per region entry) x_jit=${d.x_jit} x_ind=${d.x_ind} x_cold=${d.x_cold} dsteps=${d.dsteps} dinterp=${d.dinterp} (${(100 * (d.dinterp || 0) / Math.max(1, ins)).toFixed(1)}% interpreted) retrans=${d.retrans} blocks=${d.blocks} bytes=${d.bytes} stale=${d.stale}`);
+  { const ls1 = await lsAt(); const l = Object.fromEntries(Object.keys(ls1).map(k => [k, ls1[k] - (ls0[k] || 0)])); console.log(`host loop over the recording: slices=${l.slices} hops=${l.hops} runs=${l.runs} yield(sleep=${l.yieldSleep} hop=${l.yieldHop} input=${l.yieldInput}) budget=${l.budget} ms in x64_run=${(l.runMs || 0).toFixed(0)}`); }
   console.log(`exit kinds over the recording: direct=${d.direct} fall=${d.fall} ret=${d.ret} ind=${d.ind} slice=${d.slice} step=${d.step} xstale=${d.xstale}`); }
 { const ic1 = await icAt(), fr1 = await framesNow(); console.log(`steady state over the recording: ${((ic1 - ic0) / 1e6 / wallSec).toFixed(1)} MIPS, ${((fr1 - fr0) / wallSec).toFixed(1)} FPS presented (${fr1 - fr0} frames, ${((ic1 - ic0) / 1e6).toFixed(0)} M insns, ${fr1 > fr0 ? ((ic1 - ic0) / (fr1 - fr0) / 1e6).toFixed(2) : '?'} M insns/frame)`); }
 if (cdp) { try { const { profile } = await cdp.send('Profiler.stop'); writeFileSync(resolve(OUT, 'browser.cpuprofile'), JSON.stringify(profile)); console.log(`browser.cpuprofile: ${profile.samples.length} samples`); } catch (e) { console.log('profiler stop failed: ' + e); } }
