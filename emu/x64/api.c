@@ -175,8 +175,8 @@ EXPORT(x64_set_jit) void x64_set_jit(int on) { g_jit_on = on != 0; if (on > 1) g
 EXPORT(x64_jit_stats) const char *x64_jit_stats(void) { return jit_stats_text(); }
 extern int g_jit_skip_lo, g_jit_skip_hi;
 EXPORT(x64_jit_skip) void x64_jit_skip(int lo, int hi) { g_jit_skip_lo = lo; g_jit_skip_hi = hi; }
-extern int g_jit_inline_tlb, g_jit_xlive;
-EXPORT(x64_jit_opt) void x64_jit_opt(int inline_tlb, int xlive) { if (inline_tlb >= 0) g_jit_inline_tlb = inline_tlb != 0; if (xlive >= 0) g_jit_xlive = xlive != 0; }   /* JIT code-generation switches (benchmarks: emu/tests/wasm_run.mjs --inltlb 0|1) */
+extern int g_jit_inline_tlb, g_jit_xlive, g_jit_regcache;
+EXPORT(x64_jit_opt) void x64_jit_opt(int inline_tlb, int xlive, int regcache) { if (inline_tlb >= 0) g_jit_inline_tlb = inline_tlb != 0; if (xlive >= 0) g_jit_xlive = xlive != 0; if (regcache >= 0) g_jit_regcache = regcache != 0; }   /* JIT code-generation switches (benchmarks: emu/tests/wasm_run.mjs --inltlb 0|1) */
 /* An address identifies where execution stopped, not necessarily the cause of the fault. */
 static void report_fault_location(Proc *p) {
   Win32 *w = &p->w32; u64 a = p->cpu.err_rip;
