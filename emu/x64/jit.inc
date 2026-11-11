@@ -71,13 +71,16 @@ JEXPORT(jit_alu) u64 jit_alu(Cpu *c, int op, u64 a, u64 b, int sz) { return alu(
 JEXPORT(jit_shift) u64 jit_shift(Cpu *c, int op, u64 v, int cnt, int sz) { return shift(c, op, v, cnt, sz); }
 
 /* ---- wasm byte emitter ---- */
-typedef struct { u8 *b; u32 n, cap; int depth; const u64 *starts; int nblk, blk, m32; const u8 *retblk; u64 clo, cspan; Mem *mem; } Buf;   /* clo/cspan: guest address range of the region's code (stores into it reset the validated-block set) */   /* retblk[j]: block j is a call fall-through (ret landing) */   /* starts/nblk/blk: region blocks (sorted) and the one being emitted */
+typedef struct { u8 *b; u32 n, cap; int depth; const u64 *starts; int nblk, blk, m32; const u8 *retblk; u64 clo, cspan; Mem *mem; u32 rused, pgused; } Buf;   /* rused: registers the region's code touches (bit r) — only those are filled/spilled (jit_fix_regsites) */   /* clo/cspan: guest address range of the region's code (stores into it reset the validated-block set) */   /* retblk[j]: block j is a call fall-through (ret landing) */   /* starts/nblk/blk: region blocks (sorted) and the one being emitted */
 static void b8(Buf *B, u32 v) { if (B->n < B->cap) B->b[B->n] = (u8)v; B->n++; }
 static void bu(Buf *B, u64 v) { do { u8 x = v & 0x7f; v >>= 7; if (v) x |= 0x80; b8(B, x); } while (v); }
 static void bs(Buf *B, s64 v) { for (;;) { u8 x = v & 0x7f; v >>= 7; if ((v == 0 && !(x & 0x40)) || (v == -1 && (x & 0x40))) { b8(B, x); return; } b8(B, x | 0x80); } }
 static void bbytes(Buf *B, const void *p, u32 n) { for (u32 i = 0; i < n; i++) b8(B, ((const u8 *)p)[i]); }
 #define OP(x) b8(B, x)
-enum { L_C = 0, L_CODE = 1, L_PC = 2, L_LIMIT = 3, L_EA = 4, L_HOST = 5, L_T0 = 6, L_T1 = 7, L_T2 = 8, L_RET = 9, L_T3 = 10, L_F0 = 11, L_F1 = 12, L_V0 = 13, L_TE = 16, L_R0 = 17, L_T4 = 33 };
+enum { L_C = 0, L_CODE = 1, L_PC = 2, L_LIMIT = 3, L_EA = 4, L_HOST = 5, L_T0 = 6, L_T1 = 7, L_T2 = 8, L_RET = 9, L_T3 = 10, L_F0 = 11, L_F1 = 12, L_V0 = 13, L_TE = 16, L_R0 = 17, L_T4 = 33, L_PGA0 = 34, L_PGH0 = 51, L_NLOCALS = 68 };
+#define PG_SLOTS 17   /* page cache: one slot per base register (+1 for no base / rip-relative): L_PGA = page base of the last hit, L_PGH = host - guest for that page */
+#define L_PGA(s) (L_PGA0 + (s))
+#define L_PGH(s) (L_PGH0 + (s))
 #define L_R(r) (L_R0 + (r))   /* cached general registers (g_jit_regcache): filled at entry / after an interpreter step, spilled before any exit or helper that reads c->r */   /* L_V0..L_V0+2: bit set of the blocks whose code bytes were verified during this call of the region */
 #define L_V(j) (L_V0 + ((j) >> 6))
 #define CO_X(ri)  ((u64)__builtin_offsetof(Cpu, x) + (u64)(ri) * 16)
@@ -123,16 +126,33 @@ static u8 ld_u(int sz) { return sz == 8 ? 0x29 : sz == 4 ? 0x35 : sz == 2 ? 0x33
 static u8 st_n(int sz) { return sz == 8 ? 0x37 : sz == 4 ? 0x3E : sz == 2 ? 0x3D : 0x3C; }
 static u32 al_of(int sz) { return sz == 8 ? 3 : sz == 4 ? 2 : sz == 2 ? 1 : 0; }
 int g_jit_regcache = 1;   /* 1: the 16 general registers live in wasm locals inside a region (benchmarks: --regcache 0|1) */
-static void e_fill(Buf *B) { if (!g_jit_regcache) return; for (int r = 0; r < 16; r++) { e_lget(B, L_C); e_ld(B, 0x29, 3, CO_R(r)); e_lset(B, L_R(r)); } }
-static void e_spill(Buf *B) { if (!g_jit_regcache) return; for (int r = 0; r < 16; r++) { e_lget(B, L_C); e_lget(B, L_R(r)); e_st(B, 0x37, 3, CO_R(r)); } }
-static void e_ldreg(Buf *B, int r, int sz) { if (g_jit_regcache) { e_lget(B, L_R(r)); if (sz < 8) { e_i64c(B, mask(sz)); OP(I64_AND); } return; } e_lget(B, L_C); e_ld(B, ld_u(sz), al_of(sz), CO_R(r)); }
+/* register fill/spill sites: emitted for all 16 registers (fixed size), rewritten after the body for the registers the region really uses
+   (the rest become nops): a region that touches 5 registers pays 5 loads at entry and 5 stores at exit instead of 16 + 16 */
+#define JIT_MAX_RSITES (JIT_MAX_REGION_INSNS + 64)
+static u32 g_rsite[JIT_MAX_RSITES]; static int g_nrsite, g_rsite_over;   /* bit 31: spill */
+static void e_fill_m(Buf *B, u32 m, u32 pm) { for (int r = 0; r < 16; r++) if (m >> r & 1) { e_lget(B, L_C); e_ld(B, 0x29, 3, CO_R(r)); e_lset(B, L_R(r)); }
+  for (int q = 0; q < PG_SLOTS; q++) if (pm >> q & 1) { e_i64c(B, (u64)-4096); e_lset(B, L_PGA(q)); } }   /* page cache empty: no guest address is within 4096 of -4096 */
+static void e_spill_m(Buf *B, u32 m) { for (int r = 0; r < 16; r++) if (m >> r & 1) { e_lget(B, L_C); e_lget(B, L_R(r)); e_st(B, 0x37, 3, CO_R(r)); } }
+static void e_fill(Buf *B) { if (g_nrsite < JIT_MAX_RSITES) g_rsite[g_nrsite++] = B->n; else g_rsite_over = 1; e_fill_m(B, g_jit_regcache ? 0xffff : 0, (1u << PG_SLOTS) - 1); }
+static void e_spill(Buf *B) { if (!g_jit_regcache) return; if (g_nrsite < JIT_MAX_RSITES) g_rsite[g_nrsite++] = B->n | 0x80000000u; else g_rsite_over = 1; e_spill_m(B, 0xffff); }
+static void jit_fix_regsites(Buf *B) {
+  if (g_rsite_over) return;   /* too many sites: everything stays full (correct, just slower) */
+  static u8 tmpb[2048]; u32 m = g_jit_regcache ? B->rused : 0, rm = g_jit_regcache ? 0xffff : 0, pm = B->pgused, pall = (1u << PG_SLOTS) - 1;
+  for (int i = 0; i < g_nrsite; i++) {
+    u32 off = g_rsite[i] & 0x7fffffffu, spill = g_rsite[i] >> 31;
+    Buf f = { tmpb, 0, sizeof tmpb, 0, 0, 0, 0, 0 }; if (spill) e_spill_m(&f, 0xffff); else e_fill_m(&f, rm, pall); u32 full = f.n;
+    f.n = 0; if (spill) e_spill_m(&f, m); else e_fill_m(&f, m, pm);
+    __builtin_memcpy(B->b + off, tmpb, f.n); for (u32 k = f.n; k < full; k++) B->b[off + k] = 0x01;   /* nop */
+  }
+}
+static void e_ldreg(Buf *B, int r, int sz) { if (g_jit_regcache) { B->rused |= 1u << r; e_lget(B, L_R(r)); if (sz < 8) { e_i64c(B, mask(sz)); OP(I64_AND); } return; } e_lget(B, L_C); e_ld(B, ld_u(sz), al_of(sz), CO_R(r)); }
 static void e_ldreg_s(Buf *B, int r, int sz) {   /* low sz bytes sign-extended to i64 */
-  if (g_jit_regcache) { e_lget(B, L_R(r)); OP(sz == 4 ? 0xC4 : sz == 2 ? 0xC3 : 0xC2); return; }
+  if (g_jit_regcache) { B->rused |= 1u << r; e_lget(B, L_R(r)); OP(sz == 4 ? 0xC4 : sz == 2 ? 0xC3 : 0xC2); return; }
   e_lget(B, L_C); e_ld(B, sz == 4 ? 0x34 : sz == 2 ? 0x32 : 0x30, al_of(sz), CO_R(r)); }
 /* register store: the address (local c) must already be on the stack below the value */
 /* stack: [c, value] → register (the c below the value is dropped in the local form) */
 static void e_streg(Buf *B, int r, int sz) {
-  if (g_jit_regcache) {
+  if (g_jit_regcache) { B->rused |= 1u << r;
     if (sz == 4) { e_i64c(B, 0xffffffffull); OP(I64_AND); }
     if (sz >= 4) { e_lset(B, L_R(r)); OP(DROP); return; }
     e_i64c(B, mask(sz)); OP(I64_AND); e_lset(B, L_T4); e_lget(B, L_R(r)); e_i64c(B, ~mask(sz)); OP(I64_AND); e_lget(B, L_T4); OP(I64_OR); e_lset(B, L_R(r)); OP(DROP); return; }
@@ -141,47 +161,63 @@ static void e_streg(Buf *B, int r, int sz) {
 static u64 r8_off(const Dc *e, int r) { return (!e->rex && r >= 4 && r < 8) ? CO_R(r - 4) + 1 : CO_R(r); }
 static int r8_high(const Dc *e, int r) { return !e->rex && r >= 4 && r < 8; }   /* ah/ch/dh/bh */
 static void e_ldr8(Buf *B, const Dc *e, int r) {
-  if (g_jit_regcache) { if (r8_high(e, r)) { e_lget(B, L_R(r - 4)); e_i64c(B, 8); OP(I64_SHR_U); } else e_lget(B, L_R(r)); e_i64c(B, 0xff); OP(I64_AND); return; }
+  if (g_jit_regcache) { B->rused |= 1u << (r8_high(e, r) ? r - 4 : r); if (r8_high(e, r)) { e_lget(B, L_R(r - 4)); e_i64c(B, 8); OP(I64_SHR_U); } else e_lget(B, L_R(r)); e_i64c(B, 0xff); OP(I64_AND); return; }
   e_lget(B, L_C); e_ld(B, 0x31, 0, r8_off(e, r)); }
 static void e_str8(Buf *B, const Dc *e, int r) {   /* stack: [c, value] → 8-bit register */
-  if (g_jit_regcache) { int hi = r8_high(e, r), rr = hi ? r - 4 : r; e_i64c(B, 0xff); OP(I64_AND); if (hi) { e_i64c(B, 8); OP(I64_SHL); } e_lset(B, L_T4);
+  if (g_jit_regcache) { int hi = r8_high(e, r), rr = hi ? r - 4 : r; B->rused |= 1u << rr; e_i64c(B, 0xff); OP(I64_AND); if (hi) { e_i64c(B, 8); OP(I64_SHL); } e_lset(B, L_T4);
     e_lget(B, L_R(rr)); e_i64c(B, hi ? ~0xff00ull : ~0xffull); OP(I64_AND); e_lget(B, L_T4); OP(I64_OR); e_lset(B, L_R(rr)); OP(DROP); return; }
   e_st(B, 0x3C, 0, r8_off(e, r)); }
 static void e_icount(Buf *B, int k) { if (!k) return; e_lget(B, L_C); e_lget(B, L_C); e_ld(B, 0x29, 3, CO_ICOUNT); e_i64c(B, (u64)k); OP(I64_ADD); e_st(B, 0x37, 3, CO_ICOUNT); }
+/* exit kinds (c->jit_xk, histogram in the stats): 1 direct target outside the region, 2 block end not adjacent to the next, 3 ret to a block outside, 4 indirect target not laid out,
+   5 time slice used up, 6 an interpreter step changed the flow, 7 stale code */
+enum { XK_NONE, XK_DIRECT, XK_FALL, XK_RET, XK_IND, XK_SLICE, XK_STEP, XK_STALE, XK_N };
+static u64 g_jit_xk[XK_N];
+#define CO_JIT_XK ((u64)__builtin_offsetof(Cpu, jit_xk))
+static void e_xk(Buf *B, int k) { e_lget(B, L_C); e_i32c(B, k); e_st(B, 0x36, 2, CO_JIT_XK); }
 static void e_exit_const(Buf *B, u64 rip, int k) { e_icount(B, k); e_i64c(B, rip); e_lset(B, L_RET); e_exit(B); }
 static void e_exit_top(Buf *B, int k) { e_lset(B, L_RET); e_icount(B, k); e_exit(B); }   /* next rip on the stack */
 /* control transfer to a constant target: forward block → direct br to its label; backward block → budget check, pc, br to the dispatch loop; outside → return */
 static void e_goto(Buf *B, u64 t, int k) {
   int j = blk_of(B, t);
-  if (j < 0) { e_exit_const(B, t, k); return; }
+  if (j < 0) { e_xk(B, XK_DIRECT); e_exit_const(B, t, k); return; }
   e_icount(B, k);
   if (j > B->blk) { OP(BR); bu(B, lbl_block(B, j)); return; }
-  e_lget(B, L_C); e_ld(B, 0x29, 3, CO_ICOUNT); e_lget(B, L_LIMIT); OP(0x5A); e_if(B, 0); e_i64c(B, t); e_lset(B, L_RET); e_exit(B); e_end(B);   /* i64.ge_u: time slice used up */
+  e_lget(B, L_C); e_ld(B, 0x29, 3, CO_ICOUNT); e_lget(B, L_LIMIT); OP(0x5A); e_if(B, 0); e_xk(B, XK_SLICE); e_i64c(B, t); e_lset(B, L_RET); e_exit(B); e_end(B);   /* i64.ge_u: time slice used up */
   e_i32c(B, j); e_lset(B, L_PC); OP(BR); bu(B, lbl_loop(B));
 }
 /* control transfer to the rip in L_RET (ret): call landing blocks of this region are reached through the dispatch loop, anything else leaves */
-static void e_goto_dyn(Buf *B, int k) {
+/* dispatch on L_RET to the region blocks flagged in want[] (block starts are sorted): binary search, 5-6 compares for 24 targets instead of a linear chain;
+   a hit sets L_PC and branches to the dispatch loop, a miss falls through */
+static void e_dispatch_bs(Buf *B, const int *js, int lo, int hi) {
+  if (hi - lo <= 3) { for (int i = lo; i < hi; i++) { e_lget(B, L_RET); e_i64c(B, B->starts[js[i]]); OP(I64_EQ); e_if(B, 0); e_i32c(B, js[i]); e_lset(B, L_PC); OP(BR); bu(B, lbl_loop(B)); e_end(B); } return; }
+  int mid = (lo + hi) / 2;
+  e_lget(B, L_RET); e_i64c(B, B->starts[js[mid]]); OP(0x54); e_if(B, 0); e_dispatch_bs(B, js, lo, mid); e_else(B); e_dispatch_bs(B, js, mid, hi); e_end(B);   /* i64.lt_u */
+}
+static void e_dispatch_want(Buf *B, const u8 *want) { static int js[JIT_MAX_BLOCKS]; int n = 0; for (int j = 0; j < B->nblk; j++) if (want[j]) js[n++] = j; if (n) e_dispatch_bs(B, js, 0, n); }
+static void e_goto_dyn(Buf *B, u64 site, int k) {
   e_icount(B, k);
-  int any = 0; for (int j = 0; j < B->nblk; j++) if (B->retblk[j]) any = 1;
+  static u8 want[JIT_MAX_BLOCKS]; int any = 0;
+  for (int j = 0; j < B->nblk; j++) { want[j] = B->retblk[j]; if (want[j]) any = 1; }
+  { const Ibt *s = ibt_find(site, B->mem); if (s) for (int i = 0; i < s->n; i++) { int j = blk_of(B, s->t[i]); if (j >= 0) { want[j] = 1; any = 1; } } }   /* return sites this ret has left the region for */
   if (any) {
-    e_lget(B, L_C); e_ld(B, 0x29, 3, CO_ICOUNT); e_lget(B, L_LIMIT); OP(0x5A); e_if(B, 0); e_exit(B); e_end(B);
-    for (int j = 0; j < B->nblk; j++) if (B->retblk[j]) { e_lget(B, L_RET); e_i64c(B, B->starts[j]); OP(I64_EQ); e_if(B, 0); e_i32c(B, j); e_lset(B, L_PC); OP(BR); bu(B, lbl_loop(B)); e_end(B); }
+    e_lget(B, L_C); e_ld(B, 0x29, 3, CO_ICOUNT); e_lget(B, L_LIMIT); OP(0x5A); e_if(B, 0); e_xk(B, XK_SLICE); e_exit(B); e_end(B);
+    e_dispatch_want(B, want);
   }
-  e_exit(B);
+  e_lget(B, L_C); e_i64c(B, site); e_st(B, 0x37, 3, CO_JIT_SITE);   /* jit_enter profiles the landing (the next translation lays it out inside) */
+  e_xk(B, XK_RET); e_exit(B);
 }
 /* jmp/call r/m: L_RET = the dynamic target.  Targets this site has shown before (ibt profile) that are blocks of the region are dispatched inside
    it; anything else exits, leaving the site in c->jit_site so jit_enter records the new target (and retranslates the region with it) */
 static void e_goto_ibt(Buf *B, u64 site, int k) {
   e_icount(B, k);
-  const Ibt *s = ibt_find(site, B->mem); int any = 0;
-  if (s) for (int i = 0; i < s->n; i++) if (blk_of(B, s->t[i]) >= 0) any = 1;
+  const Ibt *s = ibt_find(site, B->mem); int any = 0; static u8 want[JIT_MAX_BLOCKS]; for (int j = 0; j < B->nblk; j++) want[j] = 0;
+  if (s) for (int i = 0; i < s->n; i++) { int j = blk_of(B, s->t[i]); if (j >= 0) { want[j] = 1; any = 1; } }
   if (any) {
-    e_lget(B, L_C); e_ld(B, 0x29, 3, CO_ICOUNT); e_lget(B, L_LIMIT); OP(0x5A); e_if(B, 0); e_exit(B); e_end(B);
-    for (int i = 0; i < s->n; i++) { int j = blk_of(B, s->t[i]); if (j < 0) continue;
-      e_lget(B, L_RET); e_i64c(B, s->t[i]); OP(I64_EQ); e_if(B, 0); e_i32c(B, j); e_lset(B, L_PC); OP(BR); bu(B, lbl_loop(B)); e_end(B); }
+    e_lget(B, L_C); e_ld(B, 0x29, 3, CO_ICOUNT); e_lget(B, L_LIMIT); OP(0x5A); e_if(B, 0); e_xk(B, XK_SLICE); e_exit(B); e_end(B);
+    e_dispatch_want(B, want);
   }
   e_lget(B, L_C); e_i64c(B, site); e_st(B, 0x37, 3, CO_JIT_SITE);
-  e_exit(B);
+  e_xk(B, XK_IND); e_exit(B);
 }
 /* effective address of a memory operand → stack (i64) */
 typedef struct { const Dc *e; u64 rip; u8 kind, need, fdef, fuse, fk, sz, seg; } JItem;
@@ -199,20 +235,27 @@ static void e_ea(Buf *B, const JItem *it) {
 /* EA on the stack → host pointer in L_HOST through the module-local TLB function; 0 = fault → leave the block (c->rip set) */
 static void e_vreset(Buf *B) { for (int j = 0; j < 3; j++) { e_i64c(B, 0); e_lset(B, L_V0 + j); } }
 static void e_vreset_if_code(Buf *B) { e_lget(B, L_EA); e_i64c(B, B->clo - 16); OP(I64_SUB); e_i64c(B, B->cspan + 16); OP(I64_LT_U); e_if(B, 0); e_vreset(B); e_end(B); }   /* a store (up to 16 bytes) at clo-16 .. clo+cspan may touch the region's code */
-int g_jit_xlive = 1;   /* 1: flags liveness crosses block boundaries inside a region; 0: every block end keeps all flags live (benchmarks: --xlive 0|1) */
+int g_jit_xlive = 1, g_jit_callflags = 1;   /* callflags 1: the flags are dead across call/ret (no ABI lets a callee or a caller rely on them; DF is not tracked here) — the ALU op before a call no longer computes a full RFLAGS */   /* 1: flags liveness crosses block boundaries inside a region; 0: every block end keeps all flags live (benchmarks: --xlive 0|1) */
 int g_jit_inline_tlb = 1;   /* 1: the TLB probe is emitted inline at every memory operand (no call; Liftoff code never inlines FN_TLB); 0: call the module-local probe */
-static void e_host(Buf *B, int size, int write, u64 rip) {
+int g_jit_pgcache = 1;   /* 1: per-base-register page cache in front of the TLB (benchmarks) */
+/* guest address on the stack → L_HOST (host pointer), or the fault exit.  slot: page-cache slot (base register, 16 = none) */
+static void e_host(Buf *B, int size, int write, u64 rip, int slot) {
   e_lset(B, L_EA);
   if (g_jit_inline_tlb) {
+    int pc = g_jit_pgcache && slot >= 0 && slot < PG_SLOTS; if (pc) B->pgused |= 1u << slot;
+    /* page cache: hit = ea - pga <= 4096 - size (same page, no crossing) → host = pgh + ea */
+    if (pc) { e_lget(B, L_EA); e_lget(B, L_PGA(slot)); OP(I64_SUB); e_i64c(B, 4096 - size); OP(I64_LE_U); e_if(B, 0x7E); e_lget(B, L_PGH(slot)); e_lget(B, L_EA); OP(I64_ADD); e_else(B); }
     /* entry = &c->mem->tlb[(ea >> 12) & (TLB_N - 1)];  hit = entry->tag == (ea >> 12) + 1 && (ea & 4095) + size <= 4096 */
     e_lget(B, L_C); e_ld(B, 0x29, 3, CO_MEM); e_lget(B, L_EA); e_i64c(B, 12); OP(I64_SHR_U); e_i64c(B, TLB_N - 1); OP(I64_AND); e_i64c(B, 4); OP(I64_SHL); OP(I64_ADD); e_ltee(B, L_TE);
     e_ld(B, 0x29, 3, MO_TLB); e_lget(B, L_EA); e_i64c(B, 12); OP(I64_SHR_U); e_i64c(B, 1); OP(I64_ADD); OP(I64_EQ);
     e_lget(B, L_EA); e_i64c(B, 4095); OP(I64_AND); e_i64c(B, size); OP(I64_ADD); e_i64c(B, 4096); OP(I64_LE_U); OP(I32_AND);
     e_if(B, 0x7E);
-      e_lget(B, L_TE); e_ld(B, 0x29, 3, MO_TLB + 8); e_lget(B, L_EA); e_i64c(B, 4095); OP(I64_AND); OP(I64_ADD);
+      if (pc) { e_lget(B, L_EA); e_i64c(B, ~4095ull); OP(I64_AND); e_lset(B, L_PGA(slot)); e_lget(B, L_TE); e_ld(B, 0x29, 3, MO_TLB + 8); e_lget(B, L_PGA(slot)); OP(I64_SUB); e_ltee(B, L_PGH(slot)); e_lget(B, L_EA); OP(I64_ADD); }
+      else { e_lget(B, L_TE); e_ld(B, 0x29, 3, MO_TLB + 8); e_lget(B, L_EA); e_i64c(B, 4095); OP(I64_AND); OP(I64_ADD); }
     e_else(B);
       e_lget(B, L_C); e_lget(B, L_EA); e_i64c(B, size); e_i32c(B, write); e_i64c(B, rip); OP(CALL); bu(B, FN_MEM);
     e_end(B);
+    if (pc) e_end(B);
   } else { e_lget(B, L_C); e_lget(B, L_EA); e_i64c(B, size); e_i32c(B, write); e_i64c(B, rip); OP(CALL); bu(B, FN_TLB); }
   e_ltee(B, L_HOST); OP(I64_EQZ); OP(BR_IF); bu(B, lbl_fault(B));
   if (write && B->cspan) e_vreset_if_code(B);
@@ -223,7 +266,8 @@ static void e_rm_load8(Buf *B, const Dc *e) { if (e->mod == 3) e_ldr8(B, e, e->r
 static void e_dst_addr(Buf *B, const Dc *e) { e_lget(B, e->mod == 3 ? L_C : L_HOST); }
 static void e_dst_store(Buf *B, const Dc *e, int sz) { if (e->mod == 3) e_streg(B, e->rm, sz); else e_st(B, st_n(sz), 0, 0); }
 static void e_dst_store8(Buf *B, const Dc *e) { if (e->mod == 3) e_str8(B, e, e->rm); else e_st(B, 0x3C, 0, 0); }
-static void e_prep_mem(Buf *B, const JItem *it, int size, int write) { if (it->e->mod != 3) { e_ea(B, it); e_host(B, size, write, it->rip); } }
+static int pg_slot(const Dc *e) { return e->riprel || e->base < 0 ? 16 : e->base; }
+static void e_prep_mem(Buf *B, const JItem *it, int size, int write) { if (it->e->mod != 3) { e_ea(B, it); e_host(B, size, write, it->rip, pg_slot(it->e)); } }
 static s64 imm_at(const u8 *code, int off, int bytes) { if (bytes == 1) return (s8)code[off]; if (bytes == 2) { s16 v; __builtin_memcpy(&v, code + off, 2); return v; } s32 v; __builtin_memcpy(&v, code + off, 4); return v; }
 static s32 imm32_at(const u8 *code, int off) { s32 v; __builtin_memcpy(&v, code + off, 4); return v; }
 /* condition code → i32 0/1 on the stack */
@@ -246,13 +290,13 @@ done32:
 /* push / pop (psz = 8, or 4 in a 32-bit process) */
 static void e_push_begin(Buf *B, int psz, int m32, u64 rip) {   /* rsp -= psz; L_HOST = &[rsp]; caller then pushes the value and calls e_push_end */
   e_ldreg(B, RSP, 8); e_i64c(B, psz); OP(I64_SUB); if (m32) { e_i64c(B, 0xffffffffull); OP(I64_AND); } e_lset(B, L_EA);
-  e_lget(B, L_EA); e_host(B, psz, 1, rip);   /* probe first: a faulting push leaves rsp unchanged */
+  e_lget(B, L_EA); e_host(B, psz, 1, rip, RSP);   /* probe first: a faulting push leaves rsp unchanged */
   e_lget(B, L_C); e_lget(B, L_EA); e_streg(B, RSP, 8);
   e_lget(B, L_HOST);
 }
 static void e_push_end(Buf *B, int psz) { e_st(B, st_n(psz), 0, 0); }
 static void e_pop(Buf *B, int psz, int m32, u64 rip) {   /* value → stack; rsp += psz */
-  e_ldreg(B, RSP, 8); e_host(B, psz, 0, rip);
+  e_ldreg(B, RSP, 8); e_host(B, psz, 0, rip, RSP);
   e_lget(B, L_HOST); e_ld(B, ld_u(psz), 0, 0); e_lset(B, L_T3);
   e_lget(B, L_C); e_ldreg(B, RSP, 8); e_i64c(B, psz); OP(I64_ADD); if (m32) { e_i64c(B, 0xffffffffull); OP(I64_AND); } e_streg(B, RSP, 8);
   e_lget(B, L_T3);
@@ -392,7 +436,7 @@ static void jit_classify(JItem *it, const u8 *code) {
 static void e_step(Buf *B, u64 rip, u64 next, int k) {   /* interpreter single step; exit unless it fell through to `next` with RUN_OK */
   e_spill(B); e_lget(B, L_C); e_i64c(B, rip); OP(CALL); bu(B, FN_STEP); e_ltee(B, L_RET); e_i64c(B, next); OP(I64_NE);
   e_lget(B, L_C); e_ld(B, 0x28, 2, CO_STATUS); OP(I32_EQZ); OP(I32_EQZ); OP(I32_OR);
-  e_if(B, 0); e_icount(B, k); e_lget(B, L_RET); OP(RETURN); e_end(B);   /* the interpreter's registers are in memory: no spill on this exit, refill when going on */
+  e_if(B, 0); e_xk(B, XK_STEP); e_icount(B, k); e_lget(B, L_RET); OP(RETURN); e_end(B);   /* the interpreter's registers are in memory: no spill on this exit, refill when going on */
   e_fill(B);
   if (B->cspan) e_vreset(B);
 }
@@ -512,7 +556,7 @@ static int e_insn(Buf *B, const JItem *it, const u8 *code, int m32, int k) {
       int cb = imm ? (code[e->mr_end] & (bits - 1)) : -1;   /* constant bit, or -1 = dynamic in L_T3 */
       if (e->mod != 3) {
         if (imm) e_prep_mem(B, it, sz, write);
-        else { e_ea(B, it); if (sz == 8) e_ldreg(B, e->reg, 8); else e_ldreg_s(B, e->reg, 4); e_i64c(B, sz == 8 ? 6 : 5); OP(I64_SHR_S); e_i64c(B, sz == 8 ? 3 : 2); OP(I64_SHL); OP(I64_ADD); if (m32) { e_i64c(B, 0xffffffffull); OP(I64_AND); } e_host(B, sz, write, start); }
+        else { e_ea(B, it); if (sz == 8) e_ldreg(B, e->reg, 8); else e_ldreg_s(B, e->reg, 4); e_i64c(B, sz == 8 ? 6 : 5); OP(I64_SHR_S); e_i64c(B, sz == 8 ? 3 : 2); OP(I64_SHL); OP(I64_ADD); if (m32) { e_i64c(B, 0xffffffffull); OP(I64_AND); } e_host(B, sz, write, start, pg_slot(e)); }
       }
       if (!imm) { e_ldreg(B, e->reg, sz); e_i64c(B, bits - 1); OP(I64_AND); e_lset(B, L_T3); }
       e_rm_load(B, e, sz); e_lset(B, L_T0);
@@ -614,10 +658,10 @@ static int e_insn(Buf *B, const JItem *it, const u8 *code, int m32, int k) {
     case FK_JMP8: { u64 t = next + (u64)(s64)(s8)code[e->hdr]; if (m32) t = (u32)t; e_goto(B, t, k + 1); return 1; }
     case FK_JMP32: { u64 t = next + (u64)(s64)imm32_at(code, e->hdr); if (m32) t = (u32)t; e_goto(B, t, k + 1); return 1; }
     case FK_CALL: { u64 t = next + (u64)(s64)imm32_at(code, e->hdr); if (m32) t = (u32)t; e_push_begin(B, psz, m32, start); e_i64c(B, next); e_push_end(B, psz); e_goto(B, t, k + 1); return 1; }
-    case FK_RET: e_pop(B, psz, m32, start); e_lset(B, L_RET); e_goto_dyn(B, k + 1); return 1;
+    case FK_RET: e_pop(B, psz, m32, start); e_lset(B, L_RET); e_goto_dyn(B, start, k + 1); return 1;
     case FK_RET_N: { u32 n = code[e->hdr] | (code[e->hdr + 1] << 8); e_pop(B, psz, m32, start); e_lset(B, L_RET);
       e_lget(B, L_C); e_ldreg(B, RSP, 8); e_i64c(B, n); OP(I64_ADD); if (m32) { e_i64c(B, 0xffffffffull); OP(I64_AND); } e_streg(B, RSP, 8);
-      e_goto_dyn(B, k + 1); return 1; }
+      e_goto_dyn(B, start, k + 1); return 1; }
 
     /* ---- SSE (scalar/packed moves, arithmetic, logic, compares, conversions) ---- */
     case FK_SSE_MOV: { u8 op2 = e->op2; int bytes = (op2 == 0x28 || op2 == 0x29) ? 16 : e->rep == 0xF3 ? 4 : e->rep == 0xF2 ? 8 : 16; int load = op2 == 0x10 || op2 == 0x28;
@@ -720,6 +764,7 @@ static int dc_valid(Mem *m, u32 gen, int m32, u64 a, const u8 *code, Dc **out) {
 static int term_targets(const Dc *e, u64 start, const u8 *code, int m32, Mem *mem, u64 t[TT_MAX]) {
   u64 next = start + e->len; if (m32) next = (u32)next; int n = 0;
   if (e->op == 0xFF) { int sub = e->reg & 7; if (sub == 2 || sub == 4) { const Ibt *s = ibt_find(start, mem); if (s) for (int i = 0; i < s->n; i++) t[n++] = s->t[i]; if (sub == 2) t[n++] = next; } return n; }
+  if (e->fast == FK_RET || e->fast == FK_RET_N) { const Ibt *s = ibt_find(start, mem); if (s) for (int i = 0; i < s->n; i++) t[n++] = s->t[i]; return n; }   /* landings this ret left a region for (profiled by jit_enter) */
   switch (e->fast) {
     case FK_JCC8: t[n++] = next + (u64)(s64)(s8)code[e->hdr]; t[n++] = next; break;
     case FK_JCC32: t[n++] = next + (u64)(s64)imm32_at(code, e->hdr + 1); t[n++] = next; break;
@@ -771,27 +816,29 @@ static int jit_translate(Cpu *c, Jb *b0) {
   /* flags liveness: backward may-liveness over the region's blocks.  Successors are the terminator's static targets (or the adjacent
      fall-through block); dynamic targets, targets outside the region and non-adjacent fall-throughs leave the region → everything live.
      Least fixed point from the empty set (standard), bounded; on non-convergence fall back to all-live block ends. */
-  static u8 livein[JIT_MAX_BLOCKS], succ_all[JIT_MAX_BLOCKS]; static int succ[JIT_MAX_BLOCKS][TT_MAX];
+  static u8 livein[JIT_MAX_BLOCKS], succ_all[JIT_MAX_BLOCKS], calldead[JIT_MAX_BLOCKS]; static int succ[JIT_MAX_BLOCKS][TT_MAX];
   for (int i = 0; i < nb; i++) {
-    for (int q = 0; q < TT_MAX; q++) succ[i][q] = -1; succ_all[i] = 0; livein[i] = 0;
+    for (int q = 0; q < TT_MAX; q++) succ[i][q] = -1; succ_all[i] = 0; livein[i] = 0; calldead[i] = 0;
     if (!blk[i].term) { if (i + 1 < nb && blk[i + 1].start == blk[i].end) succ[i][0] = i + 1; else succ_all[i] = 1; continue; }
     const JItem *last = &it[blk[i].first + blk[i].n - 1];
+    if (g_jit_callflags && (last->fk == FK_CALL || last->fk == FK_RET || last->fk == FK_RET_N || (last->fk == FK_FF && (last->e->reg & 7) == 2))) calldead[i] = 1;
     u64 t[TT_MAX]; int nt = term_targets(last->e, last->rip, rbase + (last->rip - lo), m32, m, t);
-    if (nt == 0 || last->fk == FK_FF) { succ_all[i] = 1; if (nt == 0) continue; }   /* an indirect may still go elsewhere: everything live */
+    if (nt == 0 || last->fk == FK_FF || last->fk == FK_RET || last->fk == FK_RET_N) { succ_all[i] = 1; if (nt == 0) continue; }   /* an indirect / ret may still go elsewhere: everything live */
     for (int q = 0; q < nt; q++) { int f = -1; for (int j = 0; j < nb; j++) if (blk[j].start == t[q]) { f = j; break; } if (f < 0) succ_all[i] = 1; else succ[i][q] = f; }
   }
   { int changed = 1, iter = 0; if (!g_jit_xlive) for (int i = 0; i < nb; i++) succ_all[i] = 1;
     for (; changed && iter < JIT_MAX_BLOCKS + 4; iter++) { changed = 0;
       for (int i = nb - 1; i >= 0; i--) {
         int live = succ_all[i] ? FL_ALL : 0; for (int q = 0; q < TT_MAX; q++) if (succ[i][q] >= 0) live |= livein[succ[i][q]];
+        if (calldead[i]) live = 0;
         for (int q = blk[i].first + blk[i].n - 1; q >= blk[i].first; q--) { it[q].need = (u8)(it[q].fdef & live); live = (live & ~it[q].fdef) | it[q].fuse; }
         if (live != livein[i]) { livein[i] = (u8)live; changed = 1; }
       }
     }
-    if (changed) for (int i = 0; i < nb; i++) { int live = FL_ALL; for (int q = blk[i].first + blk[i].n - 1; q >= blk[i].first; q--) { it[q].need = (u8)(it[q].fdef & live); live = (live & ~it[q].fdef) | it[q].fuse; } }
+    if (changed) for (int i = 0; i < nb; i++) { int live = calldead[i] ? 0 : FL_ALL; for (int q = blk[i].first + blk[i].n - 1; q >= blk[i].first; q--) { it[q].need = (u8)(it[q].fdef & live); live = (live & ~it[q].fdef) | it[q].fuse; } }
   }
-  Buf body = { g_jit_body, 0, sizeof g_jit_body, 0, bstarts, nb, 0, m32, retblk, 0, 0, m }; Buf *B = &body;
-  bu(B, 3); bu(B, 7); OP(0x7E); bu(B, 2); OP(0x7C); bu(B, 21); OP(0x7E);   /* locals 4..10: i64, 11..12: f64, 13..15: i64 verified-block bits (zero at entry), 16: TLB entry scratch, 17..32: cached registers, 33: scratch */
+  Buf body = { g_jit_body, 0, sizeof g_jit_body, 0, bstarts, nb, 0, m32, retblk, 0, 0, m, 0, 0 }; Buf *B = &body; g_nrsite = 0; g_rsite_over = 0;
+  bu(B, 3); bu(B, 7); OP(0x7E); bu(B, 2); OP(0x7C); bu(B, L_NLOCALS - 13); OP(0x7E);   /* locals 4..10: i64, 11..12: f64, 13..15: i64 verified-block bits (zero at entry), 16: TLB entry scratch, 17..32: cached registers, 33: scratch, 34..67: page cache */
   { u64 clo = blk[0].start, chi = blk[0].end; for (int i = 1; i < nb; i++) { if (blk[i].start < clo) clo = blk[i].start; if (blk[i].end > chi) chi = blk[i].end; } B->clo = clo; B->cspan = chi - clo; }
   /* layout:  block $exit  block $fault  loop $dispatch  block $b(nb-1) … block $b0  br_table pc  end $b0 CODE0 end $b1 CODE1 … end $b(nb-1) CODE(nb-1)  end $dispatch  end $fault  <fault exit>  end $exit  <spill, return L_RET> */
   e_fill(B);
@@ -807,7 +854,7 @@ static int jit_translate(Cpu *c, Jb *b0) {
     for (u64 off = blk[i].start; off < blk[i].end; off += 8) {
       u32 nbyt = blk[i].end - off < 8 ? (u32)(blk[i].end - off) : 8; u64 w = 0; __builtin_memcpy(&w, rbase + (off - lo), nbyt); u64 msk = nbyt == 8 ? ~0ull : (1ull << (nbyt * 8)) - 1;
       e_lget(B, L_CODE); e_ld(B, 0x29, 0, off - lo); if (nbyt < 8) { e_i64c(B, msk); OP(I64_AND); } e_i64c(B, w); OP(I64_NE);
-      e_if(B, 0); e_lget(B, L_C); e_i64c(B, blk[i].start); e_st(B, 0x37, 3, CO_RIP); e_i64c(B, 1); e_lset(B, L_RET); e_exit(B); e_end(B);   /* stale: c->rip = this block (earlier blocks of this run already executed) */
+      e_if(B, 0); e_xk(B, XK_STALE); e_lget(B, L_C); e_i64c(B, blk[i].start); e_st(B, 0x37, 3, CO_RIP); e_i64c(B, 1); e_lset(B, L_RET); e_exit(B); e_end(B);   /* stale: c->rip = this block (earlier blocks of this run already executed) */
     }
     e_lget(B, L_V(i)); e_i64c(B, 1ull << (i & 63)); OP(I64_OR); e_lset(B, L_V(i)); e_end(B);
     for (int q = blk[i].first; q < blk[i].first + blk[i].n; q++) {
@@ -817,7 +864,7 @@ static int jit_translate(Cpu *c, Jb *b0) {
       if (done) k++;
       else { e_step(B, it[q].rip, next, k); steps++; if (it[q].kind == K_TERM) e_goto(B, next, k); }
     }
-    if (!blk[i].term) { if (i + 1 < nb && blk[i + 1].start == blk[i].end) e_icount(B, k); else e_exit_const(B, blk[i].end, k); }
+    if (!blk[i].term) { if (i + 1 < nb && blk[i + 1].start == blk[i].end) e_icount(B, k); else { e_xk(B, XK_FALL); e_exit_const(B, blk[i].end, k); } }
   }
   OP(0x0B);   /* end $dispatch (unreachable) */
   OP(0x0B);   /* end $fault */
@@ -826,6 +873,7 @@ static int jit_translate(Cpu *c, Jb *b0) {
   e_spill(B); e_lget(B, L_RET); OP(RETURN);
   OP(0x0B);   /* end of function */
   if (B->n > B->cap || B->depth != 0) return 0;
+  jit_fix_regsites(B);
   Buf tlb = { g_jit_tlb, 0, sizeof g_jit_tlb, 0, 0, 0, 0, 0 }; e_tlb_func(&tlb);
   /* module: types, imports (memory + helpers), functions, export, code */
   Buf mod = { g_jit_mod, 0, sizeof g_jit_mod, 0, 0, 0, 0, 0 }; B = &mod;
@@ -891,9 +939,10 @@ static void jit_session_reset(void) {
   g_jit_nfree = 0; for (u32 fn = g_jit_fn_hi; fn >= 1 && g_jit_nfree < JIT_MAX_FN; fn--) if (g_jit_owned[fn >> 3] & (1 << (fn & 7))) { g_fnref[fn] = 0; g_jit_free[g_jit_nfree++] = fn; }
 }
 static inline int jit_enter(Cpu *c, u64 budget) {
-  int ran = 0; u64 ic0 = c->icount;
+  int ran = 0, ind = 0; u64 ic0 = c->icount;
   for (;;) {
     Jb *b = jb_lookup(c->rip, c->mem, c->mode32);
+    if (ran && !ind) { if (b->rip == c->rip && b->fn) g_jit_st.x_jit++; else g_jit_st.x_cold++; } ind = 0;
     if (!b->rip) { b->rip = c->rip; b->mem = c->mem; b->m32 = c->mode32; b->count = 1; b->fn = 0; b->gen = mem_gen(c->mem); return ran; }
     if (!b->fn) {
       if (b->gen != mem_gen(c->mem)) { b->gen = mem_gen(c->mem); b->count = 1; return ran; }   /* a new mapping generation (another process in this slot, a remapped image): the old "not translatable" verdict (count = -2M) no longer applies */
@@ -909,9 +958,8 @@ static inline int jit_enter(Cpu *c, u64 budget) {
       g_jit_st.stale++; jit_drop(b);
       if (c->rip != entry) { Jb *sb = jb_find(c->rip, c->mem, c->mode32); if (sb) jit_drop(sb); c->hist[c->hist_i++ & 4095] = c->rip | (1ull << 63); return 1; }
       return ran; }
-    g_jit_st.exec++; ran = 1;
-    if (c->jit_site) { u64 site = c->jit_site; c->jit_site = 0; ibt_record(site, c->mem, nx); g_jit_st.x_ind++; }   /* an indirect jump/call left the region: profile the target (the next translation lays it out inside) */
-    else { Jb *tb = jb_find(nx, c->mem, c->mode32); if (tb && tb->fn) g_jit_st.x_jit++; else g_jit_st.x_cold++; }
+    g_jit_st.exec++; ran = 1; g_jit_xk[c->jit_xk < XK_N ? c->jit_xk : 0]++;
+    if (c->jit_site) { u64 site = c->jit_site; c->jit_site = 0; ibt_record(site, c->mem, nx); g_jit_st.x_ind++; ind = 1; }   /* an indirect jump/call left the region: profile the target (the next translation lays it out inside) */
     if (++g_fnexit[b->fn] >= (u32)(JIT_RETRANS_EXITS << b->rt) && c->status == RUN_OK) {   /* leaves the region a lot: translate it again, now with every target that has run since (bounded, with a doubling threshold) */
       if (b->rt < JIT_MAX_RETRANS) { g_jit_st.retrans++; jit_drop_fn(b->fn, 1); } else g_fnexit[b->fn] = 0; b = 0; }
     c->rip = nx; c->hist[c->hist_i++ & 4095] = nx | (1ull << 63);   /* region exit target (bit 63 marks it in the history dump) */
@@ -919,9 +967,10 @@ static inline int jit_enter(Cpu *c, u64 budget) {
   }
 }
 const char *jit_stats_text(void) {
-  static char s[800];
+  static char s[1100];
   e_snprintf(s, sizeof s, "blocks=%llu exec=%llu insns=%llu steps=%llu bytes=%llu stale=%llu nodc=%llu fails=%llu retrans=%llu full=%llu x_ind=%llu x_jit=%llu x_cold=%llu dsteps=%llu dinterp=%llu", (unsigned long long)g_jit_st.blocks, (unsigned long long)g_jit_st.exec, (unsigned long long)g_jit_st.insns,
              (unsigned long long)g_jit_st.steps, (unsigned long long)g_jit_st.bytes, (unsigned long long)g_jit_st.stale, (unsigned long long)g_jit_st.nodc, (unsigned long long)g_jit_st.fails, (unsigned long long)g_jit_st.retrans, (unsigned long long)g_jit_st.full, (unsigned long long)g_jit_st.x_ind, (unsigned long long)g_jit_st.x_jit, (unsigned long long)g_jit_st.x_cold, (unsigned long long)g_jit_st.dsteps, (unsigned long long)g_jit_st.dinterp);
+  { int L = 0; while (s[L]) L++; L += e_snprintf(s + L, sizeof s - L, " xk: direct=%llu fall=%llu ret=%llu ind=%llu slice=%llu step=%llu xstale=%llu", (unsigned long long)g_jit_xk[XK_DIRECT], (unsigned long long)g_jit_xk[XK_FALL], (unsigned long long)g_jit_xk[XK_RET], (unsigned long long)g_jit_xk[XK_IND], (unsigned long long)g_jit_xk[XK_SLICE], (unsigned long long)g_jit_xk[XK_STEP], (unsigned long long)g_jit_xk[XK_STALE]); }
   /* top step opcodes */
   { int L = 0; while (s[L]) L++; for (int pass = 0; pass < 12 && L < (int)sizeof s - 40; pass++) { int best = -1; u32 bv = 0; for (int k = 0; k < 1024; k++) if (g_step_hist[k] > bv) { bv = g_step_hist[k]; best = k; } if (best < 0 || !bv) break;
       L += e_snprintf(s + L, sizeof s - L, " %s%s%02x:%u", best >= 512 ? "p" : "", (best & 511) >= 256 ? "0f" : "", best & 255, bv); g_step_hist[best] = 0; } }

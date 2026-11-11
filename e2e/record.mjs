@@ -154,7 +154,8 @@ while (Date.now() - tStart < seconds * 1000) {
 const acT1 = await page.evaluate(() => (window.__acs[0] ? window.__acs[0].currentTime : 0));
 const wallSec = (Date.now() - tStart) / 1000;
 { const js1 = await jsAt(); const d = Object.fromEntries(Object.keys(js1).map(k => [k, js1[k] - (js0[k] || 0)])); const ins = (await icAt()) - ic0;
-  console.log(`jit over the recording: exits=${d.exec} (${(ins / Math.max(1, d.exec)).toFixed(1)} insns per region entry) x_jit=${d.x_jit} x_ind=${d.x_ind} x_cold=${d.x_cold} dsteps=${d.dsteps} dinterp=${d.dinterp} (${(100 * (d.dinterp || 0) / Math.max(1, ins)).toFixed(1)}% interpreted) retrans=${d.retrans} blocks=${d.blocks} bytes=${d.bytes} stale=${d.stale}`); }
+  console.log(`jit over the recording: exits=${d.exec} (${(ins / Math.max(1, d.exec)).toFixed(1)} insns per region entry) x_jit=${d.x_jit} x_ind=${d.x_ind} x_cold=${d.x_cold} dsteps=${d.dsteps} dinterp=${d.dinterp} (${(100 * (d.dinterp || 0) / Math.max(1, ins)).toFixed(1)}% interpreted) retrans=${d.retrans} blocks=${d.blocks} bytes=${d.bytes} stale=${d.stale}`);
+  console.log(`exit kinds over the recording: direct=${d.direct} fall=${d.fall} ret=${d.ret} ind=${d.ind} slice=${d.slice} step=${d.step} xstale=${d.xstale}`); }
 { const ic1 = await icAt(), fr1 = await framesNow(); console.log(`steady state over the recording: ${((ic1 - ic0) / 1e6 / wallSec).toFixed(1)} MIPS, ${((fr1 - fr0) / wallSec).toFixed(1)} FPS presented (${fr1 - fr0} frames, ${((ic1 - ic0) / 1e6).toFixed(0)} M insns, ${fr1 > fr0 ? ((ic1 - ic0) / (fr1 - fr0) / 1e6).toFixed(2) : '?'} M insns/frame)`); }
 if (cdp) { try { const { profile } = await cdp.send('Profiler.stop'); writeFileSync(resolve(OUT, 'browser.cpuprofile'), JSON.stringify(profile)); console.log(`browser.cpuprofile: ${profile.samples.length} samples`); } catch (e) { console.log('profiler stop failed: ' + e); } }
 if (recOk) {

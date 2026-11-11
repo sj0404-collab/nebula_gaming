@@ -389,8 +389,8 @@ static inline void fast_xmm_store(Cpu *c, const Dc *e, u64 start, const Xmm *v, 
 }
 /* ---- indirect branch target profile: per (site, process) the targets seen so far; the JIT lays the recorded targets of jmp/call r/m out
    inside the region and dispatches to them without leaving it (switch interpreters, vtables, threaded code) ---- */
-#define IBT_BITS 12
-#define IBT_MAX 12
+#define IBT_BITS 14
+#define IBT_MAX 24
 typedef struct { u64 site; Mem *mem; u64 t[IBT_MAX]; u8 n; } Ibt;
 static Ibt g_ibt[1 << IBT_BITS];
 static inline Ibt *ibt_slot(u64 site, Mem *mem) { u64 h = (site ^ ((u64)(size_t)mem >> 4)) * 0x9E3779B97F4A7C15ull; return &g_ibt[h >> (64 - IBT_BITS)]; }

@@ -162,6 +162,7 @@ struct Cpu {
   u64  hist[4096]; u32 hist_i;             /* ring of the last executed instruction addresses (fault diagnostics) */
   u32  exc_code; u64 exc_addr; u64 exc_info;   /* hardware exception behind the last fault (0 = not dispatchable) */
   u64  jit_site;                      /* set by translated code when an indirect jump/call left its region: the branch site (jit_enter records the target) */
+  u32  jit_xk;                        /* kind of the last region exit (diagnostics: XK_* in jit.inc) */
   int  jit_fault;                     /* a memory fault inside translated code (jit_enter dispatches the exception) */
   Mem *mem;
   Win32 *w;
