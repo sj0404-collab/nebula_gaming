@@ -387,6 +387,21 @@ static inline void fast_xmm_store(Cpu *c, const Dc *e, u64 start, const Xmm *v, 
   u64 a = fast_ea(c, e, start);
   if (bytes == 4) wr32(c, a, v->d[0]); else if (bytes == 8) wr64(c, a, v->q[0]); else { wr64(c, a, v->q[0]); wr64(c, a + 8, v->q[1]); }
 }
+/* ---- indirect branch target profile: per (site, process) the targets seen so far; the JIT lays the recorded targets of jmp/call r/m out
+   inside the region and dispatches to them without leaving it (switch interpreters, vtables, threaded code) ---- */
+#define IBT_BITS 12
+#define IBT_MAX 12
+typedef struct { u64 site; Mem *mem; u64 t[IBT_MAX]; u8 n; } Ibt;
+static Ibt g_ibt[1 << IBT_BITS];
+static inline Ibt *ibt_slot(u64 site, Mem *mem) { u64 h = (site ^ ((u64)(size_t)mem >> 4)) * 0x9E3779B97F4A7C15ull; return &g_ibt[h >> (64 - IBT_BITS)]; }
+static inline Ibt *ibt_find(u64 site, Mem *mem) { Ibt *s = ibt_slot(site, mem); return (s->site == site && s->mem == mem) ? s : 0; }
+static inline int ibt_record(u64 site, Mem *mem, u64 t) {   /* 1 = a target this site had not shown before */
+  Ibt *s = ibt_slot(site, mem);
+  if (s->site != site || s->mem != mem) { s->site = site; s->mem = mem; s->n = 0; }
+  for (int i = 0; i < s->n; i++) if (s->t[i] == t) return 0;
+  if (s->n < IBT_MAX) { s->t[s->n++] = t; return 1; }
+  return 0;
+}
 /* returns the next rip */
 static inline u64 fast_exec(Cpu *c, const Dc *e, const u8 *code, u64 start) {
   u64 next = start + e->len; int sz = e->rexw ? 8 : 4;
@@ -416,8 +431,8 @@ static inline u64 fast_exec(Cpu *c, const Dc *e, const u8 *code, u64 start) {
       switch (sub) {
         case 0: { u64 v = fast_rm_get(c, e, start, sz); if (c->status != RUN_OK) return next; u64 r = (v + 1) & mask(sz); u64 cf = c->rflags & F_CF; flags_add(c, v, 1, r, sz); c->rflags = (c->rflags & ~(u64)F_CF) | cf; fast_rm_set(c, e, start, sz, r); return next; }
         case 1: { u64 v = fast_rm_get(c, e, start, sz); if (c->status != RUN_OK) return next; u64 r = (v - 1) & mask(sz); u64 cf = c->rflags & F_CF; flags_sub(c, v, 1, r, sz); c->rflags = (c->rflags & ~(u64)F_CF) | cf; fast_rm_set(c, e, start, sz, r); return next; }
-        case 2: { u64 t = fast_rm_get(c, e, start, 8); if (c->status != RUN_OK) return next; cpu_push(c, next); return t; }
-        case 4: { u64 t = fast_rm_get(c, e, start, 8); return c->status == RUN_OK ? t : next; }
+        case 2: { u64 t = fast_rm_get(c, e, start, 8); if (c->status != RUN_OK) return next; cpu_push(c, next); ibt_record(start, c->mem, t); return t; }
+        case 4: { u64 t = fast_rm_get(c, e, start, 8); if (c->status != RUN_OK) return next; ibt_record(start, c->mem, t); return t; }
         case 6: { u64 v = fast_rm_get(c, e, start, 8); if (c->status == RUN_OK) cpu_push(c, v); return next; }
         default: return 0;   /* 0 = not handled → generic path */
       } }
@@ -596,8 +611,8 @@ static void exec_body(Ins *i, u8 op) {
       switch (sub) {
         case 0: { u64 v = rm_get(i, sz), r = (v + 1) & mask(sz); u64 cf = c->rflags & F_CF; flags_add(c, v, 1, r, sz); c->rflags = (c->rflags & ~(u64)F_CF) | cf; rm_set(i, sz, r); return; }
         case 1: { u64 v = rm_get(i, sz), r = (v - 1) & mask(sz); u64 cf = c->rflags & F_CF; flags_sub(c, v, 1, r, sz); c->rflags = (c->rflags & ~(u64)F_CF) | cf; rm_set(i, sz, r); return; }
-        case 2: { u64 t = rm_get(i, c->mode32 ? 4 : 8); cpu_push(c, i->ip); i->ip = t; return; }
-        case 4: { i->ip = rm_get(i, c->mode32 ? 4 : 8); return; }
+        case 2: { u64 t = rm_get(i, c->mode32 ? 4 : 8); cpu_push(c, i->ip); i->ip = t; if (c->status == RUN_OK) ibt_record(i->start, c->mem, t); return; }
+        case 4: { i->ip = rm_get(i, c->mode32 ? 4 : 8); if (c->status == RUN_OK) ibt_record(i->start, c->mem, i->ip); return; }
         case 6: { u64 v = rm_get(i, c->mode32 ? 4 : 8); cpu_push(c, v); return; }
         default: UNSUP("FF /%d unsupported", sub);
       }

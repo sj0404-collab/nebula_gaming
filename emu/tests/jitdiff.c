@@ -195,6 +195,34 @@ static uint32_t t_misc(void) {
   for (int i = 0; i < 64; i++) h = h32(h, bitstr[i]);
   return h;
 }
+/* lock-prefixed forms (HotSpot: `lock addl [rsp],0` fences, lock cmpxchg CAS, lock xadd counters, lock or/and bit flags):
+   values, the CAS success/failure paths and the flags (ZF of cmpxchg, CF/OF/SF of xadd/add) all go into the checksum */
+static volatile int32_t at32[4]; static volatile int64_t at64[4]; static volatile uint8_t at8[4]; static volatile uint16_t at16[4];
+static uint32_t t_atomic(void) {
+  uint32_t h = 2166136261u; rng = 0x1234567u;
+  for (int i = 0; i < 4000; i++) {
+    int32_t k = (int32_t)rnd(); int64_t k64 = (int64_t)rnd() * 0x9E3779B97F4A7C15ll;
+    int32_t a = __atomic_fetch_add(&at32[i & 3], k, __ATOMIC_SEQ_CST);                 /* lock xadd */
+    int64_t b = __atomic_fetch_add(&at64[i & 3], k64, __ATOMIC_SEQ_CST);
+    int32_t exp = at32[(i + 1) & 3]; int32_t ok = __atomic_compare_exchange_n(&at32[i & 3], &exp, k ^ 0x5a5a, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);   /* lock cmpxchg */
+    int64_t exp64 = (i & 1) ? at64[i & 3] : k64; int32_t ok64 = __atomic_compare_exchange_n(&at64[i & 3], &exp64, k64 + 1, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    __atomic_fetch_or(&at32[(i + 2) & 3], 1 << (i & 31), __ATOMIC_SEQ_CST);          /* lock or [m], r */
+    __atomic_fetch_and(&at32[(i + 3) & 3], ~(1 << ((i >> 1) & 31)), __ATOMIC_SEQ_CST);/* lock and [m], r */
+    __atomic_fetch_add(&at32[(i + 1) & 3], 1, __ATOMIC_SEQ_CST);                      /* lock add/inc [m], 1 */
+    __atomic_fetch_sub(&at64[(i + 2) & 3], 7, __ATOMIC_SEQ_CST);                      /* lock sub [m], 7 */
+    __atomic_fetch_xor(&at8[i & 3], (uint8_t)k, __ATOMIC_SEQ_CST);                    /* lock xor byte */
+    __atomic_fetch_add(&at16[i & 3], (uint16_t)k, __ATOMIC_SEQ_CST);                  /* 66 lock add word */
+    uint32_t cf = 0, zf = 0;
+#if defined(__x86_64__)
+    __asm__ volatile("lock addl $0, (%%rsp)\n\tlock xaddl %2, %3\n\tsetc %b0\n\tsetz %b1" : "=&r"(cf), "=&r"(zf), "+r"(k), "+m"(at32[(i + 2) & 3]) : : "memory", "cc");
+#else
+    __asm__ volatile("lock addl $0, (%%esp)\n\tlock xaddl %2, %3\n\tsetc %b0\n\tsetz %b1" : "=&q"(cf), "=&q"(zf), "+q"(k), "+m"(at32[(i + 2) & 3]) : : "memory", "cc");
+#endif
+    h = h32(h, (uint32_t)a); h = h32(h, (uint32_t)b); h = h32(h, (uint32_t)(b >> 32)); h = h32(h, (uint32_t)ok | ((uint32_t)ok64 << 1) | (cf & 1) << 2 | (zf & 1) << 3); h = h32(h, (uint32_t)exp); h = h32(h, (uint32_t)exp64); h = h32(h, (uint32_t)k);
+  }
+  for (int i = 0; i < 4; i++) { h = h32(h, (uint32_t)at32[i]); h = h32(h, (uint32_t)at64[i]); h = h32(h, (uint32_t)(at64[i] >> 32)); h = h32(h, at8[i] | (uint32_t)at16[i] << 8); }
+  return h;
+}
 int main(void) {
   printf("camera   %08x\n", t_camera());
   printf("scalar   %08x\n", t_scalar());
@@ -202,6 +230,7 @@ int main(void) {
   printf("packed   %08x\n", t_packed());
   printf("asm      %08x\n", t_asm());
   printf("misc     %08x\n", t_misc());
+  printf("atomic   %08x\n", t_atomic());
   printf("jitdiff done\n");
   return 0;
 }

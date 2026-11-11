@@ -131,8 +131,8 @@ static uint32_t bits_bench(void) {
 /* ---- jorbis-like: what Ogg Vorbis decoding looks like in a C1-compiled JVM (Shattered Pixel Dungeon spends ~60 % of its
  * instructions here): scalar float butterflies over float[] with Java bounds checks (cmp [len]; jae cold) on every access,
  * plus a byte-at-a-time stream read (DirectByteBuffer.get) ---- */
-typedef struct { int len; float *d; } FArr;
-typedef struct { int len; int pos; unsigned char *d; } BBuf;
+typedef struct { volatile int len; float *volatile d; } FArr;                 /* volatile: the length and data pointer are re-read on every access, as C1 code does (no hoisting, no vectorisation) */
+typedef struct { volatile int len; volatile int pos; unsigned char *volatile d; } BBuf;
 static float jx_d[1024], jy_d[1024], jw_d[1024]; static unsigned char jb_d[65536];
 static void __attribute__((noinline, cold)) oob(void) { fputs("bounds\n", stderr); exit(9); }
 static inline float fld(const FArr *a, int i) { if (__builtin_expect((unsigned)i >= (unsigned)a->len, 0)) oob(); return a->d[i]; }

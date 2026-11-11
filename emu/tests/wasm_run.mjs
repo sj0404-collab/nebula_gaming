@@ -8,13 +8,14 @@ import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 
 const argv = process.argv.slice(2);
-let jitskip = null; let inltlb = -1; let rerun = 0; let maxMs = 60000, jit = 1, wasmPath = new URL('../../public/x64/nebula_x64.wasm', import.meta.url).pathname, exe = '', verbose = 0;
+let jitskip = null; let inltlb = -1, xlive = -1; let rerun = 0; let maxMs = 60000, jit = 1, wasmPath = new URL('../../public/x64/nebula_x64.wasm', import.meta.url).pathname, exe = '', verbose = 0;
 const mounts = [];
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === '--max-ms') maxMs = +argv[++i];
   else if (a === '--jit') jit = +argv[++i];
   else if (a === '--jitskip') jitskip = argv[++i].split(':').map(Number);
+  else if (a === '--xlive') xlive = +argv[++i];   // 0: flags liveness stops at block ends; 1 (default): crosses blocks inside a region
   else if (a === '--inltlb') inltlb = +argv[++i];   // 0: memory operands call the module-local TLB probe; 1 (default): the probe is inlined
   else if (a === '--wasm') wasmPath = argv[++i];
   else if (a === '--mount') mounts.push(argv[++i]);
@@ -52,6 +53,7 @@ const imports = {
     host_jit_compile: (p, n, reuse) => {
       const t = performance.now();
       try {
+        if (process.env.JIT_DUMP_DIR) fs.writeFileSync(`${process.env.JIT_DUMP_DIR}/r${String(jitModules).padStart(5, '0')}.wasm`, bytesAt(p, Number(n)));   // every region module (wasm2wat for codegen work)
         const mod = new WebAssembly.Module(bytesAt(p, Number(n)).slice());
         const inst = new WebAssembly.Instance(mod, { env: { memory: ex.memory, ...jitImports } });
         const idx = reuse ? BigInt(reuse) : table.grow(1n);
@@ -76,7 +78,7 @@ if (needsJit) {
   for (const [k, v] of Object.entries(ex)) if (k.startsWith('jit_') && typeof v === 'function') jitImports[k] = v;
   if (ex.x64_set_jit) ex.x64_set_jit(jit && table ? jit : 0);   // --jit N>1: hot threshold
   if (jitskip && ex.x64_jit_skip) ex.x64_jit_skip(jitskip[0], jitskip[1]);
-  if (inltlb >= 0 && ex.x64_jit_opt) ex.x64_jit_opt(inltlb);
+  if ((inltlb >= 0 || xlive >= 0) && ex.x64_jit_opt) ex.x64_jit_opt(inltlb, xlive);
 }
 for (const m of mounts) {
   const [host, guest] = m.split('=');

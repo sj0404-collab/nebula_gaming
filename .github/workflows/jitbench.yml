@@ -39,9 +39,10 @@ jobs:
             # checksums must match the native interpreter
             if ! diff <(grep -a ' ms  ' "/tmp/$(basename $exe .exe).native.txt" | awk '{print $1, $4}') <(grep -a ' ms  ' "/tmp/$(basename $exe .exe).jit.txt" | awk '{print $1, $4}'); then echo "::error::$exe: JIT checksums differ from the interpreter"; exit 1; fi
           done
-      - name: variants (x64) — TLB probe as a call, TurboFan only (--no-liftoff), no wasm inlining
+      - name: variants (x64) — TLB probe as a call, per-block flags liveness, TurboFan only (--no-liftoff), no wasm inlining
         run: |
           echo "== JIT, TLB probe as a module-local call (--inltlb 0)"; node emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 --inltlb 0 /tmp/bench64.exe 2>&1 | tail -12
+          echo "== JIT, flags liveness per block only (--xlive 0)"; node emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 --xlive 0 /tmp/bench64.exe 2>&1 | tail -12
           echo "== JIT, --no-liftoff (every region compiled by TurboFan at once)"; node --no-liftoff emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 /tmp/bench64.exe 2>&1 | tail -12
           echo "== JIT, --no-wasm-inlining"; node --no-wasm-inlining emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 /tmp/bench64.exe 2>&1 | tail -12 || true
       - name: bench on the wasm interpreter (--jit 0)
@@ -50,8 +51,8 @@ jobs:
       - name: jitdiff (JIT vs interpreter, bit-exact results)
         run: |
           for exe in /tmp/jitdiff.exe /tmp/jitdiff32.exe; do
-            node emu/tests/wasm_run.mjs --max-ms 600000 --jit 0 "$exe" 2>/dev/null | grep -a 'camera\|scalar\|cmp\|packed\|asm\|done' > /tmp/jd_interp.txt || true
-            node emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 "$exe" 2>/dev/null | grep -a 'camera\|scalar\|cmp\|packed\|asm\|done' > /tmp/jd_jit.txt || true
+            node emu/tests/wasm_run.mjs --max-ms 600000 --jit 0 "$exe" 2>/dev/null | grep -a 'camera\|scalar\|cmp\|packed\|asm\|misc\|atomic\|done' > /tmp/jd_interp.txt || true
+            node emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 "$exe" 2>/dev/null | grep -a 'camera\|scalar\|cmp\|packed\|asm\|misc\|atomic\|done' > /tmp/jd_jit.txt || true
             if cmp -s /tmp/jd_interp.txt /tmp/jd_jit.txt; then echo "$exe: JIT == interpreter ($(wc -l < /tmp/jd_jit.txt) lines)"; else echo "::error::$exe: JIT differs from the interpreter"; diff /tmp/jd_interp.txt /tmp/jd_jit.txt | head -40; exit 1; fi
           done
       - name: summary
