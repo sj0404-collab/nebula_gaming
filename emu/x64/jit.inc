@@ -75,7 +75,7 @@ static void bu(Buf *B, u64 v) { do { u8 x = v & 0x7f; v >>= 7; if (v) x |= 0x80;
 static void bs(Buf *B, s64 v) { for (;;) { u8 x = v & 0x7f; v >>= 7; if ((v == 0 && !(x & 0x40)) || (v == -1 && (x & 0x40))) { b8(B, x); return; } b8(B, x | 0x80); } }
 static void bbytes(Buf *B, const void *p, u32 n) { for (u32 i = 0; i < n; i++) b8(B, ((const u8 *)p)[i]); }
 #define OP(x) b8(B, x)
-enum { L_C = 0, L_CODE = 1, L_PC = 2, L_LIMIT = 3, L_EA = 4, L_HOST = 5, L_T0 = 6, L_T1 = 7, L_T2 = 8, L_RET = 9, L_T3 = 10, L_F0 = 11, L_F1 = 12, L_V0 = 13 };   /* L_V0..L_V0+2: bit set of the blocks whose code bytes were verified during this call of the region */
+enum { L_C = 0, L_CODE = 1, L_PC = 2, L_LIMIT = 3, L_EA = 4, L_HOST = 5, L_T0 = 6, L_T1 = 7, L_T2 = 8, L_RET = 9, L_T3 = 10, L_F0 = 11, L_F1 = 12, L_V0 = 13, L_TE = 16 };   /* L_V0..L_V0+2: bit set of the blocks whose code bytes were verified during this call of the region */
 #define L_V(j) (L_V0 + ((j) >> 6))
 #define CO_X(ri)  ((u64)__builtin_offsetof(Cpu, x) + (u64)(ri) * 16)
 #define CO_FS     ((u64)__builtin_offsetof(Cpu, fs_base))
@@ -159,8 +159,20 @@ static void e_ea(Buf *B, const JItem *it) {
 /* EA on the stack → host pointer in L_HOST through the module-local TLB function; 0 = fault → leave the block (c->rip set) */
 static void e_vreset(Buf *B) { for (int j = 0; j < 3; j++) { e_i64c(B, 0); e_lset(B, L_V0 + j); } }
 static void e_vreset_if_code(Buf *B) { e_lget(B, L_EA); e_i64c(B, B->clo - 16); OP(I64_SUB); e_i64c(B, B->cspan + 16); OP(I64_LT_U); e_if(B, 0); e_vreset(B); e_end(B); }   /* a store (up to 16 bytes) at clo-16 .. clo+cspan may touch the region's code */
+int g_jit_inline_tlb = 1;   /* 1: the TLB probe is emitted inline at every memory operand (no call; Liftoff code never inlines FN_TLB); 0: call the module-local probe */
 static void e_host(Buf *B, int size, int write, u64 rip) {
-  e_lset(B, L_EA); e_lget(B, L_C); e_lget(B, L_EA); e_i64c(B, size); e_i32c(B, write); e_i64c(B, rip); OP(CALL); bu(B, FN_TLB);
+  e_lset(B, L_EA);
+  if (g_jit_inline_tlb) {
+    /* entry = &c->mem->tlb[(ea >> 12) & (TLB_N - 1)];  hit = entry->tag == (ea >> 12) + 1 && (ea & 4095) + size <= 4096 */
+    e_lget(B, L_C); e_ld(B, 0x29, 3, CO_MEM); e_lget(B, L_EA); e_i64c(B, 12); OP(I64_SHR_U); e_i64c(B, TLB_N - 1); OP(I64_AND); e_i64c(B, 4); OP(I64_SHL); OP(I64_ADD); e_ltee(B, L_TE);
+    e_ld(B, 0x29, 3, MO_TLB); e_lget(B, L_EA); e_i64c(B, 12); OP(I64_SHR_U); e_i64c(B, 1); OP(I64_ADD); OP(I64_EQ);
+    e_lget(B, L_EA); e_i64c(B, 4095); OP(I64_AND); e_i64c(B, size); OP(I64_ADD); e_i64c(B, 4096); OP(I64_LE_U); OP(I32_AND);
+    e_if(B, 0x7E);
+      e_lget(B, L_TE); e_ld(B, 0x29, 3, MO_TLB + 8); e_lget(B, L_EA); e_i64c(B, 4095); OP(I64_AND); OP(I64_ADD);
+    e_else(B);
+      e_lget(B, L_C); e_lget(B, L_EA); e_i64c(B, size); e_i32c(B, write); e_i64c(B, rip); OP(CALL); bu(B, FN_MEM);
+    e_end(B);
+  } else { e_lget(B, L_C); e_lget(B, L_EA); e_i64c(B, size); e_i32c(B, write); e_i64c(B, rip); OP(CALL); bu(B, FN_TLB); }
   e_ltee(B, L_HOST); OP(I64_EQZ); OP(BR_IF); bu(B, lbl_fault(B));
   if (write && B->cspan) e_vreset_if_code(B);
 }
@@ -679,7 +691,7 @@ static int jit_translate(Cpu *c, Jb *b0) {
   /* flags liveness per block (backwards; everything live at a block end) */
   for (int i = 0; i < nb; i++) { int live = FL_ALL; for (int q = blk[i].first + blk[i].n - 1; q >= blk[i].first; q--) { it[q].need = (u8)(it[q].fdef & live); live = (live & ~it[q].fdef) | it[q].fuse; } }
   Buf body = { g_jit_body, 0, sizeof g_jit_body, 0, bstarts, nb, 0, m32, retblk }; Buf *B = &body;
-  bu(B, 3); bu(B, 7); OP(0x7E); bu(B, 2); OP(0x7C); bu(B, 3); OP(0x7E);   /* locals 4..10: i64, 11..12: f64, 13..15: i64 verified-block bits (zero at entry) */
+  bu(B, 3); bu(B, 7); OP(0x7E); bu(B, 2); OP(0x7C); bu(B, 4); OP(0x7E);   /* locals 4..10: i64, 11..12: f64, 13..15 (+16 = TLB entry scratch): i64 verified-block bits (zero at entry) */
   { u64 clo = blk[0].start, chi = blk[0].end; for (int i = 1; i < nb; i++) { if (blk[i].start < clo) clo = blk[i].start; if (blk[i].end > chi) chi = blk[i].end; } B->clo = clo; B->cspan = chi - clo; }
   /* layout:  block $fault  loop $dispatch  block $b(nb-1) … block $b0  br_table pc  end $b0 CODE0 end $b1 CODE1 … end $b(nb-1) CODE(nb-1)  end $dispatch  end $fault  <fault exit> */
   OP(0x02); OP(0x40); OP(0x03); OP(0x40); for (int i = 0; i < nb; i++) { OP(0x02); OP(0x40); }

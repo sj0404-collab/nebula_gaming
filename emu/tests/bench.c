@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdlib.h>
 
 static double now_ms(void) { static LARGE_INTEGER f; LARGE_INTEGER c; if (!f.QuadPart) QueryPerformanceFrequency(&f); QueryPerformanceCounter(&c); return c.QuadPart * 1000.0 / f.QuadPart; }
 static uint32_t rng = 0x12345678u;
@@ -127,8 +128,36 @@ static uint32_t bits_bench(void) {
   return h;
 }
 
+/* ---- jorbis-like: what Ogg Vorbis decoding looks like in a C1-compiled JVM (Shattered Pixel Dungeon spends ~60 % of its
+ * instructions here): scalar float butterflies over float[] with Java bounds checks (cmp [len]; jae cold) on every access,
+ * plus a byte-at-a-time stream read (DirectByteBuffer.get) ---- */
+typedef struct { int len; float *d; } FArr;
+typedef struct { int len; int pos; unsigned char *d; } BBuf;
+static float jx_d[1024], jy_d[1024], jw_d[1024]; static unsigned char jb_d[65536];
+static void __attribute__((noinline, cold)) oob(void) { fputs("bounds\n", stderr); exit(9); }
+static inline float fld(const FArr *a, int i) { if (__builtin_expect((unsigned)i >= (unsigned)a->len, 0)) oob(); return a->d[i]; }
+static inline void fst(FArr *a, int i, float v) { if (__builtin_expect((unsigned)i >= (unsigned)a->len, 0)) oob(); a->d[i] = v; }
+static inline int bget(BBuf *b) { int p = b->pos; if (__builtin_expect((unsigned)p >= (unsigned)b->len, 0)) oob(); b->pos = p + 1; return b->d[p]; }
+static uint32_t jorbis_bench(void) {
+  FArr x = { 1024, jx_d }, y = { 1024, jy_d }, w = { 1024, jw_d }; BBuf bb = { 65536, 0, jb_d };
+  for (int i = 0; i < 1024; i++) { jx_d[i] = (float)((i * 37) % 101) * 0.01f - 0.5f; jw_d[i] = (float)((i * 11) % 61) * 0.015f - 0.4f; }
+  for (int i = 0; i < 65536; i++) jb_d[i] = (unsigned char)(i * 13 + 7);
+  int acc = 0;
+  for (int r = 0; r < 3000; r++) {
+    int n = x.len;
+    for (int i = 0; i < n / 2; i++) {
+      float a = fld(&x, i), b = fld(&x, n - 1 - i), w0 = fld(&w, 2 * i), w1 = fld(&w, 2 * i + 1);
+      fst(&y, i, a * w0 - b * w1); fst(&y, n - 1 - i, a * w1 + b * w0);
+    }
+    for (int i = 0; i < n; i++) fst(&x, i, fld(&y, i) * 0.999f + fld(&w, (i * 7) & 1023) * 0.001f);
+    if (bb.pos + 64 > bb.len) bb.pos = 0;
+    for (int k = 0; k < 64; k++) acc = (acc * 31 + bget(&bb)) & 0xffffff;
+  }
+  uint32_t h = 2166136261u; for (int i = 0; i < 1024; i += 16) { uint32_t u; memcpy(&u, &jx_d[i], 4); h = (h ^ u) * 0x01000193u; } return (h ^ (uint32_t)acc) * 0x01000193u;
+}
+
 int main(void) {
-  struct { const char *name; uint32_t (*fn)(void); } tests[] = { { "calls", calls }, { "memcpy", memcpy_bench }, { "hash", hash_bench }, { "fpu", fpu_bench }, { "bits", bits_bench } };
+  struct { const char *name; uint32_t (*fn)(void); } tests[] = { { "calls", calls }, { "memcpy", memcpy_bench }, { "hash", hash_bench }, { "fpu", fpu_bench }, { "bits", bits_bench }, { "jorbis", jorbis_bench } };
   double t0 = now_ms(); uint32_t h = vm_switch(100); double t1 = now_ms(); printf("vm_switch %8.1f ms  %08x\n", t1 - t0, h); fflush(stdout);
   t0 = now_ms(); h = vm_goto(100); t1 = now_ms(); printf("vm_goto   %8.1f ms  %08x\n", t1 - t0, h); fflush(stdout);
   for (unsigned i = 0; i < sizeof tests / sizeof tests[0]; i++) { t0 = now_ms(); h = tests[i].fn(); t1 = now_ms(); printf("%-9s %8.1f ms  %08x\n", tests[i].name, t1 - t0, h); fflush(stdout); }

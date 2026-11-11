@@ -39,6 +39,11 @@ jobs:
             # checksums must match the native interpreter
             if ! diff <(grep -a ' ms  ' "/tmp/$(basename $exe .exe).native.txt" | awk '{print $1, $4}') <(grep -a ' ms  ' "/tmp/$(basename $exe .exe).jit.txt" | awk '{print $1, $4}'); then echo "::error::$exe: JIT checksums differ from the interpreter"; exit 1; fi
           done
+      - name: variants (x64) — TLB probe as a call, TurboFan only (--no-liftoff), no wasm inlining
+        run: |
+          echo "== JIT, TLB probe as a module-local call (--inltlb 0)"; node emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 --inltlb 0 /tmp/bench64.exe 2>&1 | tail -12
+          echo "== JIT, --no-liftoff (every region compiled by TurboFan at once)"; node --no-liftoff emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 /tmp/bench64.exe 2>&1 | tail -12
+          echo "== JIT, --no-wasm-inlining"; node --no-wasm-inlining emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 /tmp/bench64.exe 2>&1 | tail -12 || true
       - name: bench on the wasm interpreter (--jit 0)
         if: github.event.inputs.interp == '1'
         run: for exe in /tmp/bench64.exe /tmp/bench32.exe; do echo "== interp $exe"; node emu/tests/wasm_run.mjs --max-ms 900000 --jit 0 "$exe" 2>&1 | tail -15 || true; done

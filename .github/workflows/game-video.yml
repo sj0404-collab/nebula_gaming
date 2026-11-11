@@ -30,6 +30,9 @@ on:
       record_clicks:
         description: clicks during the recording, "fx,fy;fx,fy" (one every ~3 s)
         default: ''
+      chrome_args:
+        description: 'extra Chromium flags, e.g. "--js-flags=--no-liftoff" (V8 tiering experiments)'
+        default: ''
 
 run-name: "game video · jit=${{ inputs.jit }} skip=${{ inputs.jitskip }} trace=${{ inputs.gltrace }} ${{ inputs.seconds }}s"
 permissions:
@@ -68,7 +71,7 @@ jobs:
           LP_NUM_THREADS: '4'
         run: |
           RUN="node"; if [ "$GPU" != "swiftshader" ]; then RUN="xvfb-run -a node"; fi
-          $RUN e2e/record.mjs /tmp/ShatteredPD-v4.0.2-Windows.zip --seconds "${{ github.event.inputs.seconds || '15' }}" --settle-frames "${{ github.event.inputs.settle_frames || '400' }}" --jit "${{ github.event.inputs.jit || '1' }}" --gltrace "${{ github.event.inputs.gltrace }}" --jitskip "${{ github.event.inputs.jitskip }}" --actions "${{ github.event.inputs.actions }}" --record-clicks "${{ github.event.inputs.record_clicks }}" --profile --out e2e/video
+          $RUN e2e/record.mjs /tmp/ShatteredPD-v4.0.2-Windows.zip --seconds "${{ github.event.inputs.seconds || '15' }}" --settle-frames "${{ github.event.inputs.settle_frames || '400' }}" --jit "${{ github.event.inputs.jit || '1' }}" --gltrace "${{ github.event.inputs.gltrace }}" --jitskip "${{ github.event.inputs.jitskip }}" --actions "${{ github.event.inputs.actions }}" --record-clicks "${{ github.event.inputs.record_clicks }}" --chrome-args "${{ github.event.inputs.chrome_args }}" --profile --out e2e/video
         timeout-minutes: 60
       - name: Mux with ffmpeg (exact per-frame durations + captured PCM)
         run: |

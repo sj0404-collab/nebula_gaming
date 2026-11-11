@@ -27,7 +27,9 @@ const GPU = process.env.GPU || 'swiftshader';
 const gpuArgs = GPU === 'mesa-vk' ? ['--use-gl=angle', '--use-angle=vulkan', '--use-vulkan=native', '--enable-features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan', '--disable-vulkan-surface', '--ignore-gpu-blocklist', '--enable-gpu-rasterization']
   : GPU === 'mesa-gl' ? ['--use-gl=angle', '--use-angle=gl', '--ignore-gpu-blocklist', '--enable-gpu-rasterization']
   : ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'];
-const browser = await chromium.launch({ headless: GPU === 'swiftshader', args: ['--autoplay-policy=no-user-gesture-required', ...gpuArgs] });
+const extraArgs = (opt('--chrome-args', '') || '').split(/\s+/).filter(Boolean);   // e.g. "--js-flags=--no-liftoff" (V8 experiments)
+const browser = await chromium.launch({ headless: GPU === 'swiftshader', args: ['--autoplay-policy=no-user-gesture-required', ...gpuArgs, ...extraArgs] });
+if (extraArgs.length) console.log(`extra chrome args: ${extraArgs.join(' ')}`);
 console.log(`GPU backend requested: ${GPU}`);
 const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
 { const probe = await ctx.newPage(); const r = await probe.evaluate(() => { const c = document.createElement('canvas'); const gl = c.getContext('webgl2'); if (!gl) return 'no WebGL2'; const d = gl.getExtension('WEBGL_debug_renderer_info'); return d ? String(gl.getParameter(d.UNMASKED_RENDERER_WEBGL)) : String(gl.getParameter(gl.RENDERER)); }); console.log(`WebGL2 renderer: ${r}`); await probe.close(); }
@@ -133,6 +135,8 @@ const recClicks = (opt('--record-clicks', '') || '').split(';').map(a => a.trim(
 // --profile: V8 sampling profile of the page's main thread over the recording (CDP Profiler) → out/browser.cpuprofile (emu/tools/profsum.mjs)
 const wantProfile = process.argv.includes('--profile'); let cdp = null;
 if (wantProfile) { try { cdp = await page.context().newCDPSession(page); await cdp.send('Profiler.enable'); await cdp.send('Profiler.setSamplingInterval', { interval: 500 }); await cdp.send('Profiler.start'); console.log('profiler started'); } catch (e) { console.log('profiler unavailable: ' + e); cdp = null; } }
+const icAt = () => page.evaluate(() => { const rt = window.__x64; try { return Number(rt?.ex?.x64_icount?.() ?? 0); } catch { return 0; } });
+const ic0 = await icAt(); const fr0 = await framesNow();
 const tStart = Date.now(); const stamps = []; let n = 0;
 while (Date.now() - tStart < seconds * 1000) {
   const t = Date.now() - tStart;
@@ -148,6 +152,7 @@ while (Date.now() - tStart < seconds * 1000) {
 }
 const acT1 = await page.evaluate(() => (window.__acs[0] ? window.__acs[0].currentTime : 0));
 const wallSec = (Date.now() - tStart) / 1000;
+{ const ic1 = await icAt(), fr1 = await framesNow(); console.log(`steady state over the recording: ${((ic1 - ic0) / 1e6 / wallSec).toFixed(1)} MIPS, ${((fr1 - fr0) / wallSec).toFixed(1)} FPS presented (${fr1 - fr0} frames, ${((ic1 - ic0) / 1e6).toFixed(0)} M insns, ${fr1 > fr0 ? ((ic1 - ic0) / (fr1 - fr0) / 1e6).toFixed(2) : '?'} M insns/frame)`); }
 if (cdp) { try { const { profile } = await cdp.send('Profiler.stop'); writeFileSync(resolve(OUT, 'browser.cpuprofile'), JSON.stringify(profile)); console.log(`browser.cpuprofile: ${profile.samples.length} samples`); } catch (e) { console.log('profiler stop failed: ' + e); } }
 if (recOk) {
   const b64 = await page.evaluate(() => new Promise((res) => { const rec = window.__rec; rec.onstop = async () => {
