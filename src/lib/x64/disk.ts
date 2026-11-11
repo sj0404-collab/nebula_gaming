@@ -110,8 +110,11 @@ export class Disk {
   }
   /** Only report an installation as durable after IndexedDB accepted its whole batch. */
   async flushChecked(): Promise<void> {
-    await this.flush();
-    if (!this.available || this.queued() !== 0) throw new Error('IndexedDB не сохранил файлы; проверьте доступность и свободное место' + (this.lastError ? ` (${this.lastError})` : ''));
+    // Wait until the disk is idle: a flush started by the 300 ms timer (or by another window through the disk bus) may still be
+    // running when ours completes — that is not a failure of our writes, so keep draining instead of reporting "not saved".
+    const err0 = this.lastError;
+    for (let i = 0; i < 50 && (this.pending.size || this.flushing); i++) { await this.flush(); if (this.lastError !== err0) break; if (!this.pending.size && this.flushing) await this.flushing.catch(() => undefined); }
+    if (!this.available || this.queued() !== 0) throw new Error('IndexedDB не сохранил файлы; проверьте доступность и свободное место' + (this.lastError ? ` (${this.lastError})` : '') + (this.pending.size ? `; не записано: ${[...this.pending.keys()].slice(0, 3).join(', ')}` : ''));
   }
   queued() { return this.pending.size + (this.flushing ? 1 : 0); }
 

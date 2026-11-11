@@ -1,6 +1,12 @@
 /** Versioned optional vendor components. Never overwrite game files or a previous version. */
 import type { X64Runtime } from './runtime';
-export type OfficialId = 'jdk17-x64' | 'openal-x86' | 'openal-x64';
+export type OfficialId = 'openal-x86' | 'openal-x64';
+/** Like the official OpenAL installer (oalinst.exe), the router DLL also goes into the Windows system directory of its bitness, so a game
+ *  that imports OpenAL32.dll without shipping it finds it; a DLL next to the game's exe still wins (normal search order). Never overwrites. */
+export const OFFICIAL_SYSTEM_COPY: Partial<Record<OfficialId, { file: string; dir: string }>> = {
+  'openal-x86': { file: 'OpenAL32.dll', dir: 'C:\\Windows\\SysWOW64\\' },
+  'openal-x64': { file: 'OpenAL32.dll', dir: 'C:\\Windows\\System32\\' },
+};
 export interface OfficialManifest {
   id: OfficialId; pack: string; version: string; source: string; archive_sha256: string;
   checksum_verified_against: string | null;
@@ -32,6 +38,8 @@ export async function installOfficial(rt: X64Runtime, m: OfficialManifest, fetch
     const hash = Array.from(new Uint8Array(digest), x => x.toString(16).padStart(2, '0')).join('');
     if (hash !== f.sha256) throw new Error(`${f.path}: SHA-256 mismatch`);
     if (!rt.vfsAddPersistent(root + f.path.replace(/\//g, '\\'), b)) throw new Error(`${f.path}: disk refused file`);
+    const sys = OFFICIAL_SYSTEM_COPY[m.id];
+    if (sys && f.path === sys.file && rt.vfsSize(sys.dir + sys.file) < 0 && !rt.vfsAddPersistent(sys.dir + sys.file, b)) throw new Error(`${sys.dir}${sys.file}: disk refused file`);
     // Limit pending memory and surface quota failures early. Completion marker is written only after all files are durable.
     if (i % 16 === 15) await rt.disk.flushChecked();
     progress(i + 1);

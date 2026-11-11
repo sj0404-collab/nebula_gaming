@@ -13,7 +13,7 @@ jobs:
         with: { node-version: 22, cache: npm }
       - uses: mlugg/setup-zig@v2
         with: { version: 0.17.0 }
-      - run: python3 emu/tools/official-java-audio.py /tmp/vendor
+      - run: JAVA_FEATURE=17 python3 emu/tools/official-java-audio.py /tmp/vendor   # manual run only: also fetches the Temurin JDK 17 pack (not shipped in the APK)
       - run: python3 emu/tools/pack-official-components.py /tmp/vendor public/x64/official
       - name: Mimic Capacitor decompressed APK assets
         run: |

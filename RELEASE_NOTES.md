@@ -1,3 +1,47 @@
+# v1.48.0 — Android: main stabilised after 34 unreleased commits (CI green again), OpenAL Soft component, reliable "saved" checks
+
+**Why this release exists.**  After v1.47.0, 34 commits landed on `main` and nine *test* APKs (`v1.47.0-test.27…37`) were
+published from them by hand while the project's own CI (`ci.yml`) was red on every one of those commits (11 runs in a
+row): two new browser scenarios could never pass there.  This release keeps the work, fixes what was broken, and ships it
+through the normal gate — native tests, .NET on CoreCLR, JIT differential, the full browser suite, then the APK.
+
+**Kept from the test builds (now verified by the full CI):**
+- window procedures: built-in shim slots are reset per process (a program could reuse a stale slot after a re-run);
+- UCRT `_get_narrow/_get_wide_winmain_command_line` (WinMain programs built with the UCRT saw an empty command line);
+- faults name the module and offset (`Fault location: DLL … + 0x…`); the report identifies the loaded exe and labels
+  Windows-exception exits and import-only verdicts correctly;
+- MSVC x86 RTTI: `__RTDynamicCast` for single public inheritance, RTTI hierarchy flag, ordinal imports resolved in the
+  import report (`w32_have_import`);
+- x86 DirectSound COM: stdcall sizes for every `IDirectSound8/Buffer8/Notify/3DListener/3DBuffer` method, pointer widths
+  (regression `emu/tests/dsound32.c` + `dsound32-stack.S`);
+- `_libm_sse2_{log,sqrt,atan,acos,asin,cos,sin,tan,exp,log10,pow,atan2}_precise` (MSVC's SSE math helpers, XMM calling
+  convention also in x86) and `_Mtx_init_in_situ` (MSVC STL mutex layout, x86 48 B / x64 80 B);
+- virtual-disk listings are paged (`x64_vfs_list_page`): a large installed game no longer disappears from the library
+  because the 64 KB JSON buffer overflowed;
+- Android: persistent folder selection (`NebulaStoragePlugin`), read-only storage diagnostics and a copyable report, disk
+  restore failures are shown instead of an empty disk, vendor asset names fixed for the Capacitor asset copy.
+
+**Fixed in this release:**
+- **"IndexedDB did not save the files" reported for files that were saved.**  `flushChecked()` counted a flush that
+  another timer had just started (unrelated entries, e.g. the registry hive written at start-up) as "my writes are not
+  durable".  It now drains the disk until it is idle and only then decides; a real failure still names the first unsaved
+  paths and the IndexedDB error.  This was the `library: large disks…` CI failure.
+- **OpenAL Soft component (x86 + x64) — official `openal-soft-1.25.2-bin.zip` from openal-soft.org**, SHA-256 of the
+  archive recorded in the manifest and every file verified before it is written.  The DLL goes into the versioned
+  components folder **and** — like the official OpenAL installer — into `C:\Windows\SysWOW64\OpenAL32.dll` (x86) /
+  `C:\Windows\System32\OpenAL32.dll` (x64) when no file exists there, so a game that imports `OpenAL32.dll` without
+  shipping it finds it; a game with its own copy next to the exe keeps using its own (normal search order).  Built in
+  `ci.yml` (`official-components` job), tested end-to-end (checksum rejection of a corrupted file, install, persistence
+  across reload, Android asset-name branch) — the test that was red since it was added.
+- **No JDK inside the APK.**  The test builds bundled a 190 MB Eclipse Temurin JDK 17 pack (APK 405 MB) that nothing could
+  use yet (no per-game selection).  It is not shipped; `JAVA_FEATURE=17 emu/tools/official-java-audio.py` still builds it
+  for the manual workflow.  The release APK stays at ~225 MB.
+
+**Known limits (unchanged, honest):** D3D9/DirectDraw not implemented; the emulator runs on the main thread; every file of
+the persistent `C:\` is read into memory at start (heavy with all packs installed on a small-RAM phone — next on the
+list); Shattered Pixel Dungeon ≈10 FPS on a phone (JVM); Chinese glyphs missing.  Next: emulator speed / frame-time
+stability (OpenAL through Web Audio instead of emulating the mixer, JIT), then the NVIDIA PhysX System Software component.
+
 # v1.47.0 — Android: real Visual C++ 2005–2013 runtimes initialise (x86 + x64), SDL2/OpenAL games verified, Java games start from a class-data archive, Windows access checks
 
 **Visual C++ 2005 / 2008 runtimes: real DLLs, placed where Windows places them.** v1.46.0 shipped msvcr80/msvcr90 + MFC 8/9,

@@ -72,6 +72,22 @@ jobs:
           path: dn-tests/
           if-no-files-found: error
 
+  official-components:
+    name: OpenAL Soft component packs (official openal-soft.org binaries, x86 + x64 → /x64/official)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download openal-soft-1.25.2-bin.zip, verify PE machine of both DLLs, gzip per file + manifest with SHA-256 (JAVA_FEATURE=none — no JDK in the APK)
+        run: |
+          python3 emu/tools/official-java-audio.py /tmp/vendor
+          python3 emu/tools/pack-official-components.py /tmp/vendor public/x64/official
+      - uses: actions/upload-artifact@v4
+        with:
+          name: official-component-packs
+          path: public/x64/official/
+          if-no-files-found: error
+
   emulator:
     name: Nebula x64 emulator · native tests + wasm64 build
     runs-on: ubuntu-latest
@@ -180,7 +196,7 @@ jobs:
           path: public/x64/nebula_x64.wasm
 
   test:
-    needs: emulator
+    needs: [emulator, official-components]
     name: test · ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -195,9 +211,13 @@ jobs:
         with: { name: dotnet-pack, path: public/x64/dotnet }
       - uses: actions/download-artifact@v4
         with: { name: dx-pack, path: public/x64/dx }
+      - uses: actions/download-artifact@v4
+        with: { name: official-component-packs, path: public/x64/official }
       - uses: actions/download-artifact@v4   # the wasm64 emulator built in this run — never the committed one (v1.42.0/v1.43.0 APKs shipped a stale module)
         with: { name: nebula_x64-wasm64, path: public/x64 }
       - run: ls -la public/x64/nebula_x64.wasm && sha256sum public/x64/nebula_x64.wasm | tee /tmp/wasm.sha
+      - name: Mimic the Android asset copy (Capacitor inflates .gz assets to plain names; the e2e test exercises that branch)
+        run: python3 -c "import gzip, pathlib; [p.with_suffix('').write_bytes(gzip.decompress(p.read_bytes())) for p in pathlib.Path('public/x64/official').rglob('*.gz')]"
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
       - uses: oven-sh/setup-bun@v2
@@ -245,6 +265,8 @@ jobs:
         with: { name: dotnet-pack, path: public/x64/dotnet }
       - uses: actions/download-artifact@v4
         with: { name: dx-pack, path: public/x64/dx }
+      - uses: actions/download-artifact@v4
+        with: { name: official-component-packs, path: public/x64/official }
       - uses: actions/download-artifact@v4   # the wasm64 emulator built in this run — never the committed one (v1.42.0/v1.43.0 APKs shipped a stale module)
         with: { name: nebula_x64-wasm64, path: public/x64 }
       - run: ls -la public/x64/nebula_x64.wasm && sha256sum public/x64/nebula_x64.wasm | tee /tmp/wasm.sha

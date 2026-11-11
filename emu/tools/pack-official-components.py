@@ -33,5 +33,5 @@ def audio(arch):
         docs = [n for n in names if not n.endswith('/') and ('copying' in n.lower() or 'license' in n.lower()) and '/' in n]
         return [(dll, 'OpenAL32.dll')] + [(n, 'licenses/' + str(i) + '-' + n.split('/')[-1]) for i, n in enumerate(docs)]
     return select
-emit('jdk17-x64', 'Eclipse Temurin JDK 17 Windows x64', vendor['java']['file'], java, vendor['java'])
+if vendor.get('java'): emit('jdk17-x64', 'Eclipse Temurin JDK 17 Windows x64', vendor['java']['file'], java, vendor['java'])   # only when fetched with JAVA_FEATURE=17
 for arch, key in [('Win32', 'openal-x86'), ('Win64', 'openal-x64')]: emit(key, 'OpenAL Soft ' + arch, vendor['openal']['file'], audio(arch), vendor['openal'])

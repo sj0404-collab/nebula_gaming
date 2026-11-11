@@ -340,6 +340,8 @@ export class X64Runtime {
       return all;
     } catch (e) { this.onLog?.(`VFS listing failed: ${String(e)}`); return []; }
   }
+  /** size of a file on the virtual disk, or -1 when it does not exist (no bytes are pulled into wasm memory) */
+  vfsSize(path: string): number { return this.ex ? Number(this.ex.x64_vfs_size(this.putStr(path))) : -1; }
   vfsRead(path: string): Uint8Array | null {
     const ex = this.ex!; const n = Number(ex.x64_vfs_size(this.putStr(path))); if (n < 0) return null;
     // the page's copy is authoritative unless a program has written the file and it is not flushed yet (x64_vfs_data would also pull the bytes into wasm memory and pin them there)

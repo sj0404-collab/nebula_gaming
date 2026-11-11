@@ -531,7 +531,7 @@ export default function X64App() {
   }, [logComp]);
   /* Optional official components are isolated by architecture and archive hash; never write into games. */
   const [official, setOfficial] = useState<Partial<Record<OfficialId, { manifest?: OfficialManifest; status: string; note?: string }>>>({});
-  useEffect(() => { let active = true; const ids: OfficialId[] = ['jdk17-x64', 'openal-x86', 'openal-x64'];
+  useEffect(() => { let active = true; const ids: OfficialId[] = ['openal-x86', 'openal-x64'];
     for (const id of ids) void (async () => {
       try { const r = await fetch(`/x64/official/${id}/manifest.json`); if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const manifest = await r.json() as OfficialManifest; validateOfficial(manifest, id);
@@ -921,13 +921,13 @@ export default function X64App() {
               <h2 className="mb-2 text-lg font-bold">Системные компоненты</h2>
               <p className="mb-4 text-sm text-slate-600">Установка в виртуальный диск Nebula, а не в Android. Некоторые компоненты устанавливаются автоматически при запуске программы. Файлы сохраняются на виртуальном диске между запусками.</p>
               <div className="space-y-3">
-                {(['jdk17-x64', 'openal-x86', 'openal-x64'] as OfficialId[]).map(id => {
+                {(['openal-x86', 'openal-x64'] as OfficialId[]).map(id => {
                   const st = official[id]; const man = st?.manifest; const rt = rtRef.current;
                   const installed = !!man && !!rt && ready === 'ready' && st?.status !== 'error' && st?.status !== 'installing' && officialComplete(rt, man);
                   return <div key={id} className="rounded border p-3" data-official-component={id} data-official-status={installed ? 'installed' : st?.status ?? 'probing'}>
                     <b>{man?.pack ?? id}</b><p className="text-sm">{installed ? 'Установлено на виртуальный диск.' : st?.status === 'unavailable' ? 'Не включено в эту сборку.' : st?.status ?? 'Проверка…'} {st?.note}</p>
                     {man && <><p className="break-all text-xs">Версия архива: {man.version}; источник: {man.source}; SHA-256: {man.archive_sha256}. {man.checksum_verified_against ? `Контрольная сумма поставщика: ${man.checksum_verified_against}.` : 'Независимая контрольная сумма поставщика не проверена.'}</p><p className="break-all text-xs">Папка: {officialDir(man)}</p></>}
-                    <p className="text-xs">{id === 'jdk17-x64' ? 'Отдельный Windows JDK; установленная игрой Java не заменяется автоматически.' : 'Пользовательская библиотека, не драйвер Android. Игра не переключается на неё автоматически.'}</p>
+                    <p className="text-xs">Официальная OpenAL Soft (openal-soft.org), пользовательская библиотека, не драйвер Android: копируется в версионную папку компонентов и, если там ещё нет файла, в {id === 'openal-x86' ? 'C:\\Windows\\SysWOW64' : 'C:\\Windows\\System32'} как OpenAL32.dll — игра со своей OpenAL32.dll рядом с exe продолжает использовать свою.</p>
                     <button disabled={ready !== 'ready' || !man || installed || st?.status === 'installing' || !!running || !!fetching} onClick={() => void installVendor(id)} className="mt-2 rounded bg-indigo-600 px-3 py-2 text-white disabled:opacity-40">Установить</button>
                   </div>;
                 })}
