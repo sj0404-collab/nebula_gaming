@@ -18,7 +18,9 @@ int g_jit_hot = 300;   /* block entries before translation (x64_set_jit(n>1) ove
 #define JIT_HOT g_jit_hot
 #define JIT_MAX_INSNS 64
 #define JIT_MAX_BYTES 480
-typedef struct { u64 rip; Mem *mem; const u8 *code; u32 gen; u32 fn; s32 count; u16 pc; u8 m32; } Jb;   /* fn: table index of the region function, pc: entry block inside it */
+typedef struct { u64 rip; Mem *mem; const u8 *code; u32 gen; u32 fn; s32 count; u16 pc; u8 m32, rt; } Jb;   /* fn: table index of the region function, pc: entry block inside it, rt: times this region was retranslated */
+#define JIT_RETRANS_EXITS 2048   /* a region that left this often is retranslated (its branch targets executed since then join it) … */
+#define JIT_MAX_RETRANS 4        /* … at most this many times */
 static Jb g_jb[1 << JB_BITS];
 #define JB_SLOT(rip) (&g_jb[((rip) ^ ((rip) >> JB_BITS)) & ((1 << JB_BITS) - 2)])   /* 2-way set: slot and slot+1 */
 static void jit_drop(Jb *b);
@@ -41,6 +43,7 @@ int g_jit_on = 0;
 #define JIT_MAX_FN 65536
 static u32 g_jit_free[JIT_MAX_FN]; static int g_jit_nfree; static u32 g_jit_fn_hi; static u8 g_jit_owned[JIT_MAX_FN / 8];   /* table slots whose module may be replaced; the highest slot handed out; the slots the host created for us (the table also holds the C function pointers — never those) */
 static u16 g_fnref[JIT_MAX_FN];   /* JB entries referencing a table slot; 0 → slot reusable */
+static u32 g_fnexit[JIT_MAX_FN];  /* region exits since (re)translation */
 #define JIT_MAX_BLOCKS 160
 #define JIT_MAX_REGION_INSNS 2400
 struct JitStats { u64 blocks, stale, nodc, exec, fails, insns, steps, bytes, dsteps, dinterp, retrans; } g_jit_st;
@@ -702,7 +705,7 @@ static int term_targets(const Dc *e, u64 start, const u8 *code, int m32, Mem *me
 static void sort_u64(u64 *v, int n) { for (int i = 1; i < n; i++) { u64 x = v[i]; int j = i - 1; while (j >= 0 && v[j] > x) { v[j + 1] = v[j]; j--; } v[j + 1] = x; } }
 static void jit_drop(Jb *b);
 static int jit_translate(Cpu *c, Jb *b0) {
-  Mem *m = c->mem; u32 gen = mem_gen(m); int m32 = c->mode32; u64 rip = b0->rip;
+  Mem *m = c->mem; u32 gen = mem_gen(m); int m32 = c->mode32; u64 rip = b0->rip; u8 rt = b0->rt;
   Region *reg = mem_region(m, rip); if (!reg) return 0;
   u64 lo = reg->base, hi = reg->base + reg->size; const u8 *rbase = reg->host;
   /* 1. discover block starts reachable through direct branches (only code that has been executed: it has Dc entries) */
@@ -820,6 +823,7 @@ static int jit_translate(Cpu *c, Jb *b0) {
   u32 fn = host_jit_compile(mod.b, mod.n, reuse);
   if (!fn || fn >= JIT_MAX_FN) { g_jit_st.fails++; if (reuse) g_jit_free[g_jit_nfree++] = reuse; return 0; }
   if (fn > g_jit_fn_hi) g_jit_fn_hi = fn;
+  g_fnexit[fn] = 0;
   g_jit_owned[fn >> 3] |= (u8)(1 << (fn & 7));
   /* publish every block start as an entry; the hot one (rip) LAST: jb_lookup evicts 2-way set neighbours, so publishing another
      block of this region could otherwise evict b0's slot and leave it describing a different block (wrong pc -> wrong code run) */
@@ -829,16 +833,21 @@ static int jit_translate(Cpu *c, Jb *b0) {
     Jb *b = jb_lookup(blk[i].start, m, m32);
     if (b->rip == blk[i].start && b->fn && b->gen == gen) continue;
     if (b->fn) jit_drop(b);
-    b->rip = blk[i].start; b->mem = m; b->m32 = m32; b->fn = fn; b->pc = (u16)i; b->code = rbase; b->gen = gen; b->count = JIT_HOT; g_fnref[fn]++;
+    b->rip = blk[i].start; b->mem = m; b->m32 = m32; b->fn = fn; b->pc = (u16)i; b->code = rbase; b->gen = gen; b->count = JIT_HOT; b->rt = rt; g_fnref[fn]++;
   }
   g_jit_st.blocks++; g_jit_st.insns += nit; g_jit_st.steps += steps; g_jit_st.bytes += mod.n;
   if (hot >= 0) { Jb *b = jb_lookup(rip, m, m32); if (b->fn) jit_drop(b);
-    b->rip = rip; b->mem = m; b->m32 = m32; b->fn = fn; b->pc = (u16)hot; b->code = rbase; b->gen = gen; b->count = JIT_HOT; g_fnref[fn]++; }
+    b->rip = rip; b->mem = m; b->m32 = m32; b->fn = fn; b->pc = (u16)hot; b->code = rbase; b->gen = gen; b->count = JIT_HOT; b->rt = rt; g_fnref[fn]++; }
   if (--g_fnref[fn] == 0) { if (g_jit_nfree < JIT_MAX_FN) g_jit_free[g_jit_nfree++] = fn; return 0; }   /* release the hold */
   return hot >= 0;
 }
 static void jit_drop(Jb *b) { if (b->fn && g_fnref[b->fn] && --g_fnref[b->fn] == 0 && g_jit_nfree < JIT_MAX_FN) g_jit_free[g_jit_nfree++] = b->fn; b->fn = 0; b->rip = 0; b->count = 0; }
-static void jit_drop_fn(u32 fn) { if (!fn) return; for (int i = 0; i < (1 << JB_BITS); i++) if (g_jb[i].fn == fn) jit_drop(&g_jb[i]); }   /* every entry of one region */
+/* drop every entry of one region; retrans ≠ 0 keeps the entries as warm, untranslated blocks (translated again after a few visits; 1: counts as a retranslation, rt + 1) */
+static void jit_drop_fn(u32 fn, int retrans) { if (!fn) return;
+  for (int i = 0; i < (1 << JB_BITS); i++) { Jb *b = &g_jb[i]; if (b->fn != fn) continue;
+    if (!retrans) { jit_drop(b); continue; }
+    if (g_fnref[fn] && --g_fnref[fn] == 0 && g_jit_nfree < JIT_MAX_FN) g_jit_free[g_jit_nfree++] = fn;
+    b->fn = 0; b->count = JIT_HOT - 64; if (retrans == 1 && b->rt < 255) b->rt++; } }
 typedef u64 (*JitFn)(Cpu *c, const u8 *code, int pc, u64 limit);
 /* called by cpu_run at a block start: runs translated blocks back to back while they chain; returns 1 if any block ran */
 /* a new session (x64_load): forget every translated region and every block record of the previous one */
@@ -868,7 +877,9 @@ static inline int jit_enter(Cpu *c, u64 budget) {
       return ran; }
     g_jit_st.exec++; ran = 1;
     if (c->jit_site) { u64 site = c->jit_site; c->jit_site = 0;   /* an indirect jump/call left the region: profile the target; a new one → retranslate the region with it laid out inside */
-      if (ibt_record(site, c->mem, nx) && nx != 1 && c->status == RUN_OK) { g_jit_st.retrans++; jit_drop_fn(b->fn); } }
+      if (ibt_record(site, c->mem, nx) && c->status == RUN_OK) { g_jit_st.retrans++; jit_drop_fn(b->fn, 2); b = 0; } }   /* bounded by IBT_MAX targets per site */
+    else if (++g_fnexit[b->fn] >= JIT_RETRANS_EXITS && c->status == RUN_OK) {   /* leaves the region a lot: translate it again, now with every target that has run since */
+      if (b->rt < JIT_MAX_RETRANS) { g_jit_st.retrans++; jit_drop_fn(b->fn, 1); } else g_fnexit[b->fn] = 0; b = 0; }
     c->rip = nx; c->hist[c->hist_i++ & 4095] = nx | (1ull << 63);   /* region exit target (bit 63 marks it in the history dump) */
     if (c->status != RUN_OK || c->icount - ic0 >= budget || nx - G_SHIM_BASE < G_SHIM_SIZE) return 1;
   }
