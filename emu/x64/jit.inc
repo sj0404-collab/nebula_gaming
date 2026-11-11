@@ -46,7 +46,7 @@ static u16 g_fnref[JIT_MAX_FN];   /* JB entries referencing a table slot; 0 → 
 static u32 g_fnexit[JIT_MAX_FN];  /* region exits since (re)translation */
 #define JIT_MAX_BLOCKS 160
 #define JIT_MAX_REGION_INSNS 2400
-struct JitStats { u64 blocks, stale, nodc, exec, fails, insns, steps, bytes, dsteps, dinterp, retrans; } g_jit_st;
+struct JitStats { u64 blocks, stale, nodc, exec, fails, insns, steps, bytes, dsteps, dinterp, retrans, full, x_ind, x_jit, x_cold; } g_jit_st;   /* x_*: region exits through an indirect branch / to another translated block / to untranslated code */
 
 #ifdef __wasm__
 #define JEXPORT(name) __attribute__((export_name(#name)))
@@ -331,7 +331,10 @@ static void jit_fast(const Dc *e, JItem *it) {
   }
   if (e->rep) return;
   if (!e->p66 && !e->seg) {
-    if (op == 0xF6 && (e->reg & 7) == 0) it->fk = JK_TEST8_IMM; else if (op == 0xA8) it->fk = JK_TEST_AL_IMM; else if (op == 0xA9) it->fk = JK_TEST_A_IMM; else if (op >= 0xB0 && op <= 0xB7) it->fk = JK_MOV8_R_IMM;
+    if (op == 0xF6 && (e->reg & 7) == 0) it->fk = JK_TEST8_IMM; else if (op == 0xF6 && ((e->reg & 7) == 2 || (e->reg & 7) == 3)) { it->fk = FK_F7_NOTNEG; it->sz = 1; }
+    else if (op == 0xC0) { it->fk = FK_SHIFT_IMM; it->sz = 1; } else if (op == 0xD0) { it->fk = FK_SHIFT_1; it->sz = 1; } else if (op == 0xD2) { it->fk = FK_SHIFT_CL; it->sz = 1; }
+    else if (op == 0xFE && (e->reg & 7) < 2) { it->fk = FK_FF; it->sz = 1; }   /* 8-bit shift/rotate, inc/dec, not/neg share the sized emitters */
+    else if (op == 0xA8) it->fk = JK_TEST_AL_IMM; else if (op == 0xA9) it->fk = JK_TEST_A_IMM; else if (op >= 0xB0 && op <= 0xB7) it->fk = JK_MOV8_R_IMM;
     else if (e->m32 && op >= 0x40 && op <= 0x4F) it->fk = JK_INCDEC_R;   /* 32-bit mode: inc/dec r32 (no REX there) */
     else if (op == 0x68 || op == 0x6A) it->fk = JK_PUSH_IMM; else if (op == 0xC9) it->fk = JK_LEAVE;
     else if (op == 0xF7 && (e->reg & 7) >= 4) it->fk = (e->reg & 7) < 6 ? JK_MUL1 : JK_DIV;
@@ -397,6 +400,7 @@ static void e_step(Buf *B, u64 rip, u64 next, int k) {   /* interpreter single s
 typedef struct { int reg; u64 imm; } Src;
 static void e_src(Buf *B, const Dc *e, const Src *s, int sz) { if (s->reg < 0) e_i64c(B, s->imm); else if (sz == 1) e_ldr8(B, e, s->reg); else e_ldreg(B, s->reg, sz); }
 static void e_load_any(Buf *B, const Dc *e, int sz) { if (sz == 1) e_rm_load8(B, e); else e_rm_load(B, e, sz); }
+static void e_store_any(Buf *B, const Dc *e, int sz) { if (sz == 1) e_dst_store8(B, e); else e_dst_store(B, e, sz); }
 /* dst op= src where dst is r/m (dst_rm = 1) or the register e->reg / RAX (dst_rm = 0, then src is the r/m or an immediate) */
 static void e_alu(Buf *B, const Dc *e, int aop, int sz, int dst_rm, int dst_reg, const Src *src, int src_is_rm, int need) {
   int is_cmp = aop == 7, kind = (aop == 0) ? 0 : (aop == 5 || aop == 7) ? 1 : 2;
@@ -431,15 +435,15 @@ static void e_shift(Buf *B, const Dc *e, int sz, int cnt_imm, int need, int cl) 
   if (!cl && !(cnt_imm & (sz == 8 ? 63 : 31))) return;   /* count 0: no-op, flags untouched */
   e_dst_addr(B, e);
   if (need || op < 4) {
-    e_lget(B, L_C); e_i32c(B, op); e_rm_load(B, e, sz);
+    e_lget(B, L_C); e_i32c(B, op); e_load_any(B, e, sz);
     if (cl) { e_ldreg(B, RCX, 1); OP(I32_WRAP); } else e_i32c(B, cnt_imm);   /* i32.load8_u cl */
     e_i32c(B, sz); OP(CALL); bu(B, FN_SHIFT);
   } else {
-    e_rm_load(B, e, sz); if (op == 7 && sz == 4) OP(I64_EXT32_S); else if (op == 7 && sz == 2) OP(0xC3);
+    e_load_any(B, e, sz); if (op == 7 && sz == 4) OP(I64_EXT32_S); else if (op == 7 && sz == 2) OP(0xC3); else if (op == 7 && sz == 1) OP(0xC2);
     if (cl) { e_ldreg(B, RCX, 8); e_i64c(B, sz == 8 ? 63 : 31); OP(I64_AND); } else e_i64c(B, (u64)(cnt_imm & (sz == 8 ? 63 : 31)));
     OP(op == 7 ? I64_SHR_S : op == 5 ? I64_SHR_U : I64_SHL);
   }
-  e_dst_store(B, e, sz);
+  e_store_any(B, e, sz);
 }
 /* xmm source lanes: from register e->rm (CO_X) or memory (L_HOST); bytes 4/8 at byte offset `off` */
 static void e_xmm_src(Buf *B, const Dc *e, int off, int bytes) { if (e->mod == 3) { e_lget(B, L_C); e_ld(B, bytes == 4 ? 0x35 : 0x29, bytes == 4 ? 2 : 3, CO_X(e->rm) + off); } else { e_lget(B, L_HOST); e_ld(B, bytes == 4 ? 0x35 : 0x29, 0, off); } }
@@ -559,11 +563,11 @@ static int e_insn(Buf *B, const JItem *it, const u8 *code, int m32, int k) {
         e_lget(B, L_C); e_lget(B, L_T0); e_lget(B, L_T1); OP(sgn ? I64_DIV_S : I64_DIV_U); e_streg(B, RAX, 8);
       e_end(B); return 1; }
     case FK_F7_TEST: e_prep_mem(B, it, sz, 0); e_test(B, e, sz, 0, (u64)imm_at(code, e->mr_end, isz) & mask(sz), need); return 1;
-    case FK_F7_NOTNEG: { e_prep_mem(B, it, sz, 1); e_dst_addr(B, e);
-      if ((e->reg & 7) == 2) { e_rm_load(B, e, sz); e_i64c(B, ~0ull); OP(I64_XOR); }
-      else if (need) { e_i64c(B, 0); e_lset(B, L_T0); e_rm_load(B, e, sz); e_lset(B, L_T1); e_lget(B, L_T0); e_lget(B, L_T1); OP(I64_SUB); e_mask(B, sz); e_ltee(B, L_T2); e_flags(B, 1, sz, need); }
-      else { e_i64c(B, 0); e_rm_load(B, e, sz); OP(I64_SUB); }
-      e_dst_store(B, e, sz); return 1; }
+    case FK_F7_NOTNEG: { e_prep_mem(B, it, sz, 1); e_dst_addr(B, e);   /* also f6 /2 /3 (sz 1) */
+      if ((e->reg & 7) == 2) { e_load_any(B, e, sz); e_i64c(B, ~0ull); OP(I64_XOR); }
+      else if (need) { e_i64c(B, 0); e_lset(B, L_T0); e_load_any(B, e, sz); e_lset(B, L_T1); e_lget(B, L_T0); e_lget(B, L_T1); OP(I64_SUB); e_mask(B, sz); e_ltee(B, L_T2); e_flags(B, 1, sz, need); }
+      else { e_i64c(B, 0); e_load_any(B, e, sz); OP(I64_SUB); }
+      e_store_any(B, e, sz); return 1; }
     case FK_MOVZX8: e_prep_mem(B, it, 1, 0); e_lget(B, L_C); e_rm_load8(B, e); e_streg(B, e->reg, sz); return 1;
     case FK_MOVZX16: e_prep_mem(B, it, 2, 0); e_lget(B, L_C); if (e->mod == 3) e_ldreg(B, e->rm, 2); else { e_lget(B, L_HOST); e_ld(B, 0x33, 0, 0); } e_streg(B, e->reg, sz); return 1;
     case FK_MOVSX8: e_prep_mem(B, it, 1, 0); e_lget(B, L_C); if (e->mod == 3) { e_ldr8(B, e, e->rm); OP(0xC2); } else { e_lget(B, L_HOST); e_ld(B, 0x30, 0, 0); } e_streg(B, e->reg, sz); return 1;
@@ -592,10 +596,11 @@ static int e_insn(Buf *B, const JItem *it, const u8 *code, int m32, int k) {
       e_push_begin(B, psz, m32, start); e_ldreg(B, r, 8); e_push_end(B, psz); return 1; }
     case FK_POP: { int r = (e->op & 7) | (e->rexb << 3); e_lget(B, L_C); e_pop(B, psz, m32, start); e_streg(B, r, 8); return 1; }
     case FK_FF: { int sub = e->reg & 7;
-      if (sub == 0 || sub == 1) { e_prep_mem(B, it, sz, 1); e_dst_addr(B, e);
-        e_rm_load(B, e, sz); if (need) e_ltee(B, L_T0); e_i64c(B, 1); if (need) e_ltee(B, L_T1); OP(sub ? I64_SUB : I64_ADD);
+      if (sub == 0 || sub == 1) { e_prep_mem(B, it, sz, 1); e_dst_addr(B, e);   /* also fe /0 /1 (sz 1) */
+        e_load_any(B, e, sz); if (need) e_ltee(B, L_T0); e_i64c(B, 1); if (need) e_ltee(B, L_T1); OP(sub ? I64_SUB : I64_ADD);
         if (need) { e_mask(B, sz); e_ltee(B, L_T2); e_flags(B, sub ? 1 : 0, sz, need); }
-        e_dst_store(B, e, sz); return 1; }
+        e_store_any(B, e, sz); return 1; }
+      if (sz == 1) return 0;
       if (sub == 6) { e_prep_mem(B, it, psz, 0); e_rm_load(B, e, psz); e_lset(B, L_RET); e_push_begin(B, psz, m32, start); e_lget(B, L_RET); e_push_end(B, psz); return 1; }
       if (sub == 2) { e_prep_mem(B, it, psz, 0); e_rm_load(B, e, psz); e_lset(B, L_RET); e_push_begin(B, psz, m32, start); e_i64c(B, next); e_push_end(B, psz); e_goto_ibt(B, start, k + 1); return 1; }
       if (sub == 4) { e_prep_mem(B, it, psz, 0); e_rm_load(B, e, psz); e_lset(B, L_RET); e_goto_ibt(B, start, k + 1); return 1; }
@@ -758,6 +763,7 @@ static int jit_translate(Cpu *c, Jb *b0) {
     if (!added) break;
   }
   if (nb == 0) return 0;
+  if (nb >= JIT_MAX_BLOCKS || nit >= JIT_MAX_REGION_INSNS) g_jit_st.full++;
   /* a terminator's fall-through to the very next block is only free when the blocks are adjacent — they are, by construction (sorted, cut at the next start) */
   static u64 bstarts[JIT_MAX_BLOCKS]; for (int i = 0; i < nb; i++) bstarts[i] = blk[i].start;
   static u8 retblk[JIT_MAX_BLOCKS]; for (int i = 0; i < nb; i++) retblk[i] = 0;
@@ -904,7 +910,8 @@ static inline int jit_enter(Cpu *c, u64 budget) {
       if (c->rip != entry) { Jb *sb = jb_find(c->rip, c->mem, c->mode32); if (sb) jit_drop(sb); c->hist[c->hist_i++ & 4095] = c->rip | (1ull << 63); return 1; }
       return ran; }
     g_jit_st.exec++; ran = 1;
-    if (c->jit_site) { u64 site = c->jit_site; c->jit_site = 0; ibt_record(site, c->mem, nx); }   /* an indirect jump/call left the region: profile the target (the next translation lays it out inside) */
+    if (c->jit_site) { u64 site = c->jit_site; c->jit_site = 0; ibt_record(site, c->mem, nx); g_jit_st.x_ind++; }   /* an indirect jump/call left the region: profile the target (the next translation lays it out inside) */
+    else { Jb *tb = jb_find(nx, c->mem, c->mode32); if (tb && tb->fn) g_jit_st.x_jit++; else g_jit_st.x_cold++; }
     if (++g_fnexit[b->fn] >= (u32)(JIT_RETRANS_EXITS << b->rt) && c->status == RUN_OK) {   /* leaves the region a lot: translate it again, now with every target that has run since (bounded, with a doubling threshold) */
       if (b->rt < JIT_MAX_RETRANS) { g_jit_st.retrans++; jit_drop_fn(b->fn, 1); } else g_fnexit[b->fn] = 0; b = 0; }
     c->rip = nx; c->hist[c->hist_i++ & 4095] = nx | (1ull << 63);   /* region exit target (bit 63 marks it in the history dump) */
@@ -912,9 +919,9 @@ static inline int jit_enter(Cpu *c, u64 budget) {
   }
 }
 const char *jit_stats_text(void) {
-  static char s[640];
-  e_snprintf(s, sizeof s, "blocks=%llu exec=%llu insns=%llu steps=%llu bytes=%llu stale=%llu nodc=%llu fails=%llu retrans=%llu dsteps=%llu dinterp=%llu", (unsigned long long)g_jit_st.blocks, (unsigned long long)g_jit_st.exec, (unsigned long long)g_jit_st.insns,
-             (unsigned long long)g_jit_st.steps, (unsigned long long)g_jit_st.bytes, (unsigned long long)g_jit_st.stale, (unsigned long long)g_jit_st.nodc, (unsigned long long)g_jit_st.fails, (unsigned long long)g_jit_st.retrans, (unsigned long long)g_jit_st.dsteps, (unsigned long long)g_jit_st.dinterp);
+  static char s[800];
+  e_snprintf(s, sizeof s, "blocks=%llu exec=%llu insns=%llu steps=%llu bytes=%llu stale=%llu nodc=%llu fails=%llu retrans=%llu full=%llu x_ind=%llu x_jit=%llu x_cold=%llu dsteps=%llu dinterp=%llu", (unsigned long long)g_jit_st.blocks, (unsigned long long)g_jit_st.exec, (unsigned long long)g_jit_st.insns,
+             (unsigned long long)g_jit_st.steps, (unsigned long long)g_jit_st.bytes, (unsigned long long)g_jit_st.stale, (unsigned long long)g_jit_st.nodc, (unsigned long long)g_jit_st.fails, (unsigned long long)g_jit_st.retrans, (unsigned long long)g_jit_st.full, (unsigned long long)g_jit_st.x_ind, (unsigned long long)g_jit_st.x_jit, (unsigned long long)g_jit_st.x_cold, (unsigned long long)g_jit_st.dsteps, (unsigned long long)g_jit_st.dinterp);
   /* top step opcodes */
   { int L = 0; while (s[L]) L++; for (int pass = 0; pass < 12 && L < (int)sizeof s - 40; pass++) { int best = -1; u32 bv = 0; for (int k = 0; k < 1024; k++) if (g_step_hist[k] > bv) { bv = g_step_hist[k]; best = k; } if (best < 0 || !bv) break;
       L += e_snprintf(s + L, sizeof s - L, " %s%s%02x:%u", best >= 512 ? "p" : "", (best & 511) >= 256 ? "0f" : "", best & 255, bv); g_step_hist[best] = 0; } }

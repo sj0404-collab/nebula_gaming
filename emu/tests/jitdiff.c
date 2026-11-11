@@ -223,6 +223,30 @@ static uint32_t t_atomic(void) {
   for (int i = 0; i < 4; i++) { h = h32(h, (uint32_t)at32[i]); h = h32(h, (uint32_t)at64[i]); h = h32(h, (uint32_t)(at64[i] >> 32)); h = h32(h, at8[i] | (uint32_t)at16[i] << 8); }
   return h;
 }
+/* 8-bit forms the translator handles with the sized emitters (c0/d0/d2 shifts and rotates, fe inc/dec, f6 not/neg), flags consumed by setcc/lahf */
+static volatile uint8_t by[16];
+static uint32_t t_byte(void) {
+  uint32_t h = 2166136261u; rng = 0x7654321u;
+  for (int i = 0; i < 6000; i++) {
+    uint8_t a = (uint8_t)rnd(), b = (uint8_t)(rnd() >> 8), cnt = (uint8_t)(rnd() >> 16); by[i & 15] = a; uint32_t f1 = 0, f3 = 0, f7 = 0; uint8_t f2 = 0, f4 = 0, f5 = 0, f6 = 0, c1 = 0, c2 = 0, c3 = 0, c4 = 0, c5 = 0, m = (uint8_t)(i * 37);   /* setcc outputs are bytes */
+    __asm__ volatile("shlb $3, %b0\n\tlahf\n\tshrl $8, %%eax\n\tandl $0xd5, %%eax" : "+q"(a), "=&a"(f1) : : "cc");   /* SF ZF PF CF (AF is undefined after shifts) */
+    __asm__ volatile("sarb $1, %b0\n\tsetc %b1" : "+q"(a), "=q"(f2) : : "cc");
+    __asm__ volatile("shrb %%cl, %b0\n\tsetc %b2\n\tlahf\n\tshrl $8, %%eax\n\tandl $0xd5, %%eax" : "+q"(a), "=&a"(f3), "=&q"(f4) : "c"((uint8_t)(cnt & 7)) : "cc");
+    __asm__ volatile("rolb $5, %b0\n\tsetc %b1" : "+q"(b), "=q"(f5) : : "cc");
+    __asm__ volatile("rorb $1, %b0\n\tseto %b1" : "+q"(b), "=q"(f6) : : "cc");
+    __asm__ volatile("rclb $2, %b0" : "+q"(b) : : "cc");
+    __asm__ volatile("incb %0\n\tlahf\n\tshrl $8, %%eax\n\tandl $0xd4, %%eax" : "+m"(by[i & 15]), "=&a"(f7) : : "cc");   /* SF ZF AF PF (inc keeps the caller's CF) */
+    __asm__ volatile("decb %b0\n\tsetz %b1" : "+q"(a), "=q"(c1) : : "cc"); h = h32(h, c1);
+    __asm__ volatile("negb %0\n\tsetc %b1" : "+m"(by[(i + 1) & 15]), "=q"(c2) : : "cc"); h = h32(h, c2);
+    __asm__ volatile("notb %b0" : "+q"(m) : : "cc");
+    __asm__ volatile("shlb $1, %0\n\tseto %b1" : "+m"(by[(i + 2) & 15]), "=q"(c3) : : "cc"); h = h32(h, c3);
+    __asm__ volatile("sarb $7, %0\n\tsets %b1" : "+m"(by[(i + 3) & 15]), "=q"(c4) : : "cc"); h = h32(h, c4);
+    __asm__ volatile("shlb %%cl, %0\n\tsetp %b1" : "+m"(by[(i + 4) & 15]), "=q"(c5) : "c"((uint8_t)((cnt & 7) + 1)) : "cc"); h = h32(h, c5);
+    h = h32(h, a | (uint32_t)b << 8 | (uint32_t)m << 16); h = h32(h, f1 | f3 << 8 | f7 << 16); h = h32(h, f2 | (uint32_t)f4 << 8 | (uint32_t)f5 << 16 | (uint32_t)f6 << 24);
+  }
+  for (int i = 0; i < 16; i++) h = h32(h, by[i]);
+  return h;
+}
 int main(void) {
   printf("camera   %08x\n", t_camera());
   printf("scalar   %08x\n", t_scalar());
@@ -231,6 +255,7 @@ int main(void) {
   printf("asm      %08x\n", t_asm());
   printf("misc     %08x\n", t_misc());
   printf("atomic   %08x\n", t_atomic());
+  printf("byte     %08x\n", t_byte());
   printf("jitdiff done\n");
   return 0;
 }
