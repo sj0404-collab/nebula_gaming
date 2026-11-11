@@ -18,7 +18,7 @@ int g_jit_hot = 300;   /* block entries before translation (x64_set_jit(n>1) ove
 #define JIT_HOT g_jit_hot
 #define JIT_MAX_INSNS 64
 #define JIT_MAX_BYTES 480
-typedef struct { u64 rip; Mem *mem; const u8 *code; u32 gen; u32 fn; s32 count; u16 pc; u8 m32, rt; } Jb;   /* fn: table index of the region function, pc: entry block inside it, rt: times this region was retranslated */
+typedef struct { u64 rip; Mem *mem; const u8 *code; u32 gen; u32 fn; s32 count; u16 pc; u8 m32, rt : 7, norv : 1; } Jb;   /* norv: translate without page-generation validation (its code page is written all the time) */   /* fn: table index of the region function, pc: entry block inside it, rt: times this region was retranslated */
 #define JIT_RETRANS_EXITS 1024   /* a region that left this often (× 2^rt) is retranslated: branch targets executed since then and the profiled targets of its indirect jumps join it … */
 #define JIT_MAX_RETRANS 4        /* … at most this many times */
 static Jb g_jb[1 << JB_BITS];
@@ -44,9 +44,24 @@ int g_jit_on = 0;
 static u32 g_jit_free[JIT_MAX_FN]; static int g_jit_nfree; static u32 g_jit_fn_hi; static u8 g_jit_owned[JIT_MAX_FN / 8];   /* table slots whose module may be replaced; the highest slot handed out; the slots the host created for us (the table also holds the C function pointers — never those) */
 static u16 g_fnref[JIT_MAX_FN];   /* JB entries referencing a table slot; 0 → slot reusable */
 static u32 g_fnexit[JIT_MAX_FN];  /* region exits since (re)translation */
+/* region validation record: the generation counters of the code pages a region spans (mem_code_page) and the ranges + hash of its code bytes.
+   At entry the region compares the live counters with the ones it saw last; a difference → jit_reval re-hashes the ranges (something wrote to
+   the page — usually data next to the code) and refreshes the counters, or reports stale.  Regions without a record (too many pages, no
+   region memory) keep validating every block by comparing its bytes. */
+#define RV_PAGES 8
+#define RV_RANGES 24
+#define RV_N 16384
+typedef struct { u64 pgaddr[RV_PAGES]; u32 gen[RV_PAGES]; u32 npg, nr; u32 r_off[RV_RANGES], r_len[RV_RANGES]; const u8 *host; u64 hash; u32 next_free, fn, ok; } RVal;
+#define RV_TIRED 256   /* this many re-hashes in a row that found the code unchanged: the page is written constantly (data next to code) → the region goes back to per-block byte compares */
+static u32 g_rv_tired;   /* fn of such a region (handled by jit_enter after the region returned) */
+static RVal g_rv[RV_N]; static u32 g_rv_free = 0, g_rv_hi = 1; static u32 g_rv_of_fn[JIT_MAX_FN];   /* index 0 = none */
+static u32 rv_alloc(void) { u32 i; if (g_rv_free) { i = g_rv_free; g_rv_free = g_rv[i].next_free; } else if (g_rv_hi < RV_N) i = g_rv_hi++; else return 0; __builtin_memset(&g_rv[i], 0, sizeof g_rv[i]); return i; }
+static void rv_release(u32 i) { if (!i || i >= RV_N) return; g_rv[i].next_free = g_rv_free; g_rv_free = i; }
+static u64 rv_hash(const RVal *v) { u64 h = 1469598103934665603ull; for (u32 i = 0; i < v->nr; i++) { const u8 *p = v->host + v->r_off[i]; for (u32 k = 0; k < v->r_len[i]; k++) { h ^= p[k]; h *= 1099511628211ull; } } return h; }
+static void fn_free(u32 fn) { if (g_jit_nfree < JIT_MAX_FN) g_jit_free[g_jit_nfree++] = fn; rv_release(g_rv_of_fn[fn]); g_rv_of_fn[fn] = 0; }
 #define JIT_MAX_BLOCKS 160
 #define JIT_MAX_REGION_INSNS 2400
-struct JitStats { u64 blocks, stale, nodc, exec, fails, insns, steps, bytes, dsteps, dinterp, retrans, full, x_ind, x_jit, x_cold; } g_jit_st;   /* x_*: region exits through an indirect branch / to another translated block / to untranslated code */
+struct JitStats { u64 blocks, stale, nodc, exec, fails, insns, steps, bytes, dsteps, dinterp, retrans, full, x_ind, x_jit, x_cold, reval, reval_bad; } g_jit_st;   /* x_*: region exits through an indirect branch / to another translated block / to untranslated code */
 
 #ifdef __wasm__
 #define JEXPORT(name) __attribute__((export_name(#name)))
@@ -56,6 +71,13 @@ struct JitStats { u64 blocks, stale, nodc, exec, fails, insns, steps, bytes, dst
 static int cpu_step1(Cpu *c);
 /* ---- helpers called from the generated code (bit-exact interpreter semantics) ---- */
 static u32 g_step_hist[1024];   /* [op | op2<<8 for 0F | 512+ for prefixed] dynamic step counts (diagnostics: x64_jit_stats) */
+JEXPORT(jit_reval) int jit_reval(Cpu *c, u64 rvp, int pc) {   /* 1: the code is unchanged (counters refreshed), 0: stale */
+  (void)c; (void)pc; RVal *v = (RVal *)(size_t)rvp; g_jit_st.reval++;
+  if (rv_hash(v) != v->hash) { g_jit_st.reval_bad++; return 0; }
+  for (u32 k = 0; k < v->npg; k++) v->gen[k] = *(const u32 *)(size_t)v->pgaddr[k];
+  if (++v->ok >= RV_TIRED) g_rv_tired = v->fn;
+  return 1;
+}
 JEXPORT(jit_step) u64 jit_step(Cpu *c, u64 rip) {
   c->rip = rip; g_jit_st.dsteps++;
   { Dc *e = DC_SLOT(rip); if (e->rip == rip) { int k = e->op == 0x0F ? 256 + e->op2 : e->op; if (e->seg || e->rep || e->lock || e->p66) k += 512; g_step_hist[k & 1023]++; } }
@@ -71,7 +93,7 @@ JEXPORT(jit_alu) u64 jit_alu(Cpu *c, int op, u64 a, u64 b, int sz) { return alu(
 JEXPORT(jit_shift) u64 jit_shift(Cpu *c, int op, u64 v, int cnt, int sz) { return shift(c, op, v, cnt, sz); }
 
 /* ---- wasm byte emitter ---- */
-typedef struct { u8 *b; u32 n, cap; int depth; const u64 *starts; int nblk, blk, m32; const u8 *retblk; u64 clo, cspan; Mem *mem; u32 rused, pgused; } Buf;   /* rused: registers the region's code touches (bit r) — only those are filled/spilled (jit_fix_regsites) */   /* clo/cspan: guest address range of the region's code (stores into it reset the validated-block set) */   /* retblk[j]: block j is a call fall-through (ret landing) */   /* starts/nblk/blk: region blocks (sorted) and the one being emitted */
+typedef struct { u8 *b; u32 n, cap; int depth; const u64 *starts; int nblk, blk, m32; const u8 *retblk; u64 clo, cspan; Mem *mem; u32 rused, pgused; u32 rv, dirtychk; } Buf;   /* rv: RVal index (page-generation validation; L_V0 = 1 after a store into the code range → exit after that instruction) */   /* rused: registers the region's code touches (bit r) — only those are filled/spilled (jit_fix_regsites) */   /* clo/cspan: guest address range of the region's code (stores into it reset the validated-block set) */   /* retblk[j]: block j is a call fall-through (ret landing) */   /* starts/nblk/blk: region blocks (sorted) and the one being emitted */
 static void b8(Buf *B, u32 v) { if (B->n < B->cap) B->b[B->n] = (u8)v; B->n++; }
 static void bu(Buf *B, u64 v) { do { u8 x = v & 0x7f; v >>= 7; if (v) x |= 0x80; b8(B, x); } while (v); }
 static void bs(Buf *B, s64 v) { for (;;) { u8 x = v & 0x7f; v >>= 7; if ((v == 0 && !(x & 0x40)) || (v == -1 && (x & 0x40))) { b8(B, x); return; } b8(B, x | 0x80); } }
@@ -90,7 +112,7 @@ enum { F64_LOAD = 0x2B, F32_LOAD = 0x2A, F64_STORE = 0x39, F32_STORE = 0x38, F64
        F32_ADD = 0x92, F32_SUB = 0x93, F32_MUL = 0x94, F32_DIV = 0x95, F32_SQRT = 0x91, F64_EQ = 0x61, F64_NE = 0x62, F64_LT = 0x63, F64_GT = 0x64, F64_GE = 0x66, F32_LT = 0x5D, F32_GT = 0x5E,
        F64_PROMOTE = 0xBB, F32_DEMOTE = 0xB6, F64_CVT_I64S = 0xB9, F32_CVT_I64S = 0xB4,   /* 0xB4 = f32.convert_i64_s (0xB5 is the UNSIGNED form: negative ints became huge positive floats — Shattered Pixel Dungeon's camera matrix) */ I32_TRUNC_F64S = 0xAA, I64_TRUNC_F64S = 0xB0, I64_EXT32_U = 0xAD };
 static void e_f64c(Buf *B, double v) { OP(0x44); bbytes(B, &v, 8); }
-enum { FN_STEP = 0, FN_MEM = 1, FN_ALU = 2, FN_SHIFT = 3, FN_BLOCK = 4, FN_TLB = 5 };
+enum { FN_STEP = 0, FN_MEM = 1, FN_ALU = 2, FN_SHIFT = 3, FN_REVAL = 4, FN_BLOCK = 5, FN_TLB = 6 };
 enum { BR = 0x0C, BR_TABLE = 0x0E };
 /* label depths seen from the code of region block B->blk (see jit_translate for the layout) */
 static int lbl_block(Buf *B, int j) { return j - 1 - B->blk + B->depth; }   /* forward target block j > blk */
@@ -233,11 +255,12 @@ static void e_ea(Buf *B, const JItem *it) {
   if (it->seg) { e_lget(B, L_C); e_ld(B, 0x29, 3, it->seg == 1 ? CO_FS : CO_GS); OP(I64_ADD); }   /* fs: / gs: (TEB / TLS) */
 }
 /* EA on the stack → host pointer in L_HOST through the module-local TLB function; 0 = fault → leave the block (c->rip set) */
+static void e_rv_changed(Buf *B) { const RVal *v = &g_rv[B->rv]; for (u32 k = 0; k < v->npg; k++) { e_i64c(B, v->pgaddr[k]); e_ld(B, 0x28, 2, 0); e_i64c(B, (u64)(size_t)&v->gen[k]); e_ld(B, 0x28, 2, 0); OP(I32_NE); if (k) OP(I32_OR); } }
 static void e_vreset(Buf *B) { for (int j = 0; j < 3; j++) { e_i64c(B, 0); e_lset(B, L_V0 + j); } }
 static void e_vreset_if_code(Buf *B) { e_lget(B, L_EA); e_i64c(B, B->clo - 16); OP(I64_SUB); e_i64c(B, B->cspan + 16); OP(I64_LT_U); e_if(B, 0); e_vreset(B); e_end(B); }   /* a store (up to 16 bytes) at clo-16 .. clo+cspan may touch the region's code */
 int g_jit_xlive = 1, g_jit_callflags = 1;   /* callflags 1: the flags are dead across call/ret (no ABI lets a callee or a caller rely on them; DF is not tracked here) — the ALU op before a call no longer computes a full RFLAGS */   /* 1: flags liveness crosses block boundaries inside a region; 0: every block end keeps all flags live (benchmarks: --xlive 0|1) */
 int g_jit_inline_tlb = 1;   /* 1: the TLB probe is emitted inline at every memory operand (no call; Liftoff code never inlines FN_TLB); 0: call the module-local probe */
-int g_jit_pgcache = 1;   /* 1: per-base-register page cache in front of the TLB (benchmarks) */
+int g_jit_pgcache = 1, g_jit_pagegen = 1;   /* pagegen 1: region validation by code-page generation counters (RVal) instead of per-block byte compares */   /* 1: per-base-register page cache in front of the TLB (benchmarks) */
 /* guest address on the stack → L_HOST (host pointer), or the fault exit.  slot: page-cache slot (base register, 16 = none) */
 static void e_host(Buf *B, int size, int write, u64 rip, int slot) {
   e_lset(B, L_EA);
@@ -250,15 +273,25 @@ static void e_host(Buf *B, int size, int write, u64 rip, int slot) {
     e_ld(B, 0x29, 3, MO_TLB); e_lget(B, L_EA); e_i64c(B, 12); OP(I64_SHR_U); e_i64c(B, 1); OP(I64_ADD); OP(I64_EQ);
     e_lget(B, L_EA); e_i64c(B, 4095); OP(I64_AND); e_i64c(B, size); OP(I64_ADD); e_i64c(B, 4096); OP(I64_LE_U); OP(I32_AND);
     e_if(B, 0x7E);
-      if (pc) { e_lget(B, L_EA); e_i64c(B, ~4095ull); OP(I64_AND); e_lset(B, L_PGA(slot)); e_lget(B, L_TE); e_ld(B, 0x29, 3, MO_TLB + 8); e_lget(B, L_PGA(slot)); OP(I64_SUB); e_ltee(B, L_PGH(slot)); e_lget(B, L_EA); OP(I64_ADD); }
-      else { e_lget(B, L_TE); e_ld(B, 0x29, 3, MO_TLB + 8); e_lget(B, L_EA); e_i64c(B, 4095); OP(I64_AND); OP(I64_ADD); }
+      if (pc) {   /* page cache: the exact tag means no translated code on the page → the cached pointer serves reads and writes alike */
+        e_lget(B, L_EA); e_i64c(B, ~4095ull); OP(I64_AND); e_lset(B, L_PGA(slot)); e_lget(B, L_TE); e_ld(B, 0x29, 3, MO_TLB + 8); e_lget(B, L_PGA(slot)); OP(I64_SUB); e_lset(B, L_PGH(slot));
+      }
+      e_lget(B, L_TE); e_ld(B, 0x29, 3, MO_TLB + 8); e_lget(B, L_EA); e_i64c(B, 4095); OP(I64_AND); OP(I64_ADD);
     e_else(B);
+      if (!write) {   /* second chance for reads: a page holding translated code (tag | TLB_CODE) — hits, never page-cached; writes to such a page take the slow path, which bumps the page generation */
+        e_lget(B, L_TE); e_ld(B, 0x29, 3, MO_TLB); e_lget(B, L_EA); e_i64c(B, 12); OP(I64_SHR_U); e_i64c(B, 1); OP(I64_ADD); e_i64c(B, TLB_CODE); OP(I64_OR); OP(I64_EQ);
+        e_lget(B, L_EA); e_i64c(B, 4095); OP(I64_AND); e_i64c(B, size); OP(I64_ADD); e_i64c(B, 4096); OP(I64_LE_U); OP(I32_AND);
+        e_if(B, 0x7E);
+          e_lget(B, L_TE); e_ld(B, 0x29, 3, MO_TLB + 8); e_lget(B, L_EA); e_i64c(B, 4095); OP(I64_AND); OP(I64_ADD);
+        e_else(B);
+      }
       e_lget(B, L_C); e_lget(B, L_EA); e_i64c(B, size); e_i32c(B, write); e_i64c(B, rip); OP(CALL); bu(B, FN_MEM);
+      if (!write) e_end(B);
     e_end(B);
     if (pc) e_end(B);
   } else { e_lget(B, L_C); e_lget(B, L_EA); e_i64c(B, size); e_i32c(B, write); e_i64c(B, rip); OP(CALL); bu(B, FN_TLB); }
   e_ltee(B, L_HOST); OP(I64_EQZ); OP(BR_IF); bu(B, lbl_fault(B));
-  if (write && B->cspan) e_vreset_if_code(B);
+  if (write && B->cspan) { if (B->rv) { e_lget(B, L_EA); e_i64c(B, B->clo - 16); OP(I64_SUB); e_i64c(B, B->cspan + 16); OP(I64_LT_U); e_if(B, 0); e_i64c(B, 1); e_lset(B, L_V0); e_end(B); B->dirtychk = 1; } else e_vreset_if_code(B); }
 }
 /* r/m operand helpers (memory forms assume L_HOST is set) */
 static void e_rm_load(Buf *B, const Dc *e, int sz) { if (e->mod == 3) e_ldreg(B, e->rm, sz); else { e_lget(B, L_HOST); e_ld(B, ld_u(sz), 0, 0); } }
@@ -438,7 +471,7 @@ static void e_step(Buf *B, u64 rip, u64 next, int k) {   /* interpreter single s
   e_lget(B, L_C); e_ld(B, 0x28, 2, CO_STATUS); OP(I32_EQZ); OP(I32_EQZ); OP(I32_OR);
   e_if(B, 0); e_xk(B, XK_STEP); e_icount(B, k); e_lget(B, L_RET); OP(RETURN); e_end(B);   /* the interpreter's registers are in memory: no spill on this exit, refill when going on */
   e_fill(B);
-  if (B->cspan) e_vreset(B);
+  if (B->cspan) { if (B->rv) { e_rv_changed(B); e_if(B, 0); e_xk(B, XK_STALE); e_exit_const(B, next, k); e_end(B); } else e_vreset(B); }
 }
 /* source operand of an ALU form: register, 8-bit register, or immediate (already masked to sz) */
 typedef struct { int reg; u64 imm; } Src;
@@ -739,7 +772,7 @@ static void e_tlb_func(Buf *B) {
   bu(B, 1); bu(B, 2); OP(0x7E);   /* locals 5 = pg, 6 = entry */
   e_lget(B, 1); e_i64c(B, 12); OP(I64_SHR_U); e_lset(B, 5);
   e_lget(B, 0); e_ld(B, 0x29, 3, CO_MEM); e_lget(B, 5); e_i64c(B, 4095); OP(I64_AND); e_i64c(B, 4); OP(I64_SHL); OP(I64_ADD); e_ltee(B, 6);
-  e_ld(B, 0x29, 3, MO_TLB); e_lget(B, 5); e_i64c(B, 1); OP(I64_ADD); OP(I64_EQ);
+  e_ld(B, 0x29, 3, MO_TLB); e_i64c(B, ~TLB_CODE); e_lget(B, 3); OP(0xAD); e_i64c(B, 62); OP(I64_SHL); OP(I64_OR); OP(I64_AND); e_lget(B, 5); e_i64c(B, 1); OP(I64_ADD); OP(I64_EQ);   /* tag & (~CODE | write << 62): reads ignore the code bit, writes to a code page miss */
   e_lget(B, 1); e_i64c(B, 4095); OP(I64_AND); e_lget(B, 2); OP(I64_ADD); e_i64c(B, 4096); OP(I64_LE_U); OP(I32_AND);
   e_if(B, 0x7E);
     e_lget(B, 6); e_ld(B, 0x29, 3, MO_TLB + 8); e_lget(B, 1); e_i64c(B, 4095); OP(I64_AND); OP(I64_ADD);
@@ -837,11 +870,27 @@ static int jit_translate(Cpu *c, Jb *b0) {
     }
     if (changed) for (int i = 0; i < nb; i++) { int live = calldead[i] ? 0 : FL_ALL; for (int q = blk[i].first + blk[i].n - 1; q >= blk[i].first; q--) { it[q].need = (u8)(it[q].fdef & live); live = (live & ~it[q].fdef) | it[q].fuse; } }
   }
-  Buf body = { g_jit_body, 0, sizeof g_jit_body, 0, bstarts, nb, 0, m32, retblk, 0, 0, m, 0, 0 }; Buf *B = &body; g_nrsite = 0; g_rsite_over = 0;
+  /* validation record: code pages (generation counters) + byte ranges (blocks merged when < 64 bytes apart) */
+  u32 rid = g_jit_pagegen && !b0->norv ? rv_alloc() : 0;
+  if (rid) { RVal *v = &g_rv[rid]; v->host = rbase; int ok = 1;
+    for (int i = 0; i < nb && ok; i++) {
+      for (u64 pg = blk[i].start >> 12; pg <= (blk[i].end - 1) >> 12; pg++) { u32 k; for (k = 0; k < v->npg; k++) if (v->pgaddr[k] == (u64)(size_t)mem_code_page(m, reg, pg << 12)) break;
+        if (k < v->npg) continue; u32 *pp = mem_code_page(m, reg, pg << 12); if (!pp || v->npg >= RV_PAGES) { ok = 0; break; } v->pgaddr[v->npg] = (u64)(size_t)pp; v->gen[v->npg] = *pp; v->npg++; }
+      u32 off = (u32)(blk[i].start - lo), len = (u32)(blk[i].end - blk[i].start);
+      if (v->nr && off <= v->r_off[v->nr - 1] + v->r_len[v->nr - 1] + 64) { u32 e = off + len, pe = v->r_off[v->nr - 1] + v->r_len[v->nr - 1]; if (e > pe) v->r_len[v->nr - 1] = e - v->r_off[v->nr - 1]; }
+      else if (v->nr < RV_RANGES) { v->r_off[v->nr] = off; v->r_len[v->nr] = len; v->nr++; } else ok = 0;
+    }
+    if (ok) v->hash = rv_hash(v); else { rv_release(rid); rid = 0; }
+  }
+  Buf body = { g_jit_body, 0, sizeof g_jit_body, 0, bstarts, nb, 0, m32, retblk, 0, 0, m, 0, 0, rid, 0 }; Buf *B = &body; g_nrsite = 0; g_rsite_over = 0;
   bu(B, 3); bu(B, 7); OP(0x7E); bu(B, 2); OP(0x7C); bu(B, L_NLOCALS - 13); OP(0x7E);   /* locals 4..10: i64, 11..12: f64, 13..15: i64 verified-block bits (zero at entry), 16: TLB entry scratch, 17..32: cached registers, 33: scratch, 34..67: page cache */
   { u64 clo = blk[0].start, chi = blk[0].end; for (int i = 1; i < nb; i++) { if (blk[i].start < clo) clo = blk[i].start; if (blk[i].end > chi) chi = blk[i].end; } B->clo = clo; B->cspan = chi - clo; }
   /* layout:  block $exit  block $fault  loop $dispatch  block $b(nb-1) … block $b0  br_table pc  end $b0 CODE0 end $b1 CODE1 … end $b(nb-1) CODE(nb-1)  end $dispatch  end $fault  <fault exit>  end $exit  <spill, return L_RET> */
   e_fill(B);
+  if (rid) {   /* page generations unchanged → every block counts as verified; changed → re-hash (jit_reval), stale → return 1 (c->rip is still the entry) */
+    const RVal *v = &g_rv[rid]; e_rv_changed(B);
+    e_if(B, 0); e_lget(B, L_C); e_i64c(B, (u64)(size_t)v); e_lget(B, L_PC); OP(CALL); bu(B, FN_REVAL); OP(I32_EQZ); e_if(B, 0); e_i64c(B, 1); OP(RETURN); e_end(B); e_end(B);
+  }
   OP(0x02); OP(0x40); OP(0x02); OP(0x40); OP(0x03); OP(0x40); for (int i = 0; i < nb; i++) { OP(0x02); OP(0x40); }
   e_lget(B, L_PC); OP(BR_TABLE); bu(B, nb); for (int i = 0; i < nb; i++) bu(B, i); bu(B, nb - 1);
   int steps = 0; B->depth = 0;
@@ -850,19 +899,20 @@ static int jit_translate(Cpu *c, Jb *b0) {
     B->blk = i; int k = 0;
     /* the block's code bytes must still be what we translated (self-modifying / regenerated code → stale, return 1): checked on the first entry of the block in this
        call of the region; the bit is dropped again by any store into the region's code range and by any interpreter step (loops re-entering a block skip the compare) */
-    e_lget(B, L_V(i)); e_i64c(B, 1ull << (i & 63)); OP(I64_AND); OP(I64_EQZ); e_if(B, 0);
+    if (!rid) { e_lget(B, L_V(i)); e_i64c(B, 1ull << (i & 63)); OP(I64_AND); OP(I64_EQZ); e_if(B, 0);
     for (u64 off = blk[i].start; off < blk[i].end; off += 8) {
       u32 nbyt = blk[i].end - off < 8 ? (u32)(blk[i].end - off) : 8; u64 w = 0; __builtin_memcpy(&w, rbase + (off - lo), nbyt); u64 msk = nbyt == 8 ? ~0ull : (1ull << (nbyt * 8)) - 1;
       e_lget(B, L_CODE); e_ld(B, 0x29, 0, off - lo); if (nbyt < 8) { e_i64c(B, msk); OP(I64_AND); } e_i64c(B, w); OP(I64_NE);
       e_if(B, 0); e_xk(B, XK_STALE); e_lget(B, L_C); e_i64c(B, blk[i].start); e_st(B, 0x37, 3, CO_RIP); e_i64c(B, 1); e_lset(B, L_RET); e_exit(B); e_end(B);   /* stale: c->rip = this block (earlier blocks of this run already executed) */
     }
-    e_lget(B, L_V(i)); e_i64c(B, 1ull << (i & 63)); OP(I64_OR); e_lset(B, L_V(i)); e_end(B);
+    e_lget(B, L_V(i)); e_i64c(B, 1ull << (i & 63)); OP(I64_OR); e_lset(B, L_V(i)); e_end(B); }
     for (int q = blk[i].first; q < blk[i].first + blk[i].n; q++) {
       const Dc *e = it[q].e; u64 next = it[q].rip + e->len; if (m32) next = (u32)next;
       int done = 0;
       if (it[q].kind != K_STEP) { u32 save = B->n; int d = B->depth; done = e_insn(B, &it[q], rbase + (it[q].rip - lo), m32, k); if (!done) { B->n = save; B->depth = d; } }
-      if (done) k++;
+      if (done) { k++; if (B->dirtychk && it[q].kind != K_TERM) { e_lget(B, L_V0); OP(I32_WRAP); e_if(B, 0); e_xk(B, XK_STALE); e_exit_const(B, next, k); e_end(B); } }
       else { e_step(B, it[q].rip, next, k); steps++; if (it[q].kind == K_TERM) e_goto(B, next, k); }
+      B->dirtychk = 0;
     }
     if (!blk[i].term) { if (i + 1 < nb && blk[i + 1].start == blk[i].end) e_icount(B, k); else { e_xk(B, XK_FALL); e_exit_const(B, blk[i].end, k); } }
   }
@@ -872,7 +922,7 @@ static int jit_translate(Cpu *c, Jb *b0) {
   OP(0x0B);   /* end $exit */
   e_spill(B); e_lget(B, L_RET); OP(RETURN);
   OP(0x0B);   /* end of function */
-  if (B->n > B->cap || B->depth != 0) return 0;
+  if (B->n > B->cap || B->depth != 0) { rv_release(rid); return 0; }
   jit_fix_regsites(B);
   Buf tlb = { g_jit_tlb, 0, sizeof g_jit_tlb, 0, 0, 0, 0, 0 }; e_tlb_func(&tlb);
   /* module: types, imports (memory + helpers), functions, export, code */
@@ -881,17 +931,18 @@ static int jit_translate(Cpu *c, Jb *b0) {
   { Buf s = { g_jit_mod + 30000, 0, 4096, 0, 0, 0, 0, 0 }; Buf *S = &s;   /* scratch for section payloads (overwritten later by the code section) */
     #define SECTION(id) do { OP(id); bu(B, S->n); bbytes(B, S->b, S->n); S->n = 0; } while (0)
     /* types: 0 (i64,i64,i32,i64)->i64 region   1 (i64,i64,i64,i32,i64)->i64 mem/tlb   2 (i64,i32,i64,i64,i32)->i64 alu   3 (i64,i32,i64,i32,i32)->i64 shift   4 (i64,i64)->i64 step */
-    bu(S, 5);
+    bu(S, 6);
     b8(S, 0x60); bu(S, 4); b8(S, 0x7E); b8(S, 0x7E); b8(S, 0x7F); b8(S, 0x7E); bu(S, 1); b8(S, 0x7E);
     b8(S, 0x60); bu(S, 5); b8(S, 0x7E); b8(S, 0x7E); b8(S, 0x7E); b8(S, 0x7F); b8(S, 0x7E); bu(S, 1); b8(S, 0x7E);
     b8(S, 0x60); bu(S, 5); b8(S, 0x7E); b8(S, 0x7F); b8(S, 0x7E); b8(S, 0x7E); b8(S, 0x7F); bu(S, 1); b8(S, 0x7E);
     b8(S, 0x60); bu(S, 5); b8(S, 0x7E); b8(S, 0x7F); b8(S, 0x7E); b8(S, 0x7F); b8(S, 0x7F); bu(S, 1); b8(S, 0x7E);
     b8(S, 0x60); bu(S, 2); b8(S, 0x7E); b8(S, 0x7E); bu(S, 1); b8(S, 0x7E);
+    b8(S, 0x60); bu(S, 3); b8(S, 0x7E); b8(S, 0x7E); b8(S, 0x7F); bu(S, 1); b8(S, 0x7F);   /* 5 (i64,i64,i32)->i32 reval */
     SECTION(1);
-    bu(S, 5);
+    bu(S, 6);
     bu(S, 3); bbytes(S, "env", 3); bu(S, 6); bbytes(S, "memory", 6); b8(S, 0x02); b8(S, 0x04); bu(S, 1);   /* memory64, min 1 page, no max */
-    static const char *const names[4] = { "jit_step", "jit_mem", "jit_alu", "jit_shift" }; static const u8 types[4] = { 4, 1, 2, 3 };
-    for (int i = 0; i < 4; i++) { bu(S, 3); bbytes(S, "env", 3); u32 L = 0; while (names[i][L]) L++; bu(S, L); bbytes(S, names[i], L); b8(S, 0x00); bu(S, types[i]); }
+    static const char *const names[5] = { "jit_step", "jit_mem", "jit_alu", "jit_shift", "jit_reval" }; static const u8 types[5] = { 4, 1, 2, 3, 5 };
+    for (int i = 0; i < 5; i++) { bu(S, 3); bbytes(S, "env", 3); u32 L = 0; while (names[i][L]) L++; bu(S, L); bbytes(S, names[i], L); b8(S, 0x00); bu(S, types[i]); }
     SECTION(2);
     bu(S, 2); bu(S, 0); bu(S, 1); SECTION(3);   /* f: type 0, tlb: type 1 */
     bu(S, 1); bu(S, 1); bbytes(S, "f", 1); b8(S, 0x00); bu(S, FN_BLOCK); SECTION(7);
@@ -899,12 +950,12 @@ static int jit_translate(Cpu *c, Jb *b0) {
   }
   { u32 lb = body.n < 128 ? 1 : body.n < 16384 ? 2 : 3, lt = tlb.n < 128 ? 1 : 2;
     OP(10); bu(B, 1 + lb + body.n + lt + tlb.n); bu(B, 2); bu(B, body.n); bbytes(B, body.b, body.n); bu(B, tlb.n); bbytes(B, tlb.b, tlb.n); }
-  if (B->n > B->cap) return 0;
+  if (B->n > B->cap) { rv_release(rid); return 0; }
   u32 reuse = g_jit_nfree ? g_jit_free[--g_jit_nfree] : 0;
   u32 fn = host_jit_compile(mod.b, mod.n, reuse);
-  if (!fn || fn >= JIT_MAX_FN) { g_jit_st.fails++; if (reuse) g_jit_free[g_jit_nfree++] = reuse; return 0; }
+  if (!fn || fn >= JIT_MAX_FN) { g_jit_st.fails++; if (reuse) g_jit_free[g_jit_nfree++] = reuse; rv_release(rid); return 0; }
   if (fn > g_jit_fn_hi) g_jit_fn_hi = fn;
-  g_fnexit[fn] = 0;
+  g_fnexit[fn] = 0; rv_release(g_rv_of_fn[fn]); g_rv_of_fn[fn] = rid; if (rid) g_rv[rid].fn = fn;
   g_jit_owned[fn >> 3] |= (u8)(1 << (fn & 7));
   /* publish every block start as an entry; the hot one (rip) LAST: jb_lookup evicts 2-way set neighbours, so publishing another
      block of this region could otherwise evict b0's slot and leave it describing a different block (wrong pc -> wrong code run) */
@@ -919,16 +970,16 @@ static int jit_translate(Cpu *c, Jb *b0) {
   g_jit_st.blocks++; g_jit_st.insns += nit; g_jit_st.steps += steps; g_jit_st.bytes += mod.n;
   if (hot >= 0) { Jb *b = jb_lookup(rip, m, m32); if (b->fn) jit_drop(b);
     b->rip = rip; b->mem = m; b->m32 = m32; b->fn = fn; b->pc = (u16)hot; b->code = rbase; b->gen = gen; b->count = JIT_HOT; b->rt = rt; g_fnref[fn]++; }
-  if (--g_fnref[fn] == 0) { if (g_jit_nfree < JIT_MAX_FN) g_jit_free[g_jit_nfree++] = fn; return 0; }   /* release the hold */
+  if (--g_fnref[fn] == 0) { fn_free(fn); return 0; }   /* release the hold */
   return hot >= 0;
 }
-static void jit_drop(Jb *b) { if (b->fn && g_fnref[b->fn] && --g_fnref[b->fn] == 0 && g_jit_nfree < JIT_MAX_FN) g_jit_free[g_jit_nfree++] = b->fn; b->fn = 0; b->rip = 0; b->count = 0; }
+static void jit_drop(Jb *b) { if (b->fn && g_fnref[b->fn] && --g_fnref[b->fn] == 0) fn_free(b->fn); b->fn = 0; b->rip = 0; b->count = 0; }
 /* drop every entry of one region; retrans ≠ 0 keeps the entries as warm, untranslated blocks (translated again after a few visits; 1: counts as a retranslation, rt + 1) */
-static void jit_drop_fn(u32 fn, int retrans) { if (!fn) return;
+static void jit_drop_fn(u32 fn, int retrans) { if (!fn) return;   /* retrans 2: translate again without page-generation validation */
   for (int i = 0; i < (1 << JB_BITS); i++) { Jb *b = &g_jb[i]; if (b->fn != fn) continue;
     if (!retrans) { jit_drop(b); continue; }
-    if (g_fnref[fn] && --g_fnref[fn] == 0 && g_jit_nfree < JIT_MAX_FN) g_jit_free[g_jit_nfree++] = fn;
-    b->fn = 0; b->count = JIT_HOT - 16; if (retrans == 1 && b->rt < 255) b->rt++; } }
+    if (g_fnref[fn] && --g_fnref[fn] == 0) fn_free(fn);
+    b->fn = 0; b->count = JIT_HOT - 16; if (retrans == 1 && b->rt < 127) b->rt++; if (retrans == 2) b->norv = 1; } }
 typedef u64 (*JitFn)(Cpu *c, const u8 *code, int pc, u64 limit);
 /* called by cpu_run at a block start: runs translated blocks back to back while they chain; returns 1 if any block ran */
 /* a new session (x64_load): forget every translated region and every block record of the previous one */
@@ -937,6 +988,7 @@ static void jit_session_reset(void) {
   __builtin_memset(g_jb, 0, sizeof g_jb);
   /* every table slot is reusable now (the host replaces the module in a reused slot, so the old regions can be collected) */
   g_jit_nfree = 0; for (u32 fn = g_jit_fn_hi; fn >= 1 && g_jit_nfree < JIT_MAX_FN; fn--) if (g_jit_owned[fn >> 3] & (1 << (fn & 7))) { g_fnref[fn] = 0; g_jit_free[g_jit_nfree++] = fn; }
+  __builtin_memset(g_rv_of_fn, 0, sizeof g_rv_of_fn); g_rv_free = 0; g_rv_hi = 1;
 }
 static inline int jit_enter(Cpu *c, u64 budget) {
   int ran = 0, ind = 0; u64 ic0 = c->icount;
@@ -955,13 +1007,14 @@ static inline int jit_enter(Cpu *c, u64 budget) {
     u64 nx = ((JitFn)(size_t)b->fn)(c, b->code, b->pc, ic0 + budget);
     if (c->jit_fault) { c->jit_fault = 0; if (c->status == RUN_FAULT && c->exc_code && w32_hw_exception(c)) nx = c->rip; }   /* handler found: status RUN_OK again, continue at it */
     if (nx == 1) {   /* a block's code bytes changed (runtime-patched stubs, regenerated code): c->rip = that block; blocks before it in this run did execute */
-      g_jit_st.stale++; jit_drop(b);
+      g_jit_st.stale++; if (g_rv_of_fn[b->fn]) jit_drop_fn(b->fn, 0); else jit_drop(b);
       if (c->rip != entry) { Jb *sb = jb_find(c->rip, c->mem, c->mode32); if (sb) jit_drop(sb); c->hist[c->hist_i++ & 4095] = c->rip | (1ull << 63); return 1; }
       return ran; }
     g_jit_st.exec++; ran = 1; g_jit_xk[c->jit_xk < XK_N ? c->jit_xk : 0]++;
     if (c->jit_site) { u64 site = c->jit_site; c->jit_site = 0; ibt_record(site, c->mem, nx); g_jit_st.x_ind++; ind = 1; }   /* an indirect jump/call left the region: profile the target (the next translation lays it out inside) */
     if (++g_fnexit[b->fn] >= (u32)(JIT_RETRANS_EXITS << b->rt) && c->status == RUN_OK) {   /* leaves the region a lot: translate it again, now with every target that has run since (bounded, with a doubling threshold) */
       if (b->rt < JIT_MAX_RETRANS) { g_jit_st.retrans++; jit_drop_fn(b->fn, 1); } else g_fnexit[b->fn] = 0; b = 0; }
+    if (g_rv_tired) { if (b && g_rv_tired == b->fn) { jit_drop_fn(b->fn, 2); b = 0; } g_rv_tired = 0; }   /* its code page is written constantly: per-block byte compares are cheaper than re-hashing at every entry */
     c->rip = nx; c->hist[c->hist_i++ & 4095] = nx | (1ull << 63);   /* region exit target (bit 63 marks it in the history dump) */
     if (c->status != RUN_OK || c->icount - ic0 >= budget || nx - G_SHIM_BASE < G_SHIM_SIZE) return 1;
   }
@@ -970,7 +1023,7 @@ const char *jit_stats_text(void) {
   static char s[1100];
   e_snprintf(s, sizeof s, "blocks=%llu exec=%llu insns=%llu steps=%llu bytes=%llu stale=%llu nodc=%llu fails=%llu retrans=%llu full=%llu x_ind=%llu x_jit=%llu x_cold=%llu dsteps=%llu dinterp=%llu", (unsigned long long)g_jit_st.blocks, (unsigned long long)g_jit_st.exec, (unsigned long long)g_jit_st.insns,
              (unsigned long long)g_jit_st.steps, (unsigned long long)g_jit_st.bytes, (unsigned long long)g_jit_st.stale, (unsigned long long)g_jit_st.nodc, (unsigned long long)g_jit_st.fails, (unsigned long long)g_jit_st.retrans, (unsigned long long)g_jit_st.full, (unsigned long long)g_jit_st.x_ind, (unsigned long long)g_jit_st.x_jit, (unsigned long long)g_jit_st.x_cold, (unsigned long long)g_jit_st.dsteps, (unsigned long long)g_jit_st.dinterp);
-  { int L = 0; while (s[L]) L++; L += e_snprintf(s + L, sizeof s - L, " xk: direct=%llu fall=%llu ret=%llu ind=%llu slice=%llu step=%llu xstale=%llu", (unsigned long long)g_jit_xk[XK_DIRECT], (unsigned long long)g_jit_xk[XK_FALL], (unsigned long long)g_jit_xk[XK_RET], (unsigned long long)g_jit_xk[XK_IND], (unsigned long long)g_jit_xk[XK_SLICE], (unsigned long long)g_jit_xk[XK_STEP], (unsigned long long)g_jit_xk[XK_STALE]); }
+  { int L = 0; while (s[L]) L++; L += e_snprintf(s + L, sizeof s - L, " xk: direct=%llu fall=%llu ret=%llu ind=%llu slice=%llu step=%llu xstale=%llu reval=%llu/%llu", (unsigned long long)g_jit_xk[XK_DIRECT], (unsigned long long)g_jit_xk[XK_FALL], (unsigned long long)g_jit_xk[XK_RET], (unsigned long long)g_jit_xk[XK_IND], (unsigned long long)g_jit_xk[XK_SLICE], (unsigned long long)g_jit_xk[XK_STEP], (unsigned long long)g_jit_xk[XK_STALE], (unsigned long long)g_jit_st.reval, (unsigned long long)g_jit_st.reval_bad); }
   /* top step opcodes */
   { int L = 0; while (s[L]) L++; for (int pass = 0; pass < 12 && L < (int)sizeof s - 40; pass++) { int best = -1; u32 bv = 0; for (int k = 0; k < 1024; k++) if (g_step_hist[k] > bv) { bv = g_step_hist[k]; best = k; } if (best < 0 || !bv) break;
       L += e_snprintf(s + L, sizeof s - L, " %s%s%02x:%u", best >= 512 ? "p" : "", (best & 511) >= 256 ? "0f" : "", best & 255, bv); g_step_hist[best] = 0; } }

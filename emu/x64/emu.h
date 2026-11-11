@@ -86,12 +86,13 @@ u64 x64_gl_alloc(u64 len); void *x64_gl_ptr(u64 addr, u64 len, int write);   /* 
 
 /* ---------- guest memory ---------- */
 #define MAX_REGIONS 4096   /* V8 reserves hundreds of 1 MB chunks; each large reservation is its own region (lazy host pages) */
-typedef struct { u64 base, size; u8 *host; const char *name; u32 prot; } Region;
+typedef struct { u64 base, size; u8 *host; const char *name; u32 prot; u32 *pgen; u8 *pcode; } Region;   /* pgen/pcode (lazy, per 4 KB page): generation bumped by every write into a page that holds translated code (pcode bit) — the JIT validates a region by comparing generations instead of code bytes */
 int emu_free(void *p);                 /* 1 = memory returned to the host (native), 0 = not freeable (wasm arena) */
 
 #define TLB_BITS 12
 #define TLB_N (1 << TLB_BITS)
-typedef struct { u64 tag; u8 *host; } Tlb;   /* tag = page number + 1 (0 = empty); host = host address of that 4 KB page */
+typedef struct { u64 tag; u8 *host; } Tlb;   /* tag = page number + 1 (0 = empty) | TLB_CODE on a page holding translated code (reads hit, writes take the slow path, which bumps the page generation); host = host address of that 4 KB page */
+#define TLB_CODE (1ull << 62)
 typedef struct {
   Region  r[MAX_REGIONS];
   int     n;
@@ -111,12 +112,13 @@ static inline u8 *mem_ptr_fast(Mem *m, u64 addr, u64 size, int write) {
   if (write) return mem_ptr(m, addr, size, write);
 #endif
   u64 pg = addr >> 12; Tlb *t = &m->tlb[pg & (TLB_N - 1)];
-  if (t->tag == pg + 1) { u64 o = addr & 4095; if (o + size <= 4096) return t->host + o; }
+  if ((write ? t->tag : t->tag & ~TLB_CODE) == pg + 1) { u64 o = addr & 4095; if (o + size <= 4096) return t->host + o; }
   return mem_ptr(m, addr, size, write);
 }
 extern u32 g_mem_gen;   /* global generation: a Mem gets a fresh, never-reused value on every flush and on first use */
 static inline u32 mem_gen(Mem *m) { if (!m->gen) m->gen = ++g_mem_gen; return m->gen; }
 static inline void mem_tlb_flush(Mem *m) { for (int i = 0; i < TLB_N; i++) m->tlb[i].tag = 0; m->gen = ++g_mem_gen; }
+u32 *mem_code_page(Mem *m, Region *r, u64 addr);   /* marks the page of addr as holding translated code; returns its generation counter (NULL: not trackable) */
 Region *mem_region(Mem *m, u64 addr);
 void mem_release(Mem *m);                                     /* give all regions back to the pool */
 void *emu_alloc(size_t n); int emu_reserve(size_t n);                                    /* zeroed host memory, never freed (bump) */

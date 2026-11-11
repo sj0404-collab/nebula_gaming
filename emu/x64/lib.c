@@ -248,7 +248,7 @@ u8 *mem_map(Mem *m, u64 base, u64 size, const char *name) {
   u8 *h = pool_take(size); if (!h) h = emu_alloc((size_t)size);
   if (!h) return 0;
   Region *r = &m->r[m->n++];
-  r->base = base; r->size = size; r->host = h; r->name = name; r->prot = 7;
+  r->base = base; r->size = size; r->host = h; r->name = name; r->prot = 7; r->pgen = 0; r->pcode = 0;
   return h;
 }
 /* drop a region created by mem_map (VirtualFree MEM_RELEASE of a large reservation); the host memory goes back to the pool (wasm) or the OS (native) */
@@ -276,9 +276,20 @@ u8 *mem_ptr(Mem *m, u64 addr, u64 size, int write) {
   m->fault_addr = addr; m->fault_write = write;
   return 0;
 hit:;
-  u64 pg = addr >> 12, pb = pg << 12;   /* remember the page if it lies fully inside the region */
-  if (pb >= r->base && pb + 4096 <= r->base + r->size) { Tlb *t = &m->tlb[pg & (TLB_N - 1)]; t->tag = pg + 1; t->host = r->host + (pb - r->base); }
+  u64 pg = addr >> 12, pb = pg << 12; int code = 0;   /* remember the page if it lies fully inside the region */
+  if (r->pcode) {   /* pages holding translated code: a write bumps their generation (the JIT re-checks its regions); such a page never gets a write TLB entry */
+    u64 p0 = (addr - r->base) >> 12, p1 = (addr + size - 1 - r->base) >> 12;
+    for (u64 p = p0; p <= p1; p++) if (r->pcode[p >> 3] & (1u << (p & 7))) { if (write) r->pgen[p]++; if (p == p0) code = 1; }
+  }
+  if (pb >= r->base && pb + 4096 <= r->base + r->size) { Tlb *t = &m->tlb[pg & (TLB_N - 1)]; t->tag = (pg + 1) | (code ? TLB_CODE : 0); t->host = r->host + (pb - r->base); }
   return r->host + (addr - r->base);
+}
+u32 *mem_code_page(Mem *m, Region *r, u64 addr) {
+  if (addr < r->base || addr >= r->base + r->size) return 0;
+  if (!r->pgen) { u64 n = r->size >> 12; if (n > (1u << 20)) return 0; r->pgen = emu_alloc((size_t)n * 4); r->pcode = emu_alloc((size_t)(n >> 3) + 1); if (!r->pgen || !r->pcode) { r->pgen = 0; r->pcode = 0; return 0; } }
+  u64 p = (addr - r->base) >> 12, pg = addr >> 12; r->pcode[p >> 3] |= (u8)(1u << (p & 7));
+  Tlb *t = &m->tlb[pg & (TLB_N - 1)]; if (t->tag == pg + 1) t->tag |= TLB_CODE;
+  return &r->pgen[p];
 }
 
 int e_strnicmp(const char *a, const char *b, size_t n) { for (size_t i = 0; i < n; i++) { int x = (u8)a[i], y = (u8)b[i]; if (x >= 'A' && x <= 'Z') x += 32; if (y >= 'A' && y <= 'Z') y += 32; if (x != y) return x - y; if (!x) return 0; } return 0; }
