@@ -105,7 +105,7 @@ export class Disk {
         }
         this.onActivity?.();
       }
-    })().finally(() => { this.flushing = null; });
+    })().finally(() => { this.flushing = null; this.onActivity?.(); });
     return this.flushing;
   }
   /** Only report an installation as durable after IndexedDB accepted its whole batch. */

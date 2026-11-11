@@ -458,6 +458,7 @@ export default function X64App() {
 
   const current = exes.find(e => e.id === selected) ?? null;
   const running = stats?.status === 'running' || stats?.status === 'waiting-stdin';
+  const runWarning = stats?.status === 'fault' || (stats?.status === 'exited' && stats.exitCode !== 0); 
   /* phones: a program that opens a window takes the whole screen (game mode) once per run; the user can still leave with the ⤡ button */
   const autoFs = useRef(false);
   useEffect(() => { if (!running) { autoFs.current = false; return; } if (touch && stats?.hasWindow && !fs && !autoFs.current) { autoFs.current = true; setTab('screen'); toggleFullscreen(); } }, [running, stats?.hasWindow, touch, fs, toggleFullscreen]);
@@ -961,19 +962,19 @@ export default function X64App() {
               {/* what is running / just ran */}
               {current && (stats || fetching) && (
                 <div className="m-3 rounded-lg border border-slate-200 bg-white p-3" data-x64-activity={running ? 'running' : stats?.status ?? 'idle'}>
-                  <div className="flex items-center gap-2">
-                    {running ? <Loader2 size={16} className="shrink-0 animate-spin text-indigo-600" /> : stats?.status === 'fault' ? <XCircle size={16} className="shrink-0 text-rose-600" /> : <CheckCircle2 size={16} className="shrink-0 text-emerald-600" />}
+                  <div className="flex items-center gap-2" data-run-result={runWarning ? 'warning' : running ? 'running' : stats?.status ?? 'idle'}>
+                    {running ? <Loader2 size={16} className="shrink-0 animate-spin text-indigo-600" /> : runWarning ? <XCircle size={16} className="shrink-0 text-rose-600" /> : stats?.status === 'exited' ? <CheckCircle2 size={16} className="shrink-0 text-emerald-600" /> : <Square size={16} className="shrink-0 text-slate-500" />}
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-[13px] font-semibold">{current.kind === 'installer' ? 'Installing: ' : ''}{current.path ?? current.name}{stats?.title && stats.title !== current.name ? <span className="font-normal text-slate-500"> — {stats.title}</span> : null}</div>
                       <div className="text-[10px] text-slate-500">
-                        {fetching ? fetching : running ? (stats?.status === 'waiting-stdin' ? 'waiting for console input' : stats?.hasWindow ? `running · ${stats.frames} frames · ${stats.procs} process${stats.procs === 1 ? '' : 'es'}` : 'starting…') : stats?.status === 'exited' ? `finished (exit code ${stats.exitCode}) in ${((stats.elapsedMs) / 1000).toFixed(1)} s` : stats?.status === 'fault' ? `stopped with an error: ${stats.error}` : stats?.status}
-                        {stats ? ` · ${stats.mips.toFixed(0)} MIPS` : ''}{padInfo ? <span> · 🎮 {padInfo}</span> : null}{disk.writes ? ` · ${disk.writes} files written (${(disk.bytes / 1048576).toFixed(1)} MB)${disk.queued ? ' · saving…' : ' · saved'}` : ''}
+                        {fetching ? fetching : running ? (stats?.status === 'waiting-stdin' ? 'waiting for console input' : stats?.hasWindow ? `running · ${stats.frames} frames · ${stats.procs} process${stats.procs === 1 ? '' : 'es'}` : 'starting…') : stats?.status === 'exited' ? `${stats.exitCode === 0 ? 'finished' : 'exited with a non-zero code; check the report'} (exit code ${stats.exitCode}) in ${((stats.elapsedMs) / 1000).toFixed(1)} s` : stats?.status === 'fault' ? `stopped with an error: ${stats.error}` : stats?.status}
+                        {stats ? ` · ${stats.mips.toFixed(0)} MIPS` : ''}{padInfo ? <span> · 🎮 {padInfo}</span> : null}{disk.writes ? ` · ${disk.writes} files written (${(disk.bytes / 1048576).toFixed(1)} MB)${disk.queued ? ' · saving… do not close the app' : rtRef.current?.disk.lastError ? ' · storage error; check diagnostics' : ' · saved'}` : ''}
                       </div>
                     </div>
                     {running && stats?.hasWindow && <button data-x64-show-screen onClick={() => { autoTabRef.current = false; setTab('screen'); }} className="flex items-center gap-1 rounded bg-indigo-600 px-2 py-1 font-semibold text-white hover:bg-indigo-700"><Monitor size={12} /> Show</button>}
                     {running && <button onClick={stop} className="flex items-center gap-1 rounded border border-slate-300 px-2 py-1 hover:bg-slate-50"><Square size={11} /> Stop</button>}
                     {!running && current.source === 'file' && current.kind === 'program' && current.info.ok && <button data-x64-add-library onClick={() => { void addToLibrary(current); }} className="flex items-center gap-1 rounded border border-indigo-300 bg-indigo-50 px-2 py-1 font-semibold text-indigo-800 hover:bg-indigo-100"><PackagePlus size={12} /> Add to library</button>}
-                    {!running && stats?.status === 'fault' && <button onClick={() => setTab('report')} className="rounded border border-rose-300 bg-rose-50 px-2 py-1 text-rose-800">Details</button>}
+                    {!running && runWarning && <button onClick={() => setTab('report')} className="rounded border border-rose-300 bg-rose-50 px-2 py-1 text-rose-800">Details</button>}
                   </div>
                   {running && current.kind === 'installer' && <div className="mt-2 rounded bg-indigo-50 px-2 py-1 text-[11px] text-indigo-900">The setup program is running with its own wizard — it appears on the Screen tab as soon as it draws its first window. Finish it there; the installed program is added here when setup exits.</div>}
                 </div>
@@ -1207,7 +1208,7 @@ function PeReport({ e, stats, log, apiStats, jit, consoleText, storageDiag, runt
           {stats.report && <pre className="mt-2 whitespace-pre-wrap rounded bg-amber-50 p-2 font-mono text-[10px] text-amber-900">{stats.report}</pre>}
           {jit && <div className="mt-1 text-slate-600" data-x64-jit={jit.enabled ? jit.modules : 'off'}>x86&rarr;wasm JIT: {jit.enabled ? `${jit.modules} regions (${(jit.bytes / 1024).toFixed(0)} KB wasm, compiled in ${jit.compileMs.toFixed(0)} ms${jit.failed ? `, ${jit.failed} failed` : ''})` : 'off'}{jit.stats ? <span className="font-mono text-[10px]"> &middot; {jit.stats}</span> : null}</div>}
           {apiStats && <details className="mt-2"><summary className="cursor-pointer text-slate-500">Win32 API calls ({apiStats.split(',').length})</summary><div className="mt-1 break-words font-mono text-[10px] text-slate-600">{apiStats.split(',').join('  ')}</div></details>}
-          {log.length > 0 && <details className="mt-2"><summary className="cursor-pointer text-slate-500">Emulator log ({log.length})</summary><pre className="mt-1 max-h-40 overflow-auto font-mono text-[10px]">{log.join('\n')}</pre></details>}
+          {log.length > 0 && <details className="mt-2"><summary className="cursor-pointer text-slate-500">Emulator log ({log.length})</summary><pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px]" data-emulator-log>{log.join('\n')}</pre></details>}
         </div>
       )}
       <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-[10px] leading-relaxed text-slate-600">

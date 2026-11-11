@@ -23,7 +23,7 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - name: Test report copying and storage preservation
         run: |
-          E2E_GREP='report copying and read-only storage diagnostics' node e2e/run.mjs
+          E2E_GREP='/report copying and read-only storage diagnostics|x64: hello.exe/' node e2e/run.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:

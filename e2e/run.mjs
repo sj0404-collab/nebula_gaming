@@ -432,6 +432,9 @@ await test('x64: hello.exe (UCRT console, printf/qsort/malloc/math) runs to exit
   expect(/sqrt\(2\)=1\.414214 sin\(1\)=0\.8415 pow\(2,10\)=1024/.test(con), 'math/printf wrong');
   expect(/18446744073709551615/.test(con), '%llu wrong');
   expect(/code 7/.test(await w.innerText()), 'exit code 7 not reported');
+  await w.locator('[data-x64-tab="library"]').click();
+  expect(await w.locator('[data-run-result="warning"]').count() === 1, 'nonzero exit shown as success');
+  expect((await w.locator('[data-x64-activity]').innerText()).includes('check the report'), 'nonzero exit warning missing');
   await page.screenshot({ path: resolve(SHOTS, 'x64-hello.png') });
   await closeAll();
 });
