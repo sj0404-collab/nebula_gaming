@@ -1,0 +1,55 @@
+name: jitbench (x86→wasm JIT speed on bench.exe, no browser)
+on:
+  push:
+    branches: [jitbench]
+  workflow_dispatch:
+    inputs:
+      interp:
+        description: 'also run bench.exe on the interpreter (--jit 0) for comparison'
+        default: '0'
+run-name: "jitbench · ${{ github.sha }}"
+permissions:
+  contents: read
+jobs:
+  bench:
+    name: build wasm64 + run bench.exe / bench32.exe under the JIT (node 24)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with: { version: 0.17.0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - name: Build wasm64 module + native runner
+        run: ZIG=zig ./emu/x64/build.sh
+      - name: Build bench.exe (x64 + x86) and jitdiff
+        run: |
+          zig cc -target x86_64-windows-gnu -O2 -o /tmp/bench64.exe emu/tests/bench.c
+          zig cc -target x86-windows-gnu -O2 -o /tmp/bench32.exe emu/tests/bench.c
+          zig cc -target x86_64-windows-gnu -O2 -o /tmp/jitdiff.exe emu/tests/jitdiff.c
+          zig cc -target x86-windows-gnu -O2 -o /tmp/jitdiff32.exe emu/tests/jitdiff.c
+      - name: Reference checksums (native interpreter)
+        run: |
+          for exe in /tmp/bench64.exe /tmp/bench32.exe; do echo "== native $exe"; timeout 900 ./emu/x64/x64run --quiet --no-stdin --max-ms 600000 "$exe" | tee "/tmp/$(basename $exe .exe).native.txt"; done
+      - name: bench under the JIT
+        run: |
+          for exe in /tmp/bench64.exe /tmp/bench32.exe; do
+            echo "== JIT $exe"; node emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 "$exe" 2>&1 | tee "/tmp/$(basename $exe .exe).jit.txt" || true
+            # checksums must match the native interpreter
+            if ! diff <(grep -a ' ms  ' "/tmp/$(basename $exe .exe).native.txt" | awk '{print $1, $4}') <(grep -a ' ms  ' "/tmp/$(basename $exe .exe).jit.txt" | awk '{print $1, $4}'); then echo "::error::$exe: JIT checksums differ from the interpreter"; exit 1; fi
+          done
+      - name: bench on the wasm interpreter (--jit 0)
+        if: github.event.inputs.interp == '1'
+        run: for exe in /tmp/bench64.exe /tmp/bench32.exe; do echo "== interp $exe"; node emu/tests/wasm_run.mjs --max-ms 900000 --jit 0 "$exe" 2>&1 | tail -15 || true; done
+      - name: jitdiff (JIT vs interpreter, bit-exact results)
+        run: |
+          for exe in /tmp/jitdiff.exe /tmp/jitdiff32.exe; do
+            node emu/tests/wasm_run.mjs --max-ms 600000 --jit 0 "$exe" 2>/dev/null | grep -a 'camera\|scalar\|cmp\|packed\|asm\|done' > /tmp/jd_interp.txt || true
+            node emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 "$exe" 2>/dev/null | grep -a 'camera\|scalar\|cmp\|packed\|asm\|done' > /tmp/jd_jit.txt || true
+            if cmp -s /tmp/jd_interp.txt /tmp/jd_jit.txt; then echo "$exe: JIT == interpreter ($(wc -l < /tmp/jd_jit.txt) lines)"; else echo "::error::$exe: JIT differs from the interpreter"; diff /tmp/jd_interp.txt /tmp/jd_jit.txt | head -40; exit 1; fi
+          done
+      - name: summary
+        if: always()
+        run: |
+          { echo "## bench.exe"; for f in /tmp/bench64 /tmp/bench32; do echo; echo "### $(basename $f)"; echo '```'; echo "-- native interpreter"; cat $f.native.txt 2>/dev/null; echo "-- JIT (node 24)"; cat $f.jit.txt 2>/dev/null; echo '```'; done; } >> $GITHUB_STEP_SUMMARY
