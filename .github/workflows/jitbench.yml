@@ -29,6 +29,8 @@ jobs:
           zig cc -target x86-windows-gnu -O2 -o /tmp/bench32.exe emu/tests/bench.c
           zig cc -target x86_64-windows-gnu -O2 -o /tmp/jitdiff.exe emu/tests/jitdiff.c
           zig cc -target x86-windows-gnu -O2 -o /tmp/jitdiff32.exe emu/tests/jitdiff.c
+          zig cc -target x86_64-windows-gnu -O2 -o /tmp/smc64.exe emu/tests/smc.c
+          zig cc -target x86-windows-gnu -O2 -o /tmp/smc32.exe emu/tests/smc.c
       - name: Reference checksums (native interpreter)
         run: |
           for exe in /tmp/bench64.exe /tmp/bench32.exe; do echo "== native $exe"; timeout 900 ./emu/x64/x64run --quiet --no-stdin --max-ms 600000 "$exe" | tee "/tmp/$(basename $exe .exe).native.txt"; done
@@ -38,6 +40,13 @@ jobs:
             echo "== JIT $exe"; node emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 "$exe" 2>&1 | tee "/tmp/$(basename $exe .exe).jit.txt" || true
             # checksums must match the native interpreter
             if ! diff <(grep -a ' ms  ' "/tmp/$(basename $exe .exe).native.txt" | awk '{print $1, $4}') <(grep -a ' ms  ' "/tmp/$(basename $exe .exe).jit.txt" | awk '{print $1, $4}'); then echo "::error::$exe: JIT checksums differ from the interpreter"; exit 1; fi
+          done
+      - name: self-modifying code (patched callees, data next to code, memcpy'd code) — JIT vs interpreter, re-run
+        run: |
+          for b in 64 32; do
+            ./emu/x64/x64run --quiet --no-stdin --max-ms 600000 /tmp/smc$b.exe > /tmp/smc$b.native.txt
+            node emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 --rerun 2 /tmp/smc$b.exe 2>&1 | tee /tmp/smc$b.jit.txt | tail -4
+            if ! diff <(grep -a '^smc' /tmp/smc$b.native.txt) <(grep -a '^smc' /tmp/smc$b.jit.txt | head -4); then echo "::error::smc$b: JIT results differ from the interpreter"; exit 1; fi
           done
       - name: variants (x64) — TLB probe as a call, per-block flags liveness, TurboFan only (--no-liftoff), no wasm inlining
         run: |
