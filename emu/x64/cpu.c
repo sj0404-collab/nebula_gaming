@@ -231,8 +231,8 @@ static u64 shift(Cpu *c, int op, u64 v, int cnt, int sz) {
     c->rflags = (c->rflags & ~(u64)(F_CF | F_OF)) | (ncf ? F_CF : 0); set_szp(c, 0, sz); return 0;
   }
   switch (op) {
-    case 0: { cnt %= bits; if (!cnt) { return v; } r = ((v << cnt) | (v >> (bits - cnt))) & m; cf = r & 1; c->rflags &= ~(u64)(F_CF | F_OF); if (cf) c->rflags |= F_CF; if (((r >> (bits - 1)) ^ cf) & 1) c->rflags |= F_OF; return r; }               /* rol */
-    case 1: { cnt %= bits; if (!cnt) { return v; } r = ((v >> cnt) | (v << (bits - cnt))) & m; cf = (int)(r >> (bits - 1)) & 1; c->rflags &= ~(u64)(F_CF | F_OF); if (cf) c->rflags |= F_CF; if (((r >> (bits - 1)) ^ (r >> (bits - 2))) & 1) c->rflags |= F_OF; return r; } /* ror */
+    case 0: { cnt %= bits; r = cnt ? ((v << cnt) | (v >> (bits - cnt))) & m : v;   /* count 8/16: value unchanged, CF/OF still written */ cf = r & 1; c->rflags &= ~(u64)(F_CF | F_OF); if (cf) c->rflags |= F_CF; if (((r >> (bits - 1)) ^ cf) & 1) c->rflags |= F_OF; return r; }               /* rol */
+    case 1: { cnt %= bits; r = cnt ? ((v >> cnt) | (v << (bits - cnt))) & m : v; cf = (int)(r >> (bits - 1)) & 1; c->rflags &= ~(u64)(F_CF | F_OF); if (cf) c->rflags |= F_CF; if (((r >> (bits - 1)) ^ (r >> (bits - 2))) & 1) c->rflags |= F_OF; return r; } /* ror */
     case 2: { cnt %= bits + 1; for (int k = 0; k < cnt; k++) { int nc = (int)(r >> (bits - 1)) & 1; r = ((r << 1) | (u64)cf) & m; cf = nc; } c->rflags &= ~(u64)(F_CF | F_OF); if (cf) c->rflags |= F_CF; if (((r >> (bits - 1)) ^ cf) & 1) c->rflags |= F_OF; return r; }   /* rcl */
     case 3: { cnt %= bits + 1; for (int k = 0; k < cnt; k++) { int nc = (int)(r & 1); r = (r >> 1) | ((u64)cf << (bits - 1)); cf = nc; } c->rflags &= ~(u64)(F_CF | F_OF); if (cf) c->rflags |= F_CF; if (((r >> (bits - 1)) ^ (r >> (bits - 2))) & 1) c->rflags |= F_OF; return r; } /* rcr */
     case 4: case 6: { r = (v << cnt) & m; cf = (int)((v >> (bits - cnt)) & 1); c->rflags &= ~(u64)(F_CF | F_OF | F_AF); if (cf) c->rflags |= F_CF; if (cnt == 1 && (((r >> (bits - 1)) & 1) ^ cf)) c->rflags |= F_OF; set_szp(c, r, sz); return r; }   /* shl */

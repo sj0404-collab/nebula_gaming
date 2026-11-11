@@ -235,6 +235,7 @@ static uint32_t t_byte(void) {
     __asm__ volatile("rolb $5, %b0\n\tsetc %b1" : "+q"(b), "=q"(f5) : : "cc");
     __asm__ volatile("rorb $1, %b0\n\tseto %b1" : "+q"(b), "=q"(f6) : : "cc");
     __asm__ volatile("rclb $2, %b0" : "+q"(b) : : "cc");
+    __asm__ volatile("clc\n\trorb %%cl, %b0\n\tsetc %b1" : "+q"(b), "=q"(c1) : "c"((uint8_t)(cnt & 24)) : "cc"); h = h32(h, c1);   /* rotate by a multiple of the width: CF still comes from the result */
     __asm__ volatile("incb %0\n\tlahf\n\tshrl $8, %%eax\n\tandl $0xd4, %%eax" : "+m"(by[i & 15]), "=&a"(f7) : : "cc");   /* SF ZF AF PF (inc keeps the caller's CF) */
     __asm__ volatile("decb %b0\n\tsetz %b1" : "+q"(a), "=q"(c1) : : "cc"); h = h32(h, c1);
     __asm__ volatile("negb %0\n\tsetc %b1" : "+m"(by[(i + 1) & 15]), "=q"(c2) : : "cc"); h = h32(h, c2);
