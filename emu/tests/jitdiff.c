@@ -248,6 +248,34 @@ static uint32_t t_byte(void) {
   for (int i = 0; i < 16; i++) h = h32(h, by[i]);
   return h;
 }
+/* 9. results passed in the FLAGS across call / ret — Delphi's compiler-magic helpers do exactly this (System._LStrCmp /
+ *    _UStrCmp / _PStrCmp / _VarCmpXX: `call @LStrCmp; jne …`), and hand-written asm sets flags before a leaf call and tests
+ *    them after it.  Regression for the "flags are dead across call/ret" JIT assumption (Inno Setup: Runtime error 210). */
+#if defined(__x86_64__)
+__asm__(".text\n.globl jd_flagsret\njd_flagsret:\n"
+        "  xor %eax, %eax\n  call 1f\n  setg %al\n  sete %ah\n"                 /* callee returns ecx ? edx in the flags */
+        "  cmp %ecx, %edx\n  call 2f\n  jb 3f\n  ret\n3:\n  add $0x10000, %eax\n  ret\n"   /* caller's flags survive a leaf call */
+        "1:\n  cmp %edx, %ecx\n  ret\n"
+        "2:\n  push %rcx\n  pop %rcx\n  ret\n");
+#elif defined(__i386__)
+__asm__(".text\n.globl _jd_flagsret\n_jd_flagsret:\n"
+        "  mov 4(%esp), %ecx\n  mov 8(%esp), %edx\n"
+        "  xor %eax, %eax\n  call 1f\n  setg %al\n  sete %ah\n"
+        "  cmp %ecx, %edx\n  call 2f\n  jb 3f\n  ret\n3:\n  add $0x10000, %eax\n  ret\n"
+        "1:\n  cmp %edx, %ecx\n  ret\n"
+        "2:\n  push %ecx\n  pop %ecx\n  ret\n");
+#endif
+#if defined(__x86_64__) || defined(__i386__)
+uint32_t jd_flagsret(int a, int b);
+static uint32_t t_flags(void) {
+  uint32_t h = 2166136261u;
+  for (int rep = 0; rep < 3; rep++)
+    for (int i = 0; i < N; i++) { int a = ia[i], b = ia[(i * 7 + rep) % N]; h = h32(h, jd_flagsret(a, b)); h = h32(h, jd_flagsret(b, a)); h = h32(h, jd_flagsret(a, a)); }
+  return h;
+}
+#else
+static uint32_t t_flags(void) { return 0; }
+#endif
 int main(void) {
   printf("camera   %08x\n", t_camera());
   printf("scalar   %08x\n", t_scalar());
@@ -257,6 +285,7 @@ int main(void) {
   printf("misc     %08x\n", t_misc());
   printf("atomic   %08x\n", t_atomic());
   printf("byte     %08x\n", t_byte());
+  printf("flags    %08x\n", t_flags());
   printf("jitdiff done\n");
   return 0;
 }
