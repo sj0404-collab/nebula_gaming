@@ -21,6 +21,8 @@ int g_jit_hot = 300;   /* block entries before translation (x64_set_jit(n>1) ove
 typedef struct { u64 rip; Mem *mem; const u8 *code; u32 gen; u32 fn; s32 count; u16 pc; u8 m32, rt : 7, norv : 1; } Jb;   /* norv: translate without page-generation validation (its code page is written all the time) */   /* fn: table index of the region function, pc: entry block inside it, rt: times this region was retranslated */
 #define JIT_RETRANS_EXITS 1024   /* a region that left this often (× 2^rt) is retranslated: branch targets executed since then and the profiled targets of its indirect jumps join it … */
 #define JIT_MAX_RETRANS 4        /* … at most this many times */
+#define JIT_BUDGET_MS 200.0      /* translation + compile time allowed per 1000 ms of host time (UI-thread jank cap; never reached on a desktop, keeps a phone responsive) */
+static double g_jit_cwin, g_jit_cms;
 static Jb g_jb[1 << JB_BITS];
 #define JB_SLOT(rip) (&g_jb[((rip) ^ ((rip) >> JB_BITS)) & ((1 << JB_BITS) - 2)])   /* 2-way set: slot and slot+1 */
 static void jit_drop(Jb *b);
@@ -61,7 +63,7 @@ static u64 rv_hash(const RVal *v) { u64 h = 1469598103934665603ull; for (u32 i =
 static void fn_free(u32 fn) { if (g_jit_nfree < JIT_MAX_FN) g_jit_free[g_jit_nfree++] = fn; rv_release(g_rv_of_fn[fn]); g_rv_of_fn[fn] = 0; }
 #define JIT_MAX_BLOCKS 160
 #define JIT_MAX_REGION_INSNS 2400
-struct JitStats { u64 blocks, stale, nodc, exec, fails, insns, steps, bytes, dsteps, dinterp, retrans, full, x_ind, x_jit, x_cold, reval, reval_bad; } g_jit_st;   /* x_*: region exits through an indirect branch / to another translated block / to untranslated code */
+struct JitStats { u64 blocks, stale, nodc, exec, fails, insns, steps, bytes, dsteps, dinterp, retrans, full, x_ind, x_jit, x_cold, reval, reval_bad, defer; double cms; } g_jit_st;   /* defer: translations postponed by the compile-time budget; cms: ms spent translating + compiling */   /* x_*: region exits through an indirect branch / to another translated block / to untranslated code */
 
 #ifdef __wasm__
 #define JEXPORT(name) __attribute__((export_name(#name)))
@@ -1008,7 +1010,12 @@ static inline int jit_enter(Cpu *c, u64 budget) {
     if (!b->fn) {
       if (b->gen != mem_gen(c->mem)) { b->gen = mem_gen(c->mem); b->count = 1; return ran; }   /* a new mapping generation (another process in this slot, a remapped image): the old "not translatable" verdict (count = -2M) no longer applies */
       if (++b->count < JIT_HOT) return ran;
-      if (!jit_translate(c, b)) { b->count = -2000000; g_jit_st.nodc++; return ran; }
+      { /* compile-time budget: translation + synchronous wasm compile run on the UI thread; on a phone a burst of regions (program start,
+           a new screen) must not freeze input and rendering — at most JIT_BUDGET_MS of every 1000 ms go into it, the rest waits a little */
+        double now = host_now_ms(); if (now - g_jit_cwin > 1000.0) { g_jit_cwin = now; g_jit_cms = 0; }
+        if (g_jit_cms > JIT_BUDGET_MS) { b->count = JIT_HOT - 48; g_jit_st.defer++; return ran; }
+        int ok = jit_translate(c, b); double dt = host_now_ms() - now; g_jit_cms += dt; g_jit_st.cms += dt;
+        if (!ok) { b->count = -2000000; g_jit_st.nodc++; return ran; } }
       b = jb_lookup(c->rip, c->mem, c->mode32);   /* the entry for rip (publishing may have moved it within its set) */
       if (b->rip != c->rip || !b->fn) return ran;
     } else if (b->gen != mem_gen(c->mem)) { jit_drop(b); return ran; }
@@ -1032,7 +1039,7 @@ const char *jit_stats_text(void) {
   static char s[1100];
   e_snprintf(s, sizeof s, "blocks=%llu exec=%llu insns=%llu steps=%llu bytes=%llu stale=%llu nodc=%llu fails=%llu retrans=%llu full=%llu x_ind=%llu x_jit=%llu x_cold=%llu dsteps=%llu dinterp=%llu", (unsigned long long)g_jit_st.blocks, (unsigned long long)g_jit_st.exec, (unsigned long long)g_jit_st.insns,
              (unsigned long long)g_jit_st.steps, (unsigned long long)g_jit_st.bytes, (unsigned long long)g_jit_st.stale, (unsigned long long)g_jit_st.nodc, (unsigned long long)g_jit_st.fails, (unsigned long long)g_jit_st.retrans, (unsigned long long)g_jit_st.full, (unsigned long long)g_jit_st.x_ind, (unsigned long long)g_jit_st.x_jit, (unsigned long long)g_jit_st.x_cold, (unsigned long long)g_jit_st.dsteps, (unsigned long long)g_jit_st.dinterp);
-  { int L = 0; while (s[L]) L++; L += e_snprintf(s + L, sizeof s - L, " xk: direct=%llu fall=%llu ret=%llu ind=%llu slice=%llu step=%llu xstale=%llu reval=%llu/%llu", (unsigned long long)g_jit_xk[XK_DIRECT], (unsigned long long)g_jit_xk[XK_FALL], (unsigned long long)g_jit_xk[XK_RET], (unsigned long long)g_jit_xk[XK_IND], (unsigned long long)g_jit_xk[XK_SLICE], (unsigned long long)g_jit_xk[XK_STEP], (unsigned long long)g_jit_xk[XK_STALE], (unsigned long long)g_jit_st.reval, (unsigned long long)g_jit_st.reval_bad); }
+  { int L = 0; while (s[L]) L++; L += e_snprintf(s + L, sizeof s - L, " xk: direct=%llu fall=%llu ret=%llu ind=%llu slice=%llu step=%llu xstale=%llu reval=%llu/%llu defer=%llu cms=%d", (unsigned long long)g_jit_xk[XK_DIRECT], (unsigned long long)g_jit_xk[XK_FALL], (unsigned long long)g_jit_xk[XK_RET], (unsigned long long)g_jit_xk[XK_IND], (unsigned long long)g_jit_xk[XK_SLICE], (unsigned long long)g_jit_xk[XK_STEP], (unsigned long long)g_jit_xk[XK_STALE], (unsigned long long)g_jit_st.reval, (unsigned long long)g_jit_st.reval_bad, (unsigned long long)g_jit_st.defer, (int)g_jit_st.cms); }
   /* top step opcodes */
   { int L = 0; while (s[L]) L++; for (int pass = 0; pass < 12 && L < (int)sizeof s - 40; pass++) { int best = -1; u32 bv = 0; for (int k = 0; k < 1024; k++) if (g_step_hist[k] > bv) { bv = g_step_hist[k]; best = k; } if (best < 0 || !bv) break;
       L += e_snprintf(s + L, sizeof s - L, " %s%s%02x:%u", best >= 512 ? "p" : "", (best & 511) >= 256 ? "0f" : "", best & 255, bv); g_step_hist[best] = 0; } }
