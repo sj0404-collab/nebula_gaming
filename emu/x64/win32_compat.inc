@@ -276,6 +276,10 @@ static void s_CM_Locate_DevNodeW(Cpu *c) { if (ARG(0)) wr32(c, ARG(0), 0); RET(0
 static void s_CM_Get_Parent(Cpu *c) { if (ARG(0)) wr32(c, ARG(0), 0); RET(0x0D); }
 static void s_CM_Get_Device_IDA(Cpu *c) { if (ARG(1) && ARG(2)) wr8(c, ARG(1), 0); RET(0x0D); }
 static void s_CM_Get_Device_IDW(Cpu *c) { if (ARG(1) && ARG(2)) wr16(c, ARG(1), 0); RET(0x0D); }
+/* CM_Register_Notification(pFilter, pContext, pCallback, pNotifyContext): device arrival/removal notifications (SDL/jamepad hot-plug) — registered,
+   never fired: devices do not come and go inside the emulated machine; the program keeps its polling path.  CM_Unregister_Notification: CR_SUCCESS. */
+static void s_CM_Register_Notification(Cpu *c) { if (!ARG(0) || !ARG(2) || !ARG(3)) { RET(0x03); return; } static u32 next = 1; wrp(c, ARG(3), 0xC0DE0000ull + next++); RET(0); }   /* CR_INVALID_POINTER / CR_SUCCESS */
+static void s_CM_Unregister_Notification(Cpu *c) { RET(ARG(0) ? 0 : 0x03); }
 static void s_CM_Get_Device_ID_Size(Cpu *c) { if (ARG(0)) wr32(c, ARG(0), 0); RET(0x0D); }
 /* winmm capture: there is no microphone device, so every waveIn handle is invalid (MMSYSERR_INVALHANDLE = 5) */
 static void s_waveInInvalHandle(Cpu *c) { RET(5); }
@@ -320,7 +324,7 @@ static void s_GetTextCharset(Cpu *c) { RET(0); }
   S(GetSystemPowerStatus), S(AttachThreadInput), S(GetDeviceGammaRamp), S(SetDeviceGammaRamp), S(GetICMProfileW), S(GetICMProfileA), \
   S(SetupDiGetClassDevsA), S(SetupDiGetClassDevsW), S(SetupDiEnumDeviceInfo), S(SetupDiEnumDeviceInterfaces), S(SetupDiGetDeviceInterfaceDetailA), S(SetupDiGetDeviceInterfaceDetailW), \
   S(SetupDiGetDeviceRegistryPropertyA), S(SetupDiGetDeviceRegistryPropertyW), S(SetupDiDestroyDeviceInfoList), \
-  S(CM_Locate_DevNodeA), S(CM_Locate_DevNodeW), S(CM_Get_Parent), S(CM_Get_Device_IDA), S(CM_Get_Device_IDW), S(CM_Get_Device_ID_Size), \
+  S(CM_Locate_DevNodeA), S(CM_Locate_DevNodeW), S(CM_Register_Notification), S(CM_Unregister_Notification), S(CM_Get_Parent), S(CM_Get_Device_IDA), S(CM_Get_Device_IDW), S(CM_Get_Device_ID_Size), \
   SA("waveInClose", waveInInvalHandle), SA("waveInPrepareHeader", waveInInvalHandle), SA("waveInUnprepareHeader", waveInInvalHandle), SA("waveInAddBuffer", waveInInvalHandle), \
   SA("waveInStart", waveInInvalHandle), SA("waveInStop", waveInInvalHandle), SA("waveInReset", waveInInvalHandle), SA("waveInGetPosition", waveInInvalHandle), SA("waveInGetID", waveInInvalHandle),
 #define COMPAT_SHIMS SDLPROBE_SHIMS CXX_NEWDELETE_SHIMS \

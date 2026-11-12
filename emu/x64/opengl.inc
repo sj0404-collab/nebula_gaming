@@ -13,7 +13,15 @@ static int gl_find(const char *name) {   /* id of a GL entry point (binary searc
   int lo = 0, hi = GL_FN_COUNT - 1;
   while (lo <= hi) { int mid = (lo + hi) / 2; int r = e_strcmp(gl_fns[mid].name, name); if (r == 0) return mid; if (r < 0) lo = mid + 1; else hi = mid - 1; }
   return -1; }
-const char *gl_sig_of(const char *name) { int i = gl_find(name); return i >= 0 ? gl_fns[i].sig : 0; }
+/* glFooARB / glFooEXT that the table does not list but whose core entry point it does: the same function (these suffixed names are the
+   promoted extensions a Windows driver exports alongside the core names — LWJGL/GLEW probe hundreds of them) */
+static int gl_find_alias(const char *name) {
+  int id = gl_find(name); if (id >= 0 || name[0] != 'g' || name[1] != 'l') return id;
+  size_t n = e_strlen(name); if (n < 7 || n >= 96) return -1;
+  char core[96]; e_memcpy(core, name, n + 1);
+  if (!e_strcmp(name + n - 3, "ARB") || !e_strcmp(name + n - 3, "EXT")) core[n - 3] = 0; else return -1;
+  id = gl_find(core); return id >= 0 && gl_fns[id].name[2] ? id : -1; }
+const char *gl_sig_of(const char *name) { int i = gl_find_alias(name); return i >= 0 ? gl_fns[i].sig : 0; }
 const char *gl_name_of(int id) { return id >= 0 && id < (int)(sizeof gl_fns / sizeof gl_fns[0]) ? gl_fns[id].name : 0; }   /* host-side diagnostics (null driver) */   /* x86 marshalling (win32_x86.inc) */
 
 /* ---- pixel formats: 1 = RGBA8 + depth 24 + stencil 8, double-buffered; 2 = the same single-buffered ---- */
@@ -165,7 +173,7 @@ static void s_wglRealizeLayerPalette(Cpu *c) { RET(0); }
 Cpu *g_gl_cpu;   /* the CPU whose memory the host reads during a GL call (api.c exports x64_gl_ptr) */
 static void s_gl_dispatch(Cpu *c) {
   Win32 *w = W; u64 slot = w32_cur_slot(); int idx = (int)((slot - G_SHIM_BASE) / SHIM_SLOT_SIZE); const char *name = w->slots[idx].name;
-  int id = gl_find(name); if (id < 0) { cpu_fault(c, "OpenGL: unknown entry point %s", name); return; }
+  int id = gl_find_alias(name); if (id < 0) { cpu_fault(c, "OpenGL: unknown entry point %s", name); return; }
   int s = gl_cur_slot(w);
   if (!g_glcur[s].ctx) { static int warned; if (!warned++) e_log("[gl] %s called without a current context (ignored, as on Windows)\n", name); RET(0); return; }
   const char *sig = gl_fns[id].sig + 2; u64 a[16]; int n = 0;
@@ -182,7 +190,7 @@ ShimFn gdi_find_shim(const char *name);
 static void s_wglGetProcAddress(Cpu *c) {
   const char *n = rd_str(c, ARG(0), 128); if (!n) { RET(0); return; }
   if (!e_strncmp(n, "wgl", 3)) { ShimFn f = gdi_find_shim(n); RET(f ? w32_shim_slot(W, "opengl32", n) : 0); return; }
-  int id = gl_find(n); if (id < 0 || !host_gl_probe(id)) { static int logged; if (logged < 40) { logged++; e_log("[gl] wglGetProcAddress(%s): not provided by the WebGL2 bridge\n", n); } RET(0); return; }
+  int id = gl_find_alias(n); if (id < 0 || !host_gl_probe(id)) { static int logged; if (logged < 40) { logged++; e_log("[gl] wglGetProcAddress(%s) = NULL: %s (the program treats it as an absent extension, as with any driver)\n", n, id < 0 ? "no such entry point in the bridge" : "not available on WebGL2"); } RET(0); return; }
   RET(w32_shim_slot(W, "opengl32", n)); }
 static void s_wglGetDefaultProcAddress(Cpu *c) { s_wglGetProcAddress(c); }
 #define OPENGL_SHIMS \

@@ -509,7 +509,7 @@ static const ShimDef gdi_shims[] = {
   USER_SHIMS
 };
 ShimFn gdi_find_shim(const char *name) { for (size_t i = 0; i < sizeof gdi_shims / sizeof gdi_shims[0]; i++) if (!e_strcmp(gdi_shims[i].name, name)) return gdi_shims[i].fn;
-  if (name[0] == 'g' && name[1] == 'l' && gl_find(name) >= 0) return s_gl_dispatch;   /* every OpenGL entry point goes through the generic bridge */
+  if (name[0] == 'g' && name[1] == 'l' && gl_find_alias(name) >= 0) return s_gl_dispatch;   /* every OpenGL entry point goes through the generic bridge */
   return 0; }
 
 void gdi_init(Win32 *w) {
