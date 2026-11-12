@@ -61,6 +61,8 @@ static void s_VariantCopy(Cpu *c) { u64 d = ARG(0), s = ARG(1); if (d == s) { RE
   if (rd16(c, s) == 8) { call_shim(c, s_SysAllocString, rdp(c, s + 8), 0, 0, 0); wrp(c, d + 8, c->r[RAX]); } RET(0); }
 
 /* ---------- ADVAPI32: privileges / security / registry → "not available", never a crash ---------- */
+static void s_CoSetProxyBlanket(Cpu *c) { RET(0); }   /* in-process COM only: no proxies, the security blanket is a no-op (S_OK) */
+static void s_SHAutoComplete(Cpu *c) { RET(0); }      /* edit-control auto-completion of paths/URLs: accepted (the drop-down itself is not shown) */
 static void s_LookupPrivilegeValueW(Cpu *c) { W->last_error = 1313; RET(0); }      /* ERROR_NO_SUCH_PRIVILEGE */
 static void s_AdjustTokenPrivileges(Cpu *c) { W->last_error = 0; RET(1); }
 
@@ -331,7 +333,7 @@ static void s_GetTextCharset(Cpu *c) { RET(0); }
   SA("FileTimeToSystemTime", FileTimeToSystemTime2), SA("SystemTimeToFileTime", SystemTimeToFileTime2), S(SystemTimeToTzSpecificLocalTime), S(TzSpecificLocalTimeToSystemTime), \
   S(FileTimeToDosDateTime), S(DosDateTimeToFileTime), S(CompareFileTime), SA("_mkgmtime64", mkgmtime64), SA("_mkgmtime", mkgmtime64), \
   S(SysAllocString), S(SysAllocStringLen), S(SysAllocStringByteLen), S(SysFreeString), S(SysStringLen), S(SysStringByteLen), S(SysReAllocStringLen), S(VariantInit), S(VariantClear), S(VariantCopy), \
-  S(LookupPrivilegeValueW), S(AdjustTokenPrivileges), \
+  S(CoSetProxyBlanket), S(SHAutoComplete), S(LookupPrivilegeValueW), S(AdjustTokenPrivileges), \
   S(GetLargePageMinimum), S(OpenFileMappingW), S(GetLogicalDriveStringsW), S(GetLogicalDriveStringsA), S(GetDriveTypeW), S(GetDiskFreeSpaceExW), S(GetDiskFreeSpaceW), S(GetDiskFreeSpaceA), \
   S(CreateHardLinkW), S(FindFirstStreamW), S(FindNextStreamW), S(DeviceIoControl), S(GetLogicalProcessorInformation), S(GetLogicalProcessorInformationEx), \
   S(CharUpperW), S(CharLowerW), S(CharPrevExA), S(CharPrevA), S(CharNextA), S(PathIsRelativeA), S(PathIsRelativeW), S(PathIsNetworkPathW), S(PathIsNetworkPathA), S(PathMatchSpecW), S(PathMatchSpecA), S(ColorRGBToHLS), S(ColorHLSToRGB), S(ColorAdjustLuma), \

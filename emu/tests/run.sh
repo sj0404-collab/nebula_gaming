@@ -575,6 +575,17 @@ if command -v zig >/dev/null 2>&1; then
   zig cc -target x86_64-windows-gnu -O2 -o /tmp/sehcont64.exe tests/seh_continue.c && out=$($X --quiet --no-stdin /tmp/sehcont64.exe 2>&1) || out="build/run failed: $out"
   check "seh_continue (x64)"   "hits 1 result 0000634b OK"   "$out"
 else echo "  skip seh_continue (no zig)"; fi
+echo "[ddraw] DirectDrawCreate/CreateEx/EnumerateA → IDirectDraw7 device object: GetCaps, GetAvailableVidMem, GetDeviceIdentifier, GetDisplayMode, EnumDisplayModes (callback continuation), QueryInterface IDirectDraw2/4, refcounts (the GOG get_hw_caps.dll probe)"
+if command -v zig >/dev/null 2>&1; then
+  zig cc -target x86-windows-gnu -O1 -o /tmp/ddprobe32.exe tests/ddprobe.c -ldxguid && out=$($X --quiet --no-stdin --max-ms 60000 /tmp/ddprobe32.exe 2>&1) || out="build/run failed: $out"
+  check "ddprobe (x86)"   "DDPROBE OK"   "$out"
+  zig cc -target x86_64-windows-gnu -O1 -o /tmp/ddprobe64.exe tests/ddprobe.c -ldxguid && out=$($X --quiet --no-stdin --max-ms 60000 /tmp/ddprobe64.exe 2>&1) || out="build/run failed: $out"
+  check "ddprobe (x64)"   "DDPROBE OK"   "$out"
+  zig cc -target x86-windows-gnu -O1 -o /tmp/acct32.exe tests/acctprobe.c -lgdi32 && out=$($X --quiet --no-stdin --max-ms 60000 /tmp/acct32.exe 2>&1) || out="build/run failed: $out"
+  check "acctprobe (x86: LookupAccountSid/Name, SHDeleteKey, SHAutoComplete, CoSetProxyBlanket, GetDCOrgEx)"   "ACCTPROBE OK"   "$out"
+  zig cc -target x86_64-windows-gnu -O1 -o /tmp/acct64.exe tests/acctprobe.c -lgdi32 && out=$($X --quiet --no-stdin --max-ms 60000 /tmp/acct64.exe 2>&1) || out="build/run failed: $out"
+  check "acctprobe (x64)"   "ACCTPROBE OK"   "$out"
+fi
 echo "[timerqueue] CreateTimerQueueTimer periodic/one-shot + DeleteTimerQueue(Timer|Ex), GetUserPreferredUILanguages, SetLocalTime without the privilege"
 if command -v zig >/dev/null 2>&1; then
   zig cc -target x86-windows-gnu -O2 -o /tmp/tq32.exe tests/timerqueue.c && out=$($X --quiet --no-stdin --max-ms 60000 /tmp/tq32.exe 2>&1) || out="build/run failed: $out"

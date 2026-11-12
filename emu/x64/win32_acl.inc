@@ -117,7 +117,35 @@ static void s_DuplicateTokenEx(Cpu *c) { /* (token, access, sa, impersonation le
 static void s_DuplicateToken(Cpu *c) { if (!ARG(2)) { W->last_error = 87; RET(0); return; } wrp(c, ARG(2), 0x7003); RET(1); }
 static void s_ImpersonateLoggedOnUser(Cpu *c) { RET(1); }
 static void s_ImpersonateSelf(Cpu *c) { RET(1); }
+/* LookupAccountSid / LookupAccountName: the accounts the token (GetTokenInformation) and the ACL helpers hand out. Anything else → ERROR_NONE_MAPPED. */
+typedef struct { const char *name, *domain; u32 use; u8 nsub; u32 auth; u32 sub[5]; } AcctEnt;
+static const AcctEnt g_accts[] = {
+  { "user", "NEBULA", 1, 5, 5, { 21, 1000, 2000, 3000, 500 } }, { "NEBULA", "", 3, 4, 5, { 21, 1000, 2000, 3000 } },   /* SidTypeUser, SidTypeDomain */
+  { "Administrators", "BUILTIN", 4, 2, 5, { 32, 544 } }, { "Users", "BUILTIN", 4, 2, 5, { 32, 545 } }, { "BUILTIN", "", 3, 1, 5, { 32 } },   /* SidTypeAlias */
+  { "Everyone", "", 5, 1, 1, { 0 } }, { "Authenticated Users", "NT AUTHORITY", 5, 1, 5, { 11 } }, { "INTERACTIVE", "NT AUTHORITY", 5, 1, 5, { 4 } },   /* SidTypeWellKnownGroup */
+  { "SYSTEM", "NT AUTHORITY", 5, 1, 5, { 18 } }, { "LOCAL SERVICE", "NT AUTHORITY", 5, 1, 5, { 19 } }, { "NETWORK SERVICE", "NT AUTHORITY", 5, 1, 5, { 20 } },
+  { "High Mandatory Level", "Mandatory Label", 10, 1, 16, { 12288 } },   /* SidTypeLabel */
+};
+static int acct_of_sid(Cpu *c, u64 sid) { if (!sid) return -1; u8 n = rd8(c, sid + 1); u32 auth = rd8(c, sid + 7) | (u32)rd8(c, sid + 6) << 8 | (u32)rd8(c, sid + 5) << 16;
+  for (size_t i = 0; i < sizeof g_accts / sizeof g_accts[0]; i++) { const AcctEnt *a = &g_accts[i]; if (a->nsub != n || a->auth != auth) continue; int ok = 1; for (int k = 0; k < n; k++) if (rd32(c, sid + 8 + 4 * k) != a->sub[k]) { ok = 0; break; } if (ok) return (int)i; } return -1; }
+static int acct_put_str(Cpu *c, const char *s, u64 buf, u64 cch_p, int wide) {   /* → 1 ok, 0 too small (ERROR_INSUFFICIENT_BUFFER, *cch = needed) */
+  u32 need = (u32)e_strlen(s) + 1, cap = cch_p ? rd32(c, cch_p) : 0; if (cch_p) wr32(c, cch_p, need); if (!buf || cap < need) return 0;   /* failure: *cch = required size including the NUL */
+  if (wide) put_w(c, buf, s, cap); else put_a(c, buf, s, cap); if (cch_p) wr32(c, cch_p, need - 1); return 1; }   /* success: characters copied, without the NUL */
+static void lookup_account_sid(Cpu *c, int wide) { /* (system, sid, name, *cchName, domain, *cchDomain, *use) */ int i = acct_of_sid(c, ARG(1)); if (i < 0) { W->last_error = 1332; RET(0); return; }
+  int a = acct_put_str(c, g_accts[i].name, ARG(2), ARG(3), wide), b = acct_put_str(c, g_accts[i].domain, ARG(4), ARG(5), wide); if (ARG(6)) wr32(c, ARG(6), g_accts[i].use);
+  if (!a || !b) { W->last_error = 122; RET(0); return; } RET(1); }
+static void s_LookupAccountSidW(Cpu *c) { lookup_account_sid(c, 1); }
+static void s_LookupAccountSidA(Cpu *c) { lookup_account_sid(c, 0); }
+static void lookup_account_name(Cpu *c, int wide) { /* (system, name, sid, *cbSid, domain, *cchDomain, *use) */ char name[128]; if (wide) { u64 p = ARG(1); size_t o = 0; for (; o + 1 < sizeof name; o++) { u16 ch = rd16(c, p + o * 2); if (!ch) break; name[o] = ch < 128 ? (char)ch : '?'; } name[o] = 0; } else { const char *s = (const char *)mem_ptr(c->mem, ARG(1), 1, 0); size_t o = 0; for (; s && s[o] && o + 1 < sizeof name; o++) name[o] = s[o]; name[o] = 0; }
+  const char *bare = name; for (size_t k = 0; name[k]; k++) if (name[k] == '\\') bare = name + k + 1;   /* DOMAIN\name */
+  int i = -1; for (size_t k = 0; k < sizeof g_accts / sizeof g_accts[0]; k++) if (!e_stricmp(g_accts[k].name, bare)) { i = (int)k; break; } if (i < 0) { W->last_error = 1332; RET(0); return; }
+  const AcctEnt *a = &g_accts[i]; u32 need = 8 + 4u * a->nsub, cap = ARG(3) ? rd32(c, ARG(3)) : 0; if (ARG(3)) wr32(c, ARG(3), need);
+  int ok = ARG(2) && cap >= need; if (ok) { u64 s = ARG(2); wr8(c, s, 1); wr8(c, s + 1, a->nsub); for (int k = 0; k < 6; k++) wr8(c, s + 2 + k, k < 3 ? 0 : (u8)(a->auth >> (8 * (5 - k)))); for (int k = 0; k < a->nsub; k++) wr32(c, s + 8 + 4 * k, a->sub[k]); }
+  int b = acct_put_str(c, a->domain, ARG(4), ARG(5), wide); if (ARG(6)) wr32(c, ARG(6), a->use); if (!ok || !b) { W->last_error = 122; RET(0); return; } RET(1); }
+static void s_LookupAccountNameW(Cpu *c) { lookup_account_name(c, 1); }
+static void s_LookupAccountNameA(Cpu *c) { lookup_account_name(c, 0); }
 #define ACL_SHIMS \
+  S(LookupAccountSidW), S(LookupAccountSidA), S(LookupAccountNameW), S(LookupAccountNameA), \
   S(MapGenericMask), S(AccessCheck), S(DuplicateTokenEx), S(DuplicateToken), S(ImpersonateLoggedOnUser), S(ImpersonateSelf), \
   S(InitializeSecurityDescriptor), S(SetSecurityDescriptorDacl), S(GetSecurityDescriptorDacl), S(SetSecurityDescriptorOwner), S(SetSecurityDescriptorGroup), S(GetSecurityDescriptorOwner), S(GetSecurityDescriptorGroup), S(GetSecurityDescriptorControl), S(IsValidSecurityDescriptor), S(GetSecurityDescriptorLength), \
   S(InitializeAcl), S(IsValidAcl), S(GetAclInformation), S(GetAce), S(AddAccessAllowedAce), S(AddAccessAllowedAceEx), S(AddAccessDeniedAce), S(AddAccessDeniedAceEx), S(AddAce), S(DeleteAce), \
