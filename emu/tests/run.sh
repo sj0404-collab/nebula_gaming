@@ -567,6 +567,21 @@ if command -v zig >/dev/null 2>&1; then
   zig cc -target x86_64-windows-gnu -O1 -o /tmp/ansisub64.exe tests/ansisub.c && out=$($X --quiet --no-stdin /tmp/ansisub64.exe 2>&1) || out="build/run failed: $out"
   check "ansisub (x64)"   "ANSISUB OK"   "$out"
 else echo "  skip ansisub (no zig)"; fi
+echo "[seh_continue] RaiseException(0x406D1388) + EXCEPTION_CONTINUE_EXECUTION resumes in the caller with the stdcall arguments popped and the registers intact (SteamWorld Dig / OpenAL32 thread naming)"
+if command -v zig >/dev/null 2>&1; then
+  zig cc -target x86-windows-gnu -O2 -o /tmp/sehcont32.exe tests/seh_continue.c && out=$($X --quiet --no-stdin /tmp/sehcont32.exe 2>&1) || out="build/run failed: $out"
+  check "seh_continue (x86)"   "sp delta 0"   "$out"
+  check "seh_continue (x86) regs"   "hits 1 result 0000634b OK"   "$out"
+  zig cc -target x86_64-windows-gnu -O2 -o /tmp/sehcont64.exe tests/seh_continue.c && out=$($X --quiet --no-stdin /tmp/sehcont64.exe 2>&1) || out="build/run failed: $out"
+  check "seh_continue (x64)"   "hits 1 result 0000634b OK"   "$out"
+else echo "  skip seh_continue (no zig)"; fi
+echo "[timerqueue] CreateTimerQueueTimer periodic/one-shot + DeleteTimerQueue(Timer|Ex), GetUserPreferredUILanguages, SetLocalTime without the privilege"
+if command -v zig >/dev/null 2>&1; then
+  zig cc -target x86-windows-gnu -O2 -o /tmp/tq32.exe tests/timerqueue.c && out=$($X --quiet --no-stdin --max-ms 60000 /tmp/tq32.exe 2>&1) || out="build/run failed: $out"
+  check "timerqueue (x86)"   "OK"   "$out"
+  zig cc -target x86_64-windows-gnu -O2 -o /tmp/tq64.exe tests/timerqueue.c && out=$($X --quiet --no-stdin --max-ms 60000 /tmp/tq64.exe 2>&1) || out="build/run failed: $out"
+  check "timerqueue (x64)"   "OK"   "$out"
+else echo "  skip timerqueue (no zig)"; fi
 echo "[ptrout] pointer-sized out-parameters (BSTR*/HANDLE*/char**/ULONG_PTR*) are written with the guest pointer size"
 if command -v zig >/dev/null 2>&1; then
   zig cc -target x86-windows-gnu -O1 -o /tmp/ptrout32.exe tests/ptrout.c -loleaut32 && out=$($X --quiet --no-stdin /tmp/ptrout32.exe 2>&1) || out="build/run failed: $out"

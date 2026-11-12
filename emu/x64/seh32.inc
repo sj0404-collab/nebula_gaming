@@ -52,9 +52,11 @@ static void dispatch32_step(Cpu *c, int ci) {
   seh_log("[x64]   frame 0x%llx handler 0x%llx\n", (unsigned long long)node, (unsigned long long)handler);
   guest_call(c, handler, rec, node, ctx, w->cont[ci].data[3]);
 }
-static void raise_exception32(Cpu *c, u32 code, u32 flags, u32 nargs, const u64 *args, u64 address) {
+/* rsp_fix: when raised by a stdcall shim (RaiseException, _CxxThrowException) the context's Esp must be the caller's stack pointer AFTER that call
+   returned, i.e. past the callee-cleaned arguments — an EXCEPTION_CONTINUE_EXECUTION resumes with exactly that Esp (0 for a hardware fault) */
+static void raise_exception32(Cpu *c, u32 code, u32 flags, u32 nargs, const u64 *args, u64 address, u32 rsp_fix) {
   Win32 *w = W; if (nargs > 15) nargs = 15;
-  u64 octx_rip = c->rip, octx_rsp = c->r[RSP];
+  u64 octx_rip = c->rip, octx_rsp = (u32)(c->r[RSP] + rsp_fix);
   u64 sc = seh_scratch(c, EXREC32_SIZE + CTX32_SIZE + 64);
   u64 rec = sc, ctx = (sc + EXREC32_SIZE + 15) & ~15ull, ptrs = ctx + CTX32_SIZE, dc = ptrs + 8;
   u8 *rp = mem_ptr(c->mem, rec, EXREC32_SIZE, 1); if (!rp) { cpu_fault(c, "RaiseException: no stack"); return; }

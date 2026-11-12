@@ -17,7 +17,7 @@ enum { CONT_DISPATCH = 300, CONT_UNWIND, CONT_CONSOLIDATE, CONT_CSPEC };
 
 typedef struct { u64 rip, rsp, r[16]; Xmm x[16]; } UCtx;
 static void restore_context(Cpu *c, u64 ctx, u64 rec);
-static void raise_exception32(Cpu *c, u32 code, u32 flags, u32 nargs, const u64 *args, u64 address);
+static void raise_exception32(Cpu *c, u32 code, u32 flags, u32 nargs, const u64 *args, u64 address, u32 rsp_fix);
 static void start_unwind32(Cpu *c, u64 target, u64 target_ip, u64 rec, u64 retval, int internal);
 static void seh_log(const char *fmt, ...) { char m[240]; __builtin_va_list ap; __builtin_va_start(ap, fmt); e_vsnprintf(m, sizeof m, fmt, ap); __builtin_va_end(ap); host_write(3, m, e_strlen(m)); }   /* the registers virtual unwinding cares about */
 
@@ -232,7 +232,7 @@ int w32_hw_exception(Cpu *c) {
   e_snprintf(w->hw_msg, sizeof w->hw_msg, "%s", c->err); w->hw_code = code;
   c->exc_code = 0; c->status = RUN_OK; c->err[0] = 0;
   u64 args[2] = { c->exc_info, c->exc_addr };
-  if (c->mode32) { raise_exception32(c, code, 0, code == 0xC0000005u ? 2 : 0, args, c->rip); return c->status == RUN_OK; }
+  if (c->mode32) { raise_exception32(c, code, 0, code == 0xC0000005u ? 2 : 0, args, c->rip, 0); return c->status == RUN_OK; }
   c->hist[c->hist_i++ & 4095] = c->rip | (1ull << 62);
   { extern u64 g_hist_snap[4096], g_hist_snap_rip; extern u32 g_hist_snap_i; e_memcpy(g_hist_snap, c->hist, sizeof g_hist_snap); g_hist_snap_i = c->hist_i; g_hist_snap_rip = c->rip; }   /* history as of the last hardware exception (x64_history_raw(n, 1)) */
   seh_log("[x64] hw exception 0x%08x tid=%u rip=0x%llx addr=0x%llx rsp=0x%llx [rsp]=0x%llx rcx=0x%llx rdx=0x%llx rax=0x%llx r10=0x%llx\n", code, (unsigned)cur_tid(w), (unsigned long long)c->rip, (unsigned long long)c->exc_addr, (unsigned long long)c->r[RSP], (unsigned long long)rd64(c, c->r[RSP]), (unsigned long long)c->r[RCX], (unsigned long long)c->r[RDX], (unsigned long long)c->r[RAX], (unsigned long long)c->r[R10]);
@@ -241,12 +241,12 @@ int w32_hw_exception(Cpu *c) {
 }
 static void s_RaiseException(Cpu *c) {
   u32 nargs = (u32)ARG(2); u64 args[15]; u64 pa = ARG(3); for (u32 i = 0; i < nargs && i < 15; i++) args[i] = pa ? (c->mode32 ? rd32(c, pa + 4 * i) : rd64(c, pa + 8 * i)) : 0;
-  if (c->mode32) { raise_exception32(c, (u32)ARG(0), (u32)ARG(1), nargs, args, c->rip); return; }
+  if (c->mode32) { raise_exception32(c, (u32)ARG(0), (u32)ARG(1), nargs, args, c->rip, 16); return; }   /* RaiseException: 4 stdcall arguments */
   raise_exception(c, (u32)ARG(0), (u32)ARG(1), nargs, args, c->rip);
 }
 /* vcruntime!_CxxThrowException(pExceptionObject, pThrowInfo): the MSVC C++ throw = RaiseException(0xE06D7363, 1, 4, {magic, obj, throwinfo, imagebase}) */
 static void s__CxxThrowException(Cpu *c) {
-  if (c->mode32) { u64 obj = ARG(0), ti = ARG(1); if (!obj && !ti) { obj = W->cxx32_obj; ti = W->cxx32_ti; } u64 a32[3] = { 0x19930520, obj, ti }; raise_exception32(c, 0xE06D7363u, 1, 3, a32, c->rip); return; }
+  if (c->mode32) { u64 obj = ARG(0), ti = ARG(1); if (!obj && !ti) { obj = W->cxx32_obj; ti = W->cxx32_ti; } u64 a32[3] = { 0x19930520, obj, ti }; raise_exception32(c, 0xE06D7363u, 1, 3, a32, c->rip, 8); return; }   /* _CxxThrowException: 2 stdcall arguments */
   u64 base = W->image_base; u64 pd; u32 ps; u64 b2; if (seh_module(W, c->rip, &b2, &pd, &ps)) base = b2;
   u64 args[4] = { 0x19930520, ARG(0), ARG(1), base }; raise_exception(c, 0xE06D7363u, 1, 4, args, c->rip);
 }

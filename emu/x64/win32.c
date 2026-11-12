@@ -913,7 +913,9 @@ static void s_VirtualLock(Cpu *c) { RET(1); }
 static void s_VirtualUnlock(Cpu *c) { RET(1); }
 /* VirtualQuery: see win32_clr.inc (stack-aware) */
 static void s_FlushInstructionCache(Cpu *c) { RET(1); }
-static void s_CreateTimerQueue(Cpu *c) { RET(0); }
+/* SetLocalTime / SetSystemTime: SeSystemtimePrivilege is never enabled in this process's token (as for any program that does not
+   call AdjustTokenPrivileges first) — the clock stays the device's clock */
+static void s_SetLocalTime(Cpu *c) { if (!ARG(0)) { W->last_error = 87; RET(0); return; } W->last_error = 1314; RET(0); }
 static void s_GetThreadLocale(Cpu *c) { RET(0x409); }
 static void s_GetUserDefaultLCID(Cpu *c) { RET(0x409); }
 static void s_GetUserDefaultLangID(Cpu *c) { RET(0x409); }
@@ -1543,7 +1545,7 @@ static const ShimDef shims[] = {
   S(OutputDebugStringA), S(OutputDebugStringW), S(FormatMessageA), S(FormatMessageW), S(SetErrorMode), S(SetThreadExecutionState), S(GetErrorMode), S(SetThreadErrorMode), S(GetLogicalProcessorInformation), S(GetProcessAffinityMask), S(SetThreadAffinityMask), S(SetProcessAffinityMask), S(GetSystemTimeAdjustment), S(SetSystemTime), S(GetThreadPriority), S(SetThreadPriority), S(SetPriorityClass), S(GetPriorityClass), S(GetThreadTimes),
   S(GetProcessHeap), S(HeapCreate), S(HeapDestroy), S(HeapAlloc), S(HeapFree), S(HeapReAlloc), S(HeapSize), S(HeapValidate), S(HeapSetInformation), S(HeapQueryInformation), S(HeapCompact), S(HeapLock), S(HeapUnlock), S(HeapWalk), S(GlobalAlloc), S(GlobalFree), S(GlobalLock), S(GlobalReAlloc), S(GlobalHandle), S(GlobalFlags), S(GlobalUnlock), S(LocalAlloc), S(LocalFree),
   S(VirtualAlloc), S(VirtualAllocEx), S(VirtualFree), S(VirtualProtect), S(VirtualLock), S(VirtualUnlock), S(VirtualQuery), S(FlushInstructionCache),
-  S(CreateTimerQueue),
+  S(SetLocalTime),
   S(EventRegister), SA("EventUnregister", ret0), SA("EventSetInformation", ret0), SA("EventWriteTransfer", ret0), SA("EventWrite", ret0), SA("EventEnabled", ret0), SA("EventActivityIdControl", ret0),
   SA("RegisterEventSourceW", ret1), SA("RegisterEventSourceA", ret1), SA("DeregisterEventSource", ret1), SA("ReportEventW", ret1), SA("ReportEventA", ret1),
   S(GetProcessWindowStation), S(GetUserObjectInformationW), SA("GetUserObjectInformationA", GetUserObjectInformationW), S(MapVirtualKeyW),

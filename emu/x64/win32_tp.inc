@@ -64,7 +64,7 @@ static void s_nebula_tp_thunk(Cpu *c) {
   int i = cont_push(c, CONT_TP); if (i < 0) return; w->cont[i].data[0] = job;
   u64 cb = rd64(c, job + 48), ctx = rd64(c, job + 56), inst = job + 64;
   if (kind == TP_WORK) guest_call(c, cb, inst, ctx, o, 0);
-  else if (kind == TP_TIMER) guest_call(c, cb, inst, ctx, o, 0);
+  else if (kind == TP_TIMER) { if (rd32(c, o + 60)) guest_call(c, cb, ctx, 1, 0, 0); else guest_call(c, cb, inst, ctx, o, 0); }   /* [60]: a timer-queue timer — WAITORTIMERCALLBACK(param, TimerOrWaitFired = TRUE) */
   else if (kind == TP_WAIT) guest_call(c, cb, inst, ctx, o, rd32(c, job + 116));
   else guest_call(c, cb, inst, ctx, 0, 0);
 }
@@ -157,6 +157,38 @@ static void s_QueryThreadpoolStackInformation(Cpu *c) { if (ARG(1)) { wr64(c, AR
 static void s_CreateThreadpoolCleanupGroup(Cpu *c) { u64 g = w32_heap_alloc(W, 32, 1); wr32(c, g, 0x50524743u); RET(g); }
 static void s_CloseThreadpoolCleanupGroupMembers(Cpu *c) { (void)c; }   /* members are closed individually by the program or leak at exit (documented) */
 static void s_CloseThreadpoolCleanupGroup(Cpu *c) { if (ARG(0) && mem_ptr(c->mem, ARG(0), 32, 0)) w32_heap_free(W, ARG(0)); }
+/* ---- timer queues (CreateTimerQueueTimer & co., the pre-Vista API that SDL2, OpenAL-soft and many runtimes still use): the same
+   helper-thread model; a timer is a TP_TIMER object with [60] = 1 (WAITORTIMERCALLBACK signature) and [32] = its queue.  The queue
+   handle is a small guest-heap block; NULL = the default queue.  DeleteTimerQueueTimer with INVALID_HANDLE_VALUE does not block on a
+   callback that is executing right now (it finishes on its own thread; the object is freed once no callback is pending). ---- */
+#define TQ_MAGIC 0x51514D54u
+#define TQ_MAX 512
+static u64 g_tq_timers[TQ_MAX];   /* live timer objects (for DeleteTimerQueueEx) */
+static void tq_arm(Cpu *c, u64 o, u32 due_ms, u32 period) {
+  wr32(c, o + 40, rd32(c, o + 40) + 1); wr32(c, o + 52, period); wr32(c, o + 44, 1); wr32(c, o + 24, rd32(c, o + 24) + 1);
+  u64 j = tp_new_job(c, o, TP_TIMER); if (!j) { wr32(c, o + 24, rd32(c, o + 24) - 1); return; }
+  double due = host_now_ms() + (double)due_ms; u64 bits; e_memcpy(&bits, &due, 8); wr64(c, j + 32, bits);
+  if (!tp_start_job(c, j)) { wr32(c, o + 24, rd32(c, o + 24) - 1); w32_heap_free(W, j); cpu_fault(c, "CreateTimerQueueTimer: no thread slot"); } }
+static void tq_close(Cpu *c, u64 o) { wr32(c, o + 40, rd32(c, o + 40) + 1); wr32(c, o + 44, 0); wr32(c, o + 48, 1); for (int i = 0; i < TQ_MAX; i++) if (g_tq_timers[i] == o) g_tq_timers[i] = 0; tp_obj_release(c, o); }
+static void tq_signal(Cpu *c, u64 ev) { if (ev && ev != 0xffffffffffffffffull && ev != 0xffffffffull) call_shim(c, s_SetEvent, ev, 0, 0, 0); }
+static void s_CreateTimerQueue(Cpu *c) { u64 q = w32_heap_alloc(W, 16, 1); if (!q) { W->last_error = 8; RET(0); return; } wr32(c, q, TQ_MAGIC); RET(q); }
+/* CreateTimerQueueTimer(phNewTimer, hQueue, callback, parameter, DueTime ms, Period ms, flags): WT_EXECUTEONLYONCE (8) = no period */
+static void s_CreateTimerQueueTimer(Cpu *c) {
+  u64 ph = ARG(0), cb = ARG(2); u32 due = (u32)ARG(4), period = (u32)ARG(5), flags = (u32)ARG(6);
+  if (!ph || !cb) { W->last_error = 87; RET(0); return; }
+  if (flags & 8) period = 0;
+  u64 o = tp_create(c, TP_TIMER, cb, ARG(3), ARG(1)); if (!o) { RET(0); return; }
+  wr32(c, o + 60, 1); int slot = -1; for (int i = 0; i < TQ_MAX; i++) if (!g_tq_timers[i]) { slot = i; break; }
+  if (slot >= 0) g_tq_timers[slot] = o;
+  wrp(c, ph, o); tq_arm(c, o, due, period); RET(1); }
+static void s_ChangeTimerQueueTimer(Cpu *c) { u64 o = tp_obj_of(c, ARG(1)); if (!o || rd32(c, o + 48)) { W->last_error = 6; RET(0); return; } tq_arm(c, o, (u32)ARG(2), (u32)ARG(3)); RET(1); }
+static void s_DeleteTimerQueueTimer(Cpu *c) { u64 o = tp_obj_of(c, ARG(1)); if (!o) { W->last_error = 6; RET(0); return; } tq_close(c, o); tq_signal(c, ARG(2)); RET(1); }
+static void s_DeleteTimerQueueEx(Cpu *c) { u64 q = ARG(0);
+  for (int i = 0; i < TQ_MAX; i++) { u64 o = g_tq_timers[i]; if (o && rd32(c, o) == TP_MAGIC && rd64(c, o + 32) == q) tq_close(c, o); }
+  if (q && mem_ptr(c->mem, q, 16, 0) && rd32(c, q) == TQ_MAGIC) { wr32(c, q, 0); w32_heap_free(W, q); }
+  tq_signal(c, ARG(1)); RET(1); }
+static void s_DeleteTimerQueue(Cpu *c) { s_DeleteTimerQueueEx(c); }
+
 /* thread-pool I/O is not implemented: say so instead of hanging */
 static void s_CreateThreadpoolIo(Cpu *c) { cpu_fault(c, "CreateThreadpoolIo: thread-pool I/O completion callbacks are not implemented"); }
 
@@ -166,4 +198,5 @@ static void s_CreateThreadpoolIo(Cpu *c) { cpu_fault(c, "CreateThreadpoolIo: thr
   S(CreateThreadpoolWait), S(SetThreadpoolWait), S(SetThreadpoolWaitEx), S(WaitForThreadpoolWaitCallbacks), S(CloseThreadpoolWait), \
   S(SetEventWhenCallbackReturns), S(ReleaseSemaphoreWhenCallbackReturns), S(ReleaseMutexWhenCallbackReturns), S(LeaveCriticalSectionWhenCallbackReturns), S(FreeLibraryWhenCallbackReturns), S(CallbackMayRunLong), S(DisassociateCurrentThreadFromCallback), \
   S(CreateThreadpool), S(CloseThreadpool), S(SetThreadpoolThreadMaximum), S(SetThreadpoolThreadMinimum), S(SetThreadpoolStackInformation), S(QueryThreadpoolStackInformation), \
-  S(CreateThreadpoolCleanupGroup), S(CloseThreadpoolCleanupGroupMembers), S(CloseThreadpoolCleanupGroup), S(CreateThreadpoolIo),
+  S(CreateThreadpoolCleanupGroup), S(CloseThreadpoolCleanupGroupMembers), S(CloseThreadpoolCleanupGroup), S(CreateThreadpoolIo), \
+  S(CreateTimerQueue), S(CreateTimerQueueTimer), S(ChangeTimerQueueTimer), S(DeleteTimerQueueTimer), S(DeleteTimerQueueEx), S(DeleteTimerQueue),
