@@ -1,3 +1,38 @@
+# v1.49.3 — DirectDraw device objects (GOG installers' hardware probe), account lookups, EqualSid fix
+
+**What was wrong (reported from the GOG SteamWorld Dig setup on the phone).**  After the speed fix the installer ran at
+7 FPS / 13 MIPS instead of 1 FPS / 7 MIPS, but pressing *Install* stopped the emulator with
+`unimplemented API DDRAW.dll!DirectDrawCreateEx` from `get_hw_caps.dll` — GOG's hardware probe creates a DirectDraw
+device to read the amount of video memory and the display modes.  There was no DDRAW shim at all.
+
+**Added:**
+- **ddraw.dll device objects** (`emu/x64/ddraw.inc`): `DirectDrawCreate`, `DirectDrawCreateEx`, `DirectDrawCreateClipper`,
+  `DirectDrawEnumerate{A,W,ExA,ExW}`; `IDirectDraw` / `IDirectDraw2` / `IDirectDraw4` / `IDirectDraw7` with
+  `QueryInterface` between the versions, `GetCaps` (DDCAPS), `GetAvailableVidMem` (512 MB — the browser does not expose
+  the adapter's real amount), `GetDeviceIdentifier` ("Nebula OS display adapter (WebGL 2 on the device GPU)"),
+  `GetDisplayMode` / `EnumDisplayModes` (callback continuation), `SetCooperativeLevel`, `TestCooperativeLevel`,
+  `GetMonitorFrequency` (60 Hz), `SetDisplayMode` / `RestoreDisplayMode`, `WaitForVerticalBlank`, `GetFourCCCodes`,
+  `EvaluateMode`, … in x86 and x64.  `CreateSurface` / `CreatePalette` / `DuplicateSurface` stop with an explicit message:
+  DirectDraw *rendering* (surfaces, blits, flips) is **not** implemented — hardware probes and version checks pass,
+  DirectDraw games do not run yet.
+- **advapi32** `LookupAccountSid{A,W}` / `LookupAccountName{A,W}` for the accounts the token hands out (user `NEBULA\user`,
+  `BUILTIN\Administrators`, `BUILTIN\Users`, `Everyone`, `NT AUTHORITY\SYSTEM`, …; otherwise `ERROR_NONE_MAPPED`).
+- **shlwapi** `SHDeleteKey{A,W}` (recursive), `SHDeleteEmptyKey{A,W}`, `SHAutoComplete`; **ole32** `CoSetProxyBlanket`;
+  **gdi32** `GetDCOrgEx` (same screen space as `ClientToScreen`).
+- **Bug fix:** `EqualSid`, `DuplicateToken`, `AccessCheck` and `GetSecurityInfo` had real implementations that were
+  never reached — stale `ret0` stubs earlier in the shim table shadowed them (`EqualSid(x, x)` returned FALSE).
+
+**Tests:** `emu/tests/ddprobe.c` (DirectDrawCreate/CreateEx/EnumerateA, caps, vidmem, identifier, display modes,
+QueryInterface 2/4, refcounts) and `emu/tests/acctprobe.c` (account lookups, SHDeleteKey, SHAutoComplete,
+CoSetProxyBlanket, GetDCOrgEx) in `run.sh`, x86 and x64; jitdiff x86/x64 unchanged; Inno Setup 5.6.1 code volume unchanged
+(6.5 MB / 33 k instructions).
+
+**Known limits (honest):** DirectDraw surfaces / D3D9 not implemented; the GOG installer repack the report came from still
+spends most of its interpreted time in x87 `0xdf` instructions and retranslates ~550 regions — JIT work for the next
+release; the emulator runs on the main thread.
+
+---
+
 # v1.49.2 — Android: the JIT no longer floods the phone with code (installers back to full speed, cursor responsive)
 
 **What was wrong (reported as “everything crawls, 1 FPS even in an installer, the cursor lags”).**  The v1.49 JIT let a
