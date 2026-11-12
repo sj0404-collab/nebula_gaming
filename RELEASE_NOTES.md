@@ -1,3 +1,45 @@
+# v1.49.0 — Android: SteamWorld Dig (GOG) crash fixed at the root, timer queues, JIT 2× faster on the benchmarks
+
+**Why this release exists.**  The user's Report tab of *SteamWorldDig.exe* (GOG, x86) showed a crash inside `OpenAL32.dll`
+right after a `RaiseException(0x406D1388)` was *continued* — plus import-without-a-shim lines from `SDL2.dll` and
+`GetProcAddress` misses.  Everything below was reproduced with native tests (x86 **and** x64) and verified by the full CI
+on the GitHub runner before the tag.
+
+**Fixed:**
+- **x86 SEH: `EXCEPTION_CONTINUE_EXECUTION` after `RaiseException` / `_CxxThrowException` resumed with the wrong ESP.**
+  MSVC's thread-naming exception (`0x406D1388`, used by OpenAL Soft, SDL2, many engines) is raised and continued; the
+  emulator resumed in the caller **without popping the 4 stdcall arguments** (16 bytes), so the caller's later
+  `pop edi/esi/ebx` read garbage → `edi = 0` → the `mov eax,[edi+0x1c]` fault at `OpenAL32+0x365a7` in the report.
+  The continue context now carries the caller's post-call ESP (`+16` RaiseException, `+8` `_CxxThrowException`, `0` for
+  hardware faults).  Regression `emu/tests/seh_continue.c`: before `sp delta 16`, after `sp delta 0`, registers intact.
+- **Timer queues** — `CreateTimerQueue`, `CreateTimerQueueTimer`, `ChangeTimerQueueTimer`, `DeleteTimerQueueTimer`,
+  `DeleteTimerQueueEx`, `DeleteTimerQueue` (SDL2's imports): real periodic / one-shot timers on the thread-pool helper
+  model (`WAITORTIMERCALLBACK(param, TRUE)`, `WT_EXECUTEONLYONCE`, completion event).  Regression `emu/tests/timerqueue.c`.
+- `GetUserPreferredUILanguages` (the `GetProcAddress` miss), `GetSystemPreferredUILanguages`,
+  `GetProcessPreferredUILanguages`, and `GetThreadPreferredUILanguages` now return a real list (`en-US` for
+  MUI_LANGUAGE_NAME, `0409` for MUI_LANGUAGE_ID, double-NUL, size query, `ERROR_INSUFFICIENT_BUFFER`).
+- `SetLocalTime`: `FALSE` + `ERROR_PRIVILEGE_NOT_HELD`, as on Windows without `SeSystemtimePrivilege`.
+- `EnumSystemLocalesEx`, `IsValidLocaleName`, `CM_Register_Notification` / `CM_Unregister_Notification` (from the
+  phone screenshots); `glFooARB` / `glFooEXT` requested through `wglGetProcAddress` / `GetProcAddress(opengl32)` resolve to
+  the core entry point when the extension is a promoted core function (78 misses of the SPD recording gone).
+- `rol/ror` by a multiple of the operand width still update CF/OF (8/16-bit rotates by 8/16/24) — found by the JIT
+  differential test.
+
+**JIT (x86→wasm) speed work, all A/B-measured on the runner (`jitbench` workflow):**
+- `bench.exe` x64 / x86: **≈ 390 / 350 → 844 / 721 MIPS** (inline TLB probe at every memory operand, general registers
+  cached in wasm locals per region, page-generation region validation instead of per-block byte compares,
+  indirect-branch target table with in-region binary-search dispatch, retranslation only by exit count, flags
+  liveness across blocks/calls, lock-prefixed `cmpxchg/xadd` inline, self-modifying-code test `smc.c`).
+- Honest: the browser game run (Shattered Pixel Dungeon, JVM) is **≈ 74 MIPS / 12 FPS on the runner and 15–22 MIPS /
+  0–1 FPS on the phone** — the JVM workload exits regions every ~43 instructions (25 M region entries per 15 s); the
+  benchmark gains do not yet reach it.  Region chaining is the next step.
+
+**Known limits (unchanged, honest):** D3D9/DirectDraw not implemented; the emulator runs on the main thread; no CJK
+glyphs; no classic .NET Framework pack; per-game component selection missing; the SteamWorld Dig fix was reproduced with
+a synthetic test — the game itself must be re-tested on the device (send the Report tab again if it stops elsewhere).
+
+---
+
 # v1.48.0 — Android: main stabilised after 34 unreleased commits (CI green again), OpenAL Soft component, reliable "saved" checks
 
 **Why this release exists.**  After v1.47.0, 34 commits landed on `main` and nine *test* APKs (`v1.47.0-test.27…37`) were
