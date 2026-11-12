@@ -1,3 +1,26 @@
+# v1.49.1 — Android: Inno Setup installers under the JIT ("Runtime error 210" / "Abstract Error") fixed
+
+**What was wrong.**  v1.49.0 brought the new JIT; every Delphi-built installer (Inno Setup 5.x/6.x — GOG setups, most game
+and program installers) died right after start with *Runtime error 210* or *EAbstractError … Abstract Error* when the JIT
+was on.  One JIT assumption was false: *flags are dead across call/ret*.  Delphi's compiler-magic helpers
+(`System._LStrCmp`, `_UStrCmp`, `_PStrCmp`, `_VarCmpXX`) return their result **in the CPU flags** and the caller branches
+right after the `call` — the JIT no longer materialised those flags, the comparison took a random branch, and the VCL
+ended up calling an abstract method.  Reproduced on the runner (`sitecheck` Inno Setup 5.6.1, JIT on → error, JIT off →
+wizard) and in node.
+
+**Fixed:** flags are live across `call` / `ret` again (`callflags` is a benchmark-only knob now, default off).  New JIT
+differential test `flags` in `emu/tests/jitdiff.c` (both bitnesses): a callee that returns a comparison in the flags and a
+caller whose flags must survive a leaf call — it fails on the old module (`b318aef3`/`0123036f`) and matches the interpreter
+now (`603f7a81`).  `bench.exe` x64 is unchanged (≈1036 MIPS on the runner).  Verified: Inno Setup 5.6.1 reaches the license
+page under the JIT in the browser; Inno Setup 6.5.4 shows its language dialog (JIT on and off); full CI green.
+
+Everything from v1.49.0 (SteamWorld Dig GOG x86 SEH fix, timer queues, preferred UI languages, …) is included.
+
+**Known limits (unchanged, honest):** D3D9/DirectDraw not implemented; the emulator runs on the main thread; no CJK glyphs;
+phone JVM games stay slow (15–22 MIPS) — region chaining is the next speed step.
+
+---
+
 # v1.49.0 — Android: SteamWorld Dig (GOG) crash fixed at the root, timer queues, JIT 2× faster on the benchmarks
 
 **Why this release exists.**  The user's Report tab of *SteamWorldDig.exe* (GOG, x86) showed a crash inside `OpenAL32.dll`
