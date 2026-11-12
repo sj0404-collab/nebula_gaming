@@ -1,3 +1,31 @@
+# v1.49.2 — Android: the JIT no longer floods the phone with code (installers back to full speed, cursor responsive)
+
+**What was wrong (reported as “everything crawls, 1 FPS even in an installer, the cursor lags”).**  The v1.49 JIT let a
+region absorb every callee it called and every return landing of its callees, and retranslated regions absorbed them
+again.  The same code was translated over and over: Inno Setup — **163 000 instructions / 32 MB of wasm** for a working
+set of ~17 000 instructions (v1.48: 1.6 MB); the JVM game — ~373 MB of wasm per session.  Every region is compiled
+synchronously on the UI thread, so on a phone that volume meant seconds of frozen input and rendering, and V8's
+background tier-up of all that code ate the remaining cores.  On the desktop runner the compiles were fast enough to
+hide it, which is why CI and the benchmarks stayed green.
+
+**Fixed:**
+- **Code-duplication guard:** a block that is already translated inside another live region (bigger than 48
+  instructions) is not translated again — the new region exits to it through the dispatcher.  Inno Setup: 32 MB → 6.5 MB,
+  163 k → 33 k translated instructions; the JVM game: 3.7 MB over the whole recording instead of hundreds of MB.
+- **Compile-time budget:** at most 200 ms of every 1000 ms of host time go into translation + wasm compile; the rest
+  waits a little (the code runs interpreted meanwhile).  Never triggers on a desktop (`defer=0` on the runner); on a
+  phone it caps the jank of a start-up burst.  New stats fields `defer` / `cms`.
+- The game run on the runner did **not** get slower: 77.8–78.4 MIPS / 14–16 FPS (before: 74.3 / 12.2) — fewer
+  retranslations, less memory.
+
+Everything from v1.49.0 / v1.49.1 is included (SteamWorld Dig GOG x86 SEH fix, timer queues, Inno Setup flags fix).
+
+**Known limits (honest):** the phone itself could not be measured here — this release removes the identified 20× code
+volume and bounds the compile time; if an installer is still slow, the Report tab (JIT line: `bytes=`, `defer=`, `cms=`)
+will show whether compile time is still the cause.  D3D9/DirectDraw not implemented; the emulator runs on the main thread.
+
+---
+
 # v1.49.1 — Android: Inno Setup installers under the JIT ("Runtime error 210" / "Abstract Error") fixed
 
 **What was wrong.**  v1.49.0 brought the new JIT; every Delphi-built installer (Inno Setup 5.x/6.x — GOG setups, most game
