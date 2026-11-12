@@ -811,6 +811,14 @@ static int term_targets(const Dc *e, u64 start, const u8 *code, int m32, Mem *me
 }
 static void sort_u64(u64 *v, int n) { for (int i = 1; i < n; i++) { u64 x = v[i]; int j = i - 1; while (j >= 0 && v[j] > x) { v[j + 1] = v[j]; j--; } v[j + 1] = x; } }
 static void jit_drop(Jb *b);
+/* code duplication guard: a block that is already translated inside another live region joins a new region only when that
+   region is small (a leaf helper worth inlining); otherwise it is reached through the dispatcher (an x_jit exit).  Without
+   this every caller absorbed its callees and every callee its return landings — the same code was translated again and again
+   (Inno Setup: 163 k instructions / 32 MB of wasm for a 17 k-instruction working set; the JVM: 373 MB per session), and the
+   synchronous compiles of that volume are what made phones crawl. */
+#define JIT_DUP_MAX 48
+static u16 g_fn_insns[JIT_MAX_FN];   /* instructions translated into each region function */
+static int jit_owned(u64 rip, Mem *m, int m32, u32 self_fn) { Jb *o = jb_find(rip, m, m32); return o && o->fn && o->fn != self_fn && g_fn_insns[o->fn] > JIT_DUP_MAX; }
 static int jit_translate(Cpu *c, Jb *b0) {
   Mem *m = c->mem; u32 gen = mem_gen(m); int m32 = c->mode32; u64 rip = b0->rip; u8 rt = b0->rt;
   Region *reg = mem_region(m, rip); if (!reg) return 0;
@@ -831,7 +839,7 @@ static int jit_translate(Cpu *c, Jb *b0) {
         if (it[nit - 1].kind == K_TERM) { B->term = 1;
           u64 t[TT_MAX]; int nt = term_targets(e, it[nit - 1].rip, rbase + (it[nit - 1].rip - lo), m32, m, t);
           for (int q = 0; q < nt; q++) { int known = 0; for (int z = 0; z < ns; z++) if (starts[z] == t[q]) { known = 1; break; }
-            if (!known && ns < JIT_MAX_BLOCKS + 8 && t[q] >= lo && t[q] < hi) { Dc *te; if (dc_valid(m, gen, m32, t[q], rbase + (t[q] - lo), &te)) { starts[ns++] = t[q]; added = 1; } } }
+            if (!known && ns < JIT_MAX_BLOCKS + 8 && t[q] >= lo && t[q] < hi && !jit_owned(t[q], m, m32, b0->fn)) { Dc *te; if (dc_valid(m, gen, m32, t[q], rbase + (t[q] - lo), &te)) { starts[ns++] = t[q]; added = 1; } } }
           break; }
       }
       B->end = a;
@@ -954,6 +962,7 @@ static int jit_translate(Cpu *c, Jb *b0) {
   u32 reuse = g_jit_nfree ? g_jit_free[--g_jit_nfree] : 0;
   u32 fn = host_jit_compile(mod.b, mod.n, reuse);
   if (!fn || fn >= JIT_MAX_FN) { g_jit_st.fails++; if (reuse) g_jit_free[g_jit_nfree++] = reuse; rv_release(rid); return 0; }
+  g_fn_insns[fn] = (u16)(nit > 65535 ? 65535 : nit);
   if (fn > g_jit_fn_hi) g_jit_fn_hi = fn;
   g_fnexit[fn] = 0; rv_release(g_rv_of_fn[fn]); g_rv_of_fn[fn] = rid; if (rid) g_rv[rid].fn = fn;
   g_jit_owned[fn >> 3] |= (u8)(1 << (fn & 7));
