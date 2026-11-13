@@ -272,6 +272,12 @@ if [ -f ../public/x64/sys32/msvcp140.dll ]; then
 else
   echo "  skip (run emu/tools/runtime-pack.sh first)"
 fi
+echo "[5x2] msvcp_thr.exe / msvcp_thr32.exe (builtin msvcp140 xthreads: _Mtx_* / _Cnd_* / _Thrd_* producer-consumer, trylock, xtime)"
+for t in msvcp_thr.exe msvcp_thr32.exe; do
+  out=$($X --quiet --no-stdin --max-ms 60000 tests/$t 2>&1 || true)
+  check "$t mutex"      "lock=0 owns=1 relock=3 owns_after=0" "$out"
+  check "$t threads+cv" "got=300 sum=30300 exit=27 ticks_ok=1 tid_ok=1 timeouts_lt_1000=1" "$out"
+done
 echo "[5y] tpool.exe (kernel32 thread pool: work items, periodic/one-shot timers, waits, simple callbacks, *WhenCallbackReturns)"
 out=$($X --quiet --no-stdin tests/tpool.exe 2>&1 || true)
 check "24 work callbacks"      "24 work callbacks ran, sum 48000" "$out"

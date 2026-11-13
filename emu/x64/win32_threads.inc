@@ -266,6 +266,98 @@ static void s_Mtx_init_in_situ(Cpu *c) {
   wr32(c, a + tid, 0xffffffffu); wr32(c, a + tid + 4, 0);
 }
 
+/* ---- MSVCP140 C runtime threading (xthreads.h): the real msvcp140.dll of the VC++ 2015-2022 pack is preferred; these
+   builtins carry a program whose private DLLs import them before the pack is installed. Layouts from the MSVC STL sources:
+   _Mtx_internal_imp_t { int type; stl_critical_section_win7 cs (two pointers, the second is the SRWLOCK; padded to 36/64);
+   long thread_id; int count; } = 48/80 bytes; _Cnd_internal_imp_t { stl_condition_variable_win7 } = CONDITION_VARIABLE at 0;
+   _Thrd_t { void *handle; unsigned id; }. type: 1 plain, 2 try, 4 timed, 0x100 recursive. Results: 0 success, 1 nomem,
+   2 timedout, 3 busy, 4 error. All exports are cdecl. */
+static void cv_sleep(Cpu *c, u64 cv, u64 lock, u32 ms, int lock_kind);
+static void do_wait(Cpu *c, u32 n, u64 arr, u64 single, int all, u32 ms);
+#define MTX_SRW(m)  ((m) + 2 * (u64)PSZ)
+#define MTX_TID(m)  ((m) + (c->mode32 ? 40 : 72))
+#define MTX_CNT(m)  ((m) + (c->mode32 ? 44 : 76))
+static u32 xtime_rel_ms(Cpu *c, u64 xt) {   /* xtime { long long sec; long nsec; } absolute since 1970 → remaining ms */
+  if (!xt) return 0xffffffffu;
+  double target = (double)(s64)rd64(c, xt) * 1000.0 + (double)(s32)rd32(c, xt + 8) / 1e6;
+  double now = (double)(now_100ns() - 116444736000000000ull) / 10000.0; double d = target - now;
+  return d <= 0 ? 0 : d > 4e9 ? 0xfffffffeu : (u32)d;
+}
+static void mtx_lock_common(Cpu *c, u64 m, int try_only) {
+  u32 me = cur_tid(W); u64 srw = MTX_SRW(m); int type = (int)rd32(c, m);
+  if ((u32)rd32(c, MTX_TID(m)) != me) {
+    if (rdp(c, srw) != 0) {
+      if (try_only) { RET(3); return; }
+      W->block_addr = srw; W->block_flag = 1; W->wait_deadline = -1; park(c, BLOCK_SRW); return;
+    }
+    wrp(c, srw, 1);
+  }
+  wait_end(W);
+  u32 cnt = rd32(c, MTX_CNT(m)) + 1;
+  if ((type & ~0x100) != 1 && cnt > 1 && !(type & 0x100)) { RET(3); return; }   /* non-recursive relock: busy (lock not taken again) */
+  wr32(c, MTX_CNT(m), cnt); wr32(c, MTX_TID(m), me); RET(0);
+}
+static void s_Mtx_lock(Cpu *c) { mtx_lock_common(c, ARG(0), 0); }
+static void s_Mtx_trylock(Cpu *c) { mtx_lock_common(c, ARG(0), 1); }
+static void s_Mtx_timedlock(Cpu *c) { u64 m = ARG(0), xt = ARG(1); u32 ms = xtime_rel_ms(c, xt);
+  if (ms == 0) { mtx_lock_common(c, m, 1); if (c->r[RAX] == 3) RET(2); return; }
+  mtx_lock_common(c, m, 0); }   /* a positive timeout waits like lock: no blocked thread ever outlives the deadline in practice */
+static void s_Mtx_unlock(Cpu *c) { u64 m = ARG(0); u32 cnt = rd32(c, MTX_CNT(m)); if (cnt) cnt--; wr32(c, MTX_CNT(m), cnt);
+  if (cnt == 0) { wr32(c, MTX_TID(m), 0xffffffffu); wrp(c, MTX_SRW(m), 0); } RET(0); }
+static void s_Mtx_current_owns(Cpu *c) { u64 m = ARG(0); RET(rd32(c, MTX_CNT(m)) != 0 && rd32(c, MTX_TID(m)) == cur_tid(W)); }
+static void s_Mtx_getconcrtcs(Cpu *c) { RET(ARG(0) + PSZ); }
+static void s_Mtx_init(Cpu *c) { u64 pm = ARG(0), m = w32_heap_alloc(W, 80, 1); if (!m) { RET(1); return; }
+  call_shim(c, s_Mtx_init_in_situ, m, ARG(1), 0, 0); wrp(c, pm, m); RET(0); }
+static void s_Mtx_destroy(Cpu *c) { if (ARG(0)) w32_heap_free(W, ARG(0)); }
+static void s_Mtx_destroy_in_situ(Cpu *c) { (void)c; }
+static void s_Cnd_init_in_situ(Cpu *c) { wrp(c, ARG(0), 0); }
+static void s_Cnd_init(Cpu *c) { u64 pc = ARG(0), cv = w32_heap_alloc(W, 80, 1); if (!cv) { RET(1); return; } wrp(c, pc, cv); RET(0); }
+static void s_Cnd_destroy(Cpu *c) { if (ARG(0)) w32_heap_free(W, ARG(0)); }
+static void s_Cnd_destroy_in_situ(Cpu *c) { (void)c; }
+static void s_Cnd_signal(Cpu *c) { u64 a = ARG(0); wrp(c, a, rdp(c, a) + 1); RET(0); }
+static void s_Cnd_broadcast(Cpu *c) { s_Cnd_signal(c); }
+/* _Cnd_wait releases the mutex ownership (owner -1, count-1), sleeps on the condition variable with the SRW lock, then
+   re-takes ownership; the shim is re-entered after every yield, so the ownership bookkeeping happens only on first entry/exit */
+static void cnd_wait_common(Cpu *c, u64 cv, u64 m, u64 xt) {
+  int retry = W->wait_active && W->wait_rip == c->rip;
+  if (!retry) { wr32(c, MTX_TID(m), 0xffffffffu); u32 n = rd32(c, MTX_CNT(m)); wr32(c, MTX_CNT(m), n ? n - 1 : 0); }
+  cv_sleep(c, cv, MTX_SRW(m), xtime_rel_ms(c, xt), 1);
+  if (W->block != BLOCK_NONE) return;   /* parked: comes back here */
+  int woken = c->r[RAX] != 0;
+  wr32(c, MTX_TID(m), cur_tid(W)); wr32(c, MTX_CNT(m), rd32(c, MTX_CNT(m)) + 1); RET(woken ? 0 : 2);
+}
+static void s_Cnd_wait(Cpu *c) { cnd_wait_common(c, ARG(0), ARG(1), 0); }
+static void s_Cnd_timedwait(Cpu *c) { cnd_wait_common(c, ARG(0), ARG(1), ARG(2)); }
+static void s_Cnd_register_at_thread_exit(Cpu *c) { (void)c; }
+static void s_Cnd_unregister_at_thread_exit(Cpu *c) { (void)c; }
+static void s_Cnd_do_broadcast_at_thread_exit(Cpu *c) { (void)c; }
+/* _Thrd_create(_Thrd_t *, int (*)(void *), void *) and _Thrd_start(_Thrd_t *, unsigned (__stdcall *)(void *), void *): the thread
+   runs the routine directly (its return value is the exit code). By-value _Thrd_t: x86 two stack slots, x64 a pointer */
+static void s_Thrd_create(Cpu *c) { u64 t = ARG(0); u32 tid = 0; u64 h = thread_create(c, ARG(1), ARG(2), 0, 0, &tid);
+  if (!h) { RET(1); return; } wrp(c, t, h); wr32(c, t + PSZ, tid); RET(0); }
+static u64 thrd_arg_handle(Cpu *c, int i) { return c->mode32 ? ARG(i) : rdp(c, ARG(i)); }
+static u32 thrd_arg_id(Cpu *c, int i) { return c->mode32 ? (u32)ARG(i + 1) : rd32(c, ARG(i) + 8); }
+static void s_Thrd_join(Cpu *c) { u64 h = thrd_arg_handle(c, 0); int ri = c->mode32 ? 2 : 1; u64 res = ARG(ri);
+  do_wait(c, 1, 0, h, 0, 0xffffffffu); if (c->status == RUN_YIELD) return;
+  if (res) { KObj *k = kobj_of_handle(c, h, KO_THREAD); wr32(c, res, k ? k->exit_code : 0); }
+  call_shim(c, s_CloseHandle, h, 0, 0, 0); RET(0); }
+static void s_Thrd_detach(Cpu *c) { call_shim(c, s_CloseHandle, thrd_arg_handle(c, 0), 0, 0, 0); RET(0); }
+static void s_Thrd_id(Cpu *c) { RET(cur_tid(W)); }
+static void s_Thrd_current(Cpu *c) {   /* returns _Thrd_t by value: x86 in EDX:EAX, x64 through the hidden result pointer */
+  u32 tid = cur_tid(W);
+  if (c->mode32) { c->r[RAX] = 0xfffffffeu; c->r[RDX] = tid; return; }
+  u64 out = ARG(0); wrp(c, out, 0xfffffffffffffffeull); wr32(c, out + 8, tid); RET(out); }
+static void s_Thrd_equal(Cpu *c) { RET(c->mode32 ? (u32)ARG(1) == (u32)ARG(3) : thrd_arg_id(c, 0) == thrd_arg_id(c, 1)); }
+static void s_Thrd_lt(Cpu *c) { RET(c->mode32 ? (u32)ARG(1) < (u32)ARG(3) : thrd_arg_id(c, 0) < thrd_arg_id(c, 1)); }
+static void s_Thrd_sleep(Cpu *c) { call_shim(c, s_Sleep, xtime_rel_ms(c, ARG(0)), 0, 0, 0); }
+static void s_Thrd_yield(Cpu *c) { call_shim(c, s_Sleep, 0, 0, 0, 0); }
+static void s_Thrd_exit(Cpu *c) { thread_exit(c, (u32)ARG(0)); }
+static void s_Thrd_hardware_concurrency(Cpu *c) { RET(4); }
+static void s_Xtime_get_ticks(Cpu *c) { RET(now_100ns()); }   /* 100 ns since 1601, as the Windows STL returns */
+static void s_xtime_get(Cpu *c) { u64 xt = ARG(0); u64 t = now_100ns() - 116444736000000000ull; wr64(c, xt, t / 10000000ull); wr32(c, xt + 8, (u32)((t % 10000000ull) * 100)); RET(1); }
+static void s_Query_perf_counter(Cpu *c) { RET((u64)(host_now_ms() * 10000.0)); }
+static void s_Query_perf_frequency(Cpu *c) { RET(10000000ull); }
+
 /* SRW lock: one 64-bit word — bit 0 exclusive, shared holders counted from bit 4 */
 static void s_InitializeSRWLock(Cpu *c) { wrp(c, ARG(0), 0); }
 static void s_AcquireSRWLockExclusive(Cpu *c) { u64 a = ARG(0); if (rdp(c, a) == 0) { wrp(c, a, 1); wait_end(W); return; } W->block_addr = a; W->block_flag = 1; W->wait_deadline = -1; park(c, BLOCK_SRW); }

@@ -592,7 +592,23 @@ export default function X64App() {
   }, [vcPacks, logComp, pushToast]);
   /* before a program starts: every VC++ family it imports, for its own bitness (the x64 2015–2022 pack is handled by installPack) */
   ensureVC10Ref.current = async (rt: X64Runtime, entry: ExeEntry) => {
-    for (const id of vcPacksFor(entry.info.dlls, entry.info.pe32plus)) {
+    /* the exe's imports plus those of its own DLLs next to it (3 levels: Tap It Away.exe → CoronaLabs.Corona.Native.dll → msvcp140):
+       a VC++ family needed only by a private DLL must be installed too, otherwise the partial builtin stands in for the real msvcp140 */
+    const dlls = new Set<string>((entry.info.dlls ?? []).map(d => d.toLowerCase()));
+    if (entry.path) {
+      const dir = entry.path.slice(0, entry.path.lastIndexOf('\\') + 1); const seen = new Set<string>(); let frontier = [...dlls];
+      for (let depth = 0; depth < 3 && frontier.length; depth++) {
+        const next: string[] = [];
+        for (const d of frontier) {
+          if (seen.has(d) || vcPacksFor([d], entry.info.pe32plus).length) continue; seen.add(d);
+          const bytes = rt.vfsRead(dir + d) ?? rt.vfsRead(dir + d + '.dll'); if (!bytes || bytes.length < 1024 || bytes.length > 64 * 1048576) continue;
+          const info = rt.inspect(bytes); if (!info.ok || !info.dll) continue;
+          for (const x of info.dlls ?? []) { const k = x.toLowerCase(); if (!dlls.has(k)) { dlls.add(k); next.push(k); } }
+        }
+        frontier = next;
+      }
+    }
+    for (const id of vcPacksFor([...dlls], entry.info.pe32plus)) {
       if (id === 'vc2015-x64') continue;
       if (!vcPacks.some(p => p.id === id)) { setLog(l => [...l, `${id}: the runtime pack is not built into this deployment; the program's own copies of the DLLs (next to the exe) are used if present`]); continue; }
       if (!(await installVcPack(rt, id))) return false;
