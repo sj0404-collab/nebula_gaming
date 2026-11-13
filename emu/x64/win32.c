@@ -1525,6 +1525,7 @@ static void s_dsign(Cpu *c) { RET(c->x[0].f64[0] < 0 ? 1 : 0); }
 
 #include "win32_rt.inc"
 #include "win32_shlwapi.inc"
+#include "win32_acm.inc"
 #include "win32_math.inc"
 #include "win32_clr.inc"
 #include "win32_acl.inc"
@@ -1560,6 +1561,7 @@ static const ShimDef shims[] = {
   X86_SHIMS
   RT_SHIMS
   SHLWAPI2_SHIMS
+  ACM_SHIMS
   MATH_SHIMS
   TP_SHIMS
   SEH_SHIMS

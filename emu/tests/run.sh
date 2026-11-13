@@ -305,6 +305,16 @@ for t in shlwapi2.exe shlwapi232.exe; do
   check "$t compact"   "compact=C:\\very...\\file.txt prefix=1 samerout=1 filespec=1/0 lfn=1/0 next=b\\c" "$out"
   check "$t icon"      "icon=C:\\x\\y.dll idx=-7 sq=1 pretty=1" "$out"
 done
+echo "[5v4] acm.exe / acm32.exe (msacm32 PCM converter 8-bit 11025 mono -> 16-bit 22050 stereo; wininet offline errors)"
+for t in acm.exe acm32.exe; do
+  out=$($X --quiet --no-stdin --max-ms 60000 tests/$t 2>&1 || true)
+  check "$t suggest" "suggest r=0 tag=1 ch=2 rate=22050 bits=16 align=4 avg=88200" "$out"
+  check "$t open"    "open r=0 has=1" "$out"
+  check "$t convert" "conv r=0 used=1000 out=8000" "$out"
+  check "$t frames"  "frames_ok=1 avgerr=127" "$out"
+  check "$t adpcm"   "adpcm r=512 (notpossible=1)" "$out"
+  check "$t wininet" "inet open=1 connected=0 flags=20 openurl=0 err=12029 send=0 err=12029 read=0 rd=0 close=111" "$out"
+done
 echo "[5x2] msvcp_thr.exe / msvcp_thr32.exe (builtin msvcp140 xthreads: _Mtx_* / _Cnd_* / _Thrd_* producer-consumer, trylock, xtime)"
 for t in msvcp_thr.exe msvcp_thr32.exe; do
   out=$($X --quiet --no-stdin --max-ms 60000 tests/$t 2>&1 || true)
