@@ -762,7 +762,10 @@ static void s_GetSystemInfo(Cpu *c) { u64 a = ARG(0);
   if (c->mode32) { u8 *p = mem_ptr(c->mem, a, 36, 1); if (!p) return; e_memset(p, 0, 36); wr16(c, a, 0); wr32(c, a + 4, 4096); wr32(c, a + 8, 0x10000); wr32(c, a + 12, 0x7ffeffff); wr32(c, a + 16, 1); wr32(c, a + 20, 1); wr32(c, a + 24, 586); wr32(c, a + 28, 0x10000); return; }   /* SYSTEM_INFO32 (WOW64 view: PROCESSOR_ARCHITECTURE_INTEL) */
   u8 *p = mem_ptr(c->mem, a, 48, 1); if (!p) return; e_memset(p, 0, 48); wr16(c, a, 9); wr32(c, a + 4, 4096); wr64(c, a + 8, 0x10000); wr64(c, a + 16, 0x7ffffffeffff); wr64(c, a + 24, 1); wr32(c, a + 32, 1); wr32(c, a + 36, 586); wr32(c, a + 40, 0x10000); }
 static void s_GetNativeSystemInfo(Cpu *c) { s_GetSystemInfo(c); if (c->mode32) wr16(c, ARG(0), 9); }   /* the native machine is x64 */
-static void s_GlobalMemoryStatusEx(Cpu *c) { u64 a = ARG(0); wr32(c, a + 4, 30); wr64(c, a + 8, 4ull << 30); wr64(c, a + 16, 3ull << 30); wr64(c, a + 24, 4ull << 30); wr64(c, a + 32, 3ull << 30); wr64(c, a + 40, 8ull << 40); wr64(c, a + 48, 8ull << 40); RET(1); }
+/* 4 GB of RAM (the wasm module's address limit); "available" is what the session can still hand out: untouched arena plus
+   recycled blocks of exited programs (capped at 3 GB), so a JVM started after a big game sizes its heap to what is really left */
+static u64 avail_phys(void) { u64 v = (u64)emu_arena_headroom() + mem_pool_free(); if (v > (3ull << 30)) v = 3ull << 30; if (v < (256ull << 20)) v = 256ull << 20; return v & ~0xfffffull; }
+static void s_GlobalMemoryStatusEx(Cpu *c) { u64 a = ARG(0); u64 av = avail_phys(); wr32(c, a + 4, (u32)(100 - av * 100 / (4ull << 30))); wr64(c, a + 8, 4ull << 30); wr64(c, a + 16, av); wr64(c, a + 24, 4ull << 30); wr64(c, a + 32, av); wr64(c, a + 40, 8ull << 40); wr64(c, a + 48, 8ull << 40); RET(1); }
 static void s_RtlInstallFunctionTableCallback(Cpu *c) { RET(1); }
 static void s_EncodePointer(Cpu *c) { RET(ARG(0) ^ 0xA5A5A5A5ull); }
 static void s_DecodePointer(Cpu *c) { RET(ARG(0) ^ 0xA5A5A5A5ull); }
@@ -1141,7 +1144,9 @@ static void s_GetComputerNameW(Cpu *c) { u32 sz = rd32(c, ARG(1)); if (sz > 6) {
 static void s_GetComputerNameExW(Cpu *c) { call_shim(c, s_GetComputerNameW, ARG(1), ARG(2), 0, 0); }
 static void s_GetSystemDirectoryW(Cpu *c) { const char *d = "C:\\Windows\\System32"; size_t l = e_strlen(d); if ((u32)ARG(1) > l) for (size_t i = 0; i <= l; i++) wr16(c, ARG(0) + i * 2, (u8)d[i]); RET(l); }
 static void s_LocalFileTimeToFileTime(Cpu *c) { wr64(c, ARG(1), rd64(c, ARG(0))); RET(1); }
-static void s_GlobalMemoryStatus(Cpu *c) { u64 a = ARG(0); wr32(c, a + 4, 30); wr64(c, a + 8, 4ull << 30); wr64(c, a + 16, 3ull << 30); wr64(c, a + 24, 4ull << 30); wr64(c, a + 32, 3ull << 30); wr64(c, a + 40, 8ull << 40); wr64(c, a + 48, 8ull << 40); }
+static void s_GlobalMemoryStatus(Cpu *c) { u64 a = ARG(0); u64 av = avail_phys(); u32 load = (u32)(100 - av * 100 / (4ull << 30));
+  if (c->mode32) { wr32(c, a, 32); wr32(c, a + 4, load); wr32(c, a + 8, 0xffffffffu); wr32(c, a + 12, (u32)av); wr32(c, a + 16, 0xffffffffu); wr32(c, a + 20, (u32)av); wr32(c, a + 24, 0x7ffe0000u); wr32(c, a + 28, 0x7f000000u); return; }   /* MEMORYSTATUS: SIZE_T fields, >= 4 GB reported as -1 like Windows */
+  wr32(c, a, 64); wr32(c, a + 4, load); wr64(c, a + 8, 4ull << 30); wr64(c, a + 16, av); wr64(c, a + 24, 4ull << 30); wr64(c, a + 32, av); wr64(c, a + 40, 8ull << 40); wr64(c, a + 48, 8ull << 40); }
 static void s_ret0(Cpu *c) { RET(0); }
 static void s_ret1(Cpu *c) { RET(1); }
 static void s_ret2(Cpu *c) { RET(2); }                  /* ERROR_FILE_NOT_FOUND for Reg* */
@@ -1689,7 +1694,7 @@ void w32_start(Win32 *w, const char *cmdline) {
      (-XX:DumpLoadedClassList, free), launch 2 is the one-time dump pass (-Xshare:dump, exits, the host relaunches), every later launch maps the archive —
      class loading/verification, the bulk of JVM start-up under emulation, comes pre-parsed from <dir>\app\nebula-cds.jsa */
   static char java_opts[2400];
-  { e_snprintf(java_opts, sizeof java_opts, "JAVA_TOOL_OPTIONS=-XX:TieredStopAtLevel=1 -XX:-UsePerfData -XX:+IgnoreUnrecognizedVMOptions"); w->cds_dump_pass = 0; w->cds_jsa[0] = 0;
+  { e_snprintf(java_opts, sizeof java_opts, "JAVA_TOOL_OPTIONS=-XX:TieredStopAtLevel=1 -XX:-UsePerfData -XX:+IgnoreUnrecognizedVMOptions -XX:CompressedClassSpaceSize=128m -XX:ReservedCodeCacheSize=64m -XX:MaxRAMPercentage=25 -XX:-UseLargePages"); w->cds_dump_pass = 0; w->cds_jsa[0] = 0;
     if (!w->mode32 && w->exe_path[0]) { char dir[600]; e_snprintf(dir, sizeof dir, "%s", w->exe_path); char *sl = 0; for (char *q = dir; *q; q++) if (*q == '\\') sl = q; if (sl) *sl = 0;
       char jvm[700]; e_snprintf(jvm, sizeof jvm, "%s\\runtime\\bin\\server\\jvm.dll", dir); u64 sz = 0;
       if (sl && vfs_stat(jvm, &sz)) {

@@ -272,6 +272,9 @@ if [ -f ../public/x64/sys32/msvcp140.dll ]; then
 else
   echo "  skip (run emu/tools/runtime-pack.sh first)"
 fi
+echo "[5w] region free list (coalescing / best fit / split — serves a JVM's reservations from an exited game's blocks)"
+out=$($X --pool-selftest 2>&1 || true)
+check "pool selftest" "pool selftest ok" "$out"
 echo "[5x2] msvcp_thr.exe / msvcp_thr32.exe (builtin msvcp140 xthreads: _Mtx_* / _Cnd_* / _Thrd_* producer-consumer, trylock, xtime)"
 for t in msvcp_thr.exe msvcp_thr32.exe; do
   out=$($X --quiet --no-stdin --max-ms 60000 tests/$t 2>&1 || true)

@@ -30,6 +30,8 @@ int emu_reserve(size_t n) {
   arena_end = (uintptr_t)__builtin_wasm_memory_size(0) * 65536; return 1;
 }
 size_t emu_alloc_used(void) { return used_total; }
+/* bytes the arena can still grow by (the module's max-memory is 4 GB minus one page) */
+size_t emu_arena_headroom(void) { if (!arena_cur) { arena_cur = (uintptr_t)&__heap_base; arena_end = (uintptr_t)__builtin_wasm_memory_size(0) * 65536; } uintptr_t max = 4294901760ull; return arena_cur < max ? (size_t)(max - arena_cur) : 0; }
 #else
 #include <stdlib.h>
 static size_t used_total = 0;
@@ -37,6 +39,7 @@ void *emu_alloc(size_t n) { used_total += n; return calloc(1, n ? n : 1); }
 int emu_free(void *p) { free(p); return 1; }
 int emu_reserve(size_t n) { (void)n; return 1; }
 size_t emu_alloc_used(void) { return used_total; }
+size_t emu_arena_headroom(void) { return (size_t)1 << 40; }
 #endif
 
 /* ---------- strings ---------- */
@@ -250,16 +253,59 @@ int e_snprintf(char *buf, size_t n, const char *fmt, ...) { va_list ap; va_start
 void e_log(const char *fmt, ...) { char b[1024]; va_list ap; va_start(ap, fmt); int n = e_vsnprintf(b, sizeof b, fmt, ap); va_end(ap); if (n > (int)sizeof b - 1) n = sizeof b - 1; host_write(3, b, n); }
 
 /* ---------- guest memory ---------- */
-/* exited processes return their regions to a pool keyed by size (the arena itself never shrinks) */
-#define POOL_MAX 128
+/* exited processes (and released reservations) return their host blocks to a free list: sorted by address, adjacent blocks
+   coalesced, best-fit with splitting — the arena itself never shrinks, so a session that ran a 1.5 GB game and then starts a JVM
+   must serve the JVM's reservations from the first game's blocks (4 GB wasm cap). Recycled memory is cleared on take; big
+   blocks are preferred from the untouched arena while it has room (lazy zero pages stay non-resident on the phone). */
+#define POOL_MAX 4096
 static struct { u8 *host; u64 size; } g_pool[POOL_MAX]; static int g_npool;
-static u8 *pool_take(u64 size) { for (int i = 0; i < g_npool; i++) if (g_pool[i].size == size) { u8 *h = g_pool[i].host; g_pool[i] = g_pool[--g_npool]; e_memset(h, 0, (size_t)size); return h; } return 0; }
+static void pool_put(u8 *h, u64 size) {
+  if (!h || !size) return;
+  int i = 0; while (i < g_npool && g_pool[i].host < h) i++;
+  if (i > 0 && g_pool[i - 1].host + g_pool[i - 1].size == h) {
+    g_pool[i - 1].size += size;
+    if (i < g_npool && g_pool[i - 1].host + g_pool[i - 1].size == g_pool[i].host) { g_pool[i - 1].size += g_pool[i].size; for (int j = i + 1; j < g_npool; j++) g_pool[j - 1] = g_pool[j]; g_npool--; }
+    return;
+  }
+  if (i < g_npool && h + size == g_pool[i].host) { g_pool[i].host = h; g_pool[i].size += size; return; }
+  if (g_npool >= POOL_MAX) return;   /* leaked to the arena */
+  for (int j = g_npool; j > i; j--) g_pool[j] = g_pool[j - 1];
+  g_pool[i].host = h; g_pool[i].size = size; g_npool++;
+}
+static u8 *pool_take(u64 size) {
+  int best = -1;
+  for (int i = 0; i < g_npool; i++) if (g_pool[i].size >= size && (best < 0 || g_pool[i].size < g_pool[best].size)) best = i;
+  if (best < 0) return 0;
+  u8 *h = g_pool[best].host;
+  if (g_pool[best].size == size) { for (int j = best + 1; j < g_npool; j++) g_pool[j - 1] = g_pool[j]; g_npool--; }
+  else { g_pool[best].host += size; g_pool[best].size -= size; }
+  e_memset(h, 0, (size_t)size); return h;
+}
+/* self-test of the free list (x64run --pool-selftest): coalescing, best fit, splitting, exact reuse; 0 = ok */
+int mem_pool_selftest(void) {
+  static u8 blk[4096 * 16]; u8 *b = blk; int save = g_npool; g_npool = 0;
+  pool_put(b + 4096 * 4, 4096); pool_put(b, 4096 * 2); pool_put(b + 4096 * 2, 4096 * 2);   /* [0,4) + [4,5) → one block of 5 pages */
+  if (g_npool != 1 || g_pool[0].host != b || g_pool[0].size != 4096 * 5) return 1;
+  pool_put(b + 4096 * 8, 4096 * 3);                                                        /* [8,11) separate */
+  if (g_npool != 2 || mem_pool_free() != 4096 * 8) return 2;
+  u8 *t = pool_take(4096 * 3); if (t != b + 4096 * 8 || g_npool != 1) return 3;            /* best fit: the exact 3-page block */
+  t = pool_take(4096 * 2); if (t != b || g_pool[0].host != b + 4096 * 2 || g_pool[0].size != 4096 * 3) return 4;   /* split */
+  if (pool_take(4096 * 4)) return 5;                                                         /* too big */
+  pool_put(b, 4096 * 2); if (g_npool != 1 || g_pool[0].size != 4096 * 5) return 6;          /* merge back with the following block */
+  pool_put(b + 4096 * 8, 4096 * 3); pool_put(b + 4096 * 5, 4096 * 3); if (g_npool != 1 || g_pool[0].size != 4096 * 11) return 7;   /* merge both sides */
+  t = pool_take(4096 * 11); if (t != b || g_npool != 0) return 8; for (int i = 0; i < 4096 * 11; i++) if (b[i]) return 9;
+  g_npool = save; return 0;
+}
+u64 mem_pool_free(void) { u64 t = 0; for (int i = 0; i < g_npool; i++) t += g_pool[i].size; return t; }
 u32 g_mem_gen;
-void mem_release(Mem *m) { for (int i = 0; i < m->n; i++) { if (g_npool < POOL_MAX) { g_pool[g_npool].host = m->r[i].host; g_pool[g_npool].size = m->r[i].size; g_npool++; } } m->n = 0; m->last = 0; mem_tlb_flush(m); }
+void mem_release(Mem *m) { for (int i = 0; i < m->n; i++) if (!emu_free(m->r[i].host)) pool_put(m->r[i].host, m->r[i].size); m->n = 0; m->last = 0; mem_tlb_flush(m); }
 u8 *mem_map(Mem *m, u64 base, u64 size, const char *name) {
   if (m->n >= MAX_REGIONS) return 0;
   size = (size + 0xfff) & ~0xfffull;
-  u8 *h = pool_take(size); if (!h) h = emu_alloc((size_t)size);
+  u8 *h = 0;
+  if (size >= (64ull << 20) && emu_arena_headroom() >= size + (768ull << 20)) h = emu_alloc((size_t)size);   /* big block: fresh lazy pages while the arena has room */
+  if (!h) h = pool_take(size);
+  if (!h) h = emu_alloc((size_t)size);
   if (!h) return 0;
   Region *r = &m->r[m->n++];
   r->base = base; r->size = size; r->host = h; r->name = name; r->prot = 7; r->pgen = 0; r->pcode = 0;
@@ -269,7 +315,7 @@ u8 *mem_map(Mem *m, u64 base, u64 size, const char *name) {
 int mem_unmap(Mem *m, u64 base) {
   for (int i = 0; i < m->n; i++) if (m->r[i].base == base) {
     u8 *h = m->r[i].host; u64 size = m->r[i].size;
-    if (!emu_free(h) && g_npool < POOL_MAX) { g_pool[g_npool].host = h; g_pool[g_npool].size = size; g_npool++; }
+    if (!emu_free(h)) pool_put(h, size);
     for (int j = i + 1; j < m->n; j++) m->r[j - 1] = m->r[j]; m->n--; m->last = 0; mem_tlb_flush(m); return 1; }
   return 0;
 }

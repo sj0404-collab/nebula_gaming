@@ -53,6 +53,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[ai], "--prefix") && ai + 1 < argc) prefix = argv[++ai];
     else if (!strcmp(argv[ai], "--max-ms") && ai + 1 < argc) max_ms = atof(argv[++ai]);
     else if (!strcmp(argv[ai], "--quiet")) quiet = 1;
+    else if (!strcmp(argv[ai], "--pool-selftest")) { int r = mem_pool_selftest(); printf("pool selftest %s (%d)\n", r ? "FAILED" : "ok", r); return r; }
     else if (!strcmp(argv[ai], "--list-vfs")) list_vfs = 1;
     else if (!strcmp(argv[ai], "--trace")) x64_trace(1); else if (!strcmp(argv[ai], "--trace2")) x64_trace(2); else if (!strcmp(argv[ai], "--apitrace")) { extern void w32_api_trace(int); g_apitrace = 1; }
     else if (!strcmp(argv[ai], "--env") && ai + 1 < argc) { extern void w32_add_env(const char *); w32_add_env(argv[++ai]); }   /* one guest variable, value may contain ';' (PATH=…) */

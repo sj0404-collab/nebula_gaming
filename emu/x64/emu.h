@@ -120,7 +120,8 @@ static inline u32 mem_gen(Mem *m) { if (!m->gen) m->gen = ++g_mem_gen; return m-
 static inline void mem_tlb_flush(Mem *m) { for (int i = 0; i < TLB_N; i++) m->tlb[i].tag = 0; m->gen = ++g_mem_gen; }
 u32 *mem_code_page(Mem *m, Region *r, u64 addr);   /* marks the page of addr as holding translated code; returns its generation counter (NULL: not trackable) */
 Region *mem_region(Mem *m, u64 addr);
-void mem_release(Mem *m);                                     /* give all regions back to the pool */
+void mem_release(Mem *m);
+size_t emu_arena_headroom(void); u64 mem_pool_free(void); int mem_pool_selftest(void);                                     /* give all regions back to the pool */
 void *emu_alloc(size_t n); int emu_reserve(size_t n);                                    /* zeroed host memory, never freed (bump) */
 size_t emu_alloc_used(void);
 
