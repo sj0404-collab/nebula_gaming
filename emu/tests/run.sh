@@ -297,13 +297,13 @@ for t in shlwapi2.exe shlwapi232.exe; do
   check "$t escape"    "escape=http://h/a%20b/c#d%20e n=22" "$out"
   check "$t unescape"  "unescape=a b/c%zz" "$out"
   check "$t file url"  "fileurl=file:///C:/My%20Dir/f%231.txt hr=0" "$out"
-  check "$t url→path"  "path=C:\\My Dir\\f.txt hr=0" "$out"
+  check "$t url→path"  "path=C:\\\\My Dir\\\\f.txt hr=0" "$out"
   check "$t parts"     "host=host.example port=8443 query=x=1 scheme=https" "$out"
   check "$t canon"     "canon=http://h/a/c/d?q=1" "$out"
   check "$t combine"   "combine=http://h/img/x.png abs=http://h/root.css frag=http://h/dir/page.html#frag" "$out"
-  check "$t path misc" "rename=C:\\dir\\file.bak root=C:\\ skip=d isroot=1/0 rel=..\\d\\e.txt common=C:\\a drive=3 blanks=[x y]" "$out"
-  check "$t compact"   "compact=C:\\very...\\file.txt prefix=1 samerout=1 filespec=1/0 lfn=1/0 next=b\\c" "$out"
-  check "$t icon"      "icon=C:\\x\\y.dll idx=-7 sq=1 pretty=1" "$out"
+  check "$t path misc" "rename=C:\\\\dir\\\\file.bak root=C:\\\\ skip=d isroot=1/0 rel=..\\\\d\\\\e.txt common=C:\\\\a drive=3 blanks=[x y]" "$out"
+  check "$t compact"   "compact=C:\\\\very...\\\\file.txt prefix=1 samerout=1 filespec=1/0 lfn=1/0 next=b\\\\c" "$out"
+  check "$t icon"      "icon=C:\\\\x\\\\y.dll idx=-7 sq=1 pretty=1" "$out"
 done
 echo "[5v4] acm.exe / acm32.exe (msacm32 PCM converter 8-bit 11025 mono -> 16-bit 22050 stereo; wininet offline errors)"
 for t in acm.exe acm32.exe; do
