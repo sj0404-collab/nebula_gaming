@@ -66,7 +66,21 @@ double e_sqrt(double x) { return __builtin_sqrt(x); }
 double e_floor(double x) { return __builtin_floor(x); }
 double e_ceil(double x) { return __builtin_ceil(x); }
 double e_fabs(double x) { return __builtin_fabs(x); }
-double e_fmod(double a, double b) { if (b == 0) return 0.0 / 0.0; double q = __builtin_trunc(a / b); return a - q * b; }
+/* exact IEEE fmod (musl's bit algorithm): the x87 fprem/fprem1 remainder is exact on real hardware, and `a - trunc(a/b)*b`
+   is not — and worse, a compiler may contract it into an FMA, so the result depended on the host compiler (gcc 13 vs 14). */
+double e_fmod(double x, double y) {
+  union { double f; u64 i; } ux = { x }, uy = { y };
+  int ex = (int)(ux.i >> 52 & 0x7ff), ey = (int)(uy.i >> 52 & 0x7ff), sx = (int)(ux.i >> 63); u64 i, uxi = ux.i;
+  if (uy.i << 1 == 0 || y != y || ex == 0x7ff) return (x * y) / (x * y);
+  if (uxi << 1 <= uy.i << 1) { if (uxi << 1 == uy.i << 1) return 0 * x; return x; }
+  if (!ex) { for (i = uxi << 12; i >> 63 == 0; ex--, i <<= 1); uxi <<= -ex + 1; } else { uxi &= (u64)-1 >> 12; uxi |= 1ull << 52; }
+  if (!ey) { for (i = uy.i << 12; i >> 63 == 0; ey--, i <<= 1); uy.i <<= -ey + 1; } else { uy.i &= (u64)-1 >> 12; uy.i |= 1ull << 52; }
+  for (; ex > ey; ex--) { i = uxi - uy.i; if (i >> 63 == 0) { if (i == 0) return 0 * x; uxi = i; } uxi <<= 1; }
+  i = uxi - uy.i; if (i >> 63 == 0) { if (i == 0) return 0 * x; uxi = i; }
+  for (; uxi >> 52 == 0; uxi <<= 1, ex--);
+  if (ex > 0) { uxi -= 1ull << 52; uxi |= (u64)ex << 52; } else uxi >>= -ex + 1;
+  uxi |= (u64)sx << 63; ux.i = uxi; return ux.f;
+}
 
 /* ---------- number parsing ---------- */
 long long e_strtoll(const char *s, char **end, int base) {

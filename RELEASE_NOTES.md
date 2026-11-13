@@ -19,8 +19,10 @@ instruction fell out of the translated region into the interpreter, one instruct
   (`--x87inline 0`) 88–107 MIPS; interpreter unchanged at 22.  SSE builds unchanged (326–352 MIPS).
 * Correctness: `emu/tests/jitdiff.c` gained an x87 section (memory/register/pop arithmetic, `fxch`, `fild`/`fistp`
   m16/m32/m64, `fcomp`+`fnstsw`, `fcomip`/`fucomip` flags, `fldcw` truncation, `fprem`/`fscale`); interpreter, JIT and
-  the native runner print the same checksum (`x87 bf74d050`) for x86 and x64, and `ci.yml` compares it on every push.
+  the native runner (with and without FMA contraction) print the same checksum (`x87 d8f19f74`) for x86 and x64, and `ci.yml` compares it on every push.
   `x87.exe`, `x8732.exe`, `x87copy32/64` are byte-identical under `--jit 0` and `--jit 1`.
+* `fprem` / `fprem1` / the CRT `fmod` path are exact now (musl's bit algorithm) instead of `a - trunc(a/b)*b`, whose last bit
+  depended on whether the host compiler fused the multiply-add; the native runner is built with `-ffp-contract=off`.
 * Limit (unchanged, now documented): the FPU stack is kept in 64-bit doubles, so results can differ from real
   hardware by 1 ulp where a program relies on 80-bit intermediates (the native-CPU checksum of the x87 section differs
   for that reason; the emulator agrees with itself on every path).

@@ -163,12 +163,13 @@ static int x87_reg(Cpu *c, u8 op, int sub, int sti) {
         case 2: { double t = host_math(2, ST(0), 0); ST(0) = t; fpush(c, 1.0); c->fsw &= ~F_C2; return 1; }   /* fptan */
         case 3: ST(1) = host_math(6, ST(1), ST(0)); fpop(c); return 1;   /* fpatan */
         case 4: { double v = ST(0); if (v == 0) { ST(0) = -1.0 / 0.0; fpush(c, v); return 1; } int e = 0; double m = e_fabs(v); while (m >= 2) { m /= 2; e++; } while (m < 1) { m *= 2; e--; } ST(0) = e; fpush(c, v < 0 ? -m : m); return 1; }   /* fxtract */
-        case 5: { double a = ST(0), b = ST(1); double q = a / b; double n = (q < 0 ? -e_floor(-q + 0.5) : e_floor(q + 0.5)); ST(0) = a - n * b; c->fsw &= ~(F_C2 | F_C0 | F_C1 | F_C3); s64 qi = (s64)n; if (qi & 1) c->fsw |= F_C1; if (qi & 2) c->fsw |= F_C3; if (qi & 4) c->fsw |= F_C0; return 1; }   /* fprem1 */
+        case 5: { double a = ST(0), b = ST(1); double q = a / b; double n = (q < 0 ? -e_floor(-q + 0.5) : e_floor(q + 0.5)); double r = e_fmod(a, b), hb = e_fabs(b) * 0.5;   /* IEEE remainder from the exact fmod: |r| ≤ |b|/2, ties to even quotient */
+          { double ar = e_fabs(r); s64 tq = (s64)__builtin_trunc(q); if (ar > hb || (ar == hb && (tq & 1))) r = r - (r < 0 ? -e_fabs(b) : e_fabs(b)); } ST(0) = r; c->fsw &= ~(F_C2 | F_C0 | F_C1 | F_C3); s64 qi = (s64)n; if (qi & 1) c->fsw |= F_C1; if (qi & 2) c->fsw |= F_C3; if (qi & 4) c->fsw |= F_C0; return 1; }   /* fprem1 */
         case 6: c->ftop = (c->ftop - 1) & 7; return 1;                /* fdecstp */
         case 7: c->ftop = (c->ftop + 1) & 7; return 1;                /* fincstp */
         default: break; } break;
       case 7: switch (sti) {
-        case 0: { double a = ST(0), b = ST(1); double q = __builtin_trunc(a / b); ST(0) = a - q * b; c->fsw &= ~(F_C2 | F_C0 | F_C1 | F_C3); s64 qi = (s64)q; if (qi & 1) c->fsw |= F_C1; if (qi & 2) c->fsw |= F_C3; if (qi & 4) c->fsw |= F_C0; return 1; }   /* fprem */
+        case 0: { double a = ST(0), b = ST(1); double r = e_fmod(a, b); double q = __builtin_trunc(a / b); ST(0) = r; c->fsw &= ~(F_C2 | F_C0 | F_C1 | F_C3); s64 qi = (s64)q; if (qi & 1) c->fsw |= F_C1; if (qi & 2) c->fsw |= F_C3; if (qi & 4) c->fsw |= F_C0; return 1; }   /* fprem */
         case 1: ST(1) = ST(1) * host_math(14, ST(0) + 1.0, 0); fpop(c); return 1;   /* fyl2xp1 */
         case 2: ST(0) = e_sqrt(ST(0)); return 1;                      /* fsqrt */
         case 3: { double v = ST(0); ST(0) = host_math(0, v, 0); fpush(c, host_math(1, v, 0)); c->fsw &= ~F_C2; return 1; }   /* fsincos */
