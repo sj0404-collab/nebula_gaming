@@ -1,3 +1,47 @@
+# v1.51.0 — x87 under the JIT (10× on 387 code), audio that survives slow frames
+
+Measured first, fixed second.  A benchmark built three ways (`emu/tests/fpbench.c`: the same float loop as x87 code —
+what VS2010's x86 compiler emits by default and what SteamWorld Dig, its libvorbis and MSVCR100 are built with — and as
+SSE for x86 and x64) showed the gap: **24 MIPS for x87 versus 320 MIPS for SSE** under the JIT.  Every `D8`–`DF`
+instruction fell out of the translated region into the interpreter, one instruction at a time (`dsteps` = 34 M of
+44 M).  That is the slow path 32-bit games were on.
+
+**JIT: x87 fast path (`emu/x64/jit.inc`, `emu/x64/x87.inc`)**
+* The common forms are emitted inline as wasm `f64` code on the register stack in `Cpu.fp[]`: `fld`/`fst`/`fstp`
+  m32/m64, `fild` m16/m32, `fadd`/`fmul`/`fsub`/`fsubr`/`fdiv`/`fdivr` with memory, with `st(i)` and the pop forms
+  (`faddp` … `fdivrp`), `fld st(i)`, `fxch`, `fst`/`fstp st(i)`, `fchs`, `fabs` — including the exact-copy shadow
+  that keeps `fld m64 → fstp m64` and `fild m64 → fistp m64` bit-exact (Delphi `Move`, mingw `long double`).
+* Everything else (`fcom`/`fcomp`/`fcompp`, `fcomi`/`fucomi(p)` → flags, `fnstsw ax`, `fistp`, `fisttp`, `fldcw`/`fnstcw`,
+  `fsqrt`, `frndint`, `fprem`, `fscale`, `fyl2x`, `fsin`/`fcos`/`fptan`/`fpatan`, `fld1`/`fldz`/`fldpi`, `fcmovcc`, …)
+  goes through one helper call (`jit_x87`) with the operand address resolved by the region's TLB code — no interpreter
+  step, no register spill/refill.  `fnsave`/`frstor`/`fldenv`/`fstenv`/`fbld`/`fbstp` stay with the interpreter.
+* Results (GitHub runner, `jitbench` workflow): fp387 **22 → 197 MIPS** (sandbox 24 → 232); helper-only
+  (`--x87inline 0`) 88–107 MIPS; interpreter unchanged at 22.  SSE builds unchanged (326–352 MIPS).
+* Correctness: `emu/tests/jitdiff.c` gained an x87 section (memory/register/pop arithmetic, `fxch`, `fild`/`fistp`
+  m16/m32/m64, `fcomp`+`fnstsw`, `fcomip`/`fucomip` flags, `fldcw` truncation, `fprem`/`fscale`); interpreter, JIT and
+  the native runner print the same checksum (`x87 bf74d050`) for x86 and x64, and `ci.yml` compares it on every push.
+  `x87.exe`, `x8732.exe`, `x87copy32/64` are byte-identical under `--jit 0` and `--jit 1`.
+* Limit (unchanged, now documented): the FPU stack is kept in 64-bit doubles, so results can differ from real
+  hardware by 1 ulp where a program relies on 80-bit intermediates (the native-CPU checksum of the x87 section differs
+  for that reason; the emulator agrees with itself on every path).
+
+**Sound: no more gaps when a frame takes long (`emu/x64/win32_audio.inc`, `win32_threads.inc`)**
+* Adaptive host lead: 100 ms of audio is queued ahead as before, and every underrun (the host queue ran dry while
+  streams were playing — a long JIT compile, a GC pause, a slow phone) adds 50 ms up to 400 ms; 20 s without an
+  underrun take 25 ms back.  The status line and the Report show `lead N ms, N underruns` once any happened.
+* Audio-period priority: a thread woken by a WASAPI / waveOut period event (an OpenAL-Soft or SDL mixer thread) is
+  scheduled before the round-robin continues, instead of waiting behind every other runnable thread's 400 k-instruction
+  quantum.  `x64_audio_stats` exports lead / underruns / priority picks.
+* `audio.exe` (waveOut, DirectSound 8, WASAPI, PlaySound), `threads.exe`, `pthreads(32).exe` unchanged.
+
+**Tests**: `run.sh` runs `fpbench` three ways (x87, SSE x86, SSE x64: `fp hits=29548 sum=429390.029`); `jitbench.yml`
+prints fp387 under the JIT, helper-only and interpreted and fails if the x87 JIT output changes; `--x87inline 0|1` in
+`wasm_run.mjs`.
+
+**Not in this release (honest list)**: no 80-bit x87 precision; MMX still interpreted (`dsteps`); the emulator still runs
+on the UI thread (a JIT compile burst is capped at 200 ms per second); no D3D9; the indirect-branch exits of JVM code
+(`x_ind`) still dispatch through the region table.
+
 # v1.50.1 — the instruction set the compilers left out: XLAT, MMX, segment registers, BCD
 
 The SteamWorld Dig (GOG, x86) report after v1.50.0 ended with **`unsupported opcode 0xd7`** inside the real
