@@ -16,10 +16,11 @@
    GetSystemMetrics / work area / monitor report it.  Legacy mode (0): the framebuffer is the main window's client area (or the union of the
    top-level windows) presented at screen origin 64,64 of a nominal 1280x720 display. */
 int g_desk_w = 0, g_desk_h = 0; static int g_scr_x0 = 64, g_scr_y0 = 64;
+static int g_dd_mode_set, g_dd_mode_w, g_dd_mode_h, g_dd_mode_bpp;   /* DirectDraw exclusive display mode (ddraw.inc): while set, it IS the screen — metrics, framebuffer size, window clamping */
 #define SCREEN_X0 g_scr_x0
 #define SCREEN_Y0 g_scr_y0
-#define DESK_W (g_desk_w ? g_desk_w : 1280)
-#define DESK_H (g_desk_h ? g_desk_h : 720)
+#define DESK_W (g_dd_mode_set ? g_dd_mode_w : g_desk_w ? g_desk_w : 1280)
+#define DESK_H (g_dd_mode_set ? g_dd_mode_h : g_desk_h ? g_desk_h : 720)
 #define WORK_H (g_desk_h ? g_desk_h : 680)
 #define CAPTION_H 24
 #define MENU_H 20
@@ -104,7 +105,8 @@ static void desktop_clear(Win32 *w, int i) { Wnd *n = &g_wnd[i]; if (!w->screen 
   for (int y = y0; y < y1; y++) for (int x = x0; x < x1; x++) w->screen[(size_t)y * w->screen_w + x] = 0x3b3b3b; w->dirty = 1; }
 static int any_window(void) { for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed) return 1; return 0; }
 static void screen_ensure(Win32 *w, int cw, int ch) {
-  if (g_desk_w) { cw = g_desk_w; ch = g_desk_h; }   /* desktop mode: the framebuffer never follows the windows */
+  if (g_dd_mode_set) { cw = g_dd_mode_w; ch = g_dd_mode_h; }   /* DirectDraw exclusive mode: the framebuffer is the display mode (the host scales it like a monitor) */
+  else if (g_desk_w) { cw = g_desk_w; ch = g_desk_h; }   /* desktop mode: the framebuffer never follows the windows */
   if (cw < 16) cw = 16; if (ch < 16) ch = 16; if (cw > 4096) cw = 4096; if (ch > 4096) ch = 4096;
   if (w->screen && w->screen_w == cw && w->screen_h == ch) return;
   u32 *ns = emu_alloc((size_t)cw * ch * 4); for (int y = 0; y < ch; y++) for (int x = 0; x < cw; x++) ns[(size_t)y * cw + x] = 0x3b3b3b;
@@ -603,7 +605,8 @@ static void wnd_deactivated(Win32 *w, int i) { if (g_active != i && !(wnd_alive(
   if (!g_wnd[ow].builtin || g_wnd[ow].superclassed) { post_msg_to(w, HWND_OF(ow), 0x06, 1, HWND_OF(i)); post_msg_to(w, HWND_OF(ow), 0x07, HWND_OF(i), 0); } }
 static void wnd_free(int i) { Wnd *n = &g_wnd[i]; if (n->layer_pixels) { emu_free(n->layer_pixels); n->layer_pixels = 0; } items_free(n); if (n->text && n->text != n->tbuf) emu_free(n->text); if (n->stream) { emu_free(n->stream); n->stream = 0; } if (n->cc) { emu_free(n->cc); n->cc = 0; } n->nsub = 0; n->subcur = 0; n->sub_orig = 0; n->edit_wnd = 0; n->combo_wnd = 0; n->himl = 0; n->cbex_exstyle = 0; n->text = n->tbuf; n->textcap = sizeof n->tbuf; n->tbuf[0] = 0; kill_timers_of(i); if (g_focus == i) g_focus = -1; if (g_capture == i) g_capture = -1; if (g_active == i) g_active = -1; n->used = 0; n->destroyed = 1; }
 /* process exit: its windows vanish without WM_DESTROY (no code left to run them) and its window classes are released */
-void user_proc_exit(Win32 *w) { for (int k = 0; k < 32; k++) { int i = wnd_of(g_shell_hooks[k]); if (i >= 0 && g_wnd[i].pid == w->pid) g_shell_hooks[k] = 0; } for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].pid == w->pid && w->pid != 0) { g_wnd[k].destroyed = 1; g_wnd[k].visible = 0; wnd_free(k); if (k == 0) sync_main(w); }
+static void dd_proc_exit(Win32 *w);
+void user_proc_exit(Win32 *w) { dd_proc_exit(w); for (int k = 0; k < 32; k++) { int i = wnd_of(g_shell_hooks[k]); if (i >= 0 && g_wnd[i].pid == w->pid) g_shell_hooks[k] = 0; } for (int k = 0; k < MAX_WND; k++) if (g_wnd[k].used && !g_wnd[k].destroyed && g_wnd[k].pid == w->pid && w->pid != 0) { g_wnd[k].destroyed = 1; g_wnd[k].visible = 0; wnd_free(k); if (k == 0) sync_main(w); }
   for (int i = 0; i < 64; i++) if (g_cls[i].used && g_cls[i].pid == w->pid && w->pid != 0) g_cls[i].used = 0; wnd_invalidate_all(); }
 static void destroy_step(Cpu *c) {
   Win32 *w = W; int d = g_ndestroy - 1; for (;;) {
@@ -1954,9 +1957,11 @@ static void s_GetSaveFileNameA(Cpu *c) { file_dialog(c, 1, 0); }
 #include "filedlg_com.inc"
 /* ---------- continuation dispatch for this module ---------- */
 static void svgetwnd_resume(Cpu *c, u64 rax); static void ttdisp_resume(Cpu *c, u64 rax); static void ttfwd_resume(Cpu *c, u64 rax); static void svbrowse_resume(Cpu *c, u64 rax); static void s_NebulaDefViewProc(Cpu *c);
+static void ddraw_cont_dispatch(Cpu *c, int kind, u64 rax);
 void gdi_cont_resume(Cpu *c, int kind, u64 rax) {
   Win32 *w = W; int ci = w->ncont - 1;
   switch (kind) {
+    case 130: case 131: case 132: ddraw_cont_dispatch(c, kind, rax); return;   /* CONT_DDENUM / CONT_DDENUMSURF / CONT_DDENUMATT (ddraw.inc) */
     case CONT_WNDCREATE: wndcreate_resume(c, rax); return;
     case CONT_WNDDESTROY: destroy_step(c); return;
     case CONT_CTLPAINT: ctlpaint_resume(c, rax); return;

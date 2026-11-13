@@ -31,6 +31,6 @@ int main(void) {
   DWORD t2 = 0, f2 = 0; DDSCAPS sc1; sc1.dwCaps = DDSCAPS_VIDEOMEMORY; HRESULT a2 = IDirectDraw2_GetAvailableVidMem(dd2, &sc1, &t2, &f2);
   printf("DirectDrawCreate %08lx QI2 %08lx QI4 %08lx vidmem2 %lu MB; refs: dd4 release %lu dd2 release %lu dd1 release %lu\n", hr, q2, q4, t2 >> 20, IDirectDraw4_Release(dd4), IDirectDraw2_Release(dd2), IDirectDraw_Release(dd1));
   ULONG r7 = IDirectDraw7_Release(dd7);
-  int ok = ndrv == 1 && caps.dwVidMemTotal >= (64u << 20) && total == caps.dwVidMemTotal && fre > 0 && id.szDescription[0] && d.ddpfPixelFormat.dwRGBBitCount == 32 && curw >= 640 && nmodes >= 4 && modes32 >= 2 && bigw <= (int)curw && freq == 60 && SUCCEEDED(q2) && SUCCEEDED(q4) && SUCCEEDED(a2) && r7 == 0;
+  int ok = ndrv == 1 && caps.dwVidMemTotal >= (64u << 20) && total == caps.dwVidMemTotal && fre > 0 && id.szDescription[0] && d.ddpfPixelFormat.dwRGBBitCount == 32 && curw >= 640 && nmodes >= 4 && modes32 >= 2 && bigw >= 640 && freq == 60 && SUCCEEDED(q2) && SUCCEEDED(q4) && SUCCEEDED(a2) && r7 == 0;
   printf(ok ? "DDPROBE OK\n" : "DDPROBE MISMATCH\n"); return ok ? 0 : 1;
 }
