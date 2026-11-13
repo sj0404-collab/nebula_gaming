@@ -36,6 +36,15 @@ jobs:
       - name: Reference checksums (native interpreter)
         run: |
           for exe in /tmp/bench64.exe /tmp/bench32.exe; do echo "== native $exe"; timeout 900 ./emu/x64/x64run --quiet --no-stdin --max-ms 600000 "$exe" | tee "/tmp/$(basename $exe .exe).native.txt"; done
+      - name: x87 per-value diff (emu/tests/x87diff.c) — native runner vs wasm interpreter vs wasm JIT (diagnostic; first differing lines are shown)
+        run: |
+          zig cc -target x86_64-windows-gnu -O2 -o /tmp/x87diff.exe emu/tests/x87diff.c
+          ./emu/x64/x64run --quiet --no-stdin /tmp/x87diff.exe > /tmp/xd_native.txt 2>&1 || true
+          node emu/tests/wasm_run.mjs --max-ms 600000 --jit 0 /tmp/x87diff.exe 2>/dev/null > /tmp/xd_interp.txt || true
+          node emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 /tmp/x87diff.exe 2>/dev/null > /tmp/xd_jit.txt || true
+          tail -1 /tmp/xd_native.txt; tail -1 /tmp/xd_interp.txt; tail -1 /tmp/xd_jit.txt
+          diff /tmp/xd_native.txt /tmp/xd_interp.txt | head -20 || true
+          diff /tmp/xd_interp.txt /tmp/xd_jit.txt | head -20 || true
       - name: x87 fast path (fpbench, 387-only vs SSE build; the x87 line must print "fp hits=29548 sum=429390.029" and run at > 100 MIPS)
         run: |
           for exe in /tmp/fp387.exe /tmp/fpsse32.exe; do echo "== JIT $exe"; node emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 "$exe" 2>&1 | tail -3; done
