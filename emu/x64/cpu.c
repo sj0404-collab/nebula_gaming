@@ -505,6 +505,10 @@ static void exec_one(Ins *i) {
   i->hdr = (int)(i->ip - i->start);
   exec_body(i, op);
 }
+/* segment selectors: user-mode values of 32-bit (WOW64) and 64-bit processes until the program writes them; fs/gs bases never move (TEB) */
+static void sreg_init(Cpu *c) { c->sreg_init = 1; c->sreg[0] = 0x2B; c->sreg[1] = c->mode32 ? 0x23 : 0x33; c->sreg[2] = 0x2B; c->sreg[3] = 0x2B; c->sreg[4] = 0x53; c->sreg[5] = 0x2B; }
+static u16 sreg_get(Cpu *c, int s) { if (!c->sreg_init) sreg_init(c); return s < 6 ? c->sreg[s] : 0; }
+static void sreg_set(Cpu *c, int s, u16 v) { if (!c->sreg_init) sreg_init(c); if (s < 6 && s != 1) c->sreg[s] = v; }
 static void exec_body(Ins *i, u8 op) {
   Cpu *c = i->c;
   int osz = i->rexw ? 8 : i->p66 ? 2 : 4;   /* operand size */
@@ -538,6 +542,7 @@ static void exec_body(Ins *i, u8 op) {
       s128 full = (s128)a * b; u64 r = (u64)full & mask(osz); int ov = osz == 8 ? (full != (s128)(s64)full) : ((s64)sext(r, osz) != (s64)full);
       c->rflags &= ~(u64)(F_CF | F_OF); if (ov) c->rflags |= F_CF | F_OF; set_szp(c, r, osz); set_reg(i, i->reg, osz, r); return; }
     case 0x70: case 0x71: case 0x72: case 0x73: case 0x74: case 0x75: case 0x76: case 0x77: case 0x78: case 0x79: case 0x7A: case 0x7B: case 0x7C: case 0x7D: case 0x7E: case 0x7F: { s64 d = fetch_s8(i); if (cond(c, op & 15)) i->ip += d; return; }
+    case 0x82: if (!c->mode32) UNSUP("opcode 0x82 outside 32-bit mode"); op = 0x80; /* fall through: 0x82 is the 8-bit immediate group alias */
     case 0x80: case 0x81: case 0x83: { int sz = op == 0x80 ? 1 : osz; decode_modrm(i); fix_rip_rel(i, op == 0x81 ? (sz == 2 ? 2 : 4) : 1);
       u64 b = op == 0x81 ? (sz == 2 ? fetch16(i) : sext(fetch32(i), 4)) : (u64)fetch_s8(i); u64 a = rm_get(i, sz); u64 r = alu(c, i->reg & 7, a, b, sz); if ((i->reg & 7) != 7) rm_set(i, sz, r); return; }
     case 0x84: case 0x85: { int sz = op & 1 ? osz : 1; decode_modrm(i); flags_logic(c, rm_get(i, sz) & get_reg(i, i->reg, sz), sz); return; }
@@ -553,6 +558,24 @@ static void exec_body(Ins *i, u8 op) {
     case 0x9C: cpu_push(c, c->rflags); return;
     case 0x9D: c->rflags = (cpu_pop(c) & (0xcd5 | 0x200000 | 0x40000)) | 0x202; return;   /* popf: arithmetic flags + ID (bit 21, the CPUID-presence test flips it) + AC */
     case 0x9E: c->rflags = (c->rflags & ~0xd5ull) | ((c->r[RAX] >> 8) & 0xd5); return;
+    /* segment registers: push/pop es/cs/ss/ds (32-bit), mov r/m16,sreg / mov sreg,r/m16 */
+    case 0x06: case 0x0E: case 0x16: case 0x1E: { if (!c->mode32) UNSUP("push sreg outside 32-bit mode"); u64 v = sreg_get(c, op >> 3); if (i->p66) { c->r[RSP] -= 2; wr16(c, c->r[RSP], (u16)v); } else cpu_push(c, v); return; }
+    case 0x07: case 0x17: case 0x1F: { if (!c->mode32) UNSUP("pop sreg outside 32-bit mode"); u64 v; if (i->p66) { v = rd16(c, c->r[RSP]); c->r[RSP] += 2; } else v = cpu_pop(c); sreg_set(c, op >> 3, (u16)v); return; }
+    case 0x8C: { decode_modrm(i); u64 v = sreg_get(c, i->reg & 7); if (i->mod == 3) set_reg(i, i->rm, osz, v); else wr16(c, EA(i), (u16)v); return; }
+    case 0x8E: { decode_modrm(i); sreg_set(c, i->reg & 7, (u16)rm_get(i, 2)); return; }
+    /* BCD / ASCII adjust (32-bit mode only; invalid in 64-bit mode, as on the real CPU) */
+    case 0x27: case 0x2F: { if (!c->mode32) UNSUP("daa/das in 64-bit mode"); u32 al = c->r[RAX] & 0xff, old = al; int cf = (c->rflags & F_CF) != 0, af = (c->rflags & F_AF) != 0, ncf = 0, naf = 0;
+      if ((al & 0xf) > 9 || af) { al = op == 0x27 ? al + 6 : al - 6; naf = 1; ncf = cf || (op == 0x27 ? old > 0xf9 : old < 6); }
+      if (old > 0x99 || cf) { al = op == 0x27 ? al + 0x60 : al - 0x60; ncf = 1; } else if (op == 0x27) ncf = 0;   /* Intel SDM: DAA clears CF in the else branch, DAS keeps the first step's borrow */
+      al &= 0xff; c->r[RAX] = (c->r[RAX] & ~0xffull) | al; set_szp(c, al, 1); c->rflags = (c->rflags & ~(u64)(F_CF | F_AF)) | (ncf ? F_CF : 0) | (naf ? F_AF : 0); return; }
+    case 0x37: case 0x3F: { if (!c->mode32) UNSUP("aaa/aas in 64-bit mode"); u32 ax = c->r[RAX] & 0xffff; int af = (c->rflags & F_AF) != 0;
+      if ((ax & 0xf) > 9 || af) { ax = op == 0x37 ? ax + 0x106 : ax - 6 - 0x100; c->rflags |= F_CF | F_AF; } else c->rflags &= ~(u64)(F_CF | F_AF); ax &= 0xff0f; c->r[RAX] = (c->r[RAX] & ~0xffffull) | ax; return; }
+    case 0xD4: { if (!c->mode32) UNSUP("aam in 64-bit mode"); u32 b = fetch8(i); if (!b) { cpu_fault(c, "aam: division by zero"); return; } u32 al = c->r[RAX] & 0xff; u32 ah = al / b, nal = al % b; c->r[RAX] = (c->r[RAX] & ~0xffffull) | (ah << 8) | nal; set_szp(c, nal, 1); c->rflags &= ~(u64)(F_CF | F_OF | F_AF); return; }
+    case 0xD5: { if (!c->mode32) UNSUP("aad in 64-bit mode"); u32 b = fetch8(i); u32 al = c->r[RAX] & 0xff, ah = (c->r[RAX] >> 8) & 0xff; u32 nal = (al + ah * b) & 0xff; c->r[RAX] = (c->r[RAX] & ~0xffffull) | nal; set_szp(c, nal, 1); c->rflags &= ~(u64)(F_CF | F_OF | F_AF); return; }
+    case 0xD6: { if (!c->mode32) UNSUP("salc in 64-bit mode"); c->r[RAX] = (c->r[RAX] & ~0xffull) | ((c->rflags & F_CF) ? 0xff : 0); return; }   /* salc (undocumented; packers) */
+    case 0x62: { if (!c->mode32) UNSUP("bound in 64-bit mode"); decode_modrm(i); if (i->mod == 3) UNSUP("bound with register operand"); u64 ea = EA(i); s64 idx = (s64)sext(get_reg(i, i->reg, osz), osz), lo = (s64)sext(rdn(c, ea, osz), osz), hi = (s64)sext(rdn(c, ea + osz, osz), osz);
+      if (idx < lo || idx > hi) cpu_fault(c, "bound range exceeded (#BR)"); return; }
+    case 0xCE: { if (!c->mode32) UNSUP("into in 64-bit mode"); if (c->rflags & F_OF) cpu_fault(c, "into: overflow (#OF)"); return; }
     case 0xD7: {   /* xlat: AL = [seg:(r/e/)BX + AL] (MSVCR100 _mbctype / locale tables use it) */
       u64 base = c->r[RBX]; if (c->mode32) base &= i->p67 ? 0xffff : 0xffffffffull; else if (i->p67) base &= 0xffffffffull;
       u64 ea = base + (c->r[RAX] & 0xff); if (i->seg == 1) ea += c->fs_base; else if (i->seg == 2) ea += c->gs_base;
@@ -641,6 +664,8 @@ static void exec_0f(Ins *i, Cpu *c) {
     case 0x05: UNSUP("syscall");
     case 0x0B: fault_code(c, 0xC000001Du, "ud2 (illegal instruction)"); return;
     case 0x0D: case 0x18: case 0x19: case 0x1A: case 0x1B: case 0x1C: case 0x1D: case 0x1E: case 0x1F: decode_modrm(i); return;   /* nop / prefetch / endbr */
+    case 0xA0: case 0xA8: { u64 v = sreg_get(c, op == 0xA0 ? 4 : 5); if (i->p66) { c->r[RSP] -= 2; wr16(c, c->r[RSP], (u16)v); } else cpu_push(c, v); return; }   /* push fs / gs */
+    case 0xA1: case 0xA9: { u64 v; if (i->p66) { v = rd16(c, c->r[RSP]); c->r[RSP] += 2; } else v = cpu_pop(c); sreg_set(c, op == 0xA1 ? 4 : 5, (u16)v); return; }   /* pop fs / gs */
     case 0x31: { u64 t = (u64)(host_now_ms() * 1000000.0) + c->icount; c->r[RAX] = t & 0xffffffff; c->r[RDX] = t >> 32; return; }     /* rdtsc */
     case 0xA2: { /* cpuid */ u32 leaf = (u32)c->r[RAX];
       switch (leaf) {

@@ -171,6 +171,7 @@ struct Cpu {
   /* tracing / stats */
   int  trace;
   u32  unknown_op[4];                 /* first unsupported opcode bytes */
+  u16  sreg[6]; u8 sreg_init;         /* es cs ss ds fs gs selectors (what mov/push/pop sreg see; the WOW64 / x64 user-mode values until the program changes them) */
 };
 
 void cpu_reset(Cpu *c);

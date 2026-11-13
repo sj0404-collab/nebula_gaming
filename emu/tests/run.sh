@@ -556,6 +556,13 @@ if command -v zig >/dev/null 2>&1; then
   zig cc -target x86-windows-gnu -O1 -o /tmp/xlat32.exe tests/xlat.c && out=$($X --quiet /tmp/xlat32.exe 2>&1) || out="build/run failed: $out"
   check "xlat (x86)"   "xlat 256/256 prefixed 61 80"   "$out"
 else echo "  skip xlat (no zig)"; fi
+echo "[legacy] segment registers (mov/push/pop sreg), daa/das/aaa/aas/aam/aad, salc, bound, into, opcode 0x82 — 32-bit installers/packers; x64 subset"
+if command -v zig >/dev/null 2>&1; then
+  zig cc -target x86-windows-gnu -O1 -o /tmp/legacy32.exe tests/legacy_ops.c && out=$($X --quiet /tmp/legacy32.exe 2>&1) || out="build/run failed: $out"
+  check "legacy opcodes (x86)"   "LEGACY OK"   "$out"
+  zig cc -target x86_64-windows-gnu -O1 -o /tmp/legacy64.exe tests/legacy_ops.c && out=$($X --quiet /tmp/legacy64.exe 2>&1) || out="build/run failed: $out"
+  check "legacy opcodes (x64)"   "LEGACY OK"   "$out"
+else echo "  skip legacy_ops (no zig)"; fi
 echo "[upath] Cyrillic exe name with spaces: W path APIs return unit counts, CP_ACP round trip, self reopen"
 if command -v zig >/dev/null 2>&1; then
   UD=$(mktemp -d); mkdir -p "$UD/Папка тест"
