@@ -291,6 +291,20 @@ for t in mmio.exe mmio32.exe; do
   check "$t read"   "read: riff_ok=1 data_ok=1 size=202 got=202 pcm_ok=1 fmt_after_data=257 fmt_ok=1 rate=22050" "$out"
   check "$t memory" "mem: first=RIFF type=WAVE next=fmt  getinfo_ok=1 close=0 str=20564157" "$out"
 done
+echo "[5v3] shlwapi2.exe / shlwapi232.exe (Url* escape/canonicalize/combine/parts, file URL <-> path, Path* root/relative/compaction helpers)"
+for t in shlwapi2.exe shlwapi232.exe; do
+  out=$($X --quiet --no-stdin --max-ms 60000 tests/$t 2>&1 || true)
+  check "$t escape"    "escape=http://h/a%20b/c#d%20e n=22" "$out"
+  check "$t unescape"  "unescape=a b/c%zz" "$out"
+  check "$t file url"  "fileurl=file:///C:/My%20Dir/f%231.txt hr=0" "$out"
+  check "$t url→path"  "path=C:\\My Dir\\f.txt hr=0" "$out"
+  check "$t parts"     "host=host.example port=8443 query=x=1 scheme=https" "$out"
+  check "$t canon"     "canon=http://h/a/c/d?q=1" "$out"
+  check "$t combine"   "combine=http://h/img/x.png abs=http://h/root.css frag=http://h/dir/page.html#frag" "$out"
+  check "$t path misc" "rename=C:\\dir\\file.bak root=C:\\ skip=d isroot=1/0 rel=..\\d\\e.txt common=C:\\a drive=3 blanks=[x y]" "$out"
+  check "$t compact"   "compact=C:\\very...\\file.txt prefix=1 samerout=1 filespec=1/0 lfn=1/0 next=b\\c" "$out"
+  check "$t icon"      "icon=C:\\x\\y.dll idx=-7 sq=1 pretty=1" "$out"
+done
 echo "[5x2] msvcp_thr.exe / msvcp_thr32.exe (builtin msvcp140 xthreads: _Mtx_* / _Cnd_* / _Thrd_* producer-consumer, trylock, xtime)"
 for t in msvcp_thr.exe msvcp_thr32.exe; do
   out=$($X --quiet --no-stdin --max-ms 60000 tests/$t 2>&1 || true)
