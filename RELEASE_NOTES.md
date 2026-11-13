@@ -1,3 +1,58 @@
+# v1.50.0 — DirectDraw for real: surfaces, blits, flips, palettes, clippers, GetDC, exclusive display modes
+
+v1.49.3 only had DirectDraw *device* objects (`CreateSurface` stopped with "not implemented").  This release replaces
+`emu/x64/ddraw.inc` with a complete DirectDraw renderer — the thing DirectDraw games and old 2D engines actually use.
+No stubs: every method of every interface version does what ddraw.dll does, or returns the documented DDERR code.
+
+**Surfaces (`IDirectDrawSurface` / 2 / 3 / 4 / 7)** — real pixel memory in the guest address space in the surface's own
+format: 8 bpp palettised, 16 bpp with any RGB masks (565 / 555 / 1555 / 4444), 24 bpp, 32 bpp (any masks), z-buffers.
+`Lock` hands out the pointer and pitch the program writes through directly (`DDLOCK_*`, sub-rectangles, nested-lock
+errors), `Unlock` presents.  `Blt`: colour fill, copy, nearest-neighbour stretch/shrink, `DDBLTFX_MIRRORLEFTRIGHT/UPDOWN`,
+source and destination colour keys (surface keys or overrides), ROPs (SRCCOPY/SRCAND/SRCPAINT/SRCINVERT/BLACKNESS/
+WHITENESS/DSTINVERT), `DDBLT_DEPTHFILL`, format conversion between any two formats, clipping to the surface and to the
+clipper (window client rectangle or clip list) with the source rectangle scaled to match.  `BltFast` (colour keys,
+`DDERR_BLTFASTCANTCLIP`, `DDERR_INVALIDRECT` exactly like Windows).  `Flip` rotates the pixel memory through the flipping
+chain like the hardware does (a locked pointer to the back buffer becomes the front buffer's) and waits for the next
+vertical blank (60 Hz; `DDFLIP_NOVSYNC` / `DONOTWAIT` / `INTERVAL2-4`) by yielding — the emulator never spins.  `GetDC` /
+`ReleaseDC`: GDI draws onto a surface (text, rectangles, FillRect, SetPixel…) through a 32-bpp DIB that is packed back
+into the surface's format (palette index search for 8 bpp).  Attached surfaces (`AddAttachedSurface`, `GetAttachedSurface`
+by caps, `DeleteAttachedSurface`, `EnumAttachedSurfaces` callback continuation), back-buffer chains (`DDSD_BACKBUFFERCOUNT`),
+colour keys, palettes, clippers, `GetSurfaceDesc` / `GetPixelFormat` / `GetCaps` in the v1 (`DDSURFACEDESC`, `DDSCAPS`) and
+v2 layouts with the x86 and x64 field offsets, client-memory surfaces (`DDSD_LPSURFACE`, `SetSurfaceDesc`), private data
+(`SetPrivateData` / `GetPrivateData` / `FreePrivateData`, `DDSPD_IUNKNOWNPOINTER`), uniqueness values, priority / LOD for
+managed textures, `IsLost` / `Restore`, `GetDDInterface`, per-interface reference counts (`QueryInterface` between all five
+surface versions).
+
+**Primary surface = the screen.**  Windowed (`DDSCL_NORMAL`): the primary is the desktop; a blit through a window-bound
+clipper lands exactly in the window's client rectangle on the framebuffer and nothing else changes.  Exclusive
+(`DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN` + `SetDisplayMode`): the framebuffer really becomes the mode (640×480×16, 800×600×8,
+… up to 4096²), `GetSystemMetrics` / `GetDeviceCaps` / `GetDisplayMode` report it, the cooperative-level window is made
+popup and stretched over it, Nebula OS scales the frame to the phone like a monitor would; `RestoreDisplayMode` and process
+exit put the desktop back.  Changing the depth while a primary exists returns `DDERR_INVALIDMODE` (as on Windows).
+
+**Palettes (`IDirectDrawPalette`)**: 256 / 16 / 4 / 2 entries, `SetEntries` on the primary's palette re-presents the screen
+(palette animation), `GetEntries`, caps.  **Clippers (`IDirectDrawClipper`)**: `SetHWnd` / `GetHWnd`, `SetClipList` /
+`GetClipList` (RGNDATA, bounding rectangle, `DDERR_REGIONTOOSMALL`), `IsClipListChanged`, `DirectDrawCreateClipper`.
+**Device**: `CreateSurface` (primary / offscreen / texture / z-buffer / system-memory / flipping chains; `DDSD_PIXELFORMAT`
+RGB, palettised, z-buffer, luminance; FourCC and overlays refused with `DDERR_INVALIDPIXELFORMAT` / `DDERR_UNSUPPORTED` and
+a log line), `CreatePalette`, `CreateClipper`, `DuplicateSurface` (shares the memory), `EnumSurfaces` (ALL / MATCH / NOMATCH
+/ CANBECREATED, continuation), `GetGDISurface`, `GetSurfaceFromDC`, `FlipToGDISurface`, `RestoreAllSurfaces`,
+`SetDisplayMode` / `RestoreDisplayMode`, everything from v1.49.3.  `IDirectDraw::QueryInterface(IID_IDirect3D*)` says
+`E_NOINTERFACE` and logs it.
+
+**Tests** (`emu/tests/ddsurf.c`, x86 and x64, native + wasm, legacy and desktop-mode framebuffer): 70 pixel-verifying
+checks — Lock writes read back through Blt copies, 2× stretch, mirror, colour-keyed BltFast, clipped Blt, BLACKNESS,
+32→16→24→32 and 8→32 / 32→8 conversions through a palette, palette animation, GDI onto 32-bpp and 8-bpp surfaces,
+uniqueness, private data, QueryInterface IDirectDrawSurface4, GetDDInterface, exclusive 640×480 mode (metrics follow),
+flipping chain with memory rotation and 16.7 ms pacing, z-buffer attach + DEPTHFILL, RestoreDisplayMode, IDirectDraw(1)
+surface path.  Frame dumps of a windowed bar pattern and a full-screen 640×480×16 gradient with GDI text over a Flip
+chain were inspected.  `ddprobe` updated (modes up to 1920×1080 are now enumerated since they can be set).
+
+**Known limits (honest):** Direct3D 3/5/6/7 through DirectDraw (IDirect3D*) is not provided — a DirectDraw game that
+also needs D3D immediate mode stops at `QueryInterface`; overlays, FourCC/YUV surfaces and gamma ramps are not
+provided; blits are software (CPU) — fine for 640×480 / 800×600 games, a 1920×1080 full-screen blit at 60 Hz costs
+real time on the phone.  D3D9 is still not implemented (next).
+
 # v1.49.3 — DirectDraw device objects (GOG installers' hardware probe), account lookups, EqualSid fix
 
 **What was wrong (reported from the GOG SteamWorld Dig setup on the phone).**  After the speed fix the installer ran at
