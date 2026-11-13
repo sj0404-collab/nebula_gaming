@@ -63,7 +63,7 @@ static u64 rv_hash(const RVal *v) { u64 h = 1469598103934665603ull; for (u32 i =
 static void fn_free(u32 fn) { if (g_jit_nfree < JIT_MAX_FN) g_jit_free[g_jit_nfree++] = fn; rv_release(g_rv_of_fn[fn]); g_rv_of_fn[fn] = 0; }
 #define JIT_MAX_BLOCKS 160
 #define JIT_MAX_REGION_INSNS 2400
-struct JitStats { u64 blocks, stale, nodc, exec, fails, insns, steps, bytes, dsteps, dinterp, retrans, full, x_ind, x_jit, x_cold, reval, reval_bad, defer; double cms; } g_jit_st;   /* defer: translations postponed by the compile-time budget; cms: ms spent translating + compiling */   /* x_*: region exits through an indirect branch / to another translated block / to untranslated code */
+struct JitStats { u64 blocks, stale, nodc, exec, fails, insns, steps, bytes, dsteps, dinterp, retrans, full, x_ind, x_jit, x_cold, reval, reval_bad, defer, x87; double cms; } g_jit_st;   /* defer: translations postponed by the compile-time budget; cms: ms spent translating + compiling */   /* x_*: region exits through an indirect branch / to another translated block / to untranslated code */
 
 #ifdef __wasm__
 #define JEXPORT(name) __attribute__((export_name(#name)))
@@ -92,6 +92,8 @@ JEXPORT(jit_mem) u64 jit_mem(Cpu *c, u64 a, u64 size, int write, u64 rip) {
   return 0;
 }
 JEXPORT(jit_alu) u64 jit_alu(Cpu *c, int op, u64 a, u64 b, int sz) { return alu(c, op, a, b, sz); }
+u64 x87_jit(Cpu *c, u32 key, u8 *p);
+JEXPORT(jit_x87) u64 jit_x87(Cpu *c, int key, u64 host) { g_jit_st.x87++; return x87_jit(c, (u32)key, (u8 *)(size_t)host); }   /* x87 instruction with its memory operand resolved by the region (x87.inc) */
 JEXPORT(jit_shift) u64 jit_shift(Cpu *c, int op, u64 v, int cnt, int sz) { return shift(c, op, v, cnt, sz); }
 
 /* ---- wasm byte emitter ---- */
@@ -114,7 +116,7 @@ enum { F64_LOAD = 0x2B, F32_LOAD = 0x2A, F64_STORE = 0x39, F32_STORE = 0x38, F64
        F32_ADD = 0x92, F32_SUB = 0x93, F32_MUL = 0x94, F32_DIV = 0x95, F32_SQRT = 0x91, F64_EQ = 0x61, F64_NE = 0x62, F64_LT = 0x63, F64_GT = 0x64, F64_GE = 0x66, F32_LT = 0x5D, F32_GT = 0x5E,
        F64_PROMOTE = 0xBB, F32_DEMOTE = 0xB6, F64_CVT_I64S = 0xB9, F32_CVT_I64S = 0xB4,   /* 0xB4 = f32.convert_i64_s (0xB5 is the UNSIGNED form: negative ints became huge positive floats — Shattered Pixel Dungeon's camera matrix) */ I32_TRUNC_F64S = 0xAA, I64_TRUNC_F64S = 0xB0, I64_EXT32_U = 0xAD };
 static void e_f64c(Buf *B, double v) { OP(0x44); bbytes(B, &v, 8); }
-enum { FN_STEP = 0, FN_MEM = 1, FN_ALU = 2, FN_SHIFT = 3, FN_REVAL = 4, FN_BLOCK = 5, FN_TLB = 6 };
+enum { FN_STEP = 0, FN_MEM = 1, FN_ALU = 2, FN_SHIFT = 3, FN_REVAL = 4, FN_X87 = 5, FN_BLOCK = 6, FN_TLB = 7 };   /* imports 0-5, then the region function and the module-local TLB probe */
 enum { BR = 0x0C, BR_TABLE = 0x0E };
 /* label depths seen from the code of region block B->blk (see jit_translate for the layout) */
 static int lbl_block(Buf *B, int j) { return j - 1 - B->blk + B->depth; }   /* forward target block j > blk */
@@ -149,6 +151,7 @@ static void e_end(Buf *B) { OP(0x0B); B->depth--; }
 static u8 ld_u(int sz) { return sz == 8 ? 0x29 : sz == 4 ? 0x35 : sz == 2 ? 0x33 : 0x31; }
 static u8 st_n(int sz) { return sz == 8 ? 0x37 : sz == 4 ? 0x3E : sz == 2 ? 0x3D : 0x3C; }
 static u32 al_of(int sz) { return sz == 8 ? 3 : sz == 4 ? 2 : sz == 2 ? 1 : 0; }
+int g_jit_x87_inline = 1;   /* 1: the common x87 forms are emitted as wasm f64 code (--x87inline 0: all through the jit_x87 helper) */
 int g_jit_regcache = 1;   /* 1: the 16 general registers live in wasm locals inside a region (benchmarks: --regcache 0|1) */
 /* register fill/spill sites: emitted for all 16 registers (fixed size), rewritten after the body for the registers the region really uses
    (the rest become nops): a region that touches 5 registers pays 5 loads at entry and 5 stores at exit instead of 16 + 16 */
@@ -197,6 +200,12 @@ static void e_icount(Buf *B, int k) { if (!k) return; e_lget(B, L_C); e_lget(B, 
 enum { XK_NONE, XK_DIRECT, XK_FALL, XK_RET, XK_IND, XK_SLICE, XK_STEP, XK_STALE, XK_N };
 static u64 g_jit_xk[XK_N];
 #define CO_JIT_XK ((u64)__builtin_offsetof(Cpu, jit_xk))
+#define CO_FTOP   ((u64)__builtin_offsetof(Cpu, ftop))
+#define CO_FTAG   ((u64)__builtin_offsetof(Cpu, ftag))
+#define CO_FP     ((u64)__builtin_offsetof(Cpu, fp))
+#define CO_FXK    ((u64)__builtin_offsetof(Cpu, fxk))
+#define CO_FXM    ((u64)__builtin_offsetof(Cpu, fxm))
+#define CO_FXSE   ((u64)__builtin_offsetof(Cpu, fxse))
 static void e_xk(Buf *B, int k) { e_lget(B, L_C); e_i32c(B, k); e_st(B, 0x36, 2, CO_JIT_XK); }
 static void e_exit_const(Buf *B, u64 rip, int k) { e_icount(B, k); e_i64c(B, rip); e_lset(B, L_RET); e_exit(B); }
 static void e_exit_top(Buf *B, int k) { e_lset(B, L_RET); e_icount(B, k); e_exit(B); }   /* next rip on the stack */
@@ -366,7 +375,7 @@ enum { JK_TEST8_IMM = 100, JK_TEST_AL_IMM, JK_TEST_A_IMM, JK_MOV8_R_IMM, JK_CVTS
        /* 115.. (v1.42): the forms the JVM template interpreter, 32-bit code and libGDX's math lean on */
        JK_INCDEC_R = 115, JK_PUSH_IMM, JK_LEAVE, JK_BT, JK_BSF, JK_BSWAP, JK_SHLD, JK_MUL1, JK_DIV, JK_MOVLH, JK_SHUFPS, JK_CVTDQ2PS,
        /* 127.. (v1.49): lock-prefixed forms — one guest thread runs at a time, so `lock` is the plain operation (HotSpot's `lock addl [rsp],0` fence, CAS, atomic add) */
-       JK_CMPXCHG = 127, JK_XADD };
+       JK_CMPXCHG = 127, JK_XADD, JK_X87 };
 /* class / operand size / segment of an instruction: the interpreter's fast class when it has one, otherwise the prefixed
    (66 → 16-bit, fs:/gs:) and SSE forms the translator handles itself */
 static void jit_fast(const Dc *e, JItem *it) {
@@ -409,6 +418,12 @@ static void jit_fast(const Dc *e, JItem *it) {
     return;
   }
   if (e->rep) return;
+  if (op >= 0xD8 && op <= 0xDF && e->modrm) { it->seg = e->mod == 3 ? 0 : e->seg;   /* x87: helper call with the operand address resolved here (x87.inc x87_jit); env/save/bcd forms stay with the interpreter */
+    int sub = e->reg & 7, sti = e->rm & 7;
+    if (e->mod == 3) { if (x87_reg_ok(op, sub, sti)) { it->fk = JK_X87; it->sz = 0; } }
+    else { int n = x87_mem_size(op, sub); if (n) { it->fk = JK_X87; it->sz = (u8)n; } }
+    return;
+  }
   if (!e->p66 && !e->seg) {
     if (op == 0xF6 && (e->reg & 7) == 0) it->fk = JK_TEST8_IMM; else if (op == 0xF6 && ((e->reg & 7) == 2 || (e->reg & 7) == 3)) { it->fk = FK_F7_NOTNEG; it->sz = 1; }
     else if (op == 0xC0) { it->fk = FK_SHIFT_IMM; it->sz = 1; } else if (op == 0xD0) { it->fk = FK_SHIFT_1; it->sz = 1; } else if (op == 0xD2) { it->fk = FK_SHIFT_CL; it->sz = 1; }
@@ -445,6 +460,8 @@ static void jit_classify(JItem *it, const u8 *code) {
   switch (it->fk) {
     case FK_NONE: it->kind = K_STEP; it->fuse = FL_ALL; return;
     case FK_SSE_CMP: it->fdef = FL_ALL; return;
+    case JK_X87: { int sub = e->reg & 7; if (e->mod == 3) { if ((e->op == 0xDB || e->op == 0xDF) && (sub == 5 || sub == 6)) it->fdef = FB_CF | FB_PF | FB_ZF;   /* fcomi/fucomi(p): ZF PF CF */
+        else if ((e->op == 0xDA || e->op == 0xDB) && sub < 4) it->fuse = FL_ALL; } return; }   /* fcmovcc reads CF/ZF/PF */
     case JK_TEST8_IMM: case JK_TEST_AL_IMM: case JK_TEST_A_IMM: it->fdef = FL_ALL; return;
     case FK_JCC8: it->kind = K_TERM; it->fuse = cc_use(e->op & 15); return;
     case FK_JCC32: it->kind = K_TERM; it->fuse = cc_use(e->op2 & 15); return;
@@ -535,12 +552,90 @@ static void e_rflags_begin(Buf *B, u64 clear) { e_lget(B, L_C); e_lget(B, L_C); 
 static void e_rflags_end(Buf *B) { e_st(B, 0x37, 3, CO_RFLAGS); }
 /* returns 0 if the item could not be emitted inline (caller falls back to a step) */
 int g_jit_skip_lo = -1, g_jit_skip_hi = -1;   /* diagnostics: instruction kinds in [lo,hi) are stepped instead of translated (x64_jit_skip) */
+/* ---- x87 inline forms (the rest of the FPU goes through jit_x87): the register stack lives in c->fp[8] with c->ftop; the
+   exact-copy shadow (c->fxk/fxm/fxse, x87.inc) is kept the way the interpreter keeps it: cleared by arithmetic, moved by
+   fxch / fld st / fst(p) st, reset for the slot a push or pop touches. */
+enum { F64_MUL_ = 0xA2, F64_NEG = 0x9A, F64_ABS = 0x99, F64_CVT_I32S = 0xB7 };
+static void e_fslot(Buf *B, int n, int L) {   /* L = (ftop + n) & 7 as i64 */
+  e_lget(B, L_C); e_ld(B, 0x31, 0, CO_FTOP); if (n) { e_i64c(B, (u64)n); OP(I64_ADD); e_i64c(B, 7); OP(I64_AND); } e_lset(B, L); }
+static void e_faddr(Buf *B, int L) { e_lget(B, L_C); e_lget(B, L); e_i64c(B, 3); OP(I64_SHL); OP(I64_ADD); }   /* &c->fp[L] - CO_FP on the stack */
+static void e_fld_st(Buf *B, int L) { e_faddr(B, L); e_ld(B, F64_LOAD, 3, CO_FP); }
+static void e_fx_clear_all(Buf *B) { e_lget(B, L_C); e_i64c(B, 0); e_st(B, 0x37, 0, CO_FXK); }   /* fxk[0..7] = 0 (8 bytes) */
+static void e_fx_reset(Buf *B, int L) { e_lget(B, L_C); e_lget(B, L); OP(I64_ADD); e_i64c(B, 0); e_st(B, 0x3C, 0, CO_FXK); }   /* fxk[L] = 0 */
+static void e_fx_copy(Buf *B, int Ld, int Ls) {   /* shadow Ld = shadow Ls */
+  e_lget(B, L_C); e_lget(B, Ld); OP(I64_ADD); e_lget(B, L_C); e_lget(B, Ls); OP(I64_ADD); e_ld(B, 0x31, 0, CO_FXK); e_st(B, 0x3C, 0, CO_FXK);
+  e_faddr(B, Ld); e_faddr(B, Ls); e_ld(B, 0x29, 3, CO_FXM); e_st(B, 0x37, 3, CO_FXM);
+  e_lget(B, L_C); e_lget(B, Ld); e_i64c(B, 1); OP(I64_SHL); OP(I64_ADD); e_lget(B, L_C); e_lget(B, Ls); e_i64c(B, 1); OP(I64_SHL); OP(I64_ADD); e_ld(B, 0x33, 1, CO_FXSE); e_st(B, 0x3D, 1, CO_FXSE); }
+static void e_fpush_begin(Buf *B) {   /* ftop = (ftop - 1) & 7 → L_T2; ftag |= 1 << ftop; fxk[ftop] = 0; leaves &fp[ftop] - CO_FP on the stack for the value store */
+  e_lget(B, L_C); e_lget(B, L_C); e_ld(B, 0x31, 0, CO_FTOP); e_i64c(B, 7); OP(I64_ADD); e_i64c(B, 7); OP(I64_AND); e_ltee(B, L_T2); e_st(B, 0x3C, 0, CO_FTOP);
+  e_lget(B, L_C); e_lget(B, L_C); e_ld(B, 0x31, 0, CO_FTAG); e_i64c(B, 1); e_lget(B, L_T2); OP(I64_SHL); OP(I64_OR); e_st(B, 0x3C, 0, CO_FTAG);
+  e_fx_reset(B, L_T2); e_faddr(B, L_T2); }
+static void e_fpop(Buf *B) {   /* ftag &= ~(1 << ftop); fxk[ftop] = 0; ftop = (ftop + 1) & 7 */
+  e_fslot(B, 0, L_T2);
+  e_lget(B, L_C); e_lget(B, L_C); e_ld(B, 0x31, 0, CO_FTAG); e_i64c(B, 1); e_lget(B, L_T2); OP(I64_SHL); e_i64c(B, ~0ull); OP(I64_XOR); OP(I64_AND); e_st(B, 0x3C, 0, CO_FTAG);
+  e_fx_reset(B, L_T2);
+  e_lget(B, L_C); e_lget(B, L_T2); e_i64c(B, 1); OP(I64_ADD); e_i64c(B, 7); OP(I64_AND); e_st(B, 0x3C, 0, CO_FTOP); }
+static void e_fmem_val(Buf *B, int kind) {   /* memory operand (L_HOST) as f64: 0 m32fp 1 m64fp 2 m16int 3 m32int */
+  e_lget(B, L_HOST); if (kind == 0) { e_ld(B, F32_LOAD, 0, 0); OP(F64_PROMOTE); } else if (kind == 1) e_ld(B, F64_LOAD, 0, 0); else if (kind == 2) { e_ld(B, 0x2E, 0, 0); OP(F64_CVT_I32S); } else { e_ld(B, 0x28, 0, 0); OP(F64_CVT_I32S); } }
+static void e_farith(Buf *B, int sub) {   /* a b → a op b  (sub: 0 add 1 mul 4 sub 5 subr 6 div 7 divr; subr/divr computed by the caller with swapped operands) */
+  OP(sub == 0 ? F64_ADD : sub == 1 ? F64_MUL_ : (sub == 4 || sub == 5) ? F64_SUB : F64_DIV); }
+/* 1 = emitted inline, 0 = use the helper */
+static int e_x87_inline(Buf *B, const JItem *it, int sz) {
+  const Dc *e = it->e; u8 op = e->op; int sub = e->reg & 7, sti = e->rm & 7;
+  if (e->mod != 3) {
+    if ((op == 0xD8 || op == 0xDC) && sub != 2 && sub != 3) {   /* fadd/fmul/fsub/fsubr/fdiv/fdivr m32/m64 */
+      e_prep_mem(B, it, sz, 0); e_fslot(B, 0, L_T0); e_faddr(B, L_T0);
+      if (sub == 5 || sub == 7) { e_fmem_val(B, op == 0xD8 ? 0 : 1); e_fld_st(B, L_T0); } else { e_fld_st(B, L_T0); e_fmem_val(B, op == 0xD8 ? 0 : 1); }
+      e_farith(B, sub); e_st(B, F64_STORE, 3, CO_FP); e_fx_clear_all(B); return 1; }
+    if ((op == 0xD9 || op == 0xDD || op == 0xDB || op == 0xDF) && sub == 0) {   /* fld m32 / fld m64 / fild m32 / fild m16 */
+      e_prep_mem(B, it, sz, 0); if (op == 0xDB || op == 0xDF) e_fx_clear_all(B);   /* fild drops the shadow (x87_keep), fld m32/m64 keeps it */
+      e_fpush_begin(B); e_fmem_val(B, op == 0xD9 ? 0 : op == 0xDD ? 1 : op == 0xDB ? 3 : 2); e_st(B, F64_STORE, 3, CO_FP); return 1; }
+    if ((op == 0xD9 || op == 0xDD) && (sub == 2 || sub == 3)) {   /* fst/fstp m32/m64 */
+      e_prep_mem(B, it, sz, 1); e_lget(B, L_HOST); e_fslot(B, 0, L_T0); e_fld_st(B, L_T0); if (op == 0xD9) { OP(F32_DEMOTE); e_st(B, F32_STORE, 0, 0); } else e_st(B, F64_STORE, 0, 0);
+      if (sub == 3) e_fpop(B); return 1; }
+    return 0;
+  }
+  switch (op) {
+    case 0xD8: if (sub == 2 || sub == 3) return 0;   /* st0 = st0 op sti */
+      e_fslot(B, 0, L_T0); e_fslot(B, sti, L_T1); e_faddr(B, L_T0); if (sub == 5 || sub == 7) { e_fld_st(B, L_T1); e_fld_st(B, L_T0); } else { e_fld_st(B, L_T0); e_fld_st(B, L_T1); }
+      e_farith(B, sub); e_st(B, F64_STORE, 3, CO_FP); e_fx_clear_all(B); return 1;
+    case 0xDC: case 0xDE: { if (sub == 2 || sub == 3) return 0;   /* sti = sti op' st0 (the encoding swaps sub/subr, div/divr), DE pops */
+      int s2 = sub == 4 ? 5 : sub == 5 ? 4 : sub == 6 ? 7 : sub == 7 ? 6 : sub;
+      e_fslot(B, 0, L_T0); e_fslot(B, sti, L_T1); e_faddr(B, L_T1); if (s2 == 5 || s2 == 7) { e_fld_st(B, L_T0); e_fld_st(B, L_T1); } else { e_fld_st(B, L_T1); e_fld_st(B, L_T0); }
+      e_farith(B, s2); e_st(B, F64_STORE, 3, CO_FP); e_fx_clear_all(B); if (op == 0xDE) e_fpop(B); return 1; }
+    case 0xD9:
+      if (sub == 0) { e_fslot(B, sti, L_T1); e_fld_st(B, L_T1); e_lset(B, L_F0); e_fpush_begin(B); e_lget(B, L_F0); e_st(B, F64_STORE, 3, CO_FP); e_fx_copy(B, L_T2, L_T1); return 1; }   /* fld st(i) */
+      if (sub == 1) {   /* fxch */
+        e_fslot(B, 0, L_T0); e_fslot(B, sti, L_T1); e_fld_st(B, L_T0); e_lset(B, L_F0); e_faddr(B, L_T0); e_fld_st(B, L_T1); e_st(B, F64_STORE, 3, CO_FP); e_faddr(B, L_T1); e_lget(B, L_F0); e_st(B, F64_STORE, 3, CO_FP);
+        /* shadow swap through slot copies: T3 = scratch? no spare slot → swap field by field via locals */
+        e_lget(B, L_C); e_lget(B, L_T0); OP(I64_ADD); e_ld(B, 0x31, 0, CO_FXK); e_lset(B, L_T3); e_lget(B, L_C); e_lget(B, L_T0); OP(I64_ADD); e_lget(B, L_C); e_lget(B, L_T1); OP(I64_ADD); e_ld(B, 0x31, 0, CO_FXK); e_st(B, 0x3C, 0, CO_FXK);
+        e_lget(B, L_C); e_lget(B, L_T1); OP(I64_ADD); e_lget(B, L_T3); e_st(B, 0x3C, 0, CO_FXK);
+        e_faddr(B, L_T0); e_ld(B, 0x29, 3, CO_FXM); e_lset(B, L_T3); e_faddr(B, L_T0); e_faddr(B, L_T1); e_ld(B, 0x29, 3, CO_FXM); e_st(B, 0x37, 3, CO_FXM); e_faddr(B, L_T1); e_lget(B, L_T3); e_st(B, 0x37, 3, CO_FXM);
+        e_lget(B, L_C); e_lget(B, L_T0); e_i64c(B, 1); OP(I64_SHL); OP(I64_ADD); e_ld(B, 0x33, 1, CO_FXSE); e_lset(B, L_T3);
+        e_lget(B, L_C); e_lget(B, L_T0); e_i64c(B, 1); OP(I64_SHL); OP(I64_ADD); e_lget(B, L_C); e_lget(B, L_T1); e_i64c(B, 1); OP(I64_SHL); OP(I64_ADD); e_ld(B, 0x33, 1, CO_FXSE); e_st(B, 0x3D, 1, CO_FXSE);
+        e_lget(B, L_C); e_lget(B, L_T1); e_i64c(B, 1); OP(I64_SHL); OP(I64_ADD); e_lget(B, L_T3); e_st(B, 0x3D, 1, CO_FXSE);
+        return 1; }
+      if (sub == 4 && (sti == 0 || sti == 1)) { e_fslot(B, 0, L_T0); e_faddr(B, L_T0); e_fld_st(B, L_T0); OP(sti == 0 ? F64_NEG : F64_ABS); e_st(B, F64_STORE, 3, CO_FP); e_fx_clear_all(B); return 1; }   /* fchs / fabs */
+      return 0;
+    case 0xDD:
+      if (sub == 2 || sub == 3) { e_fslot(B, 0, L_T0); e_fslot(B, sti, L_T1); e_faddr(B, L_T1); e_fld_st(B, L_T0); e_st(B, F64_STORE, 3, CO_FP); e_fx_copy(B, L_T1, L_T0); if (sub == 3) e_fpop(B); return 1; }   /* fst(p) st(i) */
+      return 0;
+    default: return 0;
+  }
+}
 static int e_insn(Buf *B, const JItem *it, const u8 *code, int m32, int k) {
   const Dc *e = it->e; if (it->fk >= g_jit_skip_lo && it->fk < g_jit_skip_hi) return 0; u64 start = it->rip, next = start + e->len; int sz = it->sz, psz = m32 ? 4 : 8, need = it->need, isz = sz == 2 ? 2 : 4;   /* isz: "imm32" is imm16 with 66 */
   if (m32) next = (u32)next;
   Src src = { -1, 0 };
   switch (it->fk) {
     case FK_NOP: return 1;
+    case JK_X87: { int sub = e->reg & 7, sti = e->rm & 7, isreg = e->mod == 3; u32 key = (u32)e->op | (u32)(sub << 8) | (u32)(sti << 11) | (u32)(isreg << 14); int fnstsw = isreg && e->op == 0xDF && sub == 4;
+      if (g_jit_x87_inline && e_x87_inline(B, it, sz)) return 1;
+      if (!isreg) e_prep_mem(B, it, sz, x87_mem_write(e->op, sub));
+      if (fnstsw) e_lget(B, L_C);
+      e_lget(B, L_C); e_i32c(B, (int)key); if (isreg) e_i64c(B, 0); else e_lget(B, L_HOST); OP(CALL); bu(B, FN_X87);
+      if (fnstsw) e_streg(B, RAX, 2); else OP(DROP);
+      return 1; }
     case FK_MOV_RM_R: e_prep_mem(B, it, sz, 1); e_dst_addr(B, e); e_ldreg(B, e->reg, sz); e_dst_store(B, e, sz); return 1;
     case FK_MOV_R_RM: e_prep_mem(B, it, sz, 0); e_lget(B, L_C); e_rm_load(B, e, sz); e_streg(B, e->reg, sz); return 1;
     case FK_LEA: e_lget(B, L_C); e_ea(B, it); e_streg(B, e->reg, sz); return 1;
@@ -941,18 +1036,19 @@ static int jit_translate(Cpu *c, Jb *b0) {
   { Buf s = { g_jit_mod + 30000, 0, 4096, 0, 0, 0, 0, 0 }; Buf *S = &s;   /* scratch for section payloads (overwritten later by the code section) */
     #define SECTION(id) do { OP(id); bu(B, S->n); bbytes(B, S->b, S->n); S->n = 0; } while (0)
     /* types: 0 (i64,i64,i32,i64)->i64 region   1 (i64,i64,i64,i32,i64)->i64 mem/tlb   2 (i64,i32,i64,i64,i32)->i64 alu   3 (i64,i32,i64,i32,i32)->i64 shift   4 (i64,i64)->i64 step */
-    bu(S, 6);
+    bu(S, 7);
     b8(S, 0x60); bu(S, 4); b8(S, 0x7E); b8(S, 0x7E); b8(S, 0x7F); b8(S, 0x7E); bu(S, 1); b8(S, 0x7E);
     b8(S, 0x60); bu(S, 5); b8(S, 0x7E); b8(S, 0x7E); b8(S, 0x7E); b8(S, 0x7F); b8(S, 0x7E); bu(S, 1); b8(S, 0x7E);
     b8(S, 0x60); bu(S, 5); b8(S, 0x7E); b8(S, 0x7F); b8(S, 0x7E); b8(S, 0x7E); b8(S, 0x7F); bu(S, 1); b8(S, 0x7E);
     b8(S, 0x60); bu(S, 5); b8(S, 0x7E); b8(S, 0x7F); b8(S, 0x7E); b8(S, 0x7F); b8(S, 0x7F); bu(S, 1); b8(S, 0x7E);
     b8(S, 0x60); bu(S, 2); b8(S, 0x7E); b8(S, 0x7E); bu(S, 1); b8(S, 0x7E);
     b8(S, 0x60); bu(S, 3); b8(S, 0x7E); b8(S, 0x7E); b8(S, 0x7F); bu(S, 1); b8(S, 0x7F);   /* 5 (i64,i64,i32)->i32 reval */
+    b8(S, 0x60); bu(S, 3); b8(S, 0x7E); b8(S, 0x7F); b8(S, 0x7E); bu(S, 1); b8(S, 0x7E);   /* 6 (i64,i32,i64)->i64 x87 */
     SECTION(1);
-    bu(S, 6);
+    bu(S, 7);
     bu(S, 3); bbytes(S, "env", 3); bu(S, 6); bbytes(S, "memory", 6); b8(S, 0x02); b8(S, 0x04); bu(S, 1);   /* memory64, min 1 page, no max */
-    static const char *const names[5] = { "jit_step", "jit_mem", "jit_alu", "jit_shift", "jit_reval" }; static const u8 types[5] = { 4, 1, 2, 3, 5 };
-    for (int i = 0; i < 5; i++) { bu(S, 3); bbytes(S, "env", 3); u32 L = 0; while (names[i][L]) L++; bu(S, L); bbytes(S, names[i], L); b8(S, 0x00); bu(S, types[i]); }
+    static const char *const names[6] = { "jit_step", "jit_mem", "jit_alu", "jit_shift", "jit_reval", "jit_x87" }; static const u8 types[6] = { 4, 1, 2, 3, 5, 6 };
+    for (int i = 0; i < 6; i++) { bu(S, 3); bbytes(S, "env", 3); u32 L = 0; while (names[i][L]) L++; bu(S, L); bbytes(S, names[i], L); b8(S, 0x00); bu(S, types[i]); }
     SECTION(2);
     bu(S, 2); bu(S, 0); bu(S, 1); SECTION(3);   /* f: type 0, tlb: type 1 */
     bu(S, 1); bu(S, 1); bbytes(S, "f", 1); b8(S, 0x00); bu(S, FN_BLOCK); SECTION(7);
@@ -1039,7 +1135,7 @@ const char *jit_stats_text(void) {
   static char s[1100];
   e_snprintf(s, sizeof s, "blocks=%llu exec=%llu insns=%llu steps=%llu bytes=%llu stale=%llu nodc=%llu fails=%llu retrans=%llu full=%llu x_ind=%llu x_jit=%llu x_cold=%llu dsteps=%llu dinterp=%llu", (unsigned long long)g_jit_st.blocks, (unsigned long long)g_jit_st.exec, (unsigned long long)g_jit_st.insns,
              (unsigned long long)g_jit_st.steps, (unsigned long long)g_jit_st.bytes, (unsigned long long)g_jit_st.stale, (unsigned long long)g_jit_st.nodc, (unsigned long long)g_jit_st.fails, (unsigned long long)g_jit_st.retrans, (unsigned long long)g_jit_st.full, (unsigned long long)g_jit_st.x_ind, (unsigned long long)g_jit_st.x_jit, (unsigned long long)g_jit_st.x_cold, (unsigned long long)g_jit_st.dsteps, (unsigned long long)g_jit_st.dinterp);
-  { int L = 0; while (s[L]) L++; L += e_snprintf(s + L, sizeof s - L, " xk: direct=%llu fall=%llu ret=%llu ind=%llu slice=%llu step=%llu xstale=%llu reval=%llu/%llu defer=%llu cms=%d", (unsigned long long)g_jit_xk[XK_DIRECT], (unsigned long long)g_jit_xk[XK_FALL], (unsigned long long)g_jit_xk[XK_RET], (unsigned long long)g_jit_xk[XK_IND], (unsigned long long)g_jit_xk[XK_SLICE], (unsigned long long)g_jit_xk[XK_STEP], (unsigned long long)g_jit_xk[XK_STALE], (unsigned long long)g_jit_st.reval, (unsigned long long)g_jit_st.reval_bad, (unsigned long long)g_jit_st.defer, (int)g_jit_st.cms); }
+  { int L = 0; while (s[L]) L++; L += e_snprintf(s + L, sizeof s - L, " x87=%llu xk: direct=%llu fall=%llu ret=%llu ind=%llu slice=%llu step=%llu xstale=%llu reval=%llu/%llu defer=%llu cms=%d", (unsigned long long)g_jit_st.x87, (unsigned long long)g_jit_xk[XK_DIRECT], (unsigned long long)g_jit_xk[XK_FALL], (unsigned long long)g_jit_xk[XK_RET], (unsigned long long)g_jit_xk[XK_IND], (unsigned long long)g_jit_xk[XK_SLICE], (unsigned long long)g_jit_xk[XK_STEP], (unsigned long long)g_jit_xk[XK_STALE], (unsigned long long)g_jit_st.reval, (unsigned long long)g_jit_st.reval_bad, (unsigned long long)g_jit_st.defer, (int)g_jit_st.cms); }
   /* top step opcodes */
   { int L = 0; while (s[L]) L++; for (int pass = 0; pass < 12 && L < (int)sizeof s - 40; pass++) { int best = -1; u32 bv = 0; for (int k = 0; k < 1024; k++) if (g_step_hist[k] > bv) { bv = g_step_hist[k]; best = k; } if (best < 0 || !bv) break;
       L += e_snprintf(s + L, sizeof s - L, " %s%s%02x:%u", best >= 512 ? "p" : "", (best & 511) >= 256 ? "0f" : "", best & 255, bv); g_step_hist[best] = 0; } }

@@ -549,6 +549,15 @@ if command -v zig >/dev/null 2>&1; then
   zig cc -target x86-windows-gnu -O1 -o /tmp/x87copy32.exe tests/x87copy.c && out=$($X --quiet /tmp/x87copy32.exe 2>&1) || out="build/run failed: $out"
   check "x87 copies bit-exact (x86)"   "x87 roundtrip ok 3/3"   "$out"
 else echo "  skip x87copy (no zig)"; fi
+echo "[x87] JIT inline FPU forms (fld/fst/fadd/fmul/fsub/fdiv/fxch/fchs/fabs + jit_x87 helper) vs interpreter"
+if command -v zig >/dev/null 2>&1; then
+  zig cc -target x86-windows-gnu -O1 -mno-sse -mno-sse2 -mfpmath=387 -o /tmp/fp387.exe tests/fpbench.c && out=$($X --quiet --no-stdin /tmp/fp387.exe 2>&1) || out="build/run failed: $out"
+  check "fpbench x87 (x86, 387 only)"   "fp hits=29548 sum=429390.029"   "$out"
+  zig cc -target x86-windows-gnu -O1 -o /tmp/fpsse32.exe tests/fpbench.c && out=$($X --quiet --no-stdin /tmp/fpsse32.exe 2>&1) || out="build/run failed: $out"
+  check "fpbench sse (x86)"   "fp hits=29548 sum=429390.029"   "$out"
+  zig cc -target x86_64-windows-gnu -O1 -o /tmp/fpsse64.exe tests/fpbench.c && out=$($X --quiet --no-stdin /tmp/fpsse64.exe 2>&1) || out="build/run failed: $out"
+  check "fpbench sse (x64)"   "fp hits=29548 sum=429390.029"   "$out"
+else echo "  skip fpbench (no zig)"; fi
 echo "[xlat] 0xD7 xlat (MSVCR100 _ismbb* tables in SteamWorld Dig): all 256 entries, 0x67 and segment prefixes, x86 and x64"
 if command -v zig >/dev/null 2>&1; then
   zig cc -target x86_64-windows-gnu -O1 -o /tmp/xlat64.exe tests/xlat.c && out=$($X --quiet /tmp/xlat64.exe 2>&1) || out="build/run failed: $out"

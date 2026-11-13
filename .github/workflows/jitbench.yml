@@ -31,9 +31,17 @@ jobs:
           zig cc -target x86-windows-gnu -O2 -o /tmp/jitdiff32.exe emu/tests/jitdiff.c
           zig cc -target x86_64-windows-gnu -O2 -o /tmp/smc64.exe emu/tests/smc.c
           zig cc -target x86-windows-gnu -O2 -o /tmp/smc32.exe emu/tests/smc.c
+          zig cc -target x86-windows-gnu -O1 -mno-sse -mno-sse2 -mfpmath=387 -o /tmp/fp387.exe emu/tests/fpbench.c
+          zig cc -target x86-windows-gnu -O1 -o /tmp/fpsse32.exe emu/tests/fpbench.c
       - name: Reference checksums (native interpreter)
         run: |
           for exe in /tmp/bench64.exe /tmp/bench32.exe; do echo "== native $exe"; timeout 900 ./emu/x64/x64run --quiet --no-stdin --max-ms 600000 "$exe" | tee "/tmp/$(basename $exe .exe).native.txt"; done
+      - name: x87 fast path (fpbench, 387-only vs SSE build; the x87 line must print "fp hits=29548 sum=429390.029" and run at > 100 MIPS)
+        run: |
+          for exe in /tmp/fp387.exe /tmp/fpsse32.exe; do echo "== JIT $exe"; node emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 "$exe" 2>&1 | tail -3; done
+          echo "== JIT fp387 with --x87inline 0 (helper only)"; node emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 --x87inline 0 /tmp/fp387.exe 2>&1 | tail -3
+          echo "== interp fp387"; node emu/tests/wasm_run.mjs --max-ms 600000 --jit 0 /tmp/fp387.exe 2>&1 | tail -3
+          node emu/tests/wasm_run.mjs --max-ms 600000 --jit 1 /tmp/fp387.exe 2>/dev/null | grep -q 'fp hits=29548 sum=429390.029'
       - name: bench under the JIT
         run: |
           for exe in /tmp/bench64.exe /tmp/bench32.exe; do

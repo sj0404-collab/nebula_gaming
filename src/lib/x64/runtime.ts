@@ -173,7 +173,7 @@ export class X64Runtime {
   private jitSetup(): void {
     const ex = this.ex!; const table = ex.__indirect_function_table;
     if (!ex.x64_set_jit || !table) return;
-    for (const k of ['jit_step', 'jit_mem', 'jit_alu', 'jit_shift', 'jit_reval']) { const f = (ex as unknown as Record<string, unknown>)[k]; if (typeof f !== 'function') return; this.jitImports[k] = f; }
+    for (const k of ['jit_step', 'jit_mem', 'jit_alu', 'jit_shift', 'jit_reval', 'jit_x87']) { const f = (ex as unknown as Record<string, unknown>)[k]; if (typeof f !== 'function') return; this.jitImports[k] = f; }
     let pref = '1'; try { pref = localStorage.getItem('nebula_jit') ?? '1'; } catch { /* no storage */ }
     const on = pref !== '0' ? (Number(pref) > 1 ? Number(pref) : 1) : 0;
     ex.x64_set_jit(on); this.jit.enabled = on > 0;
