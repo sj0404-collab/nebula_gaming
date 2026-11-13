@@ -301,7 +301,7 @@ for t in shlwapi2.exe shlwapi232.exe; do
   check "$t parts"     "host=host.example port=8443 query=x=1 scheme=https" "$out"
   check "$t canon"     "canon=http://h/a/c/d?q=1" "$out"
   check "$t combine"   "combine=http://h/img/x.png abs=http://h/root.css frag=http://h/dir/page.html#frag" "$out"
-  check "$t path misc" "rename=C:\\\\dir\\\\file.bak root=C:\\\\ skip=d isroot=1/0 rel=..\\\\d\\\\e.txt common=C:\\\\a drive=3 blanks=[x y]" "$out"
+  check "$t path misc" "rename=C:\\\\dir\\\\file.bak root=C:\\\\ skip=d isroot=1/0 rel=..\\\\d\\\\e.txt common=C:\\\\a drive=3 blanks=\\[x y\\]" "$out"
   check "$t compact"   "compact=C:\\\\very...\\\\file.txt prefix=1 samerout=1 filespec=1/0 lfn=1/0 next=b\\\\c" "$out"
   check "$t icon"      "icon=C:\\\\x\\\\y.dll idx=-7 sq=1 pretty=1" "$out"
 done
