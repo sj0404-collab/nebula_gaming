@@ -1,3 +1,61 @@
+# v1.51.1 — memory that comes back, and the API layer the phone-reported programs were missing
+
+Follow-up to v1.51.0 driven by three programs on the user's phone: Shattered Pixel Dungeon (JVM `class space` / stack-guard
+failures and 7.7 MIPS after a session had already run another game), SteamWorld Dig (sound, no picture) and Tap It Away
+(MSVCP140 fault, then missing imports).
+
+**Memory: a free list for the wasm arena (`emu/x64/lib.c`, `win32.c`)**
+* The arena only ever grew (4 GB cap, never shrinks); a program that followed a big one started with almost nothing
+  left and HotSpot could not reserve its class space.  Freed regions now go to a coalescing best-fit pool (4096 entries,
+  split on reuse, `--pool-selftest` exercises it) and `GlobalMemoryStatus(Ex)` reports real headroom + pool free bytes
+  instead of a constant.
+* HotSpot options are capped from the start (`java_opts`: C1 only, CDS, class-space 128 MB, code cache 64 MB,
+  `MaxRAMPercentage=25`).  On the GitHub runner the SPD recording went from **2483 MB → 1603 MB** host memory at
+  76 MIPS / 13.6 FPS with no class-space or stack-guard messages (`game-video` run 43462435168).  Phone verification is
+  the next step — the pool fix is in this build.
+
+**MSVCP140 built-in threads (`win32_threads.inc`)** — `_Mtx_*`, `_Cnd_*`, `_Thrd_*`, `xtime`, `_Query_perf_*` backed
+by the SRW + condvar primitives (x86 and x64, MSVC STL layouts); used only when the real `msvcp140.dll` is not installed.
+Tests `msvcp_thr` / `msvcp_thr32`.
+
+**Report tab: OpenGL summary and trace on the phone (`src/lib/x64/gl.ts`, `X64App.tsx`)** — frames, draws, programs,
+shader compile/link failures, viewport and FBO state are in the Report; a "trace next frame" button records 600 GL calls
+of the following frame into the report.  This is what the SteamWorld Dig "no picture" investigation needs from the device.
+
+**gdi32 private fonts (`ttf.inc`, `win32_vcl.inc`)** — `AddFontResource(Ex)`, `AddFontMemResourceEx`,
+`RemoveFontResource(Ex)`, `RemoveFontMemResourceEx` load real TrueType faces (TTC too) and `CreateFont*` picks them by
+family + bold/italic, so games shipping their own `.ttf` render with it instead of the bundled sans.
+
+**Kernel/COM odds and ends that were imports without a shim**
+* rpcrt4 `UuidCreate`, `UuidCreateSequential`, `UuidToStringA/W`, `UuidFromStringA/W`, `UuidCompare`, `UuidEqual`,
+  `UuidIsNil`, `UuidCreateNil`, `UuidHash`, `RpcStringFreeA/W`.
+* kernel32 `LocalLock/Unlock/Handle/Size/Flags/ReAlloc`, `tmpnam`/`_wtmpnam`/`tmpnam_s`, `_wcreate_locale`,
+  `_wfindfirst64i32`/`_wfindnext64i32` and the other `_findfirst*` layout variants (`emu/x64/win32_fs.inc`).
+* winmm `mmio*` (`emu/x64/win32_mmio.inc`): `mmioOpen` (files and `FOURCC_MEM` buffers), `Read/Write/Seek`,
+  `Descend/Ascend/CreateChunk` with RIFF/LIST forms and odd-size padding, `mmioGetInfo/SetInfo/Advance`,
+  `mmioStringToFOURCC`, `mmioClose`.  `MMIOINFO` is 1-byte packed (x86 72 B / x64 100 B) — the probe that found this is in
+  the tests.  Custom I/O procedures (`mmioInstallIOProc`) are not supported and say so.
+* shlwapi (`emu/x64/win32_shlwapi.inc`, A and W): `UrlEscape`, `UrlUnescape`, `UrlCanonicalize`, `UrlCombine`,
+  `UrlGetPart`, `UrlIs`, `UrlCreateFromPath`, `PathCreateFromUrl`, `PathRenameExtension`, `PathStripToRoot`,
+  `PathSkipRoot`, `PathIsRoot`, `PathIsURL`, `PathRemoveBlanks`, `PathQuoteSpaces`, `PathUnquoteSpaces`,
+  `PathAddExtension`, `PathIsPrefix`, `PathCommonPrefix`, `PathRelativePathTo`, `PathGetDriveNumber`, `PathBuildRoot`,
+  `PathIsSameRoot`, `PathIsFileSpec`, `PathFindNextComponent`, `PathParseIconLocation`, `PathSearchAndQualify`,
+  `PathMakePretty`, `PathFindOnPath`, `PathIsDirectoryEmpty`, `PathIsLFNFileSpec`, `PathCompactPath(Ex)`.
+* msacm32 (`emu/x64/win32_acm.inc`): the built-in PCM converter — `acmStreamOpen/Size/PrepareHeader/Convert/Close`,
+  `acmFormatSuggest`, `acmMetrics`, `acmFormatTagDetails/FormatDetails` for 8↔16 bit, mono↔stereo, any rate (linear
+  interpolation).  Compressed tags (ADPCM, MP3, GSM) return `ACMERR_NOTPOSSIBLE` — no codecs are installed, and the log
+  says which tag was asked for.
+* wininet: `InternetOpen/Connect/CloseHandle`, `HttpOpenRequest`, options, cookies, status callbacks exist;
+  `HttpSendRequest`, `InternetOpenUrl`, `InternetReadFile`, `InternetGetConnectedState` fail with the offline codes
+  (`ERROR_INTERNET_CANNOT_CONNECT`, `INTERNET_CONNECTION_OFFLINE`).  The browser gives the emulator no raw sockets, so
+  this is the honest answer: programs take their "no network" path instead of faulting on a missing import.
+
+**Tests** — `run.sh` sections `[5v]` privfont, `[5v2]` mmio, `[5v3]` shlwapi2, `[5v4]` acm, each for x64 and x86; 32-bit
+stdcall table extended for every new API.
+
+**Still open** — SteamWorld Dig picture on the phone (needs the GL trace from the Report tab), Tap It Away beyond the
+imports fixed here, phone-side confirmation of the SPD memory fix.
+
 # v1.51.0 — x87 under the JIT (10× on 387 code), audio that survives slow frames
 
 Measured first, fixed second.  A benchmark built three ways (`emu/tests/fpbench.c`: the same float loop as x87 code —
