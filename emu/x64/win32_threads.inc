@@ -95,6 +95,11 @@ static int ctx_runnable(Win32 *w, ThreadCtx *x, int tid) {
   return 1;
 }
 static int thread_pick_inner(Win32 *w) {
+  for (int i = 0; i < THREAD_MAX; i++) {   /* boosted first: a thread just woken by an audio period (win32_audio.inc kobj_signal) */
+    Thread *t = &w->th[i]; if (!t->boost) continue; t->boost = 0; if (!t->used || t->state != 1 || t->suspend > 0) continue;
+    if (i == w->cur_th) { if (ctx_runnable(w, &w->tctx, t->tid)) { w->block = BLOCK_NONE; return 1; } continue; }
+    if (ctx_runnable(w, &t->ctx, t->tid)) { w32_thread_sync(w); t->ctx.block = BLOCK_NONE; thread_load(w, i); return 1; }
+  }
   for (int k = 1; k <= THREAD_MAX; k++) {
     int i = (w->cur_th + k) % THREAD_MAX; Thread *t = &w->th[i];
     if (!t->used || t->state != 1 || t->suspend > 0) continue;

@@ -27,6 +27,7 @@ export interface RunStats {
   audioFrames: number;
   /** 'running' | 'suspended' (waiting for a user gesture — the sound is dropped meanwhile, the program keeps running) | 'none' */
   audio: string;
+  audioLeadMs: number; audioUnderruns: number; audioBoosts: number;   // host queue lead (adaptive 100–400 ms), host-queue underruns, audio-thread priority picks
 }
 
 type Exports = {
@@ -34,7 +35,7 @@ type Exports = {
   x64_alloc(n: bigint): bigint; x64_inspect(p: bigint, n: bigint): bigint; x64_load(p: bigint, n: bigint, name: bigint, cmd: bigint): number;
   x64_reserve(n: bigint): number; x64_run(budget: bigint): number; x64_key(vk: number, down: number): void; x64_char(cp: number): void; x64_mouse(x: number, y: number, ev: number): void;
   x64_icount(): bigint; x64_exit_code(): number; x64_relaunch?(): number; x64_cds_dump_pass?(): number; x64_error(): bigint; x64_error_rip(): bigint; x64_rip(): bigint; x64_report(): bigint; x64_console(): bigint;
-  x64_screen_w(): number; x64_screen_h(): number; x64_set_desktop?(w: number, h: number): void; x64_screen(): bigint; x64_title(): bigint; x64_subsystem(): number; x64_sleep_ms(): number; x64_mem_used(): bigint; x64_has_window(): number; x64_proc_count(): number; x64_thread_count(): number; x64_audio_frames(): bigint;
+  x64_screen_w(): number; x64_screen_h(): number; x64_set_desktop?(w: number, h: number): void; x64_screen(): bigint; x64_title(): bigint; x64_subsystem(): number; x64_sleep_ms(): number; x64_mem_used(): bigint; x64_has_window(): number; x64_proc_count(): number; x64_thread_count(): number; x64_audio_frames(): bigint; x64_audio_stats?(): bigint;
   x64_api_stats(): bigint; x64_error_bytes(): bigint;
   x64_vfs_add(path: bigint, data: bigint, n: bigint): number; x64_vfs_mkdir(path: bigint): number; x64_vfs_set_mtime?(path: bigint, unixMs: number): number;
   x64_gl_ptr(addr: bigint, len: bigint, write: number): bigint; x64_gl_strlen(addr: bigint): bigint; x64_gl_alloc(len: bigint): bigint; x64_gl_free(addr: bigint): void; x64_gl_psize(): number; x64_vfs_remove(path: bigint): number;
@@ -361,12 +362,12 @@ export class X64Runtime {
   mouse(x: number, y: number, ev: number) { if (this.running) this.ex!.x64_mouse(x | 0, y | 0, ev); }
 
   stats(): RunStats {
-    const ex = this.ex; if (!ex) return { status: this.status, icount: 0, mips: 0, frames: 0, elapsedMs: 0, exitCode: 0, error: '', errorRip: '', errorBytes: '', report: '', title: '', subsystem: 0, hasWindow: false, memMB: 0, procs: 0, threads: 0, audioFrames: 0, audio: 'none' };
-    const el = Math.max(1, performance.now() - this.t0); const ic = Number(ex.x64_icount());
+    const ex = this.ex; if (!ex) return { status: this.status, icount: 0, mips: 0, frames: 0, elapsedMs: 0, exitCode: 0, error: '', errorRip: '', errorBytes: '', report: '', title: '', subsystem: 0, hasWindow: false, memMB: 0, procs: 0, threads: 0, audioFrames: 0, audio: 'none', audioLeadMs: 0, audioUnderruns: 0, audioBoosts: 0 };
+    const el = Math.max(1, performance.now() - this.t0); const ic = Number(ex.x64_icount()); const as = ex.x64_audio_stats ? ex.x64_audio_stats() : 0n;
     return {
       status: this.status, icount: ic, mips: ic / el / 1000, frames: this.frames, elapsedMs: el, exitCode: ex.x64_exit_code(),
       error: this.cstr(ex.x64_error()), errorRip: '0x' + ex.x64_error_rip().toString(16), errorBytes: this.cstr(ex.x64_error_bytes()), report: this.cstr(ex.x64_report()),
-      title: this.cstr(ex.x64_title()), subsystem: ex.x64_subsystem(), hasWindow: !!ex.x64_has_window(), memMB: Number(ex.x64_mem_used()) / 1048576, procs: ex.x64_proc_count(), threads: ex.x64_thread_count ? ex.x64_thread_count() : 0, audioFrames: ex.x64_audio_frames ? Number(ex.x64_audio_frames()) : 0, audio: this.audio.state(),
+      title: this.cstr(ex.x64_title()), subsystem: ex.x64_subsystem(), hasWindow: !!ex.x64_has_window(), memMB: Number(ex.x64_mem_used()) / 1048576, procs: ex.x64_proc_count(), threads: ex.x64_thread_count ? ex.x64_thread_count() : 0, audioFrames: ex.x64_audio_frames ? Number(ex.x64_audio_frames()) : 0, audio: this.audio.state(), audioLeadMs: Number(as & 0xffffn), audioUnderruns: Number((as >> 16n) & 0xffffffn), audioBoosts: Number(as >> 40n),
     };
   }
   apiStats(): string { return this.ex ? this.cstr(this.ex.x64_api_stats()) : ''; }

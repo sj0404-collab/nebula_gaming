@@ -42,7 +42,7 @@ typedef struct {
 } AStream;
 static AStream g_astr[AUD_MAX];
 static int g_aud_host_rate, g_aud_host_state;         /* host output: 0 not opened, 1 open, -1 unavailable */
-static u64 g_aud_written; static u32 g_aud_tag = 0x5100;
+static u64 g_aud_written; static u32 g_aud_tag = 0x5100; static u64 g_aud_boosts;
 static int g_aud_pending_cb;                           /* waveOut callbacks waiting for their owner process */
 static int g_aud_log3d;
 
@@ -81,7 +81,10 @@ static int astr_idx(AStream *s) { return (int)(s - g_astr); }
 static void astr_free(AStream *s) { s->used = 0; }
 static AStream *astr_by_tag(u32 tag) { for (int i = 0; i < AUD_MAX; i++) if (g_astr[i].used && g_astr[i].guest_tag == tag) return &g_astr[i]; return 0; }
 static int kobj_of_event(Cpu *c, u64 h) { int kind, idx; if (!h || !wait_handle(c, h, &kind, &idx) || kind != 2) return -1; KObj *k = kobj_get(idx); return k && k->kind == KO_EVENT ? idx : -1; }
-static void kobj_signal(Win32 *w, int idx) { KObj *k = kobj_get(idx); if (!k || k->kind != KO_EVENT) return; if (k->manual || !event_deliver(w, idx, 0)) k->signaled = 1; }
+static void kobj_signal(Win32 *w, int idx) { KObj *k = kobj_get(idx); if (!k || k->kind != KO_EVENT) return; if (k->manual || !event_deliver(w, idx, 0)) k->signaled = 1;
+  /* audio period: the waiting thread goes first at the next pick (its buffer is draining in real time, the round-robin quantum of every other thread is up to 400k instructions) */
+  for (int i = 0; i < THREAD_MAX; i++) { Thread *t = &w->th[i]; if (!t->used || t->state != 1) continue; ThreadCtx *x = i == w->cur_th ? &w->tctx : &t->ctx;
+    if (x->block != BLOCK_OBJ) continue; for (int j = 0; j < x->nwobj; j++) if (x->wobj_kind[j] == 2 && x->wobj_idx[j] == idx) { t->boost = 1; g_aud_boosts++; break; } } }
 
 static inline float aud_sample(const u8 *p, int bits, int isfloat) {
   if (isfloat) { float f; e_memcpy(&f, p, 4); return f; }
@@ -168,20 +171,26 @@ static void aud_mix_block(float *out, int n) {
   }
   for (int i = 0; i < 2 * n; i++) { float v = out[i]; out[i] = v > 1 ? 1 : v < -1 ? -1 : v; }
 }
-/* called by the scheduler before every pick: keep the host fed; period events for WASAPI streams */
+/* called by the scheduler before every pick: keep the host fed; period events for WASAPI streams.
+   Lead (how much sound is queued at the host) adapts: 100 ms normally; every underrun (the host queue ran dry while streams
+   were playing — a long host frame, JIT compile, GC, a slow phone) adds 50 ms up to 400 ms; 20 s without one takes 25 ms back. */
+int g_aud_lead_ms = 100, g_aud_underruns = 0; static double g_aud_last_underrun = -1;
 void w32_audio_pump(void) {
   if (g_aud_host_state == 0) return;
-  int rate = g_aud_host_rate, per = rate / 100, target = rate / 10;   /* 10 ms blocks, 100 ms of lead */
+  int rate = g_aud_host_rate, per = rate / 100, target = rate / 1000 * g_aud_lead_ms;   /* 10 ms blocks */
   static float blk[2 * 3840]; if (per > 3840) per = 3840;
   int queued, blocks = 0;
-  if (g_aud_host_state == 1) queued = host_audio_queued();
+  if (g_aud_host_state == 1) { queued = host_audio_queued();
+    if (queued < per && g_aud_written > 0) { int playing = 0; for (int i = 0; i < AUD_MAX; i++) if (g_astr[i].used && g_astr[i].playing && !g_astr[i].paused) { playing = 1; break; }
+      double now = host_now_ms(); if (playing && now - g_aud_last_underrun > 500) { g_aud_underruns++; if (g_aud_lead_ms < 400) g_aud_lead_ms += 50; g_aud_last_underrun = now; target = rate / 1000 * g_aud_lead_ms; } }
+    else if (g_aud_lead_ms > 100 && g_aud_last_underrun >= 0 && host_now_ms() - g_aud_last_underrun > 20000) { g_aud_lead_ms -= 25; g_aud_last_underrun = host_now_ms(); } }
   else {   /* no host output (wasm_run, tests): pace the mixer against the clock, otherwise every scheduler pick would mix 200 ms of sound */
     static double t0 = -1; double now = host_now_ms(); if (t0 < 0) t0 = now;
     long long played = (long long)((now - t0) / 1000.0 * rate), q = (long long)g_aud_written - played;
     if (q < 0) { t0 = now - (double)g_aud_written * 1000.0 / rate; q = 0; }
     queued = (int)q;
   }
-  while (queued < target && blocks < 20) {
+  while (queued < target && blocks < 40) {
     aud_mix_block(blk, per); host_audio_write(blk, per); g_aud_written += (u64)per; queued += per; blocks++;
     for (int i = 0; i < AUD_MAX; i++) { AStream *s = &g_astr[i]; if (s->used && s->kind == AS_WASAPI && s->playing && s->event_mode && s->ev_kobj >= 0) kobj_signal(s->w, s->ev_kobj); }
   }
@@ -190,6 +199,8 @@ void w32_audio_pump(void) {
 int w32_audio_pending(void) { if (g_aud_host_state != 1 && g_aud_host_state != -1) return 0; for (int i = 0; i < AUD_MAX; i++) if (g_astr[i].used && g_astr[i].playing) return 1; return g_aud_pending_cb; }
 u64 w32_audio_frames(void) { return g_aud_written; }
 int w32_audio_cb_pending(void) { return g_aud_pending_cb; }
+/* "lead_ms,underruns,boosts" packed: lead in bits 0-15, underruns 16-39, boosts 40-63 (x64_audio_stats) */
+u64 w32_audio_stats(void) { return (u64)(g_aud_lead_ms & 0xffff) | ((u64)(g_aud_underruns & 0xffffff) << 16) | ((g_aud_boosts & 0xffffffull) << 40); }
 /* waveOut callbacks are delivered in the owner's process context (helper thread / message queue) */
 static void s_nebula_audio_thunk(Cpu *c) {
   u64 job = ARG(0); Win32 *w = W; if (!job || !mem_ptr(c->mem, job, 48, 0)) { RET(0); return; }

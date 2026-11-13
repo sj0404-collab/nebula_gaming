@@ -311,6 +311,7 @@ typedef struct { THREAD_CTX_FIELDS; } ThreadCtx;
 typedef struct Thread {
   int used, state, tid, suspend, kobj;   /* state 1 running, 2 exited */
   int quit_posted; u32 quit_code;
+  int boost;                             /* woken by an audio period event: scheduled before the round-robin continues (a WASAPI/OpenAL mixer thread must refill its buffer within one period) */
   Cpu *cpu; u64 teb, stack, stack_size, tls_blk[MAX_TLS_IMAGES], tls_arr, start, param; u32 exit_code;
   ThreadCtx ctx;                         /* saved while not current */
 } Thread;
