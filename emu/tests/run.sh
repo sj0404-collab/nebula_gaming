@@ -549,6 +549,13 @@ if command -v zig >/dev/null 2>&1; then
   zig cc -target x86-windows-gnu -O1 -o /tmp/x87copy32.exe tests/x87copy.c && out=$($X --quiet /tmp/x87copy32.exe 2>&1) || out="build/run failed: $out"
   check "x87 copies bit-exact (x86)"   "x87 roundtrip ok 3/3"   "$out"
 else echo "  skip x87copy (no zig)"; fi
+echo "[xlat] 0xD7 xlat (MSVCR100 _ismbb* tables in SteamWorld Dig): all 256 entries, 0x67 and segment prefixes, x86 and x64"
+if command -v zig >/dev/null 2>&1; then
+  zig cc -target x86_64-windows-gnu -O1 -o /tmp/xlat64.exe tests/xlat.c && out=$($X --quiet /tmp/xlat64.exe 2>&1) || out="build/run failed: $out"
+  check "xlat (x64)"   "xlat 256/256 prefixed 61 80"   "$out"
+  zig cc -target x86-windows-gnu -O1 -o /tmp/xlat32.exe tests/xlat.c && out=$($X --quiet /tmp/xlat32.exe 2>&1) || out="build/run failed: $out"
+  check "xlat (x86)"   "xlat 256/256 prefixed 61 80"   "$out"
+else echo "  skip xlat (no zig)"; fi
 echo "[upath] Cyrillic exe name with spaces: W path APIs return unit counts, CP_ACP round trip, self reopen"
 if command -v zig >/dev/null 2>&1; then
   UD=$(mktemp -d); mkdir -p "$UD/Папка тест"

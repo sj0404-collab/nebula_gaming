@@ -553,6 +553,10 @@ static void exec_body(Ins *i, u8 op) {
     case 0x9C: cpu_push(c, c->rflags); return;
     case 0x9D: c->rflags = (cpu_pop(c) & (0xcd5 | 0x200000 | 0x40000)) | 0x202; return;   /* popf: arithmetic flags + ID (bit 21, the CPUID-presence test flips it) + AC */
     case 0x9E: c->rflags = (c->rflags & ~0xd5ull) | ((c->r[RAX] >> 8) & 0xd5); return;
+    case 0xD7: {   /* xlat: AL = [seg:(r/e/)BX + AL] (MSVCR100 _mbctype / locale tables use it) */
+      u64 base = c->r[RBX]; if (c->mode32) base &= i->p67 ? 0xffff : 0xffffffffull; else if (i->p67) base &= 0xffffffffull;
+      u64 ea = base + (c->r[RAX] & 0xff); if (i->seg == 1) ea += c->fs_base; else if (i->seg == 2) ea += c->gs_base;
+      c->r[RAX] = (c->r[RAX] & ~0xffull) | (rdn(c, ea, 1) & 0xff); return; }
     case 0x9F: c->r[RAX] = (c->r[RAX] & ~0xff00ull) | (((c->rflags & 0xd5) | 2) << 8); return;
     case 0xA4: case 0xA5: case 0xAA: case 0xAB: case 0xAC: case 0xAD: case 0xA6: case 0xA7: case 0xAE: case 0xAF: string_op(i, op & ~1, op & 1 ? osz : 1); return;
     case 0xA0: case 0xA1: case 0xA2: case 0xA3: {                                   /* mov al/eax/rax <-> moffs (movabs) */
