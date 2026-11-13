@@ -653,9 +653,57 @@ static void exec_body(Ins *i, u8 op) {
 }
 
 #include "sse4.inc"
+/* packed-integer lane operations shared by SSE2 (n = 16 bytes, xmm) and MMX (n = 8 bytes, mm held in an Xmm's low qword) */
+static void pint_op(u8 op, Xmm *d, const Xmm *sp, int n) {
+  if (op == 0x60 || op == 0x61 || op == 0x62 || op == 0x68 || op == 0x69 || op == 0x6A || op == 0x6C || op == 0x6D) { Xmm r, s = *sp; int hi = op == 0x6C ? 0 : op == 0x6D ? 1 : op >= 0x68;   /* punpckl* 60-62/6C, punpckh* 68-6A/6D */
+      switch (op & 7) { case 0: for (int k = 0; k < n / 2; k++) { r.b[2 * k] = d->b[k + hi * (n / 2)]; r.b[2 * k + 1] = s.b[k + hi * (n / 2)]; } break;   /* punpck bw */
+        case 1: for (int k = 0; k < n / 4; k++) { r.w[2 * k] = d->w[k + hi * (n / 4)]; r.w[2 * k + 1] = s.w[k + hi * (n / 4)]; } break;                      /* wd */
+        case 2: for (int k = 0; k < n / 8; k++) { r.d[2 * k] = d->d[k + hi * (n / 8)]; r.d[2 * k + 1] = s.d[k + hi * (n / 8)]; } break;                      /* dq */
+        default: r.q[0] = d->q[hi]; r.q[1] = s.q[hi]; break; }                                                                                   /* qdq */
+      if (n == 8) r.q[1] = d->q[1]; *d = r; return; }
+  if (op == 0x63 || op == 0x67 || op == 0x6B) { Xmm r, s = *sp;
+      if (op == 0x63) { for (int k = 0; k < n / 2; k++) { s16 a = (s16)d->w[k], b = (s16)s.w[k]; r.b[k] = (u8)(a < -128 ? -128 : a > 127 ? 127 : a); r.b[k + n / 2] = (u8)(b < -128 ? -128 : b > 127 ? 127 : b); } }
+      else if (op == 0x67) { for (int k = 0; k < n / 2; k++) { s16 a = (s16)d->w[k], b = (s16)s.w[k]; r.b[k] = (u8)(a < 0 ? 0 : a > 255 ? 255 : a); r.b[k + n / 2] = (u8)(b < 0 ? 0 : b > 255 ? 255 : b); } }
+      else { for (int k = 0; k < n / 4; k++) { s32 a = (s32)d->d[k], b = (s32)s.d[k]; r.w[k] = (u16)(a < -32768 ? -32768 : a > 32767 ? 32767 : a); r.w[k + n / 4] = (u16)(b < -32768 ? -32768 : b > 32767 ? 32767 : b); } }
+      if (n == 8) r.q[1] = d->q[1]; *d = r; return; }
+  if (op == 0x64 || op == 0x65 || op == 0x66 || op == 0x74 || op == 0x75 || op == 0x76) { const Xmm s = *sp; int gt = op < 0x70;
+      if ((op & 3) == 0) for (int k = 0; k < n; k++) d->b[k] = (gt ? (s8)d->b[k] > (s8)s.b[k] : d->b[k] == s.b[k]) ? 0xff : 0;
+      else if ((op & 3) == 1) for (int k = 0; k < n / 2; k++) d->w[k] = (gt ? (s16)d->w[k] > (s16)s.w[k] : d->w[k] == s.w[k]) ? 0xffff : 0;
+      else for (int k = 0; k < n / 4; k++) d->d[k] = (gt ? (s32)d->d[k] > (s32)s.d[k] : d->d[k] == s.d[k]) ? 0xffffffff : 0; return; }
+  if (op == 0xDB || op == 0xDF || op == 0xEB || op == 0xEF) { const Xmm s = *sp;
+      for (int k = 0; k < n / 8; k++) d->q[k] = op == 0xDB ? d->q[k] & s.q[k] : op == 0xDF ? ~d->q[k] & s.q[k] : op == 0xEB ? d->q[k] | s.q[k] : d->q[k] ^ s.q[k]; return; }
+  if (op == 0xD1 || op == 0xD2 || op == 0xD3 || op == 0xE1 || op == 0xE2 || op == 0xF1 || op == 0xF2 || op == 0xF3) { u64 cnt = sp->q[0];
+      if (op == 0xD1) for (int k = 0; k < n / 2; k++) d->w[k] = cnt > 15 ? 0 : d->w[k] >> cnt; else if (op == 0xD2) for (int k = 0; k < n / 4; k++) d->d[k] = cnt > 31 ? 0 : d->d[k] >> cnt; else if (op == 0xD3) for (int k = 0; k < n / 8; k++) d->q[k] = cnt > 63 ? 0 : d->q[k] >> cnt;
+      else if (op == 0xE1) for (int k = 0; k < n / 2; k++) d->w[k] = (u16)((s16)d->w[k] >> (cnt > 15 ? 15 : cnt)); else if (op == 0xE2) for (int k = 0; k < n / 4; k++) d->d[k] = (u32)((s32)d->d[k] >> (cnt > 31 ? 31 : cnt));
+      else if (op == 0xF1) for (int k = 0; k < n / 2; k++) d->w[k] = cnt > 15 ? 0 : (u16)(d->w[k] << cnt); else if (op == 0xF2) for (int k = 0; k < n / 4; k++) d->d[k] = cnt > 31 ? 0 : d->d[k] << cnt; else for (int k = 0; k < n / 8; k++) d->q[k] = cnt > 63 ? 0 : d->q[k] << cnt;
+      return; }
+  { const Xmm s = *sp;
+      switch (op) {
+        case 0xD4: d->q[0] += s.q[0]; if (n == 16) d->q[1] += s.q[1]; break; case 0xFB: d->q[0] -= s.q[0]; if (n == 16) d->q[1] -= s.q[1]; break;
+        case 0xFE: for (int k = 0; k < n / 4; k++) d->d[k] += s.d[k]; break; case 0xFA: for (int k = 0; k < n / 4; k++) d->d[k] -= s.d[k]; break;
+        case 0xFD: for (int k = 0; k < n / 2; k++) d->w[k] += s.w[k]; break; case 0xF9: for (int k = 0; k < n / 2; k++) d->w[k] -= s.w[k]; break;
+        case 0xFC: for (int k = 0; k < n; k++) d->b[k] += s.b[k]; break; case 0xF8: for (int k = 0; k < n; k++) d->b[k] -= s.b[k]; break;
+        case 0xD5: for (int k = 0; k < n / 2; k++) d->w[k] = (u16)(d->w[k] * s.w[k]); break;
+        case 0xE5: for (int k = 0; k < n / 2; k++) d->w[k] = (u16)(((s32)(s16)d->w[k] * (s32)(s16)s.w[k]) >> 16); break;
+        case 0xE4: for (int k = 0; k < n / 2; k++) d->w[k] = (u16)(((u32)d->w[k] * (u32)s.w[k]) >> 16); break;
+        case 0xF4: d->q[0] = (u64)d->d[0] * s.d[0]; if (n == 16) d->q[1] = (u64)d->d[2] * s.d[2]; break;
+        case 0xDA: for (int k = 0; k < n; k++) d->b[k] = d->b[k] < s.b[k] ? d->b[k] : s.b[k]; break; case 0xDE: for (int k = 0; k < n; k++) d->b[k] = d->b[k] > s.b[k] ? d->b[k] : s.b[k]; break;
+        case 0xEA: for (int k = 0; k < n / 2; k++) d->w[k] = (s16)d->w[k] < (s16)s.w[k] ? d->w[k] : s.w[k]; break; case 0xEE: for (int k = 0; k < n / 2; k++) d->w[k] = (s16)d->w[k] > (s16)s.w[k] ? d->w[k] : s.w[k]; break;
+        case 0xE0: for (int k = 0; k < n; k++) d->b[k] = (u8)((d->b[k] + s.b[k] + 1) >> 1); break; case 0xE3: for (int k = 0; k < n / 2; k++) d->w[k] = (u16)((d->w[k] + s.w[k] + 1) >> 1); break;
+        case 0xD8: for (int k = 0; k < n; k++) d->b[k] = d->b[k] > s.b[k] ? d->b[k] - s.b[k] : 0; break; case 0xDC: for (int k = 0; k < n; k++) { u32 t = d->b[k] + s.b[k]; d->b[k] = t > 255 ? 255 : (u8)t; } break;
+        case 0xD9: for (int k = 0; k < n / 2; k++) d->w[k] = d->w[k] > s.w[k] ? d->w[k] - s.w[k] : 0; break; case 0xDD: for (int k = 0; k < n / 2; k++) { u32 t = d->w[k] + s.w[k]; d->w[k] = t > 65535 ? 65535 : (u16)t; } break;
+        case 0xEC: for (int k = 0; k < n; k++) { s32 t = (s8)d->b[k] + (s8)s.b[k]; d->b[k] = (u8)(t < -128 ? -128 : t > 127 ? 127 : t); } break; case 0xED: for (int k = 0; k < n / 2; k++) { s32 t = (s16)d->w[k] + (s16)s.w[k]; d->w[k] = (u16)(t < -32768 ? -32768 : t > 32767 ? 32767 : t); } break;
+        case 0xE8: for (int k = 0; k < n; k++) { s32 t = (s8)d->b[k] - (s8)s.b[k]; d->b[k] = (u8)(t < -128 ? -128 : t > 127 ? 127 : t); } break; case 0xE9: for (int k = 0; k < n / 2; k++) { s32 t = (s16)d->w[k] - (s16)s.w[k]; d->w[k] = (u16)(t < -32768 ? -32768 : t > 32767 ? 32767 : t); } break;
+        case 0xF5: for (int k = 0; k < n / 4; k++) d->d[k] = (u32)((s32)(s16)d->w[2 * k] * (s16)s.w[2 * k] + (s32)(s16)d->w[2 * k + 1] * (s16)s.w[2 * k + 1]); break;
+        case 0xF6: { u32 a = 0, b = 0; for (int k = 0; k < 8; k++) { a += d->b[k] > s.b[k] ? d->b[k] - s.b[k] : s.b[k] - d->b[k]; if (n == 16) b += d->b[k + 8] > s.b[k + 8] ? d->b[k + 8] - s.b[k + 8] : s.b[k + 8] - d->b[k + 8]; } d->q[0] = a; if (n == 16) d->q[1] = b; break; }
+      }
+      return; }
+}
+#include "mmx.inc"
 static void exec_0f(Ins *i, Cpu *c) {
   u8 op = fetch8(i);
   int osz = i->rexw ? 8 : i->p66 ? 2 : 4;
+  if (mmx_is(op, i)) { mmx_exec(i, op); return; }   /* mm registers: no-prefix 0F 60–FE, cvtpi2ps/cvtps2pi (mmx.inc) */
   /* jcc rel32 / setcc / cmovcc */
   if (op >= 0x80 && op <= 0x8F) { s64 d = fetch_s32(i); if (cond(c, op & 15)) i->ip += d; return; }
   if (op >= 0x90 && op <= 0x9F) { decode_modrm(i); rm_set(i, 1, cond(c, op & 15)); return; }
@@ -792,21 +840,13 @@ static void exec_0f(Ins *i, Cpu *c) {
     case 0xC6: { decode_modrm(i); fix_rip_rel(i, 1); Xmm s, *d = &c->x[i->reg], r; xmm_load(i, &s, 16); u8 im = fetch8(i);
       if (i->p66) { r.q[0] = d->q[im & 1]; r.q[1] = s.q[(im >> 1) & 1]; } else { r.d[0] = d->d[im & 3]; r.d[1] = d->d[(im >> 2) & 3]; r.d[2] = s.d[(im >> 4) & 3]; r.d[3] = s.d[(im >> 6) & 3]; }
       *d = r; return; }
-    case 0x60: case 0x61: case 0x62: case 0x68: case 0x69: case 0x6A: case 0x6C: case 0x6D: { decode_modrm(i); Xmm s, *d = &c->x[i->reg], r; xmm_load(i, &s, 16); int hi = op == 0x6C ? 0 : op == 0x6D ? 1 : op >= 0x68;   /* punpckl* 60-62/6C, punpckh* 68-6A/6D */
-      switch (op & 7) { case 0: for (int k = 0; k < 8; k++) { r.b[2 * k] = d->b[k + hi * 8]; r.b[2 * k + 1] = s.b[k + hi * 8]; } break;   /* punpck bw */
-        case 1: for (int k = 0; k < 4; k++) { r.w[2 * k] = d->w[k + hi * 4]; r.w[2 * k + 1] = s.w[k + hi * 4]; } break;                      /* wd */
-        case 2: for (int k = 0; k < 2; k++) { r.d[2 * k] = d->d[k + hi * 2]; r.d[2 * k + 1] = s.d[k + hi * 2]; } break;                      /* dq */
-        default: r.q[0] = d->q[hi]; r.q[1] = s.q[hi]; break; }                                                                                   /* qdq */
-      *d = r; return; }
-    case 0x63: case 0x67: case 0x6B: { decode_modrm(i); Xmm s, *d = &c->x[i->reg], r; xmm_load(i, &s, 16);
-      if (op == 0x63) { for (int k = 0; k < 8; k++) { s16 a = (s16)d->w[k], b = (s16)s.w[k]; r.b[k] = (u8)(a < -128 ? -128 : a > 127 ? 127 : a); r.b[k + 8] = (u8)(b < -128 ? -128 : b > 127 ? 127 : b); } }
-      else if (op == 0x67) { for (int k = 0; k < 8; k++) { s16 a = (s16)d->w[k], b = (s16)s.w[k]; r.b[k] = (u8)(a < 0 ? 0 : a > 255 ? 255 : a); r.b[k + 8] = (u8)(b < 0 ? 0 : b > 255 ? 255 : b); } }
-      else { for (int k = 0; k < 4; k++) { s32 a = (s32)d->d[k], b = (s32)s.d[k]; r.w[k] = (u16)(a < -32768 ? -32768 : a > 32767 ? 32767 : a); r.w[k + 4] = (u16)(b < -32768 ? -32768 : b > 32767 ? 32767 : b); } }
-      *d = r; return; }
-    case 0x64: case 0x65: case 0x66: case 0x74: case 0x75: case 0x76: { decode_modrm(i); Xmm s, *d = &c->x[i->reg]; xmm_load(i, &s, 16); int gt = op < 0x70;
-      if ((op & 3) == 0) for (int k = 0; k < 16; k++) d->b[k] = (gt ? (s8)d->b[k] > (s8)s.b[k] : d->b[k] == s.b[k]) ? 0xff : 0;
-      else if ((op & 3) == 1) for (int k = 0; k < 8; k++) d->w[k] = (gt ? (s16)d->w[k] > (s16)s.w[k] : d->w[k] == s.w[k]) ? 0xffff : 0;
-      else for (int k = 0; k < 4; k++) d->d[k] = (gt ? (s32)d->d[k] > (s32)s.d[k] : d->d[k] == s.d[k]) ? 0xffffffff : 0; return; }
+    case 0x60: case 0x61: case 0x62: case 0x68: case 0x69: case 0x6A: case 0x6C: case 0x6D: case 0x63: case 0x67: case 0x6B: case 0x64: case 0x65: case 0x66: case 0x74: case 0x75: case 0x76:
+    case 0xD4: case 0xFB: case 0xFE: case 0xFA: case 0xFD: case 0xF9: case 0xFC: case 0xF8: case 0xD5: case 0xE5: case 0xF4: case 0xDA: case 0xDE: case 0xEA: case 0xEE: case 0xE0: case 0xE3: case 0xD8: case 0xD9: case 0xDC: case 0xDD: case 0xEC: case 0xED: case 0xE8: case 0xE9: case 0xF5: case 0xF6: case 0xE4:
+    case 0xDB: case 0xDF: case 0xEB: case 0xEF: case 0xD1: case 0xD2: case 0xD3: case 0xE1: case 0xE2: case 0xF1: case 0xF2: case 0xF3: {   /* packed integer lane ops (shared with MMX, mmx.inc) */
+      decode_modrm(i); Xmm s, *d = &c->x[i->reg]; xmm_load(i, &s, 16); pint_op(op, d, &s, 16); return; }
+    case 0xD7: { decode_modrm(i); Xmm *s = &c->x[i->rm]; u32 r = 0; for (int k = 0; k < 16; k++) r |= (u32)(s->b[k] >> 7) << k; c->r[i->reg] = r; return; }
+    case 0xC4: { decode_modrm(i); fix_rip_rel(i, 1); u64 v = rm_get(i, 2); u8 im = fetch8(i); c->x[i->reg].w[im & 7] = (u16)v; return; }      /* pinsrw */
+    case 0xC5: { decode_modrm(i); u8 im = fetch8(i); c->r[i->reg] = c->x[i->rm].w[im & 7]; return; }                                        /* pextrw */
     case 0x6E: { decode_modrm(i); Xmm *d = &c->x[i->reg]; d->q[1] = 0; if (i->rexw) d->q[0] = rm_get(i, 8); else { d->q[0] = 0; d->d[0] = (u32)rm_get(i, 4); } return; }   /* movd/movq xmm, r/m */
     case 0x7E: { decode_modrm(i); if (i->rep == 0xF3) { Xmm s; xmm_load(i, &s, 8); c->x[i->reg].q[0] = s.q[0]; c->x[i->reg].q[1] = 0; return; } /* movq xmm, xmm/m64 */
       if (i->rexw) rm_set(i, 8, c->x[i->reg].q[0]); else rm_set(i, 4, c->x[i->reg].d[0]); return; }
@@ -828,38 +868,9 @@ static void exec_0f(Ins *i, Cpu *c) {
         else if (sub == 7) { /* pslldq */ Xmm r = { { 0, 0 } }; for (int k = im; k < 16; k++) r.b[k] = d->b[k - im]; *d = r; }
         else UNSUP("0F 73 /%d", sub); }
       return; }
-    case 0xD4: case 0xFB: case 0xFE: case 0xFA: case 0xFD: case 0xF9: case 0xFC: case 0xF8: case 0xD5: case 0xE5: case 0xF4: case 0xDA: case 0xDE: case 0xEA: case 0xEE: case 0xE0: case 0xE3: case 0xD8: case 0xD9: case 0xDC: case 0xDD: case 0xEC: case 0xED: case 0xE8: case 0xE9: case 0xF5: case 0xF6: case 0xE4: {
-      decode_modrm(i); Xmm s, *d = &c->x[i->reg]; xmm_load(i, &s, 16);
-      switch (op) {
-        case 0xD4: d->q[0] += s.q[0]; d->q[1] += s.q[1]; break; case 0xFB: d->q[0] -= s.q[0]; d->q[1] -= s.q[1]; break;
-        case 0xFE: for (int k = 0; k < 4; k++) d->d[k] += s.d[k]; break; case 0xFA: for (int k = 0; k < 4; k++) d->d[k] -= s.d[k]; break;
-        case 0xFD: for (int k = 0; k < 8; k++) d->w[k] += s.w[k]; break; case 0xF9: for (int k = 0; k < 8; k++) d->w[k] -= s.w[k]; break;
-        case 0xFC: for (int k = 0; k < 16; k++) d->b[k] += s.b[k]; break; case 0xF8: for (int k = 0; k < 16; k++) d->b[k] -= s.b[k]; break;
-        case 0xD5: for (int k = 0; k < 8; k++) d->w[k] = (u16)(d->w[k] * s.w[k]); break;
-        case 0xE5: for (int k = 0; k < 8; k++) d->w[k] = (u16)(((s32)(s16)d->w[k] * (s32)(s16)s.w[k]) >> 16); break;
-        case 0xE4: for (int k = 0; k < 8; k++) d->w[k] = (u16)(((u32)d->w[k] * (u32)s.w[k]) >> 16); break;
-        case 0xF4: d->q[0] = (u64)d->d[0] * s.d[0]; d->q[1] = (u64)d->d[2] * s.d[2]; break;
-        case 0xDA: for (int k = 0; k < 16; k++) d->b[k] = d->b[k] < s.b[k] ? d->b[k] : s.b[k]; break; case 0xDE: for (int k = 0; k < 16; k++) d->b[k] = d->b[k] > s.b[k] ? d->b[k] : s.b[k]; break;
-        case 0xEA: for (int k = 0; k < 8; k++) d->w[k] = (s16)d->w[k] < (s16)s.w[k] ? d->w[k] : s.w[k]; break; case 0xEE: for (int k = 0; k < 8; k++) d->w[k] = (s16)d->w[k] > (s16)s.w[k] ? d->w[k] : s.w[k]; break;
-        case 0xE0: for (int k = 0; k < 16; k++) d->b[k] = (u8)((d->b[k] + s.b[k] + 1) >> 1); break; case 0xE3: for (int k = 0; k < 8; k++) d->w[k] = (u16)((d->w[k] + s.w[k] + 1) >> 1); break;
-        case 0xD8: for (int k = 0; k < 16; k++) d->b[k] = d->b[k] > s.b[k] ? d->b[k] - s.b[k] : 0; break; case 0xDC: for (int k = 0; k < 16; k++) { u32 t = d->b[k] + s.b[k]; d->b[k] = t > 255 ? 255 : (u8)t; } break;
-        case 0xD9: for (int k = 0; k < 8; k++) d->w[k] = d->w[k] > s.w[k] ? d->w[k] - s.w[k] : 0; break; case 0xDD: for (int k = 0; k < 8; k++) { u32 t = d->w[k] + s.w[k]; d->w[k] = t > 65535 ? 65535 : (u16)t; } break;
-        case 0xEC: for (int k = 0; k < 16; k++) { s32 t = (s8)d->b[k] + (s8)s.b[k]; d->b[k] = (u8)(t < -128 ? -128 : t > 127 ? 127 : t); } break; case 0xED: for (int k = 0; k < 8; k++) { s32 t = (s16)d->w[k] + (s16)s.w[k]; d->w[k] = (u16)(t < -32768 ? -32768 : t > 32767 ? 32767 : t); } break;
-        case 0xE8: for (int k = 0; k < 16; k++) { s32 t = (s8)d->b[k] - (s8)s.b[k]; d->b[k] = (u8)(t < -128 ? -128 : t > 127 ? 127 : t); } break; case 0xE9: for (int k = 0; k < 8; k++) { s32 t = (s16)d->w[k] - (s16)s.w[k]; d->w[k] = (u16)(t < -32768 ? -32768 : t > 32767 ? 32767 : t); } break;
-        case 0xF5: for (int k = 0; k < 4; k++) d->d[k] = (u32)((s32)(s16)d->w[2 * k] * (s16)s.w[2 * k] + (s32)(s16)d->w[2 * k + 1] * (s16)s.w[2 * k + 1]); break;
-        case 0xF6: { u32 a = 0, b = 0; for (int k = 0; k < 8; k++) { a += d->b[k] > s.b[k] ? d->b[k] - s.b[k] : s.b[k] - d->b[k]; b += d->b[k + 8] > s.b[k + 8] ? d->b[k + 8] - s.b[k + 8] : s.b[k + 8] - d->b[k + 8]; } d->q[0] = a; d->q[1] = b; break; }
-      }
-      return; }
-    case 0xDB: case 0xDF: case 0xEB: case 0xEF: { decode_modrm(i); Xmm s, *d = &c->x[i->reg]; xmm_load(i, &s, 16);
-      for (int k = 0; k < 2; k++) d->q[k] = op == 0xDB ? d->q[k] & s.q[k] : op == 0xDF ? ~d->q[k] & s.q[k] : op == 0xEB ? d->q[k] | s.q[k] : d->q[k] ^ s.q[k]; return; }
-    case 0xD7: { decode_modrm(i); Xmm *s = &c->x[i->rm]; u32 r = 0; for (int k = 0; k < 16; k++) r |= (u32)(s->b[k] >> 7) << k; c->r[i->reg] = r; return; }
-    case 0xC4: { decode_modrm(i); fix_rip_rel(i, 1); u64 v = rm_get(i, 2); u8 im = fetch8(i); c->x[i->reg].w[im & 7] = (u16)v; return; }      /* pinsrw */
-    case 0xC5: { decode_modrm(i); u8 im = fetch8(i); c->r[i->reg] = c->x[i->rm].w[im & 7]; return; }                                        /* pextrw */
-    case 0xD1: case 0xD2: case 0xD3: case 0xE1: case 0xE2: case 0xF1: case 0xF2: case 0xF3: { decode_modrm(i); Xmm s, *d = &c->x[i->reg]; xmm_load(i, &s, 16); u64 cnt = s.q[0];
-      if (op == 0xD1) for (int k = 0; k < 8; k++) d->w[k] = cnt > 15 ? 0 : d->w[k] >> cnt; else if (op == 0xD2) for (int k = 0; k < 4; k++) d->d[k] = cnt > 31 ? 0 : d->d[k] >> cnt; else if (op == 0xD3) for (int k = 0; k < 2; k++) d->q[k] = cnt > 63 ? 0 : d->q[k] >> cnt;
-      else if (op == 0xE1) for (int k = 0; k < 8; k++) d->w[k] = (u16)((s16)d->w[k] >> (cnt > 15 ? 15 : cnt)); else if (op == 0xE2) for (int k = 0; k < 4; k++) d->d[k] = (u32)((s32)d->d[k] >> (cnt > 31 ? 31 : cnt));
-      else if (op == 0xF1) for (int k = 0; k < 8; k++) d->w[k] = cnt > 15 ? 0 : (u16)(d->w[k] << cnt); else if (op == 0xF2) for (int k = 0; k < 4; k++) d->d[k] = cnt > 31 ? 0 : d->d[k] << cnt; else for (int k = 0; k < 2; k++) d->q[k] = cnt > 63 ? 0 : d->q[k] << cnt;
-      return; }
+    case 0xF7: {   /* maskmovdqu [rdi], xmm, xmm (66 prefix; the mm form is in mmx.inc) */
+      decode_modrm(i); if (i->mod != 3) UNSUP("maskmovdqu with memory operand"); const Xmm *data = &c->x[i->reg], *msk = &c->x[i->rm]; u64 di = c->r[RDI]; if (c->mode32 || i->p67) di &= 0xffffffffull; if (i->seg == 1) di += c->fs_base; else if (i->seg == 2) di += c->gs_base;
+      for (int k = 0; k < 16; k++) if (msk->b[k] & 0x80) wr8(c, di + k, data->b[k]); return; }
     case 0x38: op_0f38(i); return;
     case 0x3A: op_0f3a(i); return;
     case 0x7C: case 0x7D: case 0xD0: if (!i->p66 && i->rep != 0xF2) UNSUP("0F %02X without SSE3 prefix", op); op_sse3_h(i, op); return;   /* haddp*, hsubp*, addsubp* */

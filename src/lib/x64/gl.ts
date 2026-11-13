@@ -5,9 +5,9 @@
  * ints/enums, float/double bit patterns, guest pointers). This file implements each entry point against WebGL2 and talks to
  * guest memory through the emulator exports (x64_gl_ptr / x64_gl_strlen / x64_gl_alloc). What WebGL2 cannot do is reported
  * the way a core-profile driver does it — GL_INVALID_OPERATION / GL_INVALID_ENUM plus one log line — never silently faked:
- *   • fixed-function pipeline (glBegin/glEnd, matrices, lighting, display lists) → GL_INVALID_OPERATION
- *   • glPolygonMode(LINE/POINT), multisampled textures, geometry/tessellation stages → GL_INVALID_ENUM / INVALID_OPERATION
- *   • GL_QUADS and client-side vertex arrays ARE emulated (index expansion / scratch VBOs), 1D textures are not.
+ *   • the fixed-function pipeline (glBegin/glEnd, matrices, lighting, display lists, GLU) lives in glff.ts (GL 1.x on WebGL2)
+ *   • multisampled/rectangle textures, geometry/tessellation stages → GL_INVALID_ENUM / INVALID_OPERATION
+ *   • GL_QUADS, client-side vertex arrays, polygon-mode outlines and 1D textures ARE emulated (index expansion / scratch VBOs).
  * The context behaves like a forward-compatible OpenGL 3.3 core context (GL_CONTEXT_FLAGS reports it), which is what WebGL2 is closest to.
  */
 import { GL_FUNCS } from './gltable';

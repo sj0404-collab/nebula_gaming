@@ -563,6 +563,13 @@ if command -v zig >/dev/null 2>&1; then
   zig cc -target x86_64-windows-gnu -O1 -o /tmp/legacy64.exe tests/legacy_ops.c && out=$($X --quiet /tmp/legacy64.exe 2>&1) || out="build/run failed: $out"
   check "legacy opcodes (x64)"   "LEGACY OK"   "$out"
 else echo "  skip legacy_ops (no zig)"; fi
+echo "[mmx] MMX mm0-mm7 (all no-prefix 0F ops, pshufw/pinsrw/pextrw/pmovmskb/maskmovq/movntq, cvtpi2ps/cvtps2pi, emms) + maskmovdqu: hash equal to the host CPU"
+if command -v zig >/dev/null 2>&1; then
+  zig cc -target x86-windows-gnu -O1 -o /tmp/mmx32.exe tests/mmxtest.c && out=$($X --quiet /tmp/mmx32.exe 2>&1) || out="build/run failed: $out"
+  check "mmx (x86)"   "mmx hash b33a6c4174c62e2d"   "$out"
+  zig cc -target x86_64-windows-gnu -O1 -o /tmp/mmx64.exe tests/mmxtest.c && out=$($X --quiet /tmp/mmx64.exe 2>&1) || out="build/run failed: $out"
+  check "mmx (x64)"   "mmx hash b33a6c4174c62e2d"   "$out"
+else echo "  skip mmxtest (no zig)"; fi
 echo "[upath] Cyrillic exe name with spaces: W path APIs return unit counts, CP_ACP round trip, self reopen"
 if command -v zig >/dev/null 2>&1; then
   UD=$(mktemp -d); mkdir -p "$UD/Папка тест"
