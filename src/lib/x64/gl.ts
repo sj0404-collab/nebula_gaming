@@ -201,6 +201,13 @@ export class GLBridge {
     this.log(line + '\n'); const gt = globalThis as unknown as { __gltrace?: string[] }; (gt.__gltrace ??= []).push(line);
     if (this.traceLeft === 0) this.log('[gltrace] --- end of trace ---\n');
   }
+  /** trace the next presented frame's GL calls into the log (Report tab button on the phone, where localStorage is out of reach) */
+  armTrace(calls = 600) { this.traceAfter = this.frameNo + 1; this.traceLeft = -calls; this.log(`[gl] call trace armed: next frame (${this.frameNo + 1}), ${calls} calls\n`); }
+  /** running totals for the report: frames presented through GL, draws, programs/shaders/textures/framebuffers created, shader failures */
+  summary(): string { const gl = this.gl; if (!gl) return ''; let vp = '', prog = '', fbo = '';
+    try { vp = Array.from(gl.getParameter(gl.VIEWPORT) as Int32Array).join(','); prog = gl.getParameter(gl.CURRENT_PROGRAM) ? 'yes' : 'none'; fbo = gl.getParameter(gl.FRAMEBUFFER_BINDING) ? 'offscreen' : 'default'; } catch { /* lost context */ }
+    return `GL: ${this.frameNo} frames presented · ${this.draws} draw calls · ${this.prog.size} programs · ${this.shader.size} shaders · ${this.badShaders} shader/link failures · surface ${this.width}x${this.height} · viewport [${vp}] · program ${prog} · framebuffer ${fbo} · ${this.describeRenderer()}`; }
+  private draws = 0; private badShaders = 0;
   private describeRenderer(): string { const gl = this.gl!; const dbg = gl.getExtension('WEBGL_debug_renderer_info'); return dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : String(gl.getParameter(gl.RENDERER)); }
   probe(id: number): number { return this.impl[id] ? 1 : 0; }
 
@@ -566,7 +573,7 @@ export class GLBridge {
     this.def('glDeleteShader', (a) => { const id = U(a[0]); const s = this.shader.get(id); if (s) { g().deleteShader(s); this.shaderIds.delete(s); } this.shader.delete(id); this.shaderSrc.delete(id); });
     this.def('glIsShader', (a) => this.shader.has(U(a[0])) ? 1 : 0);
     this.def('glShaderSource', (a) => { const id = U(a[0]), n = I(a[1]); const s = this.shader.get(id); if (!s) { this.setErr(GL.INVALID_VALUE); return; } let src = ''; for (let i = 0; i < n; i++) { const p = this.rdp(a[2] + BigInt(i * this.mem!.psize())); let len = -1; if (a[3]) { const l = this.i32(a[3] + BigInt(i * 4), 1); if (l && l[0] >= 0) len = l[0]; } src += this.rdstr(p, len); } this.shaderSrc.set(id, src); g().shaderSource(s, this.translate(src, this.shaderType.get(id)!)); }); this.alias('glShaderSourceARB', 'glShaderSource');
-    this.def('glCompileShader', (a) => { const id = U(a[0]); const s = this.shader.get(id); if (!s) { this.setErr(GL.INVALID_VALUE); return; } g().compileShader(s); if (!g().getShaderParameter(s, GL.COMPILE_STATUS)) { const log = g().getShaderInfoLog(s) || ''; this.warn('compile:' + log.slice(0, 80), `shader ${id} failed to compile: ${log.trim().slice(0, 400)}\n--- translated source ---\n${g().getShaderSource(s)?.slice(0, 1200)}`); } }); this.alias('glCompileShaderARB', 'glCompileShader');
+    this.def('glCompileShader', (a) => { const id = U(a[0]); const s = this.shader.get(id); if (!s) { this.setErr(GL.INVALID_VALUE); return; } g().compileShader(s); if (!g().getShaderParameter(s, GL.COMPILE_STATUS)) { const log = g().getShaderInfoLog(s) || ''; this.badShaders++; this.warn('compile:' + log.slice(0, 80), `shader ${id} failed to compile: ${log.trim().slice(0, 400)}\n--- translated source ---\n${g().getShaderSource(s)?.slice(0, 1200)}`); } }); this.alias('glCompileShaderARB', 'glCompileShader');
     this.def('glGetShaderiv', (a) => { const id = U(a[0]), p = U(a[1]); const s = this.shader.get(id); if (!s) { this.setErr(GL.INVALID_VALUE); return; } if (p === GL.INFO_LOG_LENGTH) { const l = g().getShaderInfoLog(s) || ''; this.wr32(a[2], l.length ? l.length + 1 : 0); return; } if (p === GL.SHADER_SOURCE_LENGTH) { const src = this.shaderSrc.get(id) || ''; this.wr32(a[2], src.length ? src.length + 1 : 0); return; } if (p === GL.SHADER_TYPE) { this.wr32(a[2], this.shaderType.get(id)!); return; } const v = g().getShaderParameter(s, p); this.wr32(a[2], typeof v === 'boolean' ? (v ? 1 : 0) : (v as number) | 0); });
     this.def('glGetShaderInfoLog', (a) => { const s = this.shader.get(U(a[0])); this.wrstr(a[3], I(a[1]), s ? g().getShaderInfoLog(s) || '' : '', a[2]); });
     this.def('glGetShaderSource', (a) => this.wrstr(a[3], I(a[1]), this.shaderSrc.get(U(a[0])) || '', a[2]));
@@ -577,7 +584,7 @@ export class GLBridge {
     this.def('glIsProgram', (a) => this.prog.has(U(a[0])) ? 1 : 0);
     this.def('glAttachShader', (a) => { const p = this.prog.get(U(a[0])), s = this.shader.get(U(a[1])); if (!p || !s) { this.setErr(GL.INVALID_VALUE); return; } g().attachShader(p, s); }); this.alias('glAttachObjectARB', 'glAttachShader');
     this.def('glDetachShader', (a) => { const p = this.prog.get(U(a[0])), s = this.shader.get(U(a[1])); if (p && s) g().detachShader(p, s); });
-    this.def('glLinkProgram', (a) => { const id = U(a[0]); const p = this.prog.get(id); if (!p) { this.setErr(GL.INVALID_VALUE); return; } g().linkProgram(p); const info = this.progInfoOf(id); info.uniforms.clear(); info.locs = []; if (!g().getProgramParameter(p, GL.LINK_STATUS)) this.warn('link:' + id, `program ${id} failed to link: ${(g().getProgramInfoLog(p) || '').trim().slice(0, 400)}`); }); this.alias('glLinkProgramARB', 'glLinkProgram');
+    this.def('glLinkProgram', (a) => { const id = U(a[0]); const p = this.prog.get(id); if (!p) { this.setErr(GL.INVALID_VALUE); return; } g().linkProgram(p); const info = this.progInfoOf(id); info.uniforms.clear(); info.locs = []; if (!g().getProgramParameter(p, GL.LINK_STATUS)) { this.badShaders++; this.warn('link:' + id, `program ${id} failed to link: ${(g().getProgramInfoLog(p) || '').trim().slice(0, 400)}`); } }); this.alias('glLinkProgramARB', 'glLinkProgram');
     this.def('glUseProgram', (a) => { const id = U(a[0]); const p = id ? this.prog.get(id) : null; if (id && !p) { this.setErr(GL.INVALID_VALUE); return; } g().useProgram(p ?? null); this.bound.program = id; }); this.alias('glUseProgramObjectARB', 'glUseProgram');
     this.def('glValidateProgram', (a) => { const p = this.prog.get(U(a[0])); if (p) g().validateProgram(p); });
     this.def('glGetProgramiv', (a) => { const id = U(a[0]), pn = U(a[1]); const p = this.prog.get(id); if (!p) { this.setErr(GL.INVALID_VALUE); return; }
@@ -726,7 +733,7 @@ export class GLBridge {
     if ((m.access & GL.MAP_WRITE_BIT) && !(m.access & GL.MAP_FLUSH_EXPLICIT_BIT)) { const d = this.u8(m.ptr, m.length); if (d) { gl.bufferSubData(target, m.offset, d); const info = this.bufInfo.get(id); if (info) { info.version++; info.shadow = null; } } }
     this.mem!.free(m.ptr); return 1; }
   private drawArrays(mode: number, first: number, count: number, instances: number) {
-    const gl = this.gl!; if (count <= 0) return;
+    this.draws++; const gl = this.gl!; if (count <= 0) return;
     if (this.ff.ownsDraw()) { if (instances > 1) this.warn('ffinst', 'instanced draw with fixed-function vertex arrays: drawn once'); this.ff.drawArrays(mode, first, count); return; }
     if (mode === GL.QUADS) { const nq = count >> 2; const prep = this.prepareDraw(first, nq * 4, null); if (!prep.ok) return; const ibo = this.quadIndices(nq); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
       if (first === 0) { if (instances > 1) gl.drawElementsInstanced(gl.TRIANGLES, nq * 6, gl.UNSIGNED_INT, 0, instances); else gl.drawElements(gl.TRIANGLES, nq * 6, gl.UNSIGNED_INT, 0); }
@@ -736,6 +743,7 @@ export class GLBridge {
     const prep = this.prepareDraw(first, count, null); if (!prep.ok) return;
     if (instances > 1) gl.drawArraysInstanced(mode, first, count, instances); else gl.drawArrays(mode, first, count); }
   private drawElements(mode: number, count: number, type: number, indices: bigint, instances: number, baseVertex: number) {
+    this.draws++;
     const gl = this.gl!; if (count <= 0) return;
     if (this.ff.ownsDraw() && !baseVertex) { this.ff.drawElements(mode, count, type, indices); return; }
     if (baseVertex) { this.setErr(GL.INVALID_OPERATION); this.warn('basevertex', 'glDrawElementsBaseVertex with a non-zero base vertex: not available in WebGL2 → GL_INVALID_OPERATION'); return; }

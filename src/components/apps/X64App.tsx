@@ -203,6 +203,7 @@ export default function X64App() {
   const stdinRef = useRef<HTMLInputElement | null>(null);
   const [consoleText, setConsoleText] = useState('');
   const [log, setLog] = useState<string[]>([]);
+  const [glTrace, setGlTrace] = useState<string[]>([]);   // [gltrace] lines (one traced frame), kept apart from the 200-line log
   const [stats, setStats] = useState<RunStats | null>(null);
   const [args, setArgs] = useState('');
   const [glInfo, setGlInfo] = useState('');
@@ -263,7 +264,7 @@ export default function X64App() {
     if (!e || e.pending) return;
     if (rt.status === 'running' || rt.status === 'waiting-stdin') rt.stop();
     if (!await ensureVC10Ref.current(rt, e)) return;
-    setSelected(e.id); setArgs(want.args); consoleBuf.current = ''; setConsoleText(''); setLog([]);
+    setSelected(e.id); setArgs(want.args); consoleBuf.current = ''; setConsoleText(''); setLog([]); setGlTrace([]);
     const argv0 = e.path && e.path.includes(' ') ? `"${e.path}"` : e.path ?? e.name;   // like Explorer: a quoted full path when it has spaces (launchers re-parse GetCommandLineW)
     applyDesktopRef.current();
     const err = rt.start(e.bytes, e.path ?? e.name, want.args.trim() ? `${argv0} ${want.args.trim()}` : argv0, e.cwd);
@@ -278,7 +279,7 @@ export default function X64App() {
     const rt = new X64Runtime(); rtRef.current = rt;
     (window as unknown as { __x64?: X64Runtime }).__x64 = rt;   // debugging aid (e2e / devtools): the live runtime of the last opened Programs window
     rt.onConsole = (_fd, text) => { consoleBuf.current = (consoleBuf.current + text).slice(-60000); setConsoleText(consoleBuf.current); };
-    rt.onLog = (text) => setLog(l => [...l.slice(-199), text.trimEnd()]);
+    rt.onLog = (text) => { if (text.startsWith('[gltrace]')) { setGlTrace(l => [...l.slice(-1199), text.trimEnd()]); return; } setLog(l => [...l.slice(-199), text.trimEnd()]); };
     rt.onStdinWait = (w) => { setWaitingStdin(w); if (w) { setTab('console'); setTimeout(() => stdinRef.current?.focus(), 30); } };
     rt.onPresent = (px, w, h) => { presenterRef.current?.present(px, w, h); setFrames(f => { if (f === 0 && autoTabRef.current) setTab('screen'); return f + 1; }); };
     rt.onGlPresent = (cv, x, y, w, h) => presenterRef.current?.setGl(cv, x, y, w, h) ?? false;
@@ -632,7 +633,7 @@ export default function X64App() {
   const run = useCallback(async (entry?: ExeEntry, argv?: string) => {
     const rt = rtRef.current; const current = entry ?? curRef.current; if (!rt || !current) return;
     const args = argv ?? argsRef.current;
-    consoleBuf.current = ''; setConsoleText(''); setLog([]); setFrames(0); setWaitingStdin(false);
+    consoleBuf.current = ''; setConsoleText(''); setLog([]); setGlTrace([]); setFrames(0); setWaitingStdin(false);
     if (current.pending && current.pending.length) {   // heavy runtime: fetch its companion files on first Run
       const urls = current.pending; let done = 0, bytes = 0;
       try {
@@ -1133,7 +1134,7 @@ export default function X64App() {
           )}
           {tab === 'report' && (
             <div className="min-h-0 flex-1 overflow-auto p-4" data-x64-report>
-              {current ? <PeReport e={current} stats={stats} log={log} apiStats={apiStats} jit={jitInfo} consoleText={consoleText} storageDiag={storageDiag} runtime={{ packs: vcPacks, status: id => vcState[id]?.status ?? 'available', install: id => { const rt = rtRef.current; if (rt) void installVcPack(rt, id); }, busy: !!running || !!fetching }} /> : <div className="text-slate-400">Select an executable to see its compatibility report.</div>}
+              {current ? <PeReport e={current} stats={stats} log={log} glTrace={glTrace} glSummary={rtRef.current?.glb.summary() ?? ''} onGlTrace={() => { setGlTrace([]); rtRef.current?.glb.armTrace(600); }} apiStats={apiStats} jit={jitInfo} consoleText={consoleText} storageDiag={storageDiag} runtime={{ packs: vcPacks, status: id => vcState[id]?.status ?? 'available', install: id => { const rt = rtRef.current; if (rt) void installVcPack(rt, id); }, busy: !!running || !!fetching }} /> : <div className="text-slate-400">Select an executable to see its compatibility report.</div>}
             </div>
           )}
           {/* status bar */}
@@ -1149,7 +1150,7 @@ export default function X64App() {
   );
 }
 
-function PeReport({ e, stats, log, apiStats, jit, consoleText, storageDiag, runtime }: { e: ExeEntry; stats: RunStats | null; log: string[]; apiStats: string; jit: JitInfo | null; consoleText: string; storageDiag: string; runtime?: { packs: { id: string; label: string }[]; status: (id: string) => string; install: (id: string) => void; busy: boolean } }) {
+function PeReport({ e, stats, log, glTrace, glSummary, onGlTrace, apiStats, jit, consoleText, storageDiag, runtime }: { e: ExeEntry; stats: RunStats | null; log: string[]; glTrace: string[]; glSummary: string; onGlTrace: () => void; apiStats: string; jit: JitInfo | null; consoleText: string; storageDiag: string; runtime?: { packs: { id: string; label: string }[]; status: (id: string) => string; install: (id: string) => void; busy: boolean } }) {
   const [copyMessage, setCopyMessage] = useState('');
   const [manualCopy, setManualCopy] = useState(false);
   const reportText = () => [
@@ -1158,6 +1159,7 @@ function PeReport({ e, stats, log, apiStats, jit, consoleText, storageDiag, runt
     'PE:', JSON.stringify(e.info, null, 2), 'Последний запуск:', JSON.stringify(stats, null, 2),
     'JIT:', JSON.stringify(jit, null, 2), 'Win32 API calls:', apiStats || '(нет)',
     `Emulator log (последние ${log.length} строк; ограничено приложением):`, log.join('\n') || '(нет)',
+    'OpenGL:', glSummary || '(контекст не создавался)', `GL trace (${glTrace.length} строк):`, glTrace.join('\n') || '(не записывалась)',
     'Console (последние 60000 символов):', consoleText || '(нет)',
     'Диагностика хранилища:', storageDiag || '(не запускалась)',
   ].join('\n');
@@ -1224,6 +1226,9 @@ function PeReport({ e, stats, log, apiStats, jit, consoleText, storageDiag, runt
           {stats.report && <pre className="mt-2 whitespace-pre-wrap rounded bg-amber-50 p-2 font-mono text-[10px] text-amber-900">{stats.report}</pre>}
           {jit && <div className="mt-1 text-slate-600" data-x64-jit={jit.enabled ? jit.modules : 'off'}>x86&rarr;wasm JIT: {jit.enabled ? `${jit.modules} regions (${(jit.bytes / 1024).toFixed(0)} KB wasm, compiled in ${jit.compileMs.toFixed(0)} ms${jit.failed ? `, ${jit.failed} failed` : ''})` : 'off'}{jit.stats ? <span className="font-mono text-[10px]"> &middot; {jit.stats}</span> : null}</div>}
           {apiStats && <details className="mt-2"><summary className="cursor-pointer text-slate-500">Win32 API calls ({apiStats.split(',').length})</summary><div className="mt-1 break-words font-mono text-[10px] text-slate-600">{apiStats.split(',').join('  ')}</div></details>}
+          {glSummary && <div className="mt-1 text-slate-600" data-x64-gl-summary>{glSummary}</div>}
+          {stats.status === 'running' && glSummary && <div className="mt-1"><button data-x64-gltrace onClick={onGlTrace} className="rounded border border-slate-400 px-2 py-1 text-slate-700">Трассировка GL: записать следующий кадр</button><span className="ml-2 text-slate-500">все вызовы OpenGL одного кадра попадут в отчёт (для разбора «нет картинки»)</span></div>}
+          {glTrace.length > 0 && <details className="mt-2"><summary className="cursor-pointer text-slate-500">GL trace ({glTrace.length})</summary><pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px]" data-x64-gltrace-log>{glTrace.join('\n')}</pre></details>}
           {log.length > 0 && <details className="mt-2"><summary className="cursor-pointer text-slate-500">Emulator log ({log.length})</summary><pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px]" data-emulator-log>{log.join('\n')}</pre></details>}
         </div>
       )}
