@@ -1,3 +1,44 @@
+# v1.50.1 — the instruction set the compilers left out: XLAT, MMX, segment registers, BCD
+
+The SteamWorld Dig (GOG, x86) report after v1.50.0 ended with **`unsupported opcode 0xd7`** inside the real
+`MSVCR100.dll` (loaded from the VC++ 2010 pack): the CRT's byte-table lookups use `xlat`, an instruction no modern
+compiler emits and the CPU core had never needed.  Looking for the rest of that class — one-byte opcodes that are legal
+but absent — found more, and the MMX register file was missing entirely while `CPUID` advertised it.
+
+**CPU core (interpreter + JIT fallback), x86 and x64**
+* `xlat` / `xlatb` (`D7`): `AL = [DS:(E)BX + AL]`, with `0x67` address-size and segment-override prefixes.
+* **MMX** (`mm0`–`mm7`, new `emu/x64/mmx.inc`): every no-prefix `0F` MMX opcode — padd/psub (b/w/d/q, signed and
+  unsigned saturating), pmullw/pmulhw/pmulhuw/pmaddwd/pmuludq, psadbw, pavgb/w, pminub/pmaxub/pminsw/pmaxsw, pand/pandn/
+  por/pxor, pcmpeq*/pcmpgt*, punpckl*/punpckh*, packsswb/packssdw/packuswb, all shifts by register and by immediate,
+  `pshufw`, `pinsrw`/`pextrw`, `pmovmskb`, `maskmovq`, `movntq`, `movd`/`movq` in both directions, `cvtpi2ps` /
+  `cvtps2pi` / `cvttps2pi` / `cvtpi2pd` / `cvtpd2pi`, `emms`.  Any MMX instruction sets the x87 TOP to 0 and tags
+  all registers valid, `emms` empties them — what programs observe of the x87 aliasing.  Before this release these
+  opcodes were silently executed as their 128-bit SSE2 twins on the xmm registers (a `movq [mem], mm0` wrote 16 bytes;
+  `punpckhbw mm` picked the wrong half) and `emms` stopped the program.  The lane arithmetic is one function
+  (`pint_op`) shared by SSE2 at 16 bytes and MMX at 8 bytes, so both widths are bit-identical by construction.
+* `maskmovdqu` (SSE2, `66 0F F7`).
+* Segment registers: `mov r/m16, sreg`, `mov sreg, r/m16`, `push`/`pop` of `es`/`cs`/`ss`/`ds`/`fs`/`gs` (32-bit) and
+  `push`/`pop fs`/`gs` (64-bit), with the user-mode selector values of WOW64 (`cs=0x23`) and x64 (`cs=0x33`)
+  processes (`ds/es/ss/gs=0x2B`, `fs=0x53`).  Delphi/VB6/packer prologues read these.
+* BCD and ASCII adjust: `daa`, `das`, `aaa`, `aas`, `aam imm8` (incl. the `#DE` on zero), `aad imm8`; the undocumented
+  `salc`; `bound` (`#BR` on range violation), `into` (`#OF`), the `0x82` alias of the 8-bit immediate ALU group — all in
+  32-bit mode only, invalid in 64-bit mode exactly like the real CPU.
+
+**Program report**: the import verdict for OpenGL programs no longer says the fixed-function pipeline is missing — it has
+been in `glff.ts` since v1.40.0 (glBegin/glEnd, matrices, lighting, display lists, GLU); the limits listed are the real
+ones (selection/feedback, accumulation buffer, evaluators, stipples, glLogicOp, multisample/rectangle textures,
+geometry/tessellation shaders).
+
+**Tests** (`emu/tests/run.sh`, native x86 + x64, and the same executables through the wasm64 build with the JIT):
+`xlat.c` (all 256 table entries, `0x67` and segment prefixes), `legacy_ops.c` (selectors, push/pop sreg, DAA/DAS/AAA/
+AAS/AAM/AAD with the SDM example values, SALC, BOUND, INTO, opcode 0x82), `mmxtest.c` (169 MMX/SSE results hashed with
+FNV-1a; the emulator's hash equals the one the host CPU prints for the same program — `b33a6c4174c62e2d`).
+
+**Honest limits**: AVX/VEX encodings (`C4`/`C5`) are still not implemented and `CPUID` does not advertise them; 3DNow!,
+far calls/returns (`9A`/`CA`/`CB`), `in`/`out`, `cli`/`sti` are refused with the opcode in the report.  The MMX path runs
+in the interpreter (the JIT steps through it) — fast enough for blitters, not a SIMD fast path.  SteamWorld Dig now
+runs past the CRT fault; what it hits next needs its report again.
+
 # v1.50.0 — DirectDraw for real: surfaces, blits, flips, palettes, clippers, GetDC, exclusive display modes
 
 v1.49.3 only had DirectDraw *device* objects (`CreateSurface` stopped with "not implemented").  This release replaces
