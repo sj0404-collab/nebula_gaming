@@ -275,6 +275,22 @@ fi
 echo "[5w] region free list (coalescing / best fit / split — serves a JVM's reservations from an exited game's blocks)"
 out=$($X --pool-selftest 2>&1 || true)
 check "pool selftest" "pool selftest ok" "$out"
+echo "[5v] privfont.exe / privfont32.exe (AddFontResource / AddFontMemResourceEx private TrueType faces, rpcrt4 UUIDs, _wfindfirst64i32 layout, tmpnam)"
+for t in privfont.exe privfont32.exe; do
+  out=$($X --quiet --no-stdin --max-ms 60000 --mount '../public/x64/fonts=C:\Windows\Fonts' tests/$t 2>&1 || true)
+  check "$t private font" "addfont=1 private_width=175 fallback_width=176 tmHeight_ok=1 weight=700" "$out"
+  check "$t memory font"  "memfont=1 faces=1 removed=1 memremoved=1" "$out"
+  check "$t uuid"         "uuid_ok=1 roundtrip_nil=0 free=1" "$out"
+  check "$t findfirst"    "wfindfirst64i32=1 name=abc.txt size=5" "$out"
+  check "$t tmpnam"       "tmpnam=root-relative" "$out"
+done
+echo "[5v2] mmio.exe / mmio32.exe (winmm RIFF file I/O: create/ascend/descend/read, FOURCC_MEM streams, mmioGetInfo)"
+for t in mmio.exe mmio32.exe; do
+  out=$($X --quiet --no-stdin --max-ms 60000 tests/$t 2>&1 || true)
+  check "$t write"  "written: fmt=16 data=202 riff=238" "$out"
+  check "$t read"   "read: riff_ok=1 data_ok=1 size=202 got=202 pcm_ok=1 fmt_after_data=257 fmt_ok=1 rate=22050" "$out"
+  check "$t memory" "mem: first=RIFF type=WAVE next=fmt  getinfo_ok=1 close=0 str=20564157" "$out"
+done
 echo "[5x2] msvcp_thr.exe / msvcp_thr32.exe (builtin msvcp140 xthreads: _Mtx_* / _Cnd_* / _Thrd_* producer-consumer, trylock, xtime)"
 for t in msvcp_thr.exe msvcp_thr32.exe; do
   out=$($X --quiet --no-stdin --max-ms 60000 tests/$t 2>&1 || true)

@@ -431,6 +431,7 @@ static void vm_add_view(u64 base, u64 size, u64 heap); static void vm_release_vi
 #include "win32_bun.inc"
 #include "d3d11.inc"
 #include "win32_audio.inc"
+#include "win32_mmio.inc"
 static void s_CancelIo(Cpu *c) { sock_cancel_io(c, ARG(0)); RET(1); }   /* pipes: parked ReadFile/WriteFile stay (libuv cancels those only on close) */
 static void s_ret0(Cpu *c); static void s_atexit(Cpu *c); static void s_setjmp(Cpu *c);
 #include "win32_compat.inc"
@@ -853,6 +854,37 @@ static void s_GlobalFlags(Cpu *c) { RET(w32_heap_size(W, ARG(0)) ? 0 : 0x8000 /*
 static void s_GlobalUnlock(Cpu *c) { RET(1); }
 static void s_LocalAlloc(Cpu *c) { RET(w32_heap_alloc(W, ARG(1), !!(ARG(0) & 0x40))); }
 static void s_LocalFree(Cpu *c) { w32_heap_free(W, ARG(0)); RET(0); }
+static void s_LocalLock(Cpu *c) { RET(ARG(0)); }   /* LMEM_FIXED blocks: the handle is the pointer */
+static void s_LocalUnlock(Cpu *c) { W->last_error = 0; RET(0); }
+static void s_LocalHandle(Cpu *c) { RET(ARG(0)); }
+static void s_LocalFlags(Cpu *c) { RET(0); }
+/* rpcrt4 UUIDs: version-4 random, textual form "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" (lower case, as Windows), RpcStringFree releases it */
+static u32 g_uuid_seed;
+static void uuid_make(u8 *p) { if (!g_uuid_seed) g_uuid_seed = (u32)host_now_ms() ^ 0x9e3779b9u; for (int i = 0; i < 16; i++) { g_uuid_seed = g_uuid_seed * 1664525u + 1013904223u; p[i] = (u8)(g_uuid_seed >> 24); } p[7] = (p[7] & 0x0f) | 0x40; p[8] = (p[8] & 0x3f) | 0x80; }
+static void s_UuidCreate(Cpu *c) { u8 *p = mem_ptr(c->mem, ARG(0), 16, 1); if (!p) { RET(0x57); return; } uuid_make(p); RET(0); }
+static void s_UuidCreateNil(Cpu *c) { u8 *p = mem_ptr(c->mem, ARG(0), 16, 1); if (p) e_memset(p, 0, 16); RET(0); }
+static void uuid_text(const u8 *p, char *out) { e_snprintf(out, 40, "%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x", *(const u32 *)p, *(const u16 *)(p + 4), *(const u16 *)(p + 6), p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15]); }
+static void s_UuidToStringA(Cpu *c) { const u8 *p = mem_ptr(c->mem, ARG(0), 16, 0); if (!p || !ARG(1)) { RET(0x57); return; } char t[40]; uuid_text(p, t); u64 a = w32_heap_alloc(W, 40, 1); if (!a) { RET(14); return; } u8 *q = mem_ptr(c->mem, a, 40, 1); if (q) e_memcpy(q, t, 37); wrp(c, ARG(1), a); RET(0); }
+static void s_UuidToStringW(Cpu *c) { const u8 *p = mem_ptr(c->mem, ARG(0), 16, 0); if (!p || !ARG(1)) { RET(0x57); return; } char t[40]; uuid_text(p, t); u64 a = w32_heap_alloc(W, 80, 1); if (!a) { RET(14); return; } for (int i = 0; i < 37; i++) wr16(c, a + 2 * i, (u8)t[i]); wrp(c, ARG(1), a); RET(0); }
+static void s_RpcStringFreeA(Cpu *c) { u64 pp = ARG(0); if (pp) { u64 a = rdp(c, pp); if (a) w32_heap_free(W, a); wrp(c, pp, 0); } RET(0); }
+static int uuid_hex(int ch) { return ch >= '0' && ch <= '9' ? ch - '0' : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : ch >= 'A' && ch <= 'F' ? ch - 'A' + 10 : -1; }
+static int uuid_parse(const char *t, u8 *p) {   /* 8-4-4-4-12 → the GUID's mixed-endian memory layout */
+  u8 raw[16]; int k = 0; for (int i = 0; t[i] && k < 16; i++) { if (t[i] == '-') { if (i != 8 && i != 13 && i != 18 && i != 23) return 0; continue; } int h = uuid_hex(t[i]), l = uuid_hex(t[i + 1]); if (h < 0 || l < 0) return 0; raw[k++] = (u8)(h * 16 + l); i++; }
+  if (k != 16) return 0; p[0] = raw[3]; p[1] = raw[2]; p[2] = raw[1]; p[3] = raw[0]; p[4] = raw[5]; p[5] = raw[4]; p[6] = raw[7]; p[7] = raw[6]; for (int i = 8; i < 16; i++) p[i] = raw[i]; return 1; }
+static void s_UuidFromStringA(Cpu *c) { u8 *p = mem_ptr(c->mem, ARG(1), 16, 1); if (!p) { RET(0x57); return; } if (!ARG(0)) { e_memset(p, 0, 16); RET(0); return; } const char *t = rd_str(c, ARG(0), 64); RET(t && uuid_parse(t, p) ? 0 : 0x6a9); }   /* RPC_S_INVALID_STRING_UUID */
+static void s_UuidFromStringW(Cpu *c) { u8 *p = mem_ptr(c->mem, ARG(1), 16, 1); if (!p) { RET(0x57); return; } if (!ARG(0)) { e_memset(p, 0, 16); RET(0); return; } char t[64]; wstr_to_utf8(c, ARG(0), t, sizeof t, -1); RET(uuid_parse(t, p) ? 0 : 0x6a9); }
+static void s_UuidIsNil(Cpu *c) { const u8 *p = mem_ptr(c->mem, ARG(0), 16, 0); int nil = 1; if (p) for (int i = 0; i < 16; i++) if (p[i]) nil = 0; if (ARG(1)) wr32(c, ARG(1), 0); RET(p ? nil : 1); }
+static void s_UuidEqual(Cpu *c) { const u8 *a = mem_ptr(c->mem, ARG(0), 16, 0), *b = mem_ptr(c->mem, ARG(1), 16, 0); if (ARG(2)) wr32(c, ARG(2), 0); RET(a && b && !e_memcmp(a, b, 16)); }
+static void s_UuidCompare(Cpu *c) { const u8 *a = mem_ptr(c->mem, ARG(0), 16, 0), *b = mem_ptr(c->mem, ARG(1), 16, 0); if (ARG(2)) wr32(c, ARG(2), 0); int r = a && b ? e_memcmp(a, b, 16) : 0; RET(r < 0 ? (u64)(s64)-1 : r > 0 ? 1 : 0); }
+static void s_UuidHash(Cpu *c) { const u8 *p = mem_ptr(c->mem, ARG(0), 16, 0); u32 h = 0; if (p) for (int i = 0; i < 16; i++) h = h * 31 + p[i]; if (ARG(1)) wr32(c, ARG(1), 0); RET(h & 0xffff); }
+/* CRT temporary names: tmpnam → "\sXXXX.N" relative to the root (MSVC), _tempnam → malloc'd "<dir>\<prefix>N" in TMP */
+static u32 g_tmpnam_n;
+static void s_tmpnam(Cpu *c) { Win32 *w = W; u64 buf = ARG(0); if (!buf) { if (!w->tmpnam_buf) w->tmpnam_buf = shim_bump(w, 260); buf = w->tmpnam_buf; } char t[64]; e_snprintf(t, sizeof t, "\\s%x.%u", (unsigned)w->pid, ++g_tmpnam_n); u8 *p = mem_ptr(c->mem, buf, e_strlen(t) + 1, 1); if (p) e_memcpy(p, t, e_strlen(t) + 1); RET(buf); }
+static void s_wtmpnam(Cpu *c) { Win32 *w = W; u64 buf = ARG(0); if (!buf) { if (!w->tmpnam_buf) w->tmpnam_buf = shim_bump(w, 520); buf = w->tmpnam_buf; } char t[64]; e_snprintf(t, sizeof t, "\\s%x.%u", (unsigned)w->pid, ++g_tmpnam_n); for (size_t i = 0; i <= e_strlen(t); i++) wr16(c, buf + 2 * i, (u8)t[i]); RET(buf); }
+static void s_tmpnam_s(Cpu *c) { u64 buf = ARG(0), n = ARG(1); if (!buf || n < 16) { RET(22); return; } char t[64]; e_snprintf(t, sizeof t, "\\s%x.%u", (unsigned)W->pid, ++g_tmpnam_n); u8 *p = mem_ptr(c->mem, buf, e_strlen(t) + 1, 1); if (p) e_memcpy(p, t, e_strlen(t) + 1); RET(0); }
+static void s_wtmpnam_s(Cpu *c) { u64 buf = ARG(0), n = ARG(1); if (!buf || n < 16) { RET(22); return; } char t[64]; e_snprintf(t, sizeof t, "\\s%x.%u", (unsigned)W->pid, ++g_tmpnam_n); for (size_t i = 0; i <= e_strlen(t); i++) wr16(c, buf + 2 * i, (u8)t[i]); RET(0); }
+static void s_tempnam(Cpu *c) { const char *dir = ARG(0) ? rd_str(c, ARG(0), 520) : 0, *pre = ARG(1) ? rd_str(c, ARG(1), 64) : 0; char t[1024]; e_snprintf(t, sizeof t, "%s%s%s%u", dir && *dir ? dir : "C:\\tmp", dir && *dir && dir[e_strlen(dir) - 1] == '\\' ? "" : "\\", pre ? pre : "", ++g_tmpnam_n); size_t l = e_strlen(t) + 1; u64 a = w32_heap_alloc(W, l, 0); u8 *p = a ? mem_ptr(c->mem, a, l, 1) : 0; if (p) e_memcpy(p, t, l); RET(a); }
+static void s_wtempnam(Cpu *c) { char dir[520] = "", pre[64] = ""; if (ARG(0)) wstr_to_utf8(c, ARG(0), dir, sizeof dir, -1); if (ARG(1)) wstr_to_utf8(c, ARG(1), pre, sizeof pre, -1); char t[1024]; e_snprintf(t, sizeof t, "%s%s%s%u", *dir ? dir : "C:\\tmp", *dir && dir[e_strlen(dir) - 1] == '\\' ? "" : "\\", pre, ++g_tmpnam_n); size_t l = e_strlen(t) + 1; u64 a = w32_heap_alloc(W, l * 2, 0); if (a) for (size_t i = 0; i < l; i++) wr16(c, a + 2 * i, (u8)t[i]); RET(a); }
 /* VirtualAlloc: every reservation is tracked so that (a) MEM_COMMIT inside an earlier reservation succeeds, (b) an address hint
  * that points into the image / stack / heap FAILS with ERROR_INVALID_ADDRESS like on Windows (V8 probes hints near its embedded
  * builtins and would otherwise build its code-range bookkeeping on top of node.exe's .text), (c) a hint at a free address is honoured. */
@@ -1538,6 +1570,7 @@ static const ShimDef shims[] = {
   BUN_SHIMS
   D3D_SHIMS
   AUD_SHIMS
+  MMIO_SHIMS
   S(GetLastError), S(SetLastError), S(GetCurrentProcess), S(GetCurrentProcessId), S(ExitProcess), S(TerminateProcess),
   S(GetTickCount), S(GetTickCount64), S(QueryPerformanceCounter), S(QueryPerformanceFrequency), S(GetSystemTimeAsFileTime), S(GetSystemTimePreciseAsFileTime), S(GetSystemTime), S(GetLocalTime), S(Sleep), S(SleepEx),
   S(GetStdHandle), S(WriteFile), S(WriteConsoleA), S(WriteConsoleW), S(ReadFile), S(ReadConsoleA), S(GetConsoleMode), S(SetConsoleMode), S(GetConsoleOutputCP), S(GetConsoleCP), S(SetConsoleOutputCP), S(SetConsoleCP), S(GetConsoleScreenBufferInfo), S(SetConsoleTextAttribute), S(SetConsoleTitleA), S(SetConsoleTitleW), S(GetConsoleTitleW), S(GetConsoleTitleA), S(GetConsoleCursorInfo), S(SetConsoleCursorInfo), S(SetConsoleCursorPosition), S(FillConsoleOutputCharacterW), S(FillConsoleOutputCharacterA), S(FillConsoleOutputAttribute), S(ScrollConsoleScreenBufferW), S(ScrollConsoleScreenBufferA), S(SetConsoleScreenBufferSize), S(SetConsoleWindowInfo), S(WriteConsoleOutputW), S(WriteConsoleOutputA), S(WriteConsoleOutputCharacterW), S(WriteConsoleOutputAttribute), S(ReadConsoleOutputW), S(ReadConsoleOutputCharacterW), S(ReadConsoleOutputAttribute), S(GetLargestConsoleWindowSize), S(WriteConsoleInputW), S(GetConsoleProcessList), S(GetConsoleDisplayMode), S(GetConsoleOriginalTitleW), S(GetConsoleAliasesLengthW), S(GetConsoleScreenBufferInfoEx), S(SetConsoleScreenBufferInfoEx), S(GetCurrentConsoleFontEx), S(GetCurrentConsoleFont), S(SetCurrentConsoleFontEx), S(GetConsoleFontSize), S(GetConsoleWindow), S(AllocConsole), S(SetConsoleCtrlHandler), S(FlushFileBuffers), S(GetFileType), S(CloseHandle),
@@ -1591,6 +1624,9 @@ static const ShimDef shims[] = {
   S(getenv), S(getenv_s), SA("_dupenv_s", ret0), SA("_putenv", ret0), S(system), S(rand), S(srand), SA("rand_s", ret0),
   S(sscanf), S(strlen), S(wcslen), S(strnlen), S(wcscpy), S(wcsncpy), S(wcscat), S(wcsncat), S(wcsspn), S(wcscspn), S(wcspbrk), S(strcmp), SA("_stricmp", stricmp), SA("_strcmpi", stricmp), SA("stricmp", stricmp), S(strncmp), SA("_strnicmp", strnicmp), S(wcscmp), S(strcpy), S(strncpy), S(strcat), S(strchr), S(strrchr), S(strstr), SA("_strdup", strdup), S(strdup), S(strtol), S(strtoul), S(strtoll), SA("_strtoi64", strtoll), SA("_strtoui64", strtoll), SA("strtoull", strtoll), S(atoi), S(atol), S(atoll), SA("_atoi64", atoll), S(strtod), S(atof), S(toupper), S(tolower), S(isdigit), S(isalpha), S(isalnum), S(isspace), S(isupper), S(islower), S(isprint), S(isxdigit), S(ispunct), SA("isgraph", isprint), SA("iswspace", isspace), SA("iswdigit", isdigit), SA("iswalpha", isalpha), SA("towupper", toupper), SA("towlower", tolower), SA("strcoll", strcmp),
   S(memcpy), SA("memmove", memcpy), S(memset), S(memcmp), S(memchr), S(qsort), SA("qsort_s", qsort), S(bsearch), SA("_setjmp", setjmp), SA("_setjmpex", setjmp), SA("_setjmp3", setjmp), S(longjmp), S(div), SA("ldiv", div), S(abs), S(labs), SA("_abs64", llabs), S(llabs),
+  S(LocalLock), S(LocalUnlock), S(LocalHandle), S(LocalFlags),
+  S(UuidCreate), SA("UuidCreateSequential", UuidCreate), S(UuidCreateNil), S(UuidToStringA), S(UuidToStringW), S(RpcStringFreeA), SA("RpcStringFreeW", RpcStringFreeA), S(UuidFromStringA), S(UuidFromStringW), S(UuidIsNil), S(UuidEqual), S(UuidCompare), S(UuidHash),
+  S(tmpnam), SA("_wtmpnam", wtmpnam), S(tmpnam_s), SA("_wtmpnam_s", wtmpnam_s), SA("_tempnam", tempnam), SA("_wtempnam", wtempnam), SA("_wcreate_locale", ret0),
   SA("_Mtx_init_in_situ", Mtx_init_in_situ), SA("_Mtx_destroy_in_situ", Mtx_destroy_in_situ), SA("_Mtx_init", Mtx_init), SA("_Mtx_destroy", Mtx_destroy),
   SA("_Mtx_lock", Mtx_lock), SA("_Mtx_trylock", Mtx_trylock), SA("_Mtx_timedlock", Mtx_timedlock), SA("_Mtx_unlock", Mtx_unlock), SA("_Mtx_current_owns", Mtx_current_owns), SA("_Mtx_getconcrtcs", Mtx_getconcrtcs),
   SA("_Cnd_init_in_situ", Cnd_init_in_situ), SA("_Cnd_destroy_in_situ", Cnd_destroy_in_situ), SA("_Cnd_init", Cnd_init), SA("_Cnd_destroy", Cnd_destroy), SA("_Cnd_signal", Cnd_signal), SA("_Cnd_broadcast", Cnd_broadcast),

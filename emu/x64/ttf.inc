@@ -3,9 +3,10 @@
  * (C:\Windows\Fonts\*.ttf), loaded on first use. Everything that measures or draws text goes through fnt_*; when a face
  * is missing the old 8x8 bitmap glyphs with a fixed cell width stay as the fallback, so nothing depends on the files. */
 
-typedef struct { const u8 *d; u32 len; int tried, ok; u16 upem, nglyphs, nhm; int long_loca; u32 loca, glyf, glyf_len, hmtx, cmap4, cmap12; int win_asc, win_desc, xavg, advmax; } TtfFace;
-enum { TF_SANS = 0, TF_SANS_B = 1, TF_MONO = 2, TF_MONO_B = 3, TF_N = 4 };
-static TtfFace g_ttf[TF_N];
+typedef struct { const u8 *d; u32 len; int tried, ok; u16 upem, nglyphs, nhm; int long_loca; u32 loca, glyf, glyf_len, hmtx, cmap4, cmap12; int win_asc, win_desc, xavg, advmax;
+  char family[64]; int bold, italic; char path[260]; int mem_handle; } TtfFace;   /* family/bold/italic from the name + OS/2 tables (private fonts); path or mem_handle identify an AddFontResource entry */
+enum { TF_SANS = 0, TF_SANS_B = 1, TF_MONO = 2, TF_MONO_B = 3, TF_N = 4, TF_PRIV = 32 };   /* 4 bundled faces + up to 32 private ones (AddFontResource / AddFontMemResourceEx) */
+static TtfFace g_ttf[TF_N + TF_PRIV]; static int g_npriv;
 static const char *const g_ttf_files[TF_N] = { "C:\\Windows\\Fonts\\ptsans.ttf", "C:\\Windows\\Fonts\\ptsansb.ttf", "C:\\Windows\\Fonts\\cousine.ttf", "C:\\Windows\\Fonts\\cousineb.ttf" };
 
 static u32 tt16(const TtfFace *f, u32 o) { return o + 2 <= f->len ? ((u32)f->d[o] << 8) | f->d[o + 1] : 0; }
@@ -13,14 +14,23 @@ static int tts16(const TtfFace *f, u32 o) { return (s16)tt16(f, o); }
 static u32 tt32(const TtfFace *f, u32 o) { return o + 4 <= f->len ? ((u32)f->d[o] << 24) | ((u32)f->d[o + 1] << 16) | ((u32)f->d[o + 2] << 8) | f->d[o + 3] : 0; }
 
 static int ttf_parse(TtfFace *f) {
-  u32 nt = tt16(f, 4); if (nt == 0 || nt > 64) return 0; u32 head = 0, maxp = 0, hhea = 0, os2 = 0, cmap = 0;
+  u32 nt = tt16(f, 4); if (nt == 0 || nt > 64) return 0; u32 head = 0, maxp = 0, hhea = 0, os2 = 0, cmap = 0, name = 0;
   for (u32 i = 0; i < nt; i++) { u32 r = 12 + 16 * i; u32 tag = tt32(f, r), off = tt32(f, r + 8), ln = tt32(f, r + 12); if (off >= f->len || ln > f->len - off) continue;
     switch (tag) { case 0x68656164: head = off; break; case 0x6d617870: maxp = off; break; case 0x68686561: hhea = off; break; case 0x4f532f32: os2 = off; break; case 0x636d6170: cmap = off; break;
-      case 0x6c6f6361: f->loca = off; break; case 0x676c7966: f->glyf = off; f->glyf_len = ln; break; case 0x686d7478: f->hmtx = off; break; default: break; } }
+      case 0x6c6f6361: f->loca = off; break; case 0x676c7966: f->glyf = off; f->glyf_len = ln; break; case 0x686d7478: f->hmtx = off; break; case 0x6e616d65: name = off; break; default: break; } }
+  if (name) {   /* family name (nameID 1): Windows/Unicode UTF-16BE preferred, else Macintosh Roman */
+    u32 cnt = tt16(f, name + 2), so = tt16(f, name + 4); if (cnt > 512) cnt = 512; int best = -1;
+    for (u32 i = 0; i < cnt; i++) { u32 r = name + 6 + 12 * i; u32 pid = tt16(f, r), nid = tt16(f, r + 6); if (nid != 1) continue; int score = pid == 3 ? (tt16(f, r + 4) == 0x409 ? 3 : 2) : pid == 1 ? 1 : 0; if (best < 0 || score > best) { best = score;
+        u32 ln = tt16(f, r + 8), off = name + so + tt16(f, r + 10); if (off + ln > f->len) { best = -1; continue; } int k = 0;
+        if (pid == 3 || pid == 0) { for (u32 j = 0; j + 1 < ln && k < 63; j += 2) { u32 ch = ((u32)f->d[off + j] << 8) | f->d[off + j + 1]; if (ch < 0x80) f->family[k++] = (char)ch; else if (ch < 0x800 && k < 62) { f->family[k++] = (char)(0xc0 | (ch >> 6)); f->family[k++] = (char)(0x80 | (ch & 0x3f)); } else if (k < 61) { f->family[k++] = (char)(0xe0 | (ch >> 12)); f->family[k++] = (char)(0x80 | ((ch >> 6) & 0x3f)); f->family[k++] = (char)(0x80 | (ch & 0x3f)); } } }
+        else for (u32 j = 0; j < ln && k < 63; j++) f->family[k++] = (char)f->d[off + j];
+        f->family[k] = 0; } }
+  }
+  if (head) { u32 mac = tt16(f, head + 44); f->bold = !!(mac & 1); f->italic = !!(mac & 2); }
   if (!head || !maxp || !hhea || !cmap || !f->loca || !f->glyf || !f->hmtx) return 0;
   f->upem = (u16)tt16(f, head + 18); if (f->upem < 16) return 0; f->long_loca = tts16(f, head + 50) != 0; f->nglyphs = (u16)tt16(f, maxp + 4); f->nhm = (u16)tt16(f, hhea + 34); if (!f->nhm) return 0;
   f->advmax = (int)tt16(f, hhea + 10);
-  if (os2) { f->xavg = tts16(f, os2 + 2); f->win_asc = (int)tt16(f, os2 + 74); f->win_desc = (int)tt16(f, os2 + 76); }
+  if (os2) { f->xavg = tts16(f, os2 + 2); f->win_asc = (int)tt16(f, os2 + 74); f->win_desc = (int)tt16(f, os2 + 76); u32 sel = tt16(f, os2 + 62); if (sel & 0x20) f->bold = 1; if (sel & 1) f->italic = 1; if (tt16(f, os2 + 4) >= 600) f->bold = 1; }
   if (f->win_asc + f->win_desc < (int)f->upem / 2) { f->win_asc = tts16(f, hhea + 4); f->win_desc = -tts16(f, hhea + 6); }
   if (f->xavg <= 0) f->xavg = (int)f->upem / 2;
   u32 ns = tt16(f, cmap + 2); if (ns > 32) ns = 32;
@@ -29,10 +39,52 @@ static int ttf_parse(TtfFace *f) {
   return f->cmap4 || f->cmap12; }
 
 static TtfFace *ttf_face(int idx) {
+  if (idx >= TF_N && idx < TF_N + g_npriv) return g_ttf[idx].ok ? &g_ttf[idx] : 0;
   if (idx < 0 || idx >= TF_N) return 0; TtfFace *f = &g_ttf[idx]; if (f->ok) return f; if (f->tried) return 0; f->tried = 1;
   int fd = vfs_open(g_ttf_files[idx], 0x80000000u, 3, 0); if (fd < 0) return 0; s64 n = vfs_size(fd); if (n <= 64 || n > 64 * 1024 * 1024) { vfs_close(fd); return 0; }
   u8 *buf = emu_alloc((size_t)n); if (!buf) { vfs_close(fd); return 0; } s64 got = vfs_read(fd, buf, (u64)n); vfs_close(fd); if (got != n) { emu_free(buf); return 0; }
   f->d = buf; f->len = (u32)n; if (!ttf_parse(f)) { emu_free(buf); f->d = 0; f->len = 0; return 0; } f->ok = 1; return f; }
+
+/* ---- private fonts (AddFontResource / AddFontMemResourceEx): faces the program ships, selectable by family name ---- */
+static int ci_eq(const char *a, const char *b) { for (;; a++, b++) { int x = *a >= 'A' && *a <= 'Z' ? *a + 32 : (u8)*a, y = *b >= 'A' && *b <= 'Z' ? *b + 32 : (u8)*b; if (x != y) return 0; if (!x) return 1; } }
+static int ttf_priv_install(const u8 *d, u32 len, const char *path, int mem_handle) {
+  if (!d || len < 64) return 0; u32 tag = ((u32)d[0] << 24) | ((u32)d[1] << 16) | ((u32)d[2] << 8) | d[3];
+  if (tag == 0x74746366) {   /* 'ttcf' collection: install every face */
+    u32 n = len >= 12 ? ((u32)d[8] << 24) | ((u32)d[9] << 16) | ((u32)d[10] << 8) | d[11] : 0; if (n > 16) n = 16; int added = 0;
+    for (u32 i = 0; i < n && 12 + 4 * i + 4 <= len; i++) { u32 off = ((u32)d[12 + 4 * i] << 24) | ((u32)d[13 + 4 * i] << 16) | ((u32)d[14 + 4 * i] << 8) | d[15 + 4 * i]; if (off + 12 > len) continue;
+      /* table offsets inside a collection are relative to the file start: present the whole file with the face's offset table copied to the front is not possible, so parse in place */
+      if (g_npriv >= TF_PRIV) break; TtfFace *f = &g_ttf[TF_N + g_npriv]; e_memset(f, 0, sizeof *f); f->d = d; f->len = len;
+      /* ttf_parse reads the table directory at offset 0: temporarily view the face's directory by copying the file header */
+      u8 *copy = emu_alloc(len); if (!copy) break; e_memcpy(copy, d, len); e_memcpy(copy, d + off, 12 + 16 * (((u32)d[off + 4] << 8 | d[off + 5]) > 64 ? 64 : ((u32)d[off + 4] << 8 | d[off + 5]))); f->d = copy;
+      if (ttf_parse(f)) { f->ok = 1; if (path) e_snprintf(f->path, sizeof f->path, "%s", path); f->mem_handle = mem_handle; g_npriv++; added++; } else { emu_free(copy); e_memset(f, 0, sizeof *f); } }
+    return added; }
+  if (tag != 0x00010000 && tag != 0x74727565 && tag != 0x4f54544f) return 0;   /* TrueType outlines only ('OTTO' = CFF: parsed, fails at glyf) */
+  if (g_npriv >= TF_PRIV) return 0; TtfFace *f = &g_ttf[TF_N + g_npriv]; e_memset(f, 0, sizeof *f); f->d = d; f->len = len;
+  if (!ttf_parse(f)) { e_memset(f, 0, sizeof *f); return 0; }
+  f->ok = 1; if (path) e_snprintf(f->path, sizeof f->path, "%s", path); f->mem_handle = mem_handle; g_npriv++; return 1; }
+/* AddFontResource(Ex): the file on the guest disk; returns the number of faces added (0 = not a usable TrueType file) */
+int gdi_add_font_file(const char *path) {
+  if (!path || !*path) return 0;
+  for (int i = 0; i < g_npriv; i++) if (g_ttf[TF_N + i].ok && ci_eq(g_ttf[TF_N + i].path, path)) return 1;   /* already installed */
+  int fd = vfs_open(path, 0x80000000u, 3, 0); if (fd < 0) return 0; s64 n = vfs_size(fd); if (n <= 64 || n > 64 * 1024 * 1024) { vfs_close(fd); return 0; }
+  u8 *buf = emu_alloc((size_t)n); if (!buf) { vfs_close(fd); return 0; } s64 got = vfs_read(fd, buf, (u64)n); vfs_close(fd); if (got != n) { emu_free(buf); return 0; }
+  int r = ttf_priv_install(buf, (u32)n, path, 0); if (!r) emu_free(buf);
+  if (r) e_log("[font] AddFontResource %s: family \"%s\"%s%s\n", path, g_ttf[TF_N + g_npriv - 1].family, g_ttf[TF_N + g_npriv - 1].bold ? " bold" : "", g_ttf[TF_N + g_npriv - 1].italic ? " italic" : "");
+  else e_log("[font] AddFontResource %s: not a TrueType font (CFF/OpenType-PS, .fon and Type 1 are not supported)\n", path);
+  return r; }
+int gdi_remove_font_file(const char *path) { int n = 0; for (int i = 0; i < g_npriv; i++) if (g_ttf[TF_N + i].ok && ci_eq(g_ttf[TF_N + i].path, path)) { g_ttf[TF_N + i].ok = 0; n++; } return n; }
+/* AddFontMemResourceEx: a copy of the font bytes; the returned handle is removed with RemoveFontMemResourceEx */
+static int g_font_mem_next = 0x7000;
+int gdi_add_font_mem(const u8 *data, u32 len, u32 *nfaces) {
+  if (!data || len < 64) { if (nfaces) *nfaces = 0; return 0; } u8 *copy = emu_alloc(len); if (!copy) return 0; e_memcpy(copy, data, len);
+  int h = ++g_font_mem_next; int r = ttf_priv_install(copy, len, 0, h); if (!r) { emu_free(copy); if (nfaces) *nfaces = 0; return 0; }
+  if (nfaces) *nfaces = (u32)r; e_log("[font] AddFontMemResourceEx: family \"%s\" (%d face%s)\n", g_ttf[TF_N + g_npriv - 1].family, r, r == 1 ? "" : "s"); return h; }
+int gdi_remove_font_mem(int handle) { int n = 0; for (int i = 0; i < g_npriv; i++) if (g_ttf[TF_N + i].ok && g_ttf[TF_N + i].mem_handle == handle) { g_ttf[TF_N + i].ok = 0; n++; } return n; }
+/* the private face for a LOGFONT family name, best style match (bold/italic), -1 when the program did not install one */
+static int fnt_priv_find(const char *name, int bold, int italic) {
+  if (!name || !*name) return -1; int best = -1, bs = -1;
+  for (int i = 0; i < g_npriv; i++) { TtfFace *f = &g_ttf[TF_N + i]; if (!f->ok || !ci_eq(f->family, name)) continue; int sc = (f->bold == bold ? 2 : 0) + (f->italic == italic ? 1 : 0); if (sc > bs) { bs = sc; best = TF_N + i; } }
+  return best; }
 
 static int ttf_gid(const TtfFace *f, u32 cp) {
   if (f->cmap12 && (cp >= 0x10000 || !f->cmap4)) { u32 ng = tt32(f, f->cmap12 + 12); if (ng > 100000) ng = 100000; u32 lo = 0, hi = ng;
@@ -223,7 +275,8 @@ static void fnt_set_width(GdiObj *f, int lfw) { if (lfw <= 0 || f->font_face < 0
 static void fnt_setup(GdiObj *f, int lfh, int weight, int italic, int ul, int so, int pitch, const char *name) {
   int bold = weight >= 600; int mono = (pitch & 3) == 1 || (name && fnt_is_mono_name(name)); f->font_bold = bold; f->font_flags = (italic ? 1 : 0) | (ul ? 2 : 0) | (so ? 4 : 0);
   if (!mono && name && fnt_is_narrow_name(name)) f->font_flags |= 88 << 8;   /* MS Shell Dlg / Microsoft Sans Serif / Tahoma / Arial are ~12% narrower than the bundled sans: condense so dialogs laid out for them fit */ if (name) { int i = 0; for (; name[i] && i < 31; i++) f->font_name[i] = name[i]; f->font_name[i] = 0; } else f->font_name[0] = 0;
-  int face = (mono ? TF_MONO : TF_SANS) + (bold ? 1 : 0); if (!g_ttf[face].ok) g_ttf[face].tried = 0; TtfFace *tf = ttf_face(face);   /* fonts mounted after the first attempt (stock objects) get another look */
+  int face = fnt_priv_find(name, bold, italic); if (face < 0) { face = (mono ? TF_MONO : TF_SANS) + (bold ? 1 : 0); if (!g_ttf[face].ok) g_ttf[face].tried = 0; } TtfFace *tf = ttf_face(face);   /* the program's own fonts first; bundled fonts mounted after the first attempt (stock objects) get another look */
+  if (tf && face >= TF_N && tf->italic && italic) f->font_flags &= ~1;   /* a real italic face is not slanted again */
   if (!tf) { f->font_face = -1; int h = lfh, em = 0; if (h < 0) { em = -h; h = (em * 6 + 2) / 5; } if (!h) h = 16; f->font_h = h; f->font_em = em; f->font_px = em ? em : (h * 5 + 3) / 6; return; }
   int cellu = tf->win_asc + tf->win_desc; int px; if (lfh < 0) px = -lfh; else if (lfh > 0) px = (int)((long long)lfh * tf->upem + cellu / 2) / cellu; else px = 12; if (px < 1) px = 1; if (px > 400) px = 400;
   f->font_face = face; f->font_px = px; f->font_em = px; int asc = (px * tf->win_asc + tf->upem / 2) / tf->upem, desc = (px * tf->win_desc + tf->upem / 2) / tf->upem; f->font_h = asc + desc; }
@@ -237,7 +290,7 @@ static int fnt_metrics(GdiObj *f, int *asc, int *desc, int *avg, int *maxw) {
 /* average width the way dialog base units are derived on Windows: the 52-letter alphabet, (width / 26 + 1) / 2 */
 static int fnt_dlg_avg(GdiObj *f) { int px; int face = fnt_face_px(f, &px); if (face < 0) return font_cw(f, f && f->kind == K_FONT ? f->font_h : 16); int tot = 0; for (int k = 0; k < 52; k++) { Glyph *g = ttf_glyph(face, px, fnt_style(f) & ~1, (u32)(k < 26 ? 'A' + k : 'a' + k - 26)); tot += g ? g->adv : px / 2; } return (tot / 26 + 1) / 2; }
 /* glyph for a code point with family fallback: the matching face first, then the other family, else 0 (bitmap fallback) */
-static Glyph *fnt_glyph(int face, int px, int italic, u32 cp) { Glyph *g = ttf_glyph(face, px, italic, cp); if (g) return g; int alt = face ^ 2; g = ttf_glyph(alt, px, italic, cp); if (g) return g; if (face & 1) { g = ttf_glyph(face & ~1, px, italic, cp); if (g) return g; } return sym_glyph(face, px, italic, cp); }
+static Glyph *fnt_glyph(int face, int px, int italic, u32 cp) { Glyph *g = ttf_glyph(face, px, italic, cp); if (g) return g; if (face >= TF_N) { face = TF_SANS + (ttf_face(face) && g_ttf[face].bold ? 1 : 0); g = ttf_glyph(face, px, italic, cp); if (g) return g; } int alt = face ^ 2; g = ttf_glyph(alt, px, italic, cp); if (g) return g; if (face & 1) { g = ttf_glyph(face & ~1, px, italic, cp); if (g) return g; } return sym_glyph(face, px, italic, cp); }
 static int fnt_cp_adv(GdiObj *f, u32 cp) { int px; int face = fnt_face_px(f, &px); if (cp == '\r' || cp == '\n') return 0; int fh = f && f->kind == K_FONT ? f->font_h : 16; if (face < 0) return font_cw(f, fh);
   if (cp == '\t') { Glyph *sp = fnt_glyph(face, px, 0, ' '); return sp ? sp->adv * 8 : px * 4; } Glyph *g = fnt_glyph(face, px, fnt_style(f), cp); if (g) return g->adv; return (px * 3 + 2) / 5; }
 static int fnt_width(GdiObj *f, const char *s, int n) { int i = 0, w = 0; while (i < n) { u32 cp = utf8_next(s, n, &i); w += fnt_cp_adv(f, cp); } return w; }

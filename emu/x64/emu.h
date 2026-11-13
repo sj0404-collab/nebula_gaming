@@ -121,6 +121,7 @@ static inline void mem_tlb_flush(Mem *m) { for (int i = 0; i < TLB_N; i++) m->tl
 u32 *mem_code_page(Mem *m, Region *r, u64 addr);   /* marks the page of addr as holding translated code; returns its generation counter (NULL: not trackable) */
 Region *mem_region(Mem *m, u64 addr);
 void mem_release(Mem *m);
+int gdi_add_font_file(const char *path); int gdi_remove_font_file(const char *path); int gdi_add_font_mem(const u8 *data, u32 len, u32 *nfaces); int gdi_remove_font_mem(int handle);   /* private fonts (gdi.c/ttf.inc) */
 size_t emu_arena_headroom(void); u64 mem_pool_free(void); int mem_pool_selftest(void);                                     /* give all regions back to the pool */
 void *emu_alloc(size_t n); int emu_reserve(size_t n);                                    /* zeroed host memory, never freed (bump) */
 size_t emu_alloc_used(void);
@@ -355,7 +356,7 @@ struct Win32 {
   u64 at_exit[64]; int n_at_exit;
   int exited;
   int cds_dump_pass; char cds_jsa[700];   /* HotSpot: this launch only builds the class-data archive (-Xshare:dump); on success the host relaunches the program */
-  u64 loc_c, loc_wc, sys_nerr, sys_errlist;
+  u64 loc_c, loc_wc, sys_nerr, sys_errlist, tmpnam_buf;
   int api_trace;
   struct { u64 base, table, lo, hi; u32 count, growable; } dynft[32]; int ndynft;   /* RtlAddFunctionTable / RtlAddGrowableFunctionTable: unwind data for JIT code (HotSpot code cache, V8) */
   u64 veh[16]; int nveh; u64 uef; char hw_msg[160]; u32 hw_code; u64 cxx32_obj, cxx32_ti;   /* x86: the exception being handled (for `throw;`) */   /* vectored exception handlers, top-level filter, text of the last hardware fault */

@@ -109,10 +109,18 @@ static void s_GetStretchBltMode(Cpu *c) { RET(3); }
 static void s_CreatePenIndirect(Cpu *c) { u64 lp = ARG(0); call_shim_tail(c, s_CreatePen, rd32(c, lp), rd32(c, lp + 4), rd32(c, lp + 12), 0); }
 static void s_GetTextExtentPointW(Cpu *c) { call_shim_tail(c, s_GetTextExtentPoint32W, ARG(0), ARG(1), ARG(2), ARG(3)); }
 static void s_GetTextExtentPointA(Cpu *c) { call_shim_tail(c, s_GetTextExtentPoint32A, ARG(0), ARG(1), ARG(2), ARG(3)); }
-static void s_AddFontResourceW(Cpu *c) { RET(1); }
-static void s_AddFontResourceA(Cpu *c) { RET(1); }
-static void s_RemoveFontResourceW(Cpu *c) { RET(1); }
-static void s_RemoveFontResourceA(Cpu *c) { RET(1); }
+/* AddFontResource(Ex): private TrueType faces from the program's files (ttf.inc) — "name|resource" lists are not supported beyond the first file */
+static const char *font_path_arg(Cpu *c, u64 a, int wide) { static char buf[1024]; if (wide) wstr_to_utf8(c, a, buf, sizeof buf, -1); else { const char *s = rd_str(c, a, 1000); e_snprintf(buf, sizeof buf, "%s", s ? s : ""); } char *bar = buf; while (*bar && *bar != '|') bar++; *bar = 0; return buf; }
+static void s_AddFontResourceW(Cpu *c) { int n = gdi_add_font_file(font_path_arg(c, ARG(0), 1)); RET(n); }
+static void s_AddFontResourceA(Cpu *c) { int n = gdi_add_font_file(font_path_arg(c, ARG(0), 0)); RET(n); }
+static void s_AddFontResourceExW(Cpu *c) { s_AddFontResourceW(c); }   /* FR_PRIVATE / FR_NOT_ENUM: every installed font is already private to this session */
+static void s_AddFontResourceExA(Cpu *c) { s_AddFontResourceA(c); }
+static void s_RemoveFontResourceW(Cpu *c) { RET(gdi_remove_font_file(font_path_arg(c, ARG(0), 1)) ? 1 : 0); }
+static void s_RemoveFontResourceA(Cpu *c) { RET(gdi_remove_font_file(font_path_arg(c, ARG(0), 0)) ? 1 : 0); }
+static void s_RemoveFontResourceExW(Cpu *c) { s_RemoveFontResourceW(c); }
+static void s_RemoveFontResourceExA(Cpu *c) { s_RemoveFontResourceA(c); }
+static void s_AddFontMemResourceEx(Cpu *c) { u32 len = (u32)ARG(1); const u8 *d = len ? mem_ptr(c->mem, ARG(0), len, 0) : 0; u32 n = 0; int h = gdi_add_font_mem(d, len, &n); if (ARG(3)) wr32(c, ARG(3), n); RET(h); }
+static void s_RemoveFontMemResourceEx(Cpu *c) { RET(gdi_remove_font_mem((int)ARG(0)) ? 1 : 0); }
 static void s_CreateHalftonePalette(Cpu *c) { RET(stock[15]); }
 static int g_mf_reported;
 static void mf_unsupported(Cpu *c) { if (!g_mf_reported++) w32_report(W, "metafiles (EMF/WMF) are not supported — drawn as nothing"); RET(0); }
@@ -217,7 +225,7 @@ static void s_EqualRect(Cpu *c) { u64 a = ARG(0), b = ARG(1); if (!a || !b) { RE
   S(SetDIBits), S(CreateDIBitmap), S(GetDIBits), S(GetBitmapBits), S(GetDIBColorTable), S(SetDIBColorTable), \
   S(Arc), S(ArcTo), S(AngleArc), S(Pie), S(Chord), S(PolyBezier), S(PolyBezierTo), S(LineDDA), S(ExtFloodFill), S(FloodFill), S(MaskBlt), S(ExcludeClipRect), S(RectVisible), S(PtVisible), S(GetClipBox), S(GetClipRgn), S(SetRectRgn), S(FrameRgn), \
   S(GetWindowOrgEx), S(GetBrushOrgEx), S(GetCurrentPositionEx), S(GetStretchBltMode), S(CreatePenIndirect), S(GetTextExtentPointW), S(GetTextExtentPointA), S(EnumFontsW), S(EnumFontsA), S(EnumFontFamiliesExW), S(EnumFontFamiliesExA), S(EnumFontFamiliesW), S(EnumFontFamiliesA), \
-  S(AddFontResourceW), S(AddFontResourceA), S(RemoveFontResourceW), S(RemoveFontResourceA), S(CreateHalftonePalette), S(GetEnhMetaFileHeader), S(GetEnhMetaFileBits), S(SetEnhMetaFileBits), S(GetWinMetaFileBits), S(SetWinMetaFileBits), S(PlayEnhMetaFile), S(DeleteEnhMetaFile), S(CopyEnhMetaFileW), S(GetEnhMetaFileDescriptionW), S(GetEnhMetaFilePaletteEntries), S(CreateEnhMetaFileW), S(CloseEnhMetaFile), \
+  S(AddFontResourceW), S(AddFontResourceA), S(RemoveFontResourceW), S(RemoveFontResourceA), S(AddFontResourceExW), S(AddFontResourceExA), S(RemoveFontResourceExW), S(RemoveFontResourceExA), S(AddFontMemResourceEx), S(RemoveFontMemResourceEx), S(CreateHalftonePalette), S(GetEnhMetaFileHeader), S(GetEnhMetaFileBits), S(SetEnhMetaFileBits), S(GetWinMetaFileBits), S(SetWinMetaFileBits), S(PlayEnhMetaFile), S(DeleteEnhMetaFile), S(CopyEnhMetaFileW), S(GetEnhMetaFileDescriptionW), S(GetEnhMetaFilePaletteEntries), S(CreateEnhMetaFileW), S(CloseEnhMetaFile), \
   S(InitializeFlatSB), S(UninitializeFlatSB), S(FlatSB_SetScrollInfo), S(FlatSB_GetScrollInfo), S(FlatSB_SetScrollPos), S(FlatSB_GetScrollPos), S(FlatSB_SetScrollProp), S(FlatSB_SetScrollRange), S(FlatSB_ShowScrollBar), S(FlatSB_EnableScrollBar), SA("_TrackMouseEvent", TrackMouseEvent_), SA("TrackMouseEvent", TrackMouseEvent_), \
   \
   S(TransactNamedPipe), S(WNetOpenEnumW), S(WNetEnumResourceW), S(WNetCloseEnum), S(WNetGetConnectionW), S(WNetGetUniversalNameW), S(WNetGetUniversalNameA), S(WNetEnumResourceA), S(WNetOpenEnumA), S(WNetGetConnectionA), \
