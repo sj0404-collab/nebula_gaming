@@ -1,3 +1,32 @@
+# v1.51.3 — one GL session per program, and a Report that names the culprit
+
+Driven by two v1.51.2 reports from the phone taken in one sitting: SteamWorld Dig (white, then black surface with 140
+sprite draws per frame) and, started right after it, Shattered Pixel Dungeon failing in `GL.createCapabilities` with
+"There is no OpenGL context current in the current thread".
+
+* **Every program start gets a fresh GL session.**  Until now the WebGL2 context, textures, buffers, programs, the
+  WGL context table, the per-thread "current context" slots and the pixel formats of windows all survived from one
+  program to the next inside the same Nebula window.  A context that the GPU had dropped (Android does that under
+  memory pressure or when the app is backgrounded) stayed in use: every GL call quietly failed, `glGetString(GL_VERSION)`
+  came back empty and LWJGL reported "no OpenGL context current".  `x64_load` now resets the WGL state
+  (`gl_session_reset`) and the runtime disposes the old WebGL2 context and creates a new bridge for each start.
+* **Lost contexts are reported.**  `webglcontextlost` and a periodic `isContextLost()` check write
+  `[gl] the WebGL2 context was LOST …` to the log and the GL summary starts with `CONTEXT LOST`.  An all-zero surface
+  (mean 0, alpha-0 100 %) with draw calls going on is exactly what a lost context looks like from the probes.
+* **The Report now carries what is needed to read a black frame:**
+  * `GL textures`: every texture with level-0 size, internal format, min/mag filters and what the program really
+    uploaded (format/type, byte count, mean value, share of non-zero bytes, share of zero alpha).
+  * `GL shaders`: the GLSL of the first programs as handed over and — when the bridge rewrote it — as compiled for
+    WebGL2, with attribute locations, uniform names and compile/link results.
+  * In the call trace every `glDrawArrays`/`glDrawElements` is followed by `→ surface after draw: lit … max … alpha>0 …`
+    (a 6×6 sample of the draw framebuffer), the bound texture's size and upload statistics, and the first two vertices
+    of every VBO-sourced attribute (`getBufferSubData`), so a zero colour attribute, zero texture or off-screen
+    geometry is visible without guessing.
+* `wglMakeCurrent` failures and `wglGetCurrentContext` returning NULL are logged with the reason.
+
+Known limits: a lost context is not restored (the program's textures live only on the GPU) — restart the program; the
+per-draw probes run only in a traced frame, so they cost nothing otherwise.
+
 # v1.51.2 — the GL report works on the phone
 
 Diagnostic release for the SteamWorld Dig "sound, no picture" case (and anything else that draws through OpenGL and shows

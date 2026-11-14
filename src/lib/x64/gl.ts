@@ -162,7 +162,7 @@ export class GLBridge {
         const gl = canvas.getContext('webgl2', { alpha: true, depth: true, stencil: true, antialias: false, preserveDrawingBuffer: true, premultipliedAlpha: false, powerPreference: 'high-performance' }) as WebGL2RenderingContext | null;
         if (!gl) { this.log('[gl] WebGL2 is not available on this device: OpenGL programs cannot create a context\n'); return 0; }
         this.gl = gl; this.canvas = canvas; this.width = w; this.height = h;
-        try { (canvas as unknown as EventTarget).addEventListener('webglcontextlost', (e) => { e.preventDefault(); if (!this.lost) { this.lost = true; this.log('[gl] the WebGL2 context was LOST (GPU reset, memory pressure or the app went to the background): every GL call fails from here on — restart the program\n'); } }); } catch { /* no events on this canvas */ }
+        try { (canvas as unknown as EventTarget).addEventListener('webglcontextlost', (e) => { e.preventDefault(); if (!this.lost) { this.lost = true; this.log(`[gl] the WebGL2 context was LOST at frame ${this.frameNo} after ${this.draws} draws (GPU reset, memory pressure or the app went to the background): every GL call fails from here on — restart the program\n`); } }); } catch { /* no events on this canvas */ }
         try { const t = typeof localStorage !== 'undefined' ? localStorage.getItem('nebula_gltrace') : null; if (t) { const [a, n] = t.split(':'); this.traceAfter = Number(a) || 0; this.traceLeft = -(Number(n) || 400); this.log(`[gl] call trace armed: after frame ${this.traceAfter}, ${-this.traceLeft} calls\n`); } } catch { /* no storage */ }
         this.s3tc = gl.getExtension('WEBGL_compressed_texture_s3tc'); this.aniso = gl.getExtension('EXT_texture_filter_anisotropic'); this.floatLinear = !!gl.getExtension('OES_texture_float_linear'); this.colorBufferFloat = !!gl.getExtension('EXT_color_buffer_float');
         gl.getExtension('EXT_float_blend'); gl.getExtension('OES_texture_half_float_linear');
@@ -211,7 +211,7 @@ export class GLBridge {
   summary(): string { const gl = this.gl; if (!gl) return ''; let vp = '', prog = '', fbo = '';
     try { vp = Array.from(gl.getParameter(gl.VIEWPORT) as Int32Array).join(','); prog = gl.getParameter(gl.CURRENT_PROGRAM) ? 'yes' : 'none'; fbo = gl.getParameter(gl.FRAMEBUFFER_BINDING) ? 'offscreen' : 'default'; } catch { /* lost context */ }
     return `GL: ${this.lost || gl.isContextLost() ? 'CONTEXT LOST · ' : ''}${this.frameNo} frames presented · ${this.draws} draw calls · ${this.prog.size} programs · ${this.shader.size} shaders · ${this.badShaders} shader/link failures · surface ${this.width}x${this.height} · viewport [${vp}] · program ${prog} · framebuffer ${fbo} · ${this.describeRenderer()}${this.probes.length ? '\nGL surface probes (16×16 samples of the presented frame): ' + this.probes.join(' | ') : ''}` + (this.textureTable() ? '\n' + this.textureTable() : '') + (this.shaderDump() ? '\n' + this.shaderDump() : ''); }
-  private draws = 0; private badShaders = 0;
+  private draws = 0; private badShaders = 0; private linkCount = 0;
   private describeRenderer(): string { const gl = this.gl!; const dbg = gl.getExtension('WEBGL_debug_renderer_info'); return dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : String(gl.getParameter(gl.RENDERER)); }
   probe(id: number): number { return this.impl[id] ? 1 : 0; }
 
@@ -259,7 +259,7 @@ export class GLBridge {
   }
   private lost = false;
   markFrame(w: number, h: number): void {
-    if (!this.lost && this.gl && this.frameNo % 30 === 0 && this.gl.isContextLost()) { this.lost = true; this.log('[gl] the WebGL2 context was LOST (GPU reset, memory pressure or the app went to the background): every GL call fails from here on — restart the program\n'); }
+    if (!this.lost && this.gl && this.frameNo % 30 === 0 && this.gl.isContextLost()) { this.lost = true; this.log(`[gl] the WebGL2 context was LOST at frame ${this.frameNo} after ${this.draws} draws (GPU reset, memory pressure or the app went to the background): every GL call fails from here on — restart the program\n`); }
     this.frameNo++; const gt = globalThis as unknown as { __gltrace?: string[] };
     if (this.frameNo === 30 || this.frameNo === 240 || this.frameNo === 1200) { this.probeSurface(w, h);
       /* a dark surface after 240 presented frames with draw calls going on → record the next frame by itself, so the Report already carries the trace */
@@ -409,8 +409,10 @@ export class GLBridge {
       rows.push(`#${id} ${l0 ? `${l0.w}x${l0.h}${l0.d > 1 ? 'x' + l0.d : ''} ifmt=0x${l0.ifmt.toString(16)}` : 'no level 0'} levels=${ti.levels.size} min=0x${(ti.minf ?? 0x2702).toString(16)} mag=0x${(ti.magf ?? 0x2601).toString(16)}${ti.genMipmap ? ' genmip' : ''}${ti.up ? ' ' + ti.up : ' (never uploaded)'}`); }
     return n ? `GL textures (${n}${n > limit ? `, first ${limit}` : ''}): ` + rows.join(' · ') : ''; }
   /** report: the GLSL the program handed over and what the bridge compiled (first programs only — enough for the sprite shaders of a 2D game) */
+  private shaderDumpCache: { key: string; text: string } | null = null;
   shaderDump(maxProgs = 6, maxChars = 1200): string {
-    const gl = this.gl; if (!gl) return ''; const out: string[] = []; let k = 0;
+    const gl = this.gl; if (!gl) return ''; const key = Array.from(this.prog.keys()).slice(0, maxProgs).join(',') + '|' + this.badShaders + '|' + this.linkCount; if (this.shaderDumpCache && this.shaderDumpCache.key === key) return this.shaderDumpCache.text;   /* shader queries are GPU-process round trips: computed once per set of programs */
+    const out: string[] = []; let k = 0;
     for (const [pid, p] of this.prog) { if (k++ >= maxProgs) break; let sh: WebGLShader[] = []; try { sh = gl.getAttachedShaders(p) ?? []; } catch { /* lost */ }
       const parts = sh.map((s) => { const sid = this.shaderIds.get(s) ?? 0; const type = this.shaderType.get(sid) === GL.FRAGMENT_SHADER ? 'fragment' : 'vertex'; const src = (this.shaderSrc.get(sid) ?? '').trim(); let tr = ''; try { tr = (gl.getShaderSource(s) ?? '').trim(); } catch { /* lost */ }
         const log = gl.getShaderParameter(s, GL.COMPILE_STATUS) ? '' : ` COMPILE FAILED: ${(gl.getShaderInfoLog(s) || '').trim().slice(0, 300)}`; const ok = tr.replace(/\s+/g, ' ') === src.replace(/\s+/g, ' ');
@@ -418,17 +420,21 @@ export class GLBridge {
       const linked = gl.getProgramParameter(p, GL.LINK_STATUS) ? 'linked' : 'LINK FAILED: ' + (gl.getProgramInfoLog(p) || '').trim().slice(0, 300);
       let attrs = ''; try { const na = gl.getProgramParameter(p, GL.ACTIVE_ATTRIBUTES) as number; const al: string[] = []; for (let i = 0; i < na; i++) { const ai = gl.getActiveAttrib(p, i); if (ai) al.push(`${ai.name}@${gl.getAttribLocation(p, ai.name)}`); } const nu = gl.getProgramParameter(p, GL.ACTIVE_UNIFORMS) as number; const ul: string[] = []; for (let i = 0; i < nu; i++) { const ui = gl.getActiveUniform(p, i); if (ui) ul.push(ui.name); } attrs = ` attribs ${al.join(',') || '-'} uniforms ${ul.join(',') || '-'}`; } catch { /* lost */ }
       out.push(`program ${pid} (${linked}${attrs}):\n${parts.join('\n')}`); }
-    return out.length ? 'GL shaders:\n' + out.join('\n') : ''; }
+    const text = out.length ? 'GL shaders:\n' + out.join('\n') : ''; this.shaderDumpCache = { key, text }; return text; }
   /** a 6×6-sample look at the current draw framebuffer right after a traced draw call: did it put anything on the surface? */
   private texBrief(id: number): string { const ti = this.texInfo.get(id); if (!ti) return ''; const l0 = ti.levels.get(0); return ` (${l0 ? `${l0.w}x${l0.h}` : 'no level 0'}${ti.up ? ' ' + ti.up.split(' ').slice(0, 1).join('') + ' ' + (ti.up.match(/mean \d+ nonzero \d+%(?: alpha0 \d+%)?/)?.[0] ?? '') : ' never uploaded'})`; }
   private drawProbe(): string {
     const gl = this.gl; if (!gl) return '';
-    try { const vp = gl.getParameter(gl.VIEWPORT) as Int32Array; const w = Math.max(2, vp[2]), h = Math.max(2, vp[3]); const px = new Uint8Array(4); let lit = 0, a = 0, n = 0, mx = 0;
+    try { const vp = gl.getParameter(gl.VIEWPORT) as Int32Array; const w = Math.min(Math.max(1, vp[2]), 1024), h = Math.min(Math.max(1, vp[3]), 1024);   /* one readback of (up to) 1024×1024 of the draw framebuffer: a single GPU sync per draw */
       const readFb = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING) as WebGLFramebuffer | null, drawFb = gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING) as WebGLFramebuffer | null; if (readFb !== drawFb) gl.bindFramebuffer(gl.READ_FRAMEBUFFER, drawFb);
-      const packBuf = this.bound.pack; if (packBuf) gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null); gl.pixelStorei(gl.PACK_ALIGNMENT, 4);
-      for (let j = 0; j < 6; j++) for (let i = 0; i < 6; i++) { gl.readPixels(vp[0] + Math.floor((i + 0.5) * w / 6), vp[1] + Math.floor((j + 0.5) * h / 6), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px); const l = Math.max(px[0], px[1], px[2]); if (l > 16) lit++; if (px[3]) a++; if (l > mx) mx = l; n++; }
-      if (packBuf) gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this.buf.get(packBuf) ?? null); if (readFb !== drawFb) gl.bindFramebuffer(gl.READ_FRAMEBUFFER, readFb);
-      return ` → surface after draw: lit ${Math.round(lit * 100 / n)}% max ${mx} alpha>0 ${Math.round(a * 100 / n)}%`; } catch (e) { return ` → probe failed: ${(e as Error).message}`; } }
+      const packBuf = this.bound.pack; if (packBuf) gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null); gl.pixelStorei(gl.PACK_ALIGNMENT, 4); gl.pixelStorei(gl.PACK_ROW_LENGTH, 0); gl.pixelStorei(gl.PACK_SKIP_ROWS, 0); gl.pixelStorei(gl.PACK_SKIP_PIXELS, 0);
+      if (!this.probeBuf || this.probeBuf.length < w * h * 4) this.probeBuf = new Uint8Array(w * h * 4); const px = this.probeBuf;
+      gl.readPixels(vp[0] + ((Math.max(1, vp[2]) - w) >> 1), vp[1] + ((Math.max(1, vp[3]) - h) >> 1), w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      if (packBuf) gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this.buf.get(packBuf) ?? null); if (readFb !== drawFb) gl.bindFramebuffer(gl.READ_FRAMEBUFFER, readFb); gl.getError();   /* a readback error of ours must not reach the program's glGetError */
+      const step = Math.max(1, Math.floor(w * h / 16384)); let lit = 0, a = 0, n = 0, mx = 0;
+      for (let i = 0; i < w * h; i += step) { const o = i * 4; const l = Math.max(px[o], px[o + 1], px[o + 2]); if (l > 16) lit++; if (px[o + 3]) a++; if (l > mx) mx = l; n++; }
+      return ` → surface after draw: lit ${(lit * 100 / n).toFixed(1)}% max ${mx} alpha>0 ${(a * 100 / n).toFixed(1)}%`; } catch (e) { return ` → probe failed: ${(e as Error).message}`; } }
+  private probeBuf: Uint8Array | null = null;
   /** the first two vertices of an attribute that lives in a VBO (getBufferSubData) — for the draw trace */
   private vboSample(at: Attrib): string {
     const gl = this.gl; const b = this.buf.get(at.buffer); if (!gl || !b) return '';
@@ -659,7 +665,7 @@ export class GLBridge {
     this.def('glIsProgram', (a) => this.prog.has(U(a[0])) ? 1 : 0);
     this.def('glAttachShader', (a) => { const p = this.prog.get(U(a[0])), s = this.shader.get(U(a[1])); if (!p || !s) { this.setErr(GL.INVALID_VALUE); return; } g().attachShader(p, s); }); this.alias('glAttachObjectARB', 'glAttachShader');
     this.def('glDetachShader', (a) => { const p = this.prog.get(U(a[0])), s = this.shader.get(U(a[1])); if (p && s) g().detachShader(p, s); });
-    this.def('glLinkProgram', (a) => { const id = U(a[0]); const p = this.prog.get(id); if (!p) { this.setErr(GL.INVALID_VALUE); return; } g().linkProgram(p); const info = this.progInfoOf(id); info.uniforms.clear(); info.locs = []; if (!g().getProgramParameter(p, GL.LINK_STATUS)) { this.badShaders++; this.warn('link:' + id, `program ${id} failed to link: ${(g().getProgramInfoLog(p) || '').trim().slice(0, 400)}`); } }); this.alias('glLinkProgramARB', 'glLinkProgram');
+    this.def('glLinkProgram', (a) => { const id = U(a[0]); const p = this.prog.get(id); if (!p) { this.setErr(GL.INVALID_VALUE); return; } g().linkProgram(p); this.linkCount++; const info = this.progInfoOf(id); info.uniforms.clear(); info.locs = []; if (!g().getProgramParameter(p, GL.LINK_STATUS)) { this.badShaders++; this.warn('link:' + id, `program ${id} failed to link: ${(g().getProgramInfoLog(p) || '').trim().slice(0, 400)}`); } }); this.alias('glLinkProgramARB', 'glLinkProgram');
     this.def('glUseProgram', (a) => { const id = U(a[0]); const p = id ? this.prog.get(id) : null; if (id && !p) { this.setErr(GL.INVALID_VALUE); return; } g().useProgram(p ?? null); this.bound.program = id; }); this.alias('glUseProgramObjectARB', 'glUseProgram');
     this.def('glValidateProgram', (a) => { const p = this.prog.get(U(a[0])); if (p) g().validateProgram(p); });
     this.def('glGetProgramiv', (a) => { const id = U(a[0]), pn = U(a[1]); const p = this.prog.get(id); if (!p) { this.setErr(GL.INVALID_VALUE); return; }
