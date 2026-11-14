@@ -65,7 +65,7 @@ interface TexInfo { target: number; levels: Map<number, { w: number; h: number; 
 interface BufInfo { size: number; usage: number; version: number; shadow: Uint8Array | null; }
 interface Attrib { enabled: boolean; size: number; type: number; normalized: boolean; integer: boolean; stride: number; pointer: bigint; buffer: number; divisor: number; }
 interface MapInfo { buffer: number; target: number; offset: number; length: number; ptr: bigint; access: number; }
-interface ProgInfo { uniforms: Map<string, number>; locs: WebGLUniformLocation[]; sources: Map<number, string>; }
+interface ProgInfo { uniforms: Map<string, number>; locs: WebGLUniformLocation[]; sources: Map<number, { sid: number; src: string; compiled: string }>; }   /* stage (GL_VERTEX_SHADER / GL_FRAGMENT_SHADER) → source as it was at link time: games detach and delete their shaders right after linking */
 
 function typeBytes(type: number): number {
   switch (type) {
@@ -190,7 +190,17 @@ export class GLBridge {
       else if (/^glUniformMatrix[234]fv$/.test(name)) { const k = name[15] === '2' ? 4 : name[15] === '3' ? 9 : 16; const v = this.f32(a[3], k * Math.max(1, I(a[1]))); extra = ' m=[' + (v ? Array.from(v.slice(0, k)).map((x) => x.toPrecision(4)).join(',') : '?') + ']'; }
       else if (/^glUniform[1-4]fv$/.test(name)) { const k = Number(name[9]) * Math.max(1, I(a[1])); const v = this.f32(a[2], Math.min(k, 16)); extra = ' v=[' + (v ? Array.from(v).map((x) => x.toPrecision(4)).join(',') : '?') + ']'; }
       else if (/^glTex(Sub)?Image2D$/.test(name)) { const sub = name === 'glTexSubImage2D'; const w = I(a[sub ? 4 : 3]), h = I(a[sub ? 5 : 4]), fmt = U(a[6]), type = U(a[7]), ptr = a[8]; const bpp = fmt === GL.RGBA || fmt === 0x80E1 ? 4 : fmt === GL.RGB ? 3 : 1; const len = Math.min(w * h * bpp, 1 << 20); const v = ptr && this.bound.unpack === 0 ? this.u8(ptr, len) : null; let nz = 0; if (v) for (let i = 0; i < v.length; i += 7) if (v[i]) nz++; extra = ` ${w}x${h} fmt=0x${fmt.toString(16)} type=0x${type.toString(16)} ptr=0x${ptr.toString(16)} nonzero≈${v ? Math.round(nz * 7 / Math.max(1, v.length) * 100) : '?'}%`; }
-      else if (/^glDrawArrays$|^glDrawElements$/.test(name)) {
+      else if (/^glDrawArrays$|^glDrawElements$/.test(name)) extra = this.drawState();
+    } catch (e) { extra = ' (trace error: ' + (e as Error).message + ')'; }
+    const line = `[gltrace] ${name}(${ints.join(', ')})${extra}`;
+    this.log(line + '\n'); const gt = globalThis as unknown as { __gltrace?: string[] }; (gt.__gltrace ??= []).push(line);
+    if (this.traceLeft === 0) this.log('[gltrace] --- end of trace ---\n');
+  }
+  /** the state a draw call sees: viewport, program, blend/scissor/depth, bound texture and the first two vertices of every enabled attribute (client pointer or VBO) */
+  private drawState(): string {
+    let extra = '';
+    {
+      {
         const attrs = this.curAttribs(); const parts: string[] = [];
         for (let i = 0; i < attrs.length; i++) { const at = attrs[i]; if (!at.enabled) continue;
           let sample = ''; if (!at.buffer && at.pointer && at.type === GL.FLOAT) { const st = at.stride || at.size * 4; const v0 = this.f32(at.pointer, at.size), v1 = this.f32(at.pointer + BigInt(st), at.size); sample = ' v0=[' + (v0 ? Array.from(v0).map((x) => x.toPrecision(4)).join(',') : '?') + '] v1=[' + (v1 ? Array.from(v1).map((x) => x.toPrecision(4)).join(',') : '?') + ']'; }
@@ -198,19 +208,25 @@ export class GLBridge {
           else if (at.buffer) sample = this.vboSample(at);
           parts.push(`a${i}:${at.size}x0x${at.type.toString(16)}${at.normalized ? 'n' : ''} stride=${at.stride} ${at.buffer ? 'vbo' + at.buffer + '+' + at.pointer.toString() : 'ptr=0x' + at.pointer.toString(16)}${sample}`); }
         const gl = this.gl!; const prog = gl.getParameter(gl.CURRENT_PROGRAM) as WebGLProgram | null; const vp = Array.from(gl.getParameter(gl.VIEWPORT) as Int32Array).join(',');
-        extra = ` viewport=[${vp}] prog=${prog ? 'yes' : 'NONE'} blend=${gl.isEnabled(gl.BLEND)} scissor=${gl.isEnabled(gl.SCISSOR_TEST)} depth=${gl.isEnabled(gl.DEPTH_TEST)} tex2d=${this.texUnits[0]?.get(GL.TEXTURE_2D) ?? 0}${this.texBrief(this.texUnits[0]?.get(GL.TEXTURE_2D) ?? 0)} | ${parts.join(' | ')}`;
+        extra = ` viewport=[${vp}] prog=${prog ? this.bound.program : 'NONE'} blend=${gl.isEnabled(gl.BLEND)} scissor=${gl.isEnabled(gl.SCISSOR_TEST)} depth=${gl.isEnabled(gl.DEPTH_TEST)} tex2d=${this.texUnits[0]?.get(GL.TEXTURE_2D) ?? 0}${this.texBrief(this.texUnits[0]?.get(GL.TEXTURE_2D) ?? 0)} | ${parts.join(' | ')}`;
       }
-    } catch (e) { extra = ' (trace error: ' + (e as Error).message + ')'; }
-    const line = `[gltrace] ${name}(${ints.join(', ')})${extra}`;
-    this.log(line + '\n'); const gt = globalThis as unknown as { __gltrace?: string[] }; (gt.__gltrace ??= []).push(line);
-    if (this.traceLeft === 0) this.log('[gltrace] --- end of trace ---\n');
+    }
+    return extra;
+  }
+  /** vertex digest: the first draws of frames 241 and 1201 (right after the surface probes) land in the Report by themselves — what the program feeds the GPU
+   *  (vertex colours with alpha 0, texcoords, positions outside the viewport, no program) is visible without pressing the trace button */
+  private digestLeft = 0; private digests: string[] = [];
+  private digestDraw(kind: string, count: number): void {
+    if (this.digestLeft <= 0) return; this.digestLeft--;
+    try { this.digests.push(`f${this.frameNo} ${kind}(${count})${this.drawState()}`); } catch (e) { this.digests.push(`f${this.frameNo} ${kind}: digest failed (${(e as Error).message})`); }
+    if (this.digests.length > 24) this.digests.splice(0, this.digests.length - 24);
   }
   /** trace the next presented frame's GL calls into the log (Report tab button on the phone, where localStorage is out of reach) */
   armTrace(calls = 1500) { this.traceAfter = this.frameNo + 1; this.traceLeft = -calls; this.log(`[gl] call trace armed: next frame (${this.frameNo + 1}), ${calls} calls\n`); }
   /** running totals for the report: frames presented through GL, draws, programs/shaders/textures/framebuffers created, shader failures */
   summary(): string { const gl = this.gl; if (!gl) return ''; let vp = '', prog = '', fbo = '';
     try { vp = Array.from(gl.getParameter(gl.VIEWPORT) as Int32Array).join(','); prog = gl.getParameter(gl.CURRENT_PROGRAM) ? 'yes' : 'none'; fbo = gl.getParameter(gl.FRAMEBUFFER_BINDING) ? 'offscreen' : 'default'; } catch { /* lost context */ }
-    return `GL: ${this.lost || gl.isContextLost() ? 'CONTEXT LOST · ' : ''}${this.frameNo} frames presented · ${this.draws} draw calls · ${this.prog.size} programs · ${this.shader.size} shaders · ${this.badShaders} shader/link failures · surface ${this.width}x${this.height} · viewport [${vp}] · program ${prog} · framebuffer ${fbo} · ${this.describeRenderer()}${this.probes.length ? '\nGL surface probes (16×16 samples of the presented frame): ' + this.probes.join(' | ') : ''}` + (this.textureTable() ? '\n' + this.textureTable() : '') + (this.shaderDump() ? '\n' + this.shaderDump() : ''); }
+    return `GL: ${this.lost || gl.isContextLost() ? 'CONTEXT LOST · ' : ''}${this.frameNo} frames presented · ${this.draws} draw calls · ${this.prog.size} programs · ${this.shader.size} shaders · ${this.badShaders} shader/link failures · surface ${this.width}x${this.height} · viewport [${vp}] · program ${prog} · framebuffer ${fbo} · ${this.describeRenderer()}${this.probes.length ? '\nGL surface probes (16×16 samples of the presented frame): ' + this.probes.join(' | ') : ''}${this.digests.length ? '\nGL vertex digest (first draws of the frame after a probe; v0/v1 = the first two vertices of each attribute, 0x1401n = normalized bytes):\n  ' + this.digests.join('\n  ') : ''}` + (this.textureTable() ? '\n' + this.textureTable() : '') + (this.shaderDump() ? '\n' + this.shaderDump() : ''); }
   private draws = 0; private badShaders = 0; private linkCount = 0;
   private describeRenderer(): string { const gl = this.gl!; const dbg = gl.getExtension('WEBGL_debug_renderer_info'); return dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : String(gl.getParameter(gl.RENDERER)); }
   probe(id: number): number { return this.impl[id] ? 1 : 0; }
@@ -261,7 +277,7 @@ export class GLBridge {
   markFrame(w: number, h: number): void {
     if (!this.lost && this.gl && this.frameNo % 30 === 0 && this.gl.isContextLost()) { this.lost = true; this.log(`[gl] the WebGL2 context was LOST at frame ${this.frameNo} after ${this.draws} draws (GPU reset, memory pressure or the app went to the background): every GL call fails from here on — restart the program\n`); }
     this.frameNo++; const gt = globalThis as unknown as { __gltrace?: string[] };
-    if (this.frameNo === 30 || this.frameNo === 240 || this.frameNo === 1200) { this.probeSurface(w, h);
+    if (this.frameNo === 30 || this.frameNo === 240 || this.frameNo === 1200) { this.probeSurface(w, h); if (this.frameNo >= 240) this.digestLeft = 8;
       /* a dark surface after 240 presented frames with draw calls going on → record the next frame by itself, so the Report already carries the trace */
       if ((this.frameNo === 240 || this.frameNo === 1200) && this.draws > 0 && this.traceLeft <= 0 && this.traceAfter < 0 && / max (\d+) /.exec(this.probes[this.probes.length - 1] ?? '')?.[1] !== undefined && Number(/ max (\d+) /.exec(this.probes[this.probes.length - 1])![1]) < 16) { this.log(`[gl] surface black at frame ${this.frameNo} with draw calls going on: tracing the next frame automatically\n`); this.armTrace(1500); } }
     if (this.traceLeft < 0 && this.frameNo >= this.traceAfter) { this.traceLeft = -this.traceLeft; this.traceAfter = -1; const l = `[gltrace] --- frame ${this.frameNo}: tracing ${this.traceLeft} calls (surface ${this.width}x${this.height}, present ${w}x${h}) ---`; this.log(l + '\n'); (gt.__gltrace ??= []).push(l); }
@@ -414,8 +430,12 @@ export class GLBridge {
     const gl = this.gl; if (!gl) return ''; const key = Array.from(this.prog.keys()).slice(0, maxProgs).join(',') + '|' + this.badShaders + '|' + this.linkCount; if (this.shaderDumpCache && this.shaderDumpCache.key === key) return this.shaderDumpCache.text;   /* shader queries are GPU-process round trips: computed once per set of programs */
     const out: string[] = []; let k = 0;
     for (const [pid, p] of this.prog) { if (k++ >= maxProgs) break; let sh: WebGLShader[] = []; try { sh = gl.getAttachedShaders(p) ?? []; } catch { /* lost */ }
-      const parts = sh.map((s) => { const sid = this.shaderIds.get(s) ?? 0; const type = this.shaderType.get(sid) === GL.FRAGMENT_SHADER ? 'fragment' : 'vertex'; const src = (this.shaderSrc.get(sid) ?? '').trim(); let tr = ''; try { tr = (gl.getShaderSource(s) ?? '').trim(); } catch { /* lost */ }
-        const log = gl.getShaderParameter(s, GL.COMPILE_STATUS) ? '' : ` COMPILE FAILED: ${(gl.getShaderInfoLog(s) || '').trim().slice(0, 300)}`; const ok = tr.replace(/\s+/g, ' ') === src.replace(/\s+/g, ' ');
+      const snap = this.progInfo.get(pid)?.sources; const stages: { type: string; sid: number; src: string; tr: string; log: string }[] = [];
+      for (const s of sh) { const sid = this.shaderIds.get(s) ?? 0; let st = this.shaderType.get(sid) ?? 0; try { if (!st) st = gl.getShaderParameter(s, GL.SHADER_TYPE) as number; } catch { /* lost */ } let tr = ''; try { tr = (gl.getShaderSource(s) ?? '').trim(); } catch { /* lost */ }
+        let log = ''; try { log = gl.getShaderParameter(s, GL.COMPILE_STATUS) ? '' : ` COMPILE FAILED: ${(gl.getShaderInfoLog(s) || '').trim().slice(0, 300)}`; } catch { /* lost */ }
+        const snapped = snap?.get(st); stages.push({ type: st === GL.FRAGMENT_SHADER ? 'fragment' : 'vertex', sid: sid || snapped?.sid || 0, src: (this.shaderSrc.get(sid) ?? snapped?.src ?? '').trim(), tr, log }); }
+      if (!stages.length && snap) for (const [st, v] of snap) stages.push({ type: st === GL.FRAGMENT_SHADER ? 'fragment' : 'vertex', sid: v.sid, src: v.src.trim(), tr: v.compiled.trim(), log: ' (detached and deleted after linking — source as it was at link time)' });
+      const parts = stages.map(({ type, sid, src, tr, log }) => { const ok = tr.replace(/\s+/g, ' ') === src.replace(/\s+/g, ' ');
         return `  [${type} shader ${sid}${log}]\n${src.slice(0, maxChars)}${src.length > maxChars ? '\n  …' : ''}${ok ? '' : `\n  [as compiled for WebGL2]\n${tr.slice(0, maxChars)}${tr.length > maxChars ? '\n  …' : ''}`}`; });
       const linked = gl.getProgramParameter(p, GL.LINK_STATUS) ? 'linked' : 'LINK FAILED: ' + (gl.getProgramInfoLog(p) || '').trim().slice(0, 300);
       let attrs = ''; try { const na = gl.getProgramParameter(p, GL.ACTIVE_ATTRIBUTES) as number; const al: string[] = []; for (let i = 0; i < na; i++) { const ai = gl.getActiveAttrib(p, i); if (ai) al.push(`${ai.name}@${gl.getAttribLocation(p, ai.name)}`); } const nu = gl.getProgramParameter(p, GL.ACTIVE_UNIFORMS) as number; const ul: string[] = []; for (let i = 0; i < nu; i++) { const ui = gl.getActiveUniform(p, i); if (ui) ul.push(ui.name); } attrs = ` attribs ${al.join(',') || '-'} uniforms ${ul.join(',') || '-'}`; } catch { /* lost */ }
@@ -665,7 +685,7 @@ export class GLBridge {
     this.def('glIsProgram', (a) => this.prog.has(U(a[0])) ? 1 : 0);
     this.def('glAttachShader', (a) => { const p = this.prog.get(U(a[0])), s = this.shader.get(U(a[1])); if (!p || !s) { this.setErr(GL.INVALID_VALUE); return; } g().attachShader(p, s); }); this.alias('glAttachObjectARB', 'glAttachShader');
     this.def('glDetachShader', (a) => { const p = this.prog.get(U(a[0])), s = this.shader.get(U(a[1])); if (p && s) g().detachShader(p, s); });
-    this.def('glLinkProgram', (a) => { const id = U(a[0]); const p = this.prog.get(id); if (!p) { this.setErr(GL.INVALID_VALUE); return; } g().linkProgram(p); this.linkCount++; const info = this.progInfoOf(id); info.uniforms.clear(); info.locs = []; if (!g().getProgramParameter(p, GL.LINK_STATUS)) { this.badShaders++; this.warn('link:' + id, `program ${id} failed to link: ${(g().getProgramInfoLog(p) || '').trim().slice(0, 400)}`); } }); this.alias('glLinkProgramARB', 'glLinkProgram');
+    this.def('glLinkProgram', (a) => { const id = U(a[0]); const p = this.prog.get(id); if (!p) { this.setErr(GL.INVALID_VALUE); return; } g().linkProgram(p); this.linkCount++; const info = this.progInfoOf(id); info.uniforms.clear(); info.locs = []; try { for (const sh of g().getAttachedShaders(p) ?? []) { const sid = this.shaderIds.get(sh) ?? 0; const st = this.shaderType.get(sid) ?? 0; if (st) info.sources.set(st, { sid, src: this.shaderSrc.get(sid) ?? '', compiled: g().getShaderSource(sh) ?? '' }); } } catch { /* lost */ } if (!g().getProgramParameter(p, GL.LINK_STATUS)) { this.badShaders++; this.warn('link:' + id, `program ${id} failed to link: ${(g().getProgramInfoLog(p) || '').trim().slice(0, 400)}`); } }); this.alias('glLinkProgramARB', 'glLinkProgram');
     this.def('glUseProgram', (a) => { const id = U(a[0]); const p = id ? this.prog.get(id) : null; if (id && !p) { this.setErr(GL.INVALID_VALUE); return; } g().useProgram(p ?? null); this.bound.program = id; }); this.alias('glUseProgramObjectARB', 'glUseProgram');
     this.def('glValidateProgram', (a) => { const p = this.prog.get(U(a[0])); if (p) g().validateProgram(p); });
     this.def('glGetProgramiv', (a) => { const id = U(a[0]), pn = U(a[1]); const p = this.prog.get(id); if (!p) { this.setErr(GL.INVALID_VALUE); return; }
@@ -814,7 +834,7 @@ export class GLBridge {
     if ((m.access & GL.MAP_WRITE_BIT) && !(m.access & GL.MAP_FLUSH_EXPLICIT_BIT)) { const d = this.u8(m.ptr, m.length); if (d) { gl.bufferSubData(target, m.offset, d); const info = this.bufInfo.get(id); if (info) { info.version++; info.shadow = null; } } }
     this.mem!.free(m.ptr); return 1; }
   private drawArrays(mode: number, first: number, count: number, instances: number) {
-    this.draws++; const gl = this.gl!; if (count <= 0) return;
+    this.draws++; const gl = this.gl!; if (count <= 0) return; if (this.digestLeft > 0) this.digestDraw('glDrawArrays', count);
     if (this.ff.ownsDraw()) { if (instances > 1) this.warn('ffinst', 'instanced draw with fixed-function vertex arrays: drawn once'); this.ff.drawArrays(mode, first, count); return; }
     if (mode === GL.QUADS) { const nq = count >> 2; const prep = this.prepareDraw(first, nq * 4, null); if (!prep.ok) return; const ibo = this.quadIndices(nq); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
       if (first === 0) { if (instances > 1) gl.drawElementsInstanced(gl.TRIANGLES, nq * 6, gl.UNSIGNED_INT, 0, instances); else gl.drawElements(gl.TRIANGLES, nq * 6, gl.UNSIGNED_INT, 0); }
@@ -825,7 +845,7 @@ export class GLBridge {
     if (instances > 1) gl.drawArraysInstanced(mode, first, count, instances); else gl.drawArrays(mode, first, count); }
   private drawElements(mode: number, count: number, type: number, indices: bigint, instances: number, baseVertex: number) {
     this.draws++;
-    const gl = this.gl!; if (count <= 0) return;
+    const gl = this.gl!; if (count <= 0) return; if (this.digestLeft > 0) this.digestDraw('glDrawElements', count);
     if (this.ff.ownsDraw() && !baseVertex) { this.ff.drawElements(mode, count, type, indices); return; }
     if (baseVertex) { this.setErr(GL.INVALID_OPERATION); this.warn('basevertex', 'glDrawElementsBaseVertex with a non-zero base vertex: not available in WebGL2 → GL_INVALID_OPERATION'); return; }
     if (mode === GL.QUADS) {   // expand the quad index list into triangles (index data read back from the element buffer when needed)
