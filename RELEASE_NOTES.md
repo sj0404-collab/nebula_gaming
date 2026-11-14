@@ -1,3 +1,33 @@
+# v1.51.5 — the real reason SteamWorld Dig's draws vanished: one buffer, two roles
+
+The v1.51.4 report from the phone finally isolated it: every `glDrawElements` of the game (streaming VBO 20 / VBO 18 +
+element buffer **1**, `GL_UNSIGNED_SHORT`) left **0 lit pixels** although the vertex digest showed sane positions,
+white colours, opaque textures and correct matrices — while the single client-array `glDrawArrays` of the same frame
+painted the surface white.  The common factor of all failing draws was element buffer 1, which the trace never saw
+uploaded: it was created once at start-up.
+
+* **Root cause — WebGL2's "one kind per buffer" rule.** Desktop OpenGL lets a program fill an index buffer through
+  `GL_ARRAY_BUFFER` (a generic "upload this buffer" helper does exactly that) and bind it later as
+  `GL_ELEMENT_ARRAY_BUFFER`.  WebGL2 forbids it: the first binding fixes the object's kind, every later
+  `bindBuffer(ELEMENT_ARRAY_BUFFER, …)` fails with `GL_INVALID_OPERATION` and leaves **no element buffer bound**, so
+  each indexed draw fails silently and draws nothing.  The bridge now keeps a **synchronised twin** for any buffer the
+  program uses in both roles: the twin is created on the first cross-kind bind (data copied on the GPU side via
+  `getBufferSubData`), every upload (`glBufferData` / `glBufferSubData` / unmap / flush / `glCopyBufferSubData`) marks
+  the other copy stale and the stale copy is refreshed the next time it is bound (immediately if it is bound right
+  now).  `glCopyBufferSubData` across kinds goes through a CPU hop instead of the forbidden GPU copy.  The Report
+  lists such buffers (`bufdual:<id>` warning).
+* **glsprite q5** — the test now creates an index buffer through `GL_ARRAY_BUFFER`, draws with it as the element
+  buffer, and on frame 1 re-fills it through `GL_ARRAY_BUFFER` again while it is still bound as the element buffer:
+  frame 0 must be magenta, frame 2 cyan.  Verified pixel-exact in the browser (sitecheck) for x86 and x64.
+* **Deep per-draw digest in the Report** — the first eight draws of frames 30/240/1200 now also record: the GL error
+  raised by the draw itself (with a plain-language reason), colour mask / stencil / rasterizer-discard / coverage /
+  cull / depth state, framebuffer completeness, the *real* element-buffer binding against what the bridge believes
+  (this is the line that would have shown "GL has none, bridge thinks 1"), index statistics read back from the element
+  buffer (range, degenerate triangles, first indices), vertex-attribute ranges against the VBO sizes, the bounding box
+  of the positions actually drawn, every `mat4` uniform of the program, and a `GL_ANY_SAMPLES_PASSED` occlusion query
+  telling whether any fragment of the draw reached the framebuffer.
+* **Still true / limits.** Only the buffer-kind rule is fixed here; speed on the phone is unchanged in this release.
+
 # v1.51.4 — the sprite-engine GL path is proven pixel by pixel; the Report reads the vertices by itself
 
 The v1.51.3 report from the phone for SteamWorld Dig showed something new: **no lost context**, 36 textures with real

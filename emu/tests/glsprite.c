@@ -109,7 +109,7 @@ int main(void) {
   quad(verts, 40, 40, 240, 200, 0.05f, 0.1f, 0.45f, 0.9f, 255, 255, 255, 255);         /* q1: green part of the texture, white colour → green */
   quad(verts + 4, 300, 40, 600, 200, 0.55f, 0.1f, 0.95f, 0.9f, 128, 128, 128, 255);    /* q2: blue part × grey colour → (0,0,128) */
   quad(colq, 40, 260, 240, 420, 0, 0, 0, 0, 255, 255, 0, 255);                         /* q3: colour program → yellow */
-  quad(dual, 40, 430, 600, 470, 0, 0, 0, 0, 255, 0, 255, 255); quad(dual + 4, 40, 430, 600, 470, 0, 0, 0, 0, 0, 255, 255, 255);   /* q5: magenta (indices 0..3), cyan (indices 4..7) */
+  quad(dual, 250, 40, 290, 420, 0, 0, 0, 0, 255, 0, 255, 255); quad(dual + 4, 250, 40, 290, 420, 0, 0, 0, 0, 0, 255, 255, 255);   /* q5: magenta (indices 0..3), cyan (indices 4..7) */
   { Vtx q[4]; quad(q, 300, 260, 600, 420, 0.05f, 0.1f, 0.45f, 0.9f, 255, 255, 255, 255); cli[0] = q[0]; cli[1] = q[1]; cli[2] = q[2]; cli[3] = q[0]; cli[4] = q[2]; cli[5] = q[3]; }   /* q4: client arrays → green */
   int ok = 0;
   for (int frame = 0; frame < 3; frame++) {
@@ -138,7 +138,7 @@ int main(void) {
     glDrawArrays(GL_TRIANGLES, 0, 6);
     GLenum e = glGetError(); if (e) printf("frame %d: GL error 0x%x\n", frame, e);
     unsigned char q1[4] = {0}, q2[4] = {0}, q3[4] = {0}, q4[4] = {0}, q5[4] = {0}, bg[4] = {0};
-    glReadPixels(140, 120, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, q1); glReadPixels(450, 120, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, q2); glReadPixels(140, 340, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, q3); glReadPixels(450, 340, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, q4); glReadPixels(10, 10, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, bg); glReadPixels(320, 450, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, q5);
+    glReadPixels(140, 120, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, q1); glReadPixels(450, 120, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, q2); glReadPixels(140, 340, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, q3); glReadPixels(450, 340, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, q4); glReadPixels(10, 10, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, bg); glReadPixels(270, 230, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, q5);
     if (frame == 0 || frame == 2) {
       printf("frame %d pixels: q1 tex×white=(%d,%d,%d,%d) q2 tex×grey=(%d,%d,%d,%d) q3 colour=(%d,%d,%d,%d) q4 client=(%d,%d,%d,%d) q5 ibo-via-array=(%d,%d,%d,%d) bg=(%d,%d,%d,%d)\n", frame, q1[0], q1[1], q1[2], q1[3], q2[0], q2[1], q2[2], q2[3], q3[0], q3[1], q3[2], q3[3], q4[0], q4[1], q4[2], q4[3], q5[0], q5[1], q5[2], q5[3], bg[0], bg[1], bg[2], bg[3]);
       int o1 = near3(q1, 0, 255, 0) && q1[3] > 200, o2 = near3(q2, 0, 0, 128) && q2[3] > 200, o3 = near3(q3, 255, 255, 0), o4 = near3(q4, 0, 255, 0), ob = bg[0] < 20 && bg[1] < 20 && bg[2] < 20, o5 = frame == 0 ? near3(q5, 255, 0, 255) : near3(q5, 0, 255, 255);
