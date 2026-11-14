@@ -162,6 +162,7 @@ export class GLBridge {
         const gl = canvas.getContext('webgl2', { alpha: true, depth: true, stencil: true, antialias: false, preserveDrawingBuffer: true, premultipliedAlpha: false, powerPreference: 'high-performance' }) as WebGL2RenderingContext | null;
         if (!gl) { this.log('[gl] WebGL2 is not available on this device: OpenGL programs cannot create a context\n'); return 0; }
         this.gl = gl; this.canvas = canvas; this.width = w; this.height = h;
+        try { (canvas as unknown as EventTarget).addEventListener('webglcontextlost', (e) => { e.preventDefault(); if (!this.lost) { this.lost = true; this.log('[gl] the WebGL2 context was LOST (GPU reset, memory pressure or the app went to the background): every GL call fails from here on — restart the program\n'); } }); } catch { /* no events on this canvas */ }
         try { const t = typeof localStorage !== 'undefined' ? localStorage.getItem('nebula_gltrace') : null; if (t) { const [a, n] = t.split(':'); this.traceAfter = Number(a) || 0; this.traceLeft = -(Number(n) || 400); this.log(`[gl] call trace armed: after frame ${this.traceAfter}, ${-this.traceLeft} calls\n`); } } catch { /* no storage */ }
         this.s3tc = gl.getExtension('WEBGL_compressed_texture_s3tc'); this.aniso = gl.getExtension('EXT_texture_filter_anisotropic'); this.floatLinear = !!gl.getExtension('OES_texture_float_linear'); this.colorBufferFloat = !!gl.getExtension('EXT_color_buffer_float');
         gl.getExtension('EXT_float_blend'); gl.getExtension('OES_texture_half_float_linear');
@@ -209,7 +210,7 @@ export class GLBridge {
   /** running totals for the report: frames presented through GL, draws, programs/shaders/textures/framebuffers created, shader failures */
   summary(): string { const gl = this.gl; if (!gl) return ''; let vp = '', prog = '', fbo = '';
     try { vp = Array.from(gl.getParameter(gl.VIEWPORT) as Int32Array).join(','); prog = gl.getParameter(gl.CURRENT_PROGRAM) ? 'yes' : 'none'; fbo = gl.getParameter(gl.FRAMEBUFFER_BINDING) ? 'offscreen' : 'default'; } catch { /* lost context */ }
-    return `GL: ${this.frameNo} frames presented · ${this.draws} draw calls · ${this.prog.size} programs · ${this.shader.size} shaders · ${this.badShaders} shader/link failures · surface ${this.width}x${this.height} · viewport [${vp}] · program ${prog} · framebuffer ${fbo} · ${this.describeRenderer()}${this.probes.length ? '\nGL surface probes (16×16 samples of the presented frame): ' + this.probes.join(' | ') : ''}` + (this.textureTable() ? '\n' + this.textureTable() : '') + (this.shaderDump() ? '\n' + this.shaderDump() : ''); }
+    return `GL: ${this.lost || gl.isContextLost() ? 'CONTEXT LOST · ' : ''}${this.frameNo} frames presented · ${this.draws} draw calls · ${this.prog.size} programs · ${this.shader.size} shaders · ${this.badShaders} shader/link failures · surface ${this.width}x${this.height} · viewport [${vp}] · program ${prog} · framebuffer ${fbo} · ${this.describeRenderer()}${this.probes.length ? '\nGL surface probes (16×16 samples of the presented frame): ' + this.probes.join(' | ') : ''}` + (this.textureTable() ? '\n' + this.textureTable() : '') + (this.shaderDump() ? '\n' + this.shaderDump() : ''); }
   private draws = 0; private badShaders = 0;
   private describeRenderer(): string { const gl = this.gl!; const dbg = gl.getExtension('WEBGL_debug_renderer_info'); return dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : String(gl.getParameter(gl.RENDERER)); }
   probe(id: number): number { return this.impl[id] ? 1 : 0; }
@@ -256,7 +257,9 @@ export class GLBridge {
       this.probes.push(`f${this.frameNo} ${w}x${h}: mean ${Math.round(sum / n)} max ${max} lit ${Math.round(lit * 100 / n)}% alpha0 ${Math.round(alpha0 * 100 / n)}% clear(${cc[0].toFixed(2)},${cc[1].toFixed(2)},${cc[2].toFixed(2)}) blend ${gl.isEnabled(gl.BLEND) ? 'on' : 'off'} depth ${gl.isEnabled(gl.DEPTH_TEST) ? 'on' : 'off'} scissor ${gl.isEnabled(gl.SCISSOR_TEST) ? 'on' : 'off'} cull ${gl.isEnabled(gl.CULL_FACE) ? 'on' : 'off'} textures ${this.tex.size} tex2d ${gl.getParameter(gl.TEXTURE_BINDING_2D) ? 'bound' : 'none'} fbo ${gl.getParameter(gl.FRAMEBUFFER_BINDING) ? 'offscreen' : 'default'}`);
     } catch (e) { this.probes.push(`f${this.frameNo}: probe failed (${(e as Error).message})`); }
   }
+  private lost = false;
   markFrame(w: number, h: number): void {
+    if (!this.lost && this.gl && this.frameNo % 30 === 0 && this.gl.isContextLost()) { this.lost = true; this.log('[gl] the WebGL2 context was LOST (GPU reset, memory pressure or the app went to the background): every GL call fails from here on — restart the program\n'); }
     this.frameNo++; const gt = globalThis as unknown as { __gltrace?: string[] };
     if (this.frameNo === 30 || this.frameNo === 240 || this.frameNo === 1200) { this.probeSurface(w, h);
       /* a dark surface after 240 presented frames with draw calls going on → record the next frame by itself, so the Report already carries the trace */
