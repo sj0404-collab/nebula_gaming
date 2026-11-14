@@ -202,11 +202,11 @@ export class GLBridge {
     if (this.traceLeft === 0) this.log('[gltrace] --- end of trace ---\n');
   }
   /** trace the next presented frame's GL calls into the log (Report tab button on the phone, where localStorage is out of reach) */
-  armTrace(calls = 600) { this.traceAfter = this.frameNo + 1; this.traceLeft = -calls; this.log(`[gl] call trace armed: next frame (${this.frameNo + 1}), ${calls} calls\n`); }
+  armTrace(calls = 1500) { this.traceAfter = this.frameNo + 1; this.traceLeft = -calls; this.log(`[gl] call trace armed: next frame (${this.frameNo + 1}), ${calls} calls\n`); }
   /** running totals for the report: frames presented through GL, draws, programs/shaders/textures/framebuffers created, shader failures */
   summary(): string { const gl = this.gl; if (!gl) return ''; let vp = '', prog = '', fbo = '';
     try { vp = Array.from(gl.getParameter(gl.VIEWPORT) as Int32Array).join(','); prog = gl.getParameter(gl.CURRENT_PROGRAM) ? 'yes' : 'none'; fbo = gl.getParameter(gl.FRAMEBUFFER_BINDING) ? 'offscreen' : 'default'; } catch { /* lost context */ }
-    return `GL: ${this.frameNo} frames presented · ${this.draws} draw calls · ${this.prog.size} programs · ${this.shader.size} shaders · ${this.badShaders} shader/link failures · surface ${this.width}x${this.height} · viewport [${vp}] · program ${prog} · framebuffer ${fbo} · ${this.describeRenderer()}`; }
+    return `GL: ${this.frameNo} frames presented · ${this.draws} draw calls · ${this.prog.size} programs · ${this.shader.size} shaders · ${this.badShaders} shader/link failures · surface ${this.width}x${this.height} · viewport [${vp}] · program ${prog} · framebuffer ${fbo} · ${this.describeRenderer()}${this.probes.length ? '\nGL surface probes (16×16 samples of the presented frame): ' + this.probes.join(' | ') : ''}`; }
   private draws = 0; private badShaders = 0;
   private describeRenderer(): string { const gl = this.gl!; const dbg = gl.getExtension('WEBGL_debug_renderer_info'); return dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : String(gl.getParameter(gl.RENDERER)); }
   probe(id: number): number { return this.impl[id] ? 1 : 0; }
@@ -234,12 +234,36 @@ export class GLBridge {
   swapFence(): void { const gl = this.gl; if (!gl) return; const f = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); if (f) this.fences.push(f); gl.flush(); }
   /** the WebGL drawing surface (null until the program created a context) — composited on the GPU by present.ts */
   surface(): OffscreenCanvas | HTMLCanvasElement | null { return this.gl ? this.canvas : null; }
+  /** one presented frame (both paths: GPU composition of the surface and the readback fallback) — frame counter, call-trace arming,
+   *  and at a few frames a 16×16-sample brightness probe of the default framebuffer (tells "the surface is black" from "the surface is fine
+   *  but not shown" without a screenshot) */
+  private probes: string[] = [];
+  private probeSurface(w: number, h: number): void {
+    const gl = this.gl; if (!gl || w < 2 || h < 2) return;
+    try {
+      const readFb = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING) as WebGLFramebuffer | null; gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+      const packBuf = this.bound.pack; if (packBuf) gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      gl.pixelStorei(gl.PACK_ALIGNMENT, 4); gl.pixelStorei(gl.PACK_ROW_LENGTH, 0); gl.pixelStorei(gl.PACK_SKIP_ROWS, 0); gl.pixelStorei(gl.PACK_SKIP_PIXELS, 0);
+      const px = new Uint8Array(4); let sum = 0, max = 0, lit = 0, n = 0, alpha0 = 0;
+      for (let j = 0; j < 16; j++) for (let i = 0; i < 16; i++) { gl.readPixels(Math.floor((i + 0.5) * w / 16), Math.floor((j + 0.5) * h / 16), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+        const l = Math.max(px[0], px[1], px[2]); sum += l; if (l > max) max = l; if (l > 16) lit++; if (px[3] === 0) alpha0++; n++; }
+      if (packBuf) gl.bindBuffer(gl.PIXEL_PACK_BUFFER, packBuf); gl.bindFramebuffer(gl.READ_FRAMEBUFFER, readFb);
+      const cc = gl.getParameter(gl.COLOR_CLEAR_VALUE) as Float32Array;
+      this.probes.push(`f${this.frameNo} ${w}x${h}: mean ${Math.round(sum / n)} max ${max} lit ${Math.round(lit * 100 / n)}% alpha0 ${Math.round(alpha0 * 100 / n)}% clear(${cc[0].toFixed(2)},${cc[1].toFixed(2)},${cc[2].toFixed(2)}) blend ${gl.isEnabled(gl.BLEND) ? 'on' : 'off'} depth ${gl.isEnabled(gl.DEPTH_TEST) ? 'on' : 'off'} scissor ${gl.isEnabled(gl.SCISSOR_TEST) ? 'on' : 'off'} cull ${gl.isEnabled(gl.CULL_FACE) ? 'on' : 'off'} textures ${this.tex.size} tex2d ${gl.getParameter(gl.TEXTURE_BINDING_2D) ? 'bound' : 'none'} fbo ${gl.getParameter(gl.FRAMEBUFFER_BINDING) ? 'offscreen' : 'default'}`);
+    } catch (e) { this.probes.push(`f${this.frameNo}: probe failed (${(e as Error).message})`); }
+  }
+  markFrame(w: number, h: number): void {
+    this.frameNo++; const gt = globalThis as unknown as { __gltrace?: string[] };
+    if (this.frameNo === 30 || this.frameNo === 240 || this.frameNo === 1200) { this.probeSurface(w, h);
+      /* a dark surface after 240 presented frames with draw calls going on → record the next frame by itself, so the Report already carries the trace */
+      if (this.frameNo === 240 && this.draws > 0 && this.traceLeft === 0 && this.traceAfter < 0 && / max (\d+) /.exec(this.probes[this.probes.length - 1] ?? '')?.[1] !== undefined && Number(/ max (\d+) /.exec(this.probes[this.probes.length - 1])![1]) < 16) { this.log('[gl] surface still black after 240 frames with draw calls: tracing the next frame automatically\n'); this.armTrace(1500); } }
+    if (this.traceLeft < 0 && this.frameNo >= this.traceAfter) { this.traceLeft = -this.traceLeft; const l = `[gltrace] --- frame ${this.frameNo}: tracing ${this.traceLeft} calls (surface ${this.width}x${this.height}, present ${w}x${h}) ---`; this.log(l + '\n'); (gt.__gltrace ??= []).push(l); }
+    else if (this.traceLeft > 0) { const l = `[gltrace] --- present frame ${this.frameNo} (${w}x${h}) ---`; this.log(l + '\n'); (gt.__gltrace ??= []).push(l); }
+  }
   /** host_gl_present fallback (no presenter on screen): default framebuffer → BGRA rows (top first) at dst (wasm offset) */
   present(dst: Uint32Array, w: number, h: number): void {
     const gl = this.gl; if (!gl) return;
-    this.frameNo++; const gt = globalThis as unknown as { __gltrace?: string[] };
-    if (this.traceLeft < 0 && this.frameNo >= this.traceAfter) { this.traceLeft = -this.traceLeft; const l = `[gltrace] --- frame ${this.frameNo}: tracing ${this.traceLeft} calls (surface ${this.width}x${this.height}, present ${w}x${h}) ---`; this.log(l + '\n'); (gt.__gltrace ??= []).push(l); }
-    else if (this.traceLeft > 0) { const l = `[gltrace] --- present frame ${this.frameNo} (${w}x${h}) ---`; this.log(l + '\n'); (gt.__gltrace ??= []).push(l); }
+    this.markFrame(w, h);
     const rgba = new Uint8Array(w * h * 4);
     const readFb = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);

@@ -279,7 +279,7 @@ export default function X64App() {
     const rt = new X64Runtime(); rtRef.current = rt;
     (window as unknown as { __x64?: X64Runtime }).__x64 = rt;   // debugging aid (e2e / devtools): the live runtime of the last opened Programs window
     rt.onConsole = (_fd, text) => { consoleBuf.current = (consoleBuf.current + text).slice(-60000); setConsoleText(consoleBuf.current); };
-    rt.onLog = (text) => { if (text.startsWith('[gltrace]')) { setGlTrace(l => [...l.slice(-1199), text.trimEnd()]); return; } setLog(l => [...l.slice(-199), text.trimEnd()]); };
+    rt.onLog = (text) => { if (text.startsWith('[gltrace]')) { setGlTrace(l => [...l.slice(-1599), text.trimEnd()]); return; } setLog(l => [...l.slice(-199), text.trimEnd()]); };
     rt.onStdinWait = (w) => { setWaitingStdin(w); if (w) { setTab('console'); setTimeout(() => stdinRef.current?.focus(), 30); } };
     rt.onPresent = (px, w, h) => { presenterRef.current?.present(px, w, h); setFrames(f => { if (f === 0 && autoTabRef.current) setTab('screen'); return f + 1; }); };
     rt.onGlPresent = (cv, x, y, w, h) => presenterRef.current?.setGl(cv, x, y, w, h) ?? false;
@@ -1134,7 +1134,7 @@ export default function X64App() {
           )}
           {tab === 'report' && (
             <div className="min-h-0 flex-1 overflow-auto p-4" data-x64-report>
-              {current ? <PeReport e={current} stats={stats} log={log} glTrace={glTrace} glSummary={rtRef.current?.glb.summary() ?? ''} onGlTrace={() => { setGlTrace([]); rtRef.current?.glb.armTrace(600); }} apiStats={apiStats} jit={jitInfo} consoleText={consoleText} storageDiag={storageDiag} runtime={{ packs: vcPacks, status: id => vcState[id]?.status ?? 'available', install: id => { const rt = rtRef.current; if (rt) void installVcPack(rt, id); }, busy: !!running || !!fetching }} /> : <div className="text-slate-400">Select an executable to see its compatibility report.</div>}
+              {current ? <PeReport e={current} stats={stats} log={log} glTrace={glTrace} glSummary={rtRef.current?.glb.summary() ?? ''} onGlTrace={() => { setGlTrace([]); rtRef.current?.glb.armTrace(1500); }} apiStats={apiStats} jit={jitInfo} consoleText={consoleText} storageDiag={storageDiag} runtime={{ packs: vcPacks, status: id => vcState[id]?.status ?? 'available', install: id => { const rt = rtRef.current; if (rt) void installVcPack(rt, id); }, busy: !!running || !!fetching }} /> : <div className="text-slate-400">Select an executable to see its compatibility report.</div>}
             </div>
           )}
           {/* status bar */}
