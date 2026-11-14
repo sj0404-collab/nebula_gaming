@@ -35,7 +35,8 @@ export interface FFHost {
   texIdOn(unit: number, target: number): number;          // GL name bound on a unit for a target (0 = none)
   texHasAlpha(id: number): boolean;
   bound(): { array: number; element: number; program: number; vao: number; unit: number };
-  bufObj(id: number): WebGLBuffer | null;
+  bufObj(id: number): WebGLBuffer | null;   // object usable at GL_ARRAY_BUFFER
+  elemObj(id: number): WebGLBuffer | null;  // object usable at GL_ELEMENT_ARRAY_BUFFER
   vaoObj(id: number): WebGLVertexArrayObject | null;
   progObj(id: number): WebGLProgram | null;
   callImpl(name: string, args: bigint[]): number | bigint | void;
@@ -595,7 +596,7 @@ export class FixedFunction {
   drawElements(mode: number, count: number, type: number, indices: bigint) {
     if (count <= 0 || this.inBegin) return; if (mode > E.POLYGON) { this.err(E.INVALID_ENUM); return; } const gl = this.h.gl(); const tb = type === E.UNSIGNED_BYTE ? 1 : type === E.UNSIGNED_SHORT ? 2 : 4;
     let idx: Uint32Array | Uint16Array | Uint8Array | null; const eb = this.h.bound().element;
-    if (eb) { const tmp = new Uint8Array(count * tb); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.h.bufObj(eb)); gl.getBufferSubData(gl.ELEMENT_ARRAY_BUFFER, Number(indices), tmp); idx = tb === 4 ? new Uint32Array(tmp.buffer) : tb === 2 ? new Uint16Array(tmp.buffer) : tmp; }
+    if (eb) { const tmp = new Uint8Array(count * tb); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.h.elemObj(eb)); gl.getBufferSubData(gl.ELEMENT_ARRAY_BUFFER, Number(indices), tmp); idx = tb === 4 ? new Uint32Array(tmp.buffer) : tb === 2 ? new Uint16Array(tmp.buffer) : tmp; }
     else { const v = this.h.view(indices, count * tb, type); if (!v) return; idx = v as Uint32Array; }
     let maxI = 0, minI = 0x7fffffff; for (let i = 0; i < idx.length; i++) { if (idx[i] > maxI) maxI = idx[i]; if (idx[i] < minI) minI = idx[i]; }
     const saved = this.enter(); if (this.bindArrays(0, maxI + 1)) this.emit(mode, count, idx, 0); this.leave(saved); }
@@ -619,7 +620,7 @@ export class FixedFunction {
     const gl = this.h.gl(); this.ensureObjects(); const b = this.h.bound();
     const saved = { vao: this.h.vaoObj(b.vao), prog: this.h.progObj(b.program), array: this.h.bufObj(b.array) };
     gl.bindVertexArray(this.vao); return saved; }
-  private leave(s: { vao: WebGLVertexArrayObject | null; prog: WebGLProgram | null; array: WebGLBuffer | null }) { const gl = this.h.gl(); gl.bindVertexArray(s.vao); gl.useProgram(s.prog); gl.bindBuffer(gl.ARRAY_BUFFER, s.array); const eb = this.h.bound().element; gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, eb ? this.h.bufObj(eb) : null); }
+  private leave(s: { vao: WebGLVertexArrayObject | null; prog: WebGLProgram | null; array: WebGLBuffer | null }) { const gl = this.h.gl(); gl.bindVertexArray(s.vao); gl.useProgram(s.prog); gl.bindBuffer(gl.ARRAY_BUFFER, s.array); const eb = this.h.bound().element; gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, eb ? this.h.elemObj(eb) : null); }
   /** choose/upload the program and issue the WebGL draw for a GL 1.x primitive (quads, polygons, polygon mode handled) */
   private emit(mode: number, count: number, idx: Uint32Array | Uint16Array | Uint8Array | null, first: number) {
     const gl = this.h.gl(); const prog = this.program(); if (!prog) return; this.uniforms(prog);

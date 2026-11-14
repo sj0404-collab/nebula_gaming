@@ -94,17 +94,22 @@ int main(void) {
   printf("uniforms: u_texture=%d u_PMatrix=%d u_MVMatrix=%d | colour: u_PMatrix=%d u_MVMatrix=%d\n", uTex, uP, uMV, cP, cMV);
   UseProgram(ptex); Uniform1i(uTex, 0);
   /* streaming VBO (refilled every frame), static USHORT index buffer */
-  GLuint vbo = 0, ibo = 0, vbo2 = 0; GenBuffers(1, &vbo); GenBuffers(1, &ibo); GenBuffers(1, &vbo2);
+  GLuint vbo = 0, ibo = 0, vbo2 = 0, vbo3 = 0, ibo2 = 0; GenBuffers(1, &vbo); GenBuffers(1, &ibo); GenBuffers(1, &vbo2); GenBuffers(1, &vbo3); GenBuffers(1, &ibo2);
   BindBuffer(GL_ARRAY_BUFFER, vbo); BufferData(GL_ARRAY_BUFFER, 4096 * sizeof(Vtx), 0, GL_DYNAMIC_DRAW);
   static unsigned short idx[6 * 64]; for (int q = 0; q < 64; q++) { idx[q * 6] = q * 4; idx[q * 6 + 1] = q * 4 + 1; idx[q * 6 + 2] = q * 4 + 2; idx[q * 6 + 3] = q * 4; idx[q * 6 + 4] = q * 4 + 2; idx[q * 6 + 5] = q * 4 + 3; }
   BindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo); BufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof idx, idx, GL_STATIC_DRAW); BindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
   BindBuffer(GL_ARRAY_BUFFER, vbo2); BufferData(GL_ARRAY_BUFFER, 4 * sizeof(Vtx), 0, GL_DYNAMIC_DRAW); BindBuffer(GL_ARRAY_BUFFER, 0);
+  /* q5: an index buffer created and filled through GL_ARRAY_BUFFER (legal in desktop GL, forbidden for one object in WebGL2) and later bound as GL_ELEMENT_ARRAY_BUFFER;
+     frame 1 re-fills it through GL_ARRAY_BUFFER again (second quad's indices) while it is still the element buffer — the draw must follow the new data */
+  BindBuffer(GL_ARRAY_BUFFER, ibo2); BufferData(GL_ARRAY_BUFFER, 12 * sizeof(unsigned short), idx, GL_STATIC_DRAW); BindBuffer(GL_ARRAY_BUFFER, 0);
+  BindBuffer(GL_ARRAY_BUFFER, vbo3); BufferData(GL_ARRAY_BUFFER, 8 * sizeof(Vtx), 0, GL_DYNAMIC_DRAW); BindBuffer(GL_ARRAY_BUFFER, 0);
   /* orthographic projection in pixels (column-major), identity modelview — the game's u_PMatrix/u_MVMatrix */
   const float proj[16] = { 2.0f / 640, 0, 0, 0,  0, 2.0f / 480, 0, 0,  0, 0, -1, 0,  -1, -1, 0, 1 }; const float ident[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
-  static Vtx verts[8], colq[4], cli[6];
+  static Vtx verts[8], colq[4], cli[6], dual[8];
   quad(verts, 40, 40, 240, 200, 0.05f, 0.1f, 0.45f, 0.9f, 255, 255, 255, 255);         /* q1: green part of the texture, white colour → green */
   quad(verts + 4, 300, 40, 600, 200, 0.55f, 0.1f, 0.95f, 0.9f, 128, 128, 128, 255);    /* q2: blue part × grey colour → (0,0,128) */
   quad(colq, 40, 260, 240, 420, 0, 0, 0, 0, 255, 255, 0, 255);                         /* q3: colour program → yellow */
+  quad(dual, 40, 430, 600, 470, 0, 0, 0, 0, 255, 0, 255, 255); quad(dual + 4, 40, 430, 600, 470, 0, 0, 0, 0, 0, 255, 255, 255);   /* q5: magenta (indices 0..3), cyan (indices 4..7) */
   { Vtx q[4]; quad(q, 300, 260, 600, 420, 0.05f, 0.1f, 0.45f, 0.9f, 255, 255, 255, 255); cli[0] = q[0]; cli[1] = q[1]; cli[2] = q[2]; cli[3] = q[0]; cli[4] = q[2]; cli[5] = q[3]; }   /* q4: client arrays → green */
   int ok = 0;
   for (int frame = 0; frame < 3; frame++) {
@@ -121,25 +126,32 @@ int main(void) {
     BindBuffer(GL_ARRAY_BUFFER, vbo2); BufferSubData(GL_ARRAY_BUFFER, 0, sizeof colq, colq);
     VertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vtx), (void *)0); VertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(Vtx), (void *)12);
     glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (void *)0);
+    /* q5: colour quad through the index buffer that was uploaded via GL_ARRAY_BUFFER */
+    BindBuffer(GL_ARRAY_BUFFER, vbo3); BufferSubData(GL_ARRAY_BUFFER, 0, sizeof dual, dual);
+    VertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vtx), (void *)0); VertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(Vtx), (void *)12);
+    BindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo2);
+    if (frame == 1) { BindBuffer(GL_ARRAY_BUFFER, ibo2); BufferSubData(GL_ARRAY_BUFFER, 0, 6 * sizeof(unsigned short), idx + 6); BindBuffer(GL_ARRAY_BUFFER, vbo3); }   /* now indices 4..7 → cyan */
+    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (void *)0);
     /* textured quad from client-side arrays (no VBO bound) */
     UseProgram(ptex); BindBuffer(GL_ARRAY_BUFFER, 0); BindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0); EnableVertexAttribArray(2);
     VertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vtx), &cli[0].x); VertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(Vtx), &cli[0].r); VertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vtx), &cli[0].u);
     glDrawArrays(GL_TRIANGLES, 0, 6);
     GLenum e = glGetError(); if (e) printf("frame %d: GL error 0x%x\n", frame, e);
-    unsigned char q1[4] = {0}, q2[4] = {0}, q3[4] = {0}, q4[4] = {0}, bg[4] = {0};
-    glReadPixels(140, 120, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, q1); glReadPixels(450, 120, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, q2); glReadPixels(140, 340, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, q3); glReadPixels(450, 340, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, q4); glReadPixels(10, 10, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, bg);
+    unsigned char q1[4] = {0}, q2[4] = {0}, q3[4] = {0}, q4[4] = {0}, q5[4] = {0}, bg[4] = {0};
+    glReadPixels(140, 120, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, q1); glReadPixels(450, 120, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, q2); glReadPixels(140, 340, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, q3); glReadPixels(450, 340, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, q4); glReadPixels(10, 10, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, bg); glReadPixels(320, 450, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, q5);
     if (frame == 0 || frame == 2) {
-      printf("frame %d pixels: q1 tex×white=(%d,%d,%d,%d) q2 tex×grey=(%d,%d,%d,%d) q3 colour=(%d,%d,%d,%d) q4 client=(%d,%d,%d,%d) bg=(%d,%d,%d,%d)\n", frame, q1[0], q1[1], q1[2], q1[3], q2[0], q2[1], q2[2], q2[3], q3[0], q3[1], q3[2], q3[3], q4[0], q4[1], q4[2], q4[3], bg[0], bg[1], bg[2], bg[3]);
-      int o1 = near3(q1, 0, 255, 0) && q1[3] > 200, o2 = near3(q2, 0, 0, 128) && q2[3] > 200, o3 = near3(q3, 255, 255, 0), o4 = near3(q4, 0, 255, 0), ob = bg[0] < 20 && bg[1] < 20 && bg[2] < 20;
+      printf("frame %d pixels: q1 tex×white=(%d,%d,%d,%d) q2 tex×grey=(%d,%d,%d,%d) q3 colour=(%d,%d,%d,%d) q4 client=(%d,%d,%d,%d) q5 ibo-via-array=(%d,%d,%d,%d) bg=(%d,%d,%d,%d)\n", frame, q1[0], q1[1], q1[2], q1[3], q2[0], q2[1], q2[2], q2[3], q3[0], q3[1], q3[2], q3[3], q4[0], q4[1], q4[2], q4[3], q5[0], q5[1], q5[2], q5[3], bg[0], bg[1], bg[2], bg[3]);
+      int o1 = near3(q1, 0, 255, 0) && q1[3] > 200, o2 = near3(q2, 0, 0, 128) && q2[3] > 200, o3 = near3(q3, 255, 255, 0), o4 = near3(q4, 0, 255, 0), ob = bg[0] < 20 && bg[1] < 20 && bg[2] < 20, o5 = frame == 0 ? near3(q5, 255, 0, 255) : near3(q5, 0, 255, 255);
       if (!o1) printf("FAIL q1: textured VBO quad %s\n", q1[3] == 0 ? "left nothing on the surface (alpha 0: texcoords hit the transparent corner texel, colour attribute zero, or geometry off-screen)" : "has the wrong colour (texture byte order / upload)");
       if (!o2) printf("FAIL q2: colour attribute × texture %s\n", q2[3] == 0 ? "left nothing" : "wrong (normalized ubyte colour or blue half of the texture)");
       if (!o3) printf("FAIL q3: colour-only program (second VBO, attribs 0/1)\n");
       if (!o4) printf("FAIL q4: client-side arrays path\n");
       if (!ob) printf("FAIL bg: the transparent clear is not transparent black\n");
-      ok = o1 && o2 && o3 && o4 && ob;
+      if (!o5) printf("FAIL q5: index buffer uploaded through GL_ARRAY_BUFFER %s\n", q5[3] == 0 ? "draws nothing when bound as GL_ELEMENT_ARRAY_BUFFER (WebGL2 one-kind-per-buffer rule not bridged)" : frame == 0 ? "wrong colour" : "did not pick up the re-upload through GL_ARRAY_BUFFER (stale twin)");
+      ok = o1 && o2 && o3 && o4 && o5 && ob;
     }
     SwapBuffers(dc); MSG m; while (PeekMessageA(&m, 0, 0, 0, PM_REMOVE)) { TranslateMessage(&m); DispatchMessageA(&m); }
   }
   Sleep(400);
-  printf(ok ? "sprite path verified: textured VBO quads, colour quad and client arrays all on the surface\n" : "sprite path FAILED (see FAIL lines)\n");
+  printf(ok ? "sprite path verified: textured VBO quads, colour quad, array-uploaded index buffer and client arrays all on the surface\n" : "sprite path FAILED (see FAIL lines)\n");
   wglMakeCurrent(0, 0); wglDeleteContext(rc); ReleaseDC(h, dc); printf("glsprite ok\n"); return 0; }
