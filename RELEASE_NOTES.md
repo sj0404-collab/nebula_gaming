@@ -1,3 +1,20 @@
+# v1.51.2 — the GL report works on the phone
+
+Diagnostic release for the SteamWorld Dig "sound, no picture" case (and anything else that draws through OpenGL and shows
+black).
+
+* **Frame counter and "trace next frame" never ran on the phone.**  Both lived in the readback path of `host_gl_present`;
+  on the device the WebGL surface is composited on the GPU, so `GL: 0 frames presented` was always reported and the
+  Report-tab trace button could never fire.  Both now run on either path (`glb.markFrame`).
+* **Surface probes.**  At presented frames 30, 240 and 1200 the bridge samples the default framebuffer on a 16×16 grid and
+  records mean/max brightness, lit fraction, alpha-0 fraction, clear colour, blend/depth/scissor/cull state, live
+  textures, bound 2D texture and framebuffer.  The Report shows them under `GL surface probes`: a black surface points
+  at the drawing side (shaders, textures, arrays), a lit surface that is not on screen points at the compositor.
+* **Automatic trace.**  If the surface is still black at frame 240 while draw calls are happening, the next frame is
+  traced by itself (1500 calls), so the next copied Report already carries it.  The manual button traces 1500 calls too.
+
+Nothing in the emulator core changed; v1.51.1's shims and the memory pool are unchanged.
+
 # v1.51.1 — memory that comes back, and the API layer the phone-reported programs were missing
 
 Follow-up to v1.51.0 driven by three programs on the user's phone: Shattered Pixel Dungeon (JVM `class space` / stack-guard

@@ -243,7 +243,7 @@ static void dd_GetDeviceIdentifier(Cpu *c) {
   u64 p = ARG(1); int ver = (int)rd32(c, ARG(0) + 16); u32 sz = ver >= 7 ? 1068 : 1064; u8 *m = mem_ptr(c->mem, p, sz, 1); if (!m) { RET(DDERR_INVALIDPARAMS); return; }
   e_memset(m, 0, sz); const char *drv = "nebula_webgl.dll", *desc = "Nebula OS display adapter (WebGL 2 on the device GPU)";
   for (int i = 0; drv[i]; i++) m[i] = (u8)drv[i]; for (int i = 0; desc[i]; i++) m[512 + i] = (u8)desc[i];
-  wr32(c, p + 1024, 0x00020000u); wr32(c, p + 1028, 0x00330001u);   /* driver version 1.51.1.0 */ wr32(c, p + 1032, 0x1AF4u); wr32(c, p + 1036, 0x1050u); wr32(c, p + 1040, 0); wr32(c, p + 1044, 1);
+  wr32(c, p + 1024, 0x00020000u); wr32(c, p + 1028, 0x00330002u);   /* driver version 1.51.2.0 */ wr32(c, p + 1032, 0x1AF4u); wr32(c, p + 1036, 0x1050u); wr32(c, p + 1040, 0); wr32(c, p + 1044, 1);
   wr32(c, p + 1048, 0x4E45424Cu); wr32(c, p + 1052, 0x574C4744u); wr32(c, p + 1056, 0x00010000u); wr32(c, p + 1060, 0x00000001u); RET(DD_OK);
 }
 /* ---------------- pixel formats ---------------- */
