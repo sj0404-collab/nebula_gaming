@@ -33,6 +33,8 @@ static int g_gl_host = -1;         /* host_gl_init: -1 unknown, 0 none, 1 WebGL2
 static int g_gl_swap_interval = 1;
 static int g_gl_surf_w, g_gl_surf_h; static u32 *g_gl_present; static size_t g_gl_present_cap; static double g_gl_last_swap_ms;
 static int g_gl_pf[MAX_WND];       /* pixel format set on each window (0 = none) */
+/* a new process (x64_load): no context, no current context on any thread, no pixel formats — a fresh host surface is created on demand */
+void gl_session_reset(void) { e_memset(g_glctx, 0, sizeof g_glctx); e_memset(g_glcur, 0, sizeof g_glcur); e_memset(g_gl_pf, 0, sizeof g_gl_pf); g_gl_host = -1; g_gl_surf_w = g_gl_surf_h = 0; g_gl_swap_interval = 1; g_gl_last_swap_ms = 0; }
 static int gl_cur_slot(Win32 *w) { int tid = w->th[w->cur_th].tid; for (int i = 0; i < THREAD_MAX; i++) if (g_glcur[i].tid == tid) return i; for (int i = 0; i < THREAD_MAX; i++) if (!g_glcur[i].tid) { g_glcur[i].tid = tid; g_glcur[i].ctx = 0; g_glcur[i].hdc = 0; return i; } return 0; }
 static int gl_dc_wnd(Win32 *w, u64 hdc) { GdiObj *dc = gdi_get(w, hdc); if (!dc || dc->kind != K_DC) return -1; return dc->wnd > 0 ? dc->wnd - 1 : (hdc == window_dc || dc->wnd < 0 ? 0 : -1); }
 static void gl_describe_pf(Cpu *c, int fmt, u64 pfd) {
@@ -72,11 +74,11 @@ static void s_wglDeleteContext(Cpu *c) { int i = gl_ctx_of(ARG(0)); if (i < 0) {
 static void s_wglMakeCurrent(Cpu *c) {
   Win32 *w = W; int s = gl_cur_slot(w);
   if (!ARG(1)) { g_glcur[s].ctx = 0; g_glcur[s].hdc = 0; RET(1); return; }
-  int i = gl_ctx_of(ARG(1)); if (i < 0) { w->last_error = 6; RET(0); return; }
-  int wnd = gl_dc_wnd(w, ARG(0)); if (wnd < 0) { w->last_error = 2000; RET(0); return; }
+  int i = gl_ctx_of(ARG(1)); if (i < 0) { e_log("[gl] wglMakeCurrent(dc %llx, rc %llx) failed: not a context handle (ERROR_INVALID_HANDLE)\n", (unsigned long long)ARG(0), (unsigned long long)ARG(1)); w->last_error = 6; RET(0); return; }
+  int wnd = gl_dc_wnd(w, ARG(0)); if (wnd < 0) { e_log("[gl] wglMakeCurrent(dc %llx, rc %llx) failed: the DC is not a window DC (ERROR_INVALID_PIXEL_FORMAT)\n", (unsigned long long)ARG(0), (unsigned long long)ARG(1)); w->last_error = 2000; RET(0); return; }
   g_glctx[i].hdc = ARG(0); g_glctx[i].wnd = wnd; g_glcur[s].ctx = i + 1; g_glcur[s].hdc = ARG(0); gl_host_ok(w, wnd); RET(1); }
 static void s_wglMakeContextCurrentARB(Cpu *c) { c->r[RDX] = ARG(2); s_wglMakeCurrent(c); }   /* (draw dc, read dc, ctx): one surface here */
-static void s_wglGetCurrentContext(Cpu *c) { int s = gl_cur_slot(W); RET(g_glcur[s].ctx ? gl_ctx_handle(g_glcur[s].ctx - 1) : 0); }
+static void s_wglGetCurrentContext(Cpu *c) { int s = gl_cur_slot(W); if (!g_glcur[s].ctx) { static int logged; if (logged < 4) { logged++; e_log("[gl] wglGetCurrentContext: no context is current on thread %d (slot %d)\n", W->th[W->cur_th].tid, s); } } RET(g_glcur[s].ctx ? gl_ctx_handle(g_glcur[s].ctx - 1) : 0); }
 static void s_wglGetCurrentDC(Cpu *c) { int s = gl_cur_slot(W); RET(g_glcur[s].hdc); }
 static void s_wglGetCurrentReadDCARB(Cpu *c) { s_wglGetCurrentDC(c); }
 static void s_wglShareLists(Cpu *c) { RET(gl_ctx_of(ARG(0)) >= 0 && gl_ctx_of(ARG(1)) >= 0); }   /* all contexts share one WebGL2 object space */

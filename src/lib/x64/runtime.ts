@@ -97,7 +97,7 @@ export class X64Runtime {
   private waitingStdin = false;
   readonly gfx = new WebGLGfx();
   /** OpenGL (opengl32.dll) → the device's WebGL2 context (src/lib/x64/gl.ts) */
-  readonly glb = new GLBridge();
+  glb = new GLBridge();   // replaced for every process start: a new program must not inherit the previous one's GL objects, counters or context
   /** persistent C:\ (IndexedDB): installed programs, saved documents, the registry hive and Start Menu shortcuts survive restarts */
   readonly disk = new Disk();
   diskFiles = 0;   // entries restored from the persistent disk at init
@@ -261,7 +261,7 @@ export class X64Runtime {
 
   /** Load an exe and start the frame loop.  Returns the loader error text, or null on success. */
   start(bytes: Uint8Array, name: string, cmdline?: string, cwd?: string): string | null {
-    const ex = this.ex!; this.stop(); this.glb.resetGuestStrings(); this.lastGl = null;
+    const ex = this.ex!; this.stop(); this.glb.dispose(); this.glb = new GLBridge(); this.lastGl = null;
     const p = this.putCached(bytes);
     const rc = ex.x64_load(p, BigInt(bytes.length), this.putStr(name), this.putStr(cmdline ?? name));
     if (rc !== 0) { this.status = 'fault'; return this.cstr(ex.x64_report()) || `loader error ${rc}`; }

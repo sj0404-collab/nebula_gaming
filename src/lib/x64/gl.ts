@@ -61,7 +61,7 @@ const GL = { NO_ERROR: 0, INVALID_ENUM: 0x500, INVALID_VALUE: 0x501, INVALID_OPE
   DEBUG_SOURCE_API: 0x8246, DEBUG_TYPE_ERROR: 0x824C, DEBUG_SEVERITY_HIGH: 0x9146,
 } as const;
 
-interface TexInfo { target: number; levels: Map<number, { w: number; h: number; d: number; ifmt: number }>; genMipmap: boolean; }
+interface TexInfo { target: number; levels: Map<number, { w: number; h: number; d: number; ifmt: number }>; genMipmap: boolean; up?: string; minf?: number; magf?: number; }
 interface BufInfo { size: number; usage: number; version: number; shadow: Uint8Array | null; }
 interface Attrib { enabled: boolean; size: number; type: number; normalized: boolean; integer: boolean; stride: number; pointer: bigint; buffer: number; divisor: number; }
 interface MapInfo { buffer: number; target: number; offset: number; length: number; ptr: bigint; access: number; }
@@ -151,6 +151,8 @@ export class GLBridge {
     };
   }
 
+  /** a new process starts: the previous program's context, objects and counters go away (the next host_gl_init creates a fresh WebGL2 context) */
+  dispose(): void { const gl = this.gl; if (!gl) return; try { gl.getExtension('WEBGL_lose_context')?.loseContext(); } catch { /* already lost */ } this.gl = null; this.canvas = null; }
   /** host_gl_init: (re)size the drawing surface; 1 = WebGL2 ready */
   init(w: number, h: number): number {
     if (!this.gl) {
@@ -192,9 +194,10 @@ export class GLBridge {
         for (let i = 0; i < attrs.length; i++) { const at = attrs[i]; if (!at.enabled) continue;
           let sample = ''; if (!at.buffer && at.pointer && at.type === GL.FLOAT) { const st = at.stride || at.size * 4; const v0 = this.f32(at.pointer, at.size), v1 = this.f32(at.pointer + BigInt(st), at.size); sample = ' v0=[' + (v0 ? Array.from(v0).map((x) => x.toPrecision(4)).join(',') : '?') + '] v1=[' + (v1 ? Array.from(v1).map((x) => x.toPrecision(4)).join(',') : '?') + ']'; }
           else if (!at.buffer && at.pointer && at.type === GL.UNSIGNED_BYTE) { const st = at.stride || at.size; const v0 = this.u8(at.pointer, at.size), v1 = this.u8(at.pointer + BigInt(st), at.size); sample = ' v0=[' + (v0 ? Array.from(v0).join(',') : '?') + '] v1=[' + (v1 ? Array.from(v1).join(',') : '?') + ']'; }
+          else if (at.buffer) sample = this.vboSample(at);
           parts.push(`a${i}:${at.size}x0x${at.type.toString(16)}${at.normalized ? 'n' : ''} stride=${at.stride} ${at.buffer ? 'vbo' + at.buffer + '+' + at.pointer.toString() : 'ptr=0x' + at.pointer.toString(16)}${sample}`); }
         const gl = this.gl!; const prog = gl.getParameter(gl.CURRENT_PROGRAM) as WebGLProgram | null; const vp = Array.from(gl.getParameter(gl.VIEWPORT) as Int32Array).join(',');
-        extra = ` viewport=[${vp}] prog=${prog ? 'yes' : 'NONE'} blend=${gl.isEnabled(gl.BLEND)} scissor=${gl.isEnabled(gl.SCISSOR_TEST)} depth=${gl.isEnabled(gl.DEPTH_TEST)} tex2d=${this.texUnits[0]?.get(GL.TEXTURE_2D) ?? 0} | ${parts.join(' | ')}`;
+        extra = ` viewport=[${vp}] prog=${prog ? 'yes' : 'NONE'} blend=${gl.isEnabled(gl.BLEND)} scissor=${gl.isEnabled(gl.SCISSOR_TEST)} depth=${gl.isEnabled(gl.DEPTH_TEST)} tex2d=${this.texUnits[0]?.get(GL.TEXTURE_2D) ?? 0}${this.texBrief(this.texUnits[0]?.get(GL.TEXTURE_2D) ?? 0)} | ${parts.join(' | ')}`;
       }
     } catch (e) { extra = ' (trace error: ' + (e as Error).message + ')'; }
     const line = `[gltrace] ${name}(${ints.join(', ')})${extra}`;
@@ -206,7 +209,7 @@ export class GLBridge {
   /** running totals for the report: frames presented through GL, draws, programs/shaders/textures/framebuffers created, shader failures */
   summary(): string { const gl = this.gl; if (!gl) return ''; let vp = '', prog = '', fbo = '';
     try { vp = Array.from(gl.getParameter(gl.VIEWPORT) as Int32Array).join(','); prog = gl.getParameter(gl.CURRENT_PROGRAM) ? 'yes' : 'none'; fbo = gl.getParameter(gl.FRAMEBUFFER_BINDING) ? 'offscreen' : 'default'; } catch { /* lost context */ }
-    return `GL: ${this.frameNo} frames presented · ${this.draws} draw calls · ${this.prog.size} programs · ${this.shader.size} shaders · ${this.badShaders} shader/link failures · surface ${this.width}x${this.height} · viewport [${vp}] · program ${prog} · framebuffer ${fbo} · ${this.describeRenderer()}${this.probes.length ? '\nGL surface probes (16×16 samples of the presented frame): ' + this.probes.join(' | ') : ''}`; }
+    return `GL: ${this.frameNo} frames presented · ${this.draws} draw calls · ${this.prog.size} programs · ${this.shader.size} shaders · ${this.badShaders} shader/link failures · surface ${this.width}x${this.height} · viewport [${vp}] · program ${prog} · framebuffer ${fbo} · ${this.describeRenderer()}${this.probes.length ? '\nGL surface probes (16×16 samples of the presented frame): ' + this.probes.join(' | ') : ''}` + (this.textureTable() ? '\n' + this.textureTable() : '') + (this.shaderDump() ? '\n' + this.shaderDump() : ''); }
   private draws = 0; private badShaders = 0;
   private describeRenderer(): string { const gl = this.gl!; const dbg = gl.getExtension('WEBGL_debug_renderer_info'); return dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : String(gl.getParameter(gl.RENDERER)); }
   probe(id: number): number { return this.impl[id] ? 1 : 0; }
@@ -216,9 +219,10 @@ export class GLBridge {
     const f = this.impl[id];
     if (!f) { this.setErr(GL.INVALID_OPERATION); this.warn(this.names[id], `${this.names[id]}: not available in the WebGL2 bridge (GL_INVALID_OPERATION)`); return 0n; }
     if (this.ff.recording && this.ff.record(id, this.names[id], a, this.mem!.psize())) return 0n;   // glNewList … glEndList: stored, not executed
-    if (this.traceLeft > 0) this.trace(id, a);
+    const tracing = this.traceLeft > 0; if (tracing) this.trace(id, a);
     try {
       const r = f(a);
+      if (tracing && /^glDraw(Arrays|Elements)/.test(this.names[id])) this.log('[gltrace]  ' + this.drawProbe() + '\n');
       if (typeof r === 'bigint') return r; if (typeof r === 'number') return BigInt.asUintN(64, BigInt(Math.trunc(r))); return 0n;
     } catch (e) {
       this.warn('exc:' + this.names[id], `${this.names[id]}: ${(e as Error).message}`); this.setErr(GL.INVALID_OPERATION); return 0n;
@@ -387,6 +391,49 @@ export class GLBridge {
     return { data, format, type }; }
   private withUnpackTight<T>(tight: boolean, f: () => T): T { const gl = this.gl!; if (!tight) return f(); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0); gl.pixelStorei(gl.UNPACK_SKIP_ROWS, 0); gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, 0); try { return f(); } finally { gl.pixelStorei(gl.UNPACK_ALIGNMENT, this.unpackAlign); gl.pixelStorei(gl.UNPACK_ROW_LENGTH, this.unpackRowLength); gl.pixelStorei(gl.UNPACK_SKIP_ROWS, this.unpackSkipRows); gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, this.unpackSkipPixels); } }
   private noteLevel(target: number, level: number, w: number, h: number, d: number, ifmt: number) { const id = this.curTex(target); const ti = this.texInfo.get(id); if (ti) { ti.levels.set(level, { w, h, d, ifmt }); if (ti.genMipmap && level === 0) this.gl!.generateMipmap(this.texTarget(target)); } }
+  /** diagnostics: what the program really uploaded into a texture (format/type, mean value and the share of non-zero bytes of a sample) */
+  private noteUpload(target: number, how: string, format: number, type: number, data: ArrayBufferView | null): void {
+    const ti = this.texInfo.get(this.curTex(target)); if (!ti) return;
+    if (!data) { ti.up = `${how} fmt=0x${format.toString(16)} type=0x${type.toString(16)} (no data)`; return; }
+    const b = new Uint8Array(data.buffer, data.byteOffset, data.byteLength); const step = Math.max(1, Math.floor(b.length / 4096)) | 1; let sum = 0, nz = 0, n = 0, a0 = 0, an = 0;
+    for (let i = 0; i < b.length; i += step) { sum += b[i]; if (b[i]) nz++; n++; }
+    if (format === GL.RGBA || format === GL.BGRA) { const px = b.length >> 2, pstep = Math.max(1, Math.floor(px / 2048)); for (let i = 3; i < b.length; i += 4 * pstep) { an++; if (!b[i]) a0++; } }
+    ti.up = `${how} fmt=0x${format.toString(16)} type=0x${type.toString(16)} ${b.length}B mean ${n ? Math.round(sum / n) : 0} nonzero ${n ? Math.round(nz * 100 / n) : 0}%${an ? ` alpha0 ${Math.round(a0 * 100 / an)}%` : ''}`; }
+  /** report: every texture with its level-0 size, internal format, filters and upload statistics */
+  textureTable(limit = 48): string {
+    const rows: string[] = []; let n = 0;
+    for (const [id, ti] of this.texInfo) { if (!ti.target && !ti.levels.size) continue; n++; if (rows.length >= limit) continue; const l0 = ti.levels.get(0);
+      rows.push(`#${id} ${l0 ? `${l0.w}x${l0.h}${l0.d > 1 ? 'x' + l0.d : ''} ifmt=0x${l0.ifmt.toString(16)}` : 'no level 0'} levels=${ti.levels.size} min=0x${(ti.minf ?? 0x2702).toString(16)} mag=0x${(ti.magf ?? 0x2601).toString(16)}${ti.genMipmap ? ' genmip' : ''}${ti.up ? ' ' + ti.up : ' (never uploaded)'}`); }
+    return n ? `GL textures (${n}${n > limit ? `, first ${limit}` : ''}): ` + rows.join(' · ') : ''; }
+  /** report: the GLSL the program handed over and what the bridge compiled (first programs only — enough for the sprite shaders of a 2D game) */
+  shaderDump(maxProgs = 6, maxChars = 1200): string {
+    const gl = this.gl; if (!gl) return ''; const out: string[] = []; let k = 0;
+    for (const [pid, p] of this.prog) { if (k++ >= maxProgs) break; let sh: WebGLShader[] = []; try { sh = gl.getAttachedShaders(p) ?? []; } catch { /* lost */ }
+      const parts = sh.map((s) => { const sid = this.shaderIds.get(s) ?? 0; const type = this.shaderType.get(sid) === GL.FRAGMENT_SHADER ? 'fragment' : 'vertex'; const src = (this.shaderSrc.get(sid) ?? '').trim(); let tr = ''; try { tr = (gl.getShaderSource(s) ?? '').trim(); } catch { /* lost */ }
+        const log = gl.getShaderParameter(s, GL.COMPILE_STATUS) ? '' : ` COMPILE FAILED: ${(gl.getShaderInfoLog(s) || '').trim().slice(0, 300)}`; const ok = tr.replace(/\s+/g, ' ') === src.replace(/\s+/g, ' ');
+        return `  [${type} shader ${sid}${log}]\n${src.slice(0, maxChars)}${src.length > maxChars ? '\n  …' : ''}${ok ? '' : `\n  [as compiled for WebGL2]\n${tr.slice(0, maxChars)}${tr.length > maxChars ? '\n  …' : ''}`}`; });
+      const linked = gl.getProgramParameter(p, GL.LINK_STATUS) ? 'linked' : 'LINK FAILED: ' + (gl.getProgramInfoLog(p) || '').trim().slice(0, 300);
+      let attrs = ''; try { const na = gl.getProgramParameter(p, GL.ACTIVE_ATTRIBUTES) as number; const al: string[] = []; for (let i = 0; i < na; i++) { const ai = gl.getActiveAttrib(p, i); if (ai) al.push(`${ai.name}@${gl.getAttribLocation(p, ai.name)}`); } const nu = gl.getProgramParameter(p, GL.ACTIVE_UNIFORMS) as number; const ul: string[] = []; for (let i = 0; i < nu; i++) { const ui = gl.getActiveUniform(p, i); if (ui) ul.push(ui.name); } attrs = ` attribs ${al.join(',') || '-'} uniforms ${ul.join(',') || '-'}`; } catch { /* lost */ }
+      out.push(`program ${pid} (${linked}${attrs}):\n${parts.join('\n')}`); }
+    return out.length ? 'GL shaders:\n' + out.join('\n') : ''; }
+  /** a 6×6-sample look at the current draw framebuffer right after a traced draw call: did it put anything on the surface? */
+  private texBrief(id: number): string { const ti = this.texInfo.get(id); if (!ti) return ''; const l0 = ti.levels.get(0); return ` (${l0 ? `${l0.w}x${l0.h}` : 'no level 0'}${ti.up ? ' ' + ti.up.split(' ').slice(0, 1).join('') + ' ' + (ti.up.match(/mean \d+ nonzero \d+%(?: alpha0 \d+%)?/)?.[0] ?? '') : ' never uploaded'})`; }
+  private drawProbe(): string {
+    const gl = this.gl; if (!gl) return '';
+    try { const vp = gl.getParameter(gl.VIEWPORT) as Int32Array; const w = Math.max(2, vp[2]), h = Math.max(2, vp[3]); const px = new Uint8Array(4); let lit = 0, a = 0, n = 0, mx = 0;
+      const readFb = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING) as WebGLFramebuffer | null, drawFb = gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING) as WebGLFramebuffer | null; if (readFb !== drawFb) gl.bindFramebuffer(gl.READ_FRAMEBUFFER, drawFb);
+      const packBuf = this.bound.pack; if (packBuf) gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null); gl.pixelStorei(gl.PACK_ALIGNMENT, 4);
+      for (let j = 0; j < 6; j++) for (let i = 0; i < 6; i++) { gl.readPixels(vp[0] + Math.floor((i + 0.5) * w / 6), vp[1] + Math.floor((j + 0.5) * h / 6), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px); const l = Math.max(px[0], px[1], px[2]); if (l > 16) lit++; if (px[3]) a++; if (l > mx) mx = l; n++; }
+      if (packBuf) gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this.buf.get(packBuf) ?? null); if (readFb !== drawFb) gl.bindFramebuffer(gl.READ_FRAMEBUFFER, readFb);
+      return ` → surface after draw: lit ${Math.round(lit * 100 / n)}% max ${mx} alpha>0 ${Math.round(a * 100 / n)}%`; } catch (e) { return ` → probe failed: ${(e as Error).message}`; } }
+  /** the first two vertices of an attribute that lives in a VBO (getBufferSubData) — for the draw trace */
+  private vboSample(at: Attrib): string {
+    const gl = this.gl; const b = this.buf.get(at.buffer); if (!gl || !b) return '';
+    try { const comp = at.type === GL.FLOAT ? 4 : at.type === GL.UNSIGNED_BYTE || at.type === GL.BYTE ? 1 : at.type === GL.UNSIGNED_SHORT || at.type === GL.SHORT ? 2 : 4; const st = at.stride || at.size * comp; const need = Number(at.pointer) + st + at.size * comp; const prev = this.buf.get(this.bound.array) ?? null;
+      gl.bindBuffer(gl.ARRAY_BUFFER, b); const size = gl.getBufferParameter(gl.ARRAY_BUFFER, gl.BUFFER_SIZE) as number; if (size < need) { gl.bindBuffer(gl.ARRAY_BUFFER, prev); return ` (vbo only ${size}B, needs ${need})`; }
+      const raw = new Uint8Array(st + at.size * comp); gl.getBufferSubData(gl.ARRAY_BUFFER, Number(at.pointer), raw); gl.bindBuffer(gl.ARRAY_BUFFER, prev);
+      const rd = (off: number) => { const out: string[] = []; for (let i = 0; i < at.size; i++) { const o = off + i * comp; if (at.type === GL.FLOAT) out.push(new Float32Array(raw.buffer.slice(o, o + 4))[0].toPrecision(4)); else if (comp === 1) out.push(String(raw[o])); else if (comp === 2) out.push(String(new Uint16Array(raw.buffer.slice(o, o + 2))[0])); else out.push(String(new Uint32Array(raw.buffer.slice(o, o + 4))[0])); } return out.join(','); };
+      return ` v0=[${rd(0)}] v1=[${rd(st)}]`; } catch (e) { return ` (sample failed: ${(e as Error).message})`; } }
   private progInfoOf(id: number): ProgInfo { let p = this.progInfo.get(id); if (!p) { p = { uniforms: new Map(), locs: [], sources: new Map() }; this.progInfo.set(id, p); } return p; }
   private uloc(loc: number): WebGLUniformLocation | null { if (loc < 0) return null; const p = this.progInfo.get(this.bound.program); return p ? p.locs[loc] ?? null : null; }
   private queryTargetOf(t: number): number { return t === GL.SAMPLES_PASSED ? GL.ANY_SAMPLES_PASSED : t; }
@@ -449,6 +496,7 @@ export class GLBridge {
       case GL.TEXTURE_BORDER_COLOR: case GL.TEXTURE_LOD_BIAS: case GL.TEXTURE_PRIORITY: case GL.DEPTH_TEXTURE_MODE: case GL.TEXTURE_SWIZZLE_R: case GL.TEXTURE_SWIZZLE_RGBA: case 0x8E43: case 0x8E44: case 0x8E45: this.warn('texparam:' + pname, `glTexParameter(0x${pname.toString(16)}): not available in WebGL2 (ignored)`); return;
       case GL.TEXTURE_WRAP_S: case GL.TEXTURE_WRAP_T: case GL.TEXTURE_WRAP_R: if (v === GL.CLAMP || v === GL.CLAMP_TO_BORDER || v === GL.MIRROR_CLAMP_TO_EDGE) v = GL.CLAMP_TO_EDGE; gl.texParameteri(t, pname, v); return;
       case GL.TEXTURE_MIN_LOD: case GL.TEXTURE_MAX_LOD: gl.texParameterf(t, pname, v); return;
+      case GL.TEXTURE_MIN_FILTER: case GL.TEXTURE_MAG_FILTER: { const ti = this.texInfo.get(this.curTex(target)); if (ti) { if (pname === GL.TEXTURE_MIN_FILTER) ti.minf = v | 0; else ti.magf = v | 0; } gl.texParameteri(t, pname, v | 0); return; }
       default: gl.texParameteri(t, pname, v | 0); } }
   private fbStatus(target: number): number { return this.gl!.checkFramebufferStatus(target === GL.FRAMEBUFFER ? this.gl!.FRAMEBUFFER : target); }
   private rboFormat(ifmt: number): number { switch (ifmt) { case GL.DEPTH_COMPONENT: case GL.DEPTH_COMPONENT32: return GL.DEPTH_COMPONENT24; case GL.DEPTH_STENCIL: return GL.DEPTH24_STENCIL8; case GL.RGBA: case 4: case 0x805B: return GL.RGBA8; case GL.RGB: case 3: case 0x8054: return GL.RGB8; case GL.STENCIL_INDEX: case 0x8D46: case 0x8D47: case 0x8D49: return GL.STENCIL_INDEX8; case GL.RED: return GL.R8; case GL.RG: return GL.RG8; case GL.SRGB_ALPHA: return GL.SRGB8_ALPHA8; default: return ifmt; } }
@@ -507,10 +555,10 @@ export class GLBridge {
     this.def('glTexImage2D', (a) => { const target = U(a[0]), level = I(a[1]), w = I(a[3]), h = I(a[4]); const ft = this.fmtType(U(a[2]), U(a[6]), U(a[7]));
       if (this.bound.unpack) { g().texImage2D(target, level, ft.ifmt, w, h, 0, ft.format, ft.type, Number(a[8])); this.noteLevel(target, level, w, h, 1, ft.ifmt); return; }
       const px = this.pixels(a[8], w, h, 1, ft.format, ft.type); if (!px) return; const tight = px.data !== null && px.format !== ft.format;
-      this.withUnpackTight(tight, () => g().texImage2D(target, level, ft.ifmt, w, h, 0, px.format, px.type, px.data as ArrayBufferView | null)); this.noteLevel(target, level, w, h, 1, ft.ifmt); });
+      this.withUnpackTight(tight, () => g().texImage2D(target, level, ft.ifmt, w, h, 0, px.format, px.type, px.data as ArrayBufferView | null)); this.noteLevel(target, level, w, h, 1, ft.ifmt); if (level === 0) this.noteUpload(target, 'img', U(a[6]), U(a[7]), px.data); });
     this.def('glTexSubImage2D', (a) => { const target = U(a[0]), level = I(a[1]), x = I(a[2]), y = I(a[3]), w = I(a[4]), h = I(a[5]); const format = U(a[6]); let type = U(a[7]); if (type === 0x8D61) type = GL.HALF_FLOAT;
       if (this.bound.unpack) { g().texSubImage2D(target, level, x, y, w, h, format, type, Number(a[8])); return; }
-      const px = this.pixels(a[8], w, h, 1, format, type); if (!px || !px.data) return; this.withUnpackTight(px.format !== format, () => g().texSubImage2D(target, level, x, y, w, h, px.format, px.type, px.data as ArrayBufferView)); });
+      const px = this.pixels(a[8], w, h, 1, format, type); if (!px || !px.data) return; this.withUnpackTight(px.format !== format, () => g().texSubImage2D(target, level, x, y, w, h, px.format, px.type, px.data as ArrayBufferView)); if (level === 0) this.noteUpload(target, `sub${x},${y},${w}x${h}`, format, type, px.data); });
     this.def('glTexImage3D', (a) => { const target = U(a[0]), level = I(a[1]), w = I(a[3]), h = I(a[4]), d = I(a[5]); const ft = this.fmtType(U(a[2]), U(a[7]), U(a[8]));
       if (this.bound.unpack) { g().texImage3D(target, level, ft.ifmt, w, h, d, 0, ft.format, ft.type, Number(a[9])); this.noteLevel(target, level, w, h, d, ft.ifmt); return; }
       const px = this.pixels(a[9], w, h, d, ft.format, ft.type); if (!px) return; this.withUnpackTight(px.data !== null && px.format !== ft.format, () => g().texImage3D(target, level, ft.ifmt, w, h, d, 0, px.format, px.type, px.data as ArrayBufferView | null)); this.noteLevel(target, level, w, h, d, ft.ifmt); });
@@ -525,7 +573,7 @@ export class GLBridge {
     this.def('glTexStorage3D', (a) => { const target = U(a[0]), levels = I(a[1]), ifmt = this.fmtType(U(a[2]), GL.RGBA, GL.UNSIGNED_BYTE).ifmt, w = I(a[3]), h = I(a[4]), d = I(a[5]); g().texStorage3D(target, levels, ifmt, w, h, d); for (let l = 0; l < levels; l++) this.noteLevel(target, l, Math.max(1, w >> l), Math.max(1, h >> l), d, ifmt); });
     this.def('glCopyTexImage2D', (a) => { const ft = this.fmtType(U(a[2]), GL.RGBA, GL.UNSIGNED_BYTE); g().copyTexImage2D(U(a[0]), I(a[1]), ft.ifmt, I(a[3]), I(a[4]), I(a[5]), I(a[6]), 0); this.noteLevel(U(a[0]), I(a[1]), I(a[5]), I(a[6]), 1, ft.ifmt); });
     this.def('glCopyTexSubImage2D', (a) => g().copyTexSubImage2D(U(a[0]), I(a[1]), I(a[2]), I(a[3]), I(a[4]), I(a[5]), I(a[6]), I(a[7]))); this.def('glCopyTexSubImage3D', (a) => g().copyTexSubImage3D(U(a[0]), I(a[1]), I(a[2]), I(a[3]), I(a[4]), I(a[5]), I(a[6]), I(a[7]), I(a[8])));
-    this.def('glCompressedTexImage2D', (a) => { const target = U(a[0]), level = I(a[1]), ifmt = U(a[2]), w = I(a[3]), h = I(a[4]), size = I(a[6]); if (!this.compressedOk(ifmt)) return; if (this.bound.unpack) { g().compressedTexImage2D(target, level, ifmt, w, h, 0, size, Number(a[7])); } else { const d = this.u8(a[7], size); if (!d) return; g().compressedTexImage2D(target, level, ifmt, w, h, 0, d); } this.noteLevel(target, level, w, h, 1, ifmt); }); this.alias('glCompressedTexImage2DARB', 'glCompressedTexImage2D');
+    this.def('glCompressedTexImage2D', (a) => { const target = U(a[0]), level = I(a[1]), ifmt = U(a[2]), w = I(a[3]), h = I(a[4]), size = I(a[6]); if (!this.compressedOk(ifmt)) return; if (this.bound.unpack) { g().compressedTexImage2D(target, level, ifmt, w, h, 0, size, Number(a[7])); } else { const d = this.u8(a[7], size); if (!d) return; g().compressedTexImage2D(target, level, ifmt, w, h, 0, d); if (level === 0) this.noteUpload(target, 'dxt', ifmt, 0, d); } this.noteLevel(target, level, w, h, 1, ifmt); }); this.alias('glCompressedTexImage2DARB', 'glCompressedTexImage2D');
     this.def('glCompressedTexSubImage2D', (a) => { const target = U(a[0]), level = I(a[1]), x = I(a[2]), y = I(a[3]), w = I(a[4]), h = I(a[5]), fmt = U(a[6]), size = I(a[7]); if (!this.compressedOk(fmt)) return; if (this.bound.unpack) g().compressedTexSubImage2D(target, level, x, y, w, h, fmt, size, Number(a[8])); else { const d = this.u8(a[8], size); if (d) g().compressedTexSubImage2D(target, level, x, y, w, h, fmt, d); } }); this.alias('glCompressedTexSubImage2DARB', 'glCompressedTexSubImage2D');
     this.def('glCompressedTexImage3D', (a) => { const ifmt = U(a[2]), size = I(a[7]); if (!this.compressedOk(ifmt)) return; if (this.bound.unpack) g().compressedTexImage3D(U(a[0]), I(a[1]), ifmt, I(a[3]), I(a[4]), I(a[5]), 0, size, Number(a[8])); else { const d = this.u8(a[8], size); if (d) g().compressedTexImage3D(U(a[0]), I(a[1]), ifmt, I(a[3]), I(a[4]), I(a[5]), 0, d); } this.noteLevel(U(a[0]), I(a[1]), I(a[3]), I(a[4]), I(a[5]), ifmt); });
     this.def('glCompressedTexSubImage3D', (a) => { const fmt = U(a[8]), size = I(a[9]); if (!this.compressedOk(fmt)) return; if (this.bound.unpack) g().compressedTexSubImage3D(U(a[0]), I(a[1]), I(a[2]), I(a[3]), I(a[4]), I(a[5]), I(a[6]), I(a[7]), fmt, size, Number(a[10])); else { const d = this.u8(a[10], size); if (d) g().compressedTexSubImage3D(U(a[0]), I(a[1]), I(a[2]), I(a[3]), I(a[4]), I(a[5]), I(a[6]), I(a[7]), fmt, d); } });

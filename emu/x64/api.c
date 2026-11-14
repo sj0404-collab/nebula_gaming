@@ -120,6 +120,7 @@ static int g_want_stdin; static int g_trace;
 EXPORT(x64_alloc) void *x64_alloc(size_t n) { return emu_alloc(n); }
 EXPORT(x64_reserve) int x64_reserve(size_t n) { return emu_reserve(n); }   /* grow the wasm arena once before a batch of x64_alloc/x64_vfs_add */
 EXPORT(x64_inspect) const char *x64_inspect(const u8 *bytes, size_t len) { pe_inspect(bytes, len, g_inspect, sizeof g_inspect); return g_inspect; }
+void gl_session_reset(void);   /* opengl.inc (gdi.c): drop the previous process' WGL contexts */
 EXPORT(x64_load) int x64_load(const u8 *bytes, size_t len, const char *name, const char *cmdline) {
 #ifdef __wasm__
   gdi_set_msgbox_auto(0);   /* in the browser the user answers MessageBox / file dialogs — never auto-dismiss */
@@ -132,7 +133,7 @@ EXPORT(x64_load) int x64_load(const u8 *bytes, size_t len, const char *name, con
   Proc *p = proc_alloc(); if (!p) return 8; g_root = p; g_cur = 0; g_root_w32 = &p->w32;
   p->pid = 4242; p->ppid = HOST_PID; p->state = 1; p->exit_code = 0; p->handles = 0; g_next_pid = 4242;
   e_snprintf(p->name, sizeof p->name, "%s", name ? basename_of(name) : "app.exe");
-  mem_release(&p->mem); cpu_reset(&p->cpu); cpu_session_reset();
+  mem_release(&p->mem); cpu_reset(&p->cpu); cpu_session_reset(); gl_session_reset();
   w32_init(&p->w32, &p->cpu, &p->mem); p->w32.pid = p->pid; p->w32.ppid = HOST_PID;
   vfs_init_proc(p->w32.fs, 0); vfs_use(p->w32.fs);
   if (name && e_strchr(name, '\\')) e_snprintf(p->w32.exe_path, sizeof p->w32.exe_path, "%s", name); else e_snprintf(p->w32.exe_path, sizeof p->w32.exe_path, "C:\\nebula\\%s", p->name);
