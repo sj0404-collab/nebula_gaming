@@ -263,8 +263,8 @@ export class GLBridge {
     this.frameNo++; const gt = globalThis as unknown as { __gltrace?: string[] };
     if (this.frameNo === 30 || this.frameNo === 240 || this.frameNo === 1200) { this.probeSurface(w, h);
       /* a dark surface after 240 presented frames with draw calls going on → record the next frame by itself, so the Report already carries the trace */
-      if (this.frameNo === 240 && this.draws > 0 && this.traceLeft === 0 && this.traceAfter < 0 && / max (\d+) /.exec(this.probes[this.probes.length - 1] ?? '')?.[1] !== undefined && Number(/ max (\d+) /.exec(this.probes[this.probes.length - 1])![1]) < 16) { this.log('[gl] surface still black after 240 frames with draw calls: tracing the next frame automatically\n'); this.armTrace(1500); } }
-    if (this.traceLeft < 0 && this.frameNo >= this.traceAfter) { this.traceLeft = -this.traceLeft; const l = `[gltrace] --- frame ${this.frameNo}: tracing ${this.traceLeft} calls (surface ${this.width}x${this.height}, present ${w}x${h}) ---`; this.log(l + '\n'); (gt.__gltrace ??= []).push(l); }
+      if ((this.frameNo === 240 || this.frameNo === 1200) && this.draws > 0 && this.traceLeft <= 0 && this.traceAfter < 0 && / max (\d+) /.exec(this.probes[this.probes.length - 1] ?? '')?.[1] !== undefined && Number(/ max (\d+) /.exec(this.probes[this.probes.length - 1])![1]) < 16) { this.log(`[gl] surface black at frame ${this.frameNo} with draw calls going on: tracing the next frame automatically\n`); this.armTrace(1500); } }
+    if (this.traceLeft < 0 && this.frameNo >= this.traceAfter) { this.traceLeft = -this.traceLeft; this.traceAfter = -1; const l = `[gltrace] --- frame ${this.frameNo}: tracing ${this.traceLeft} calls (surface ${this.width}x${this.height}, present ${w}x${h}) ---`; this.log(l + '\n'); (gt.__gltrace ??= []).push(l); }
     else if (this.traceLeft > 0) { const l = `[gltrace] --- present frame ${this.frameNo} (${w}x${h}) ---`; this.log(l + '\n'); (gt.__gltrace ??= []).push(l); }
   }
   /** host_gl_present fallback (no presenter on screen): default framebuffer → BGRA rows (top first) at dst (wasm offset) */

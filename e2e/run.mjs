@@ -946,6 +946,21 @@ for (const exe of ['glff.exe', 'glff32.exe']) await test(`x64: ${exe} — OpenGL
   await page.screenshot({ path: resolve(SHOTS, `x64-${exe.replace('.exe', '')}.png`) });
   await closeAll();
 });
+for (const exe of ['glsprite.exe', 'glsprite32.exe']) await test(`x64: ${exe} — OpenGL 2D sprite-engine path on WebGL2 (legacy context, #version-less GLSL, 8_8_8_8_REV NPOT texture, streaming VBO + USHORT indices, premultiplied blend, client arrays) — every quad pixel-verified`, async () => {
+  const w = await x64Open();
+  await w.locator(`[data-x64-exe="${exe}"]`).click();
+  await w.locator('[data-x64-run]').click();
+  const exited = await page.waitForFunction(() => document.querySelector('[data-x64-status]')?.getAttribute('data-x64-status') === 'exited', null, { timeout: 60_000 }).then(() => true, () => false);
+  await w.locator('[data-x64-tab="console"]').click();
+  const con = await w.locator('[data-x64-console]').innerText();
+  if (!exited) { await w.locator('[data-x64-tab="report"]').click(); const rep = await w.locator('[data-x64-report]').innerText().catch(() => ''); expect(false, `${exe} did not exit within 60 s; console: ${con.slice(-1500)} report: ${rep.slice(-2500)}`); }
+  expect(/program textured linked=1/.test(con) && /program colour linked=1/.test(con), 'sprite programs did not link: ' + con.slice(-600));
+  const fails = con.split('\n').filter((l) => l.startsWith('FAIL'));
+  expect(/sprite path verified/.test(con) && /glsprite ok/.test(con), `${exe}: ${fails.join(' | ').slice(0, 1200)} ${con.split('\n').filter((l) => /pixels:/.test(l)).join(' | ').slice(0, 600)}`);
+  await w.locator('[data-x64-tab="screen"]').click(); await sleep(300);
+  await page.screenshot({ path: resolve(SHOTS, `x64-${exe.replace('.exe', '')}.png`) });
+  await closeAll();
+});
 for (const exe of ['gltri.exe', 'gltri32.exe']) await test(`x64: ${exe} — OpenGL (opengl32.dll) on the device WebGL2: WGL context, GLSL 330 triangle + GLSL 120 GL_QUADS quad, glReadPixels, SwapBuffers`, async () => {
   const w = await x64Open();
   await w.locator(`[data-x64-exe="${exe}"]`).click();

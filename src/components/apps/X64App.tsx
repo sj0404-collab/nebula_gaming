@@ -37,6 +37,8 @@ const SAMPLES: { name: string; href: string; desc: string; args?: string; files?
   { name: 'gltri.exe', href: '/x64/samples/gltri.exe', desc: 'OpenGL → WebGL2 (x64): opengl32.dll on the device GPU — ChoosePixelFormat/SetPixelFormat, wglCreateContext/MakeCurrent, wglGetProcAddress, GLSL 330 + VAO/VBO triangle, a GLSL 120 program drawing GL_QUADS from a client-side array (translated/emulated by the bridge), glReadPixels check, SwapBuffers' },
   { name: 'glff.exe', href: '/x64/samples/glff.exe', desc: 'OpenGL 1.x fixed-function pipeline + GLU (x64): glBegin/glEnd, matrix stacks, display lists, lighting, texturing (texenv, 1D, gluBuild2DMipmaps), fog, alpha test, clip planes, glPolygonMode, glDrawPixels/glBitmap, vertex arrays, gluPerspective/gluLookAt/gluSphere/gluProject — 90+ pixel checks' },
   { name: 'glff32.exe', href: '/x64/samples/glff32.exe', desc: 'The same OpenGL 1.x / GLU self-check as a 32-bit exe (glu32.dll doubles on the x86 stack)' },
+  { name: 'glsprite.exe', href: '/x64/samples/glsprite.exe', desc: 'OpenGL 2D sprite-engine path (x64): the exact sequence of SteamWorld Dig-style engines — legacy WGL context, GLSL without #version, glBindAttribLocation, NPOT RGBA textures as GL_UNSIGNED_INT_8_8_8_8_REV, a streaming VBO (pos 3f · colour 4ub · uv 2f, stride 24) + USHORT index buffer, premultiplied blending, client arrays; every quad is read back and compared (prints FAIL lines naming the broken stage)' },
+  { name: 'glsprite32.exe', href: '/x64/samples/glsprite32.exe', desc: 'The same sprite-engine path as a 32-bit PE32 exe (what the x86 games use)' },
   { name: 'gltri32.exe', href: '/x64/samples/gltri32.exe', desc: 'The same OpenGL test as a 32-bit PE32 exe (stdcall GL entry points with float/double arguments on the x86 stack)' },
   { name: 'd3d11tri.exe', href: '/x64/samples/d3d11tri.exe', desc: 'Direct3D 11 → WebGL2: device + swap chain, vertex/index/constant buffers, input layout, precompiled DXBC vertex/pixel shaders translated to GLSL, Draw + DrawIndexed + Present (3 frames). Args: number of frames', args: '3' },
   { name: 'd3d11clear.exe', href: '/x64/samples/d3d11clear.exe', desc: 'Direct3D 11: D3D11CreateDeviceAndSwapChain, GetBuffer, CreateRenderTargetView, ClearRenderTargetView + Present in three colours' },
@@ -279,7 +281,7 @@ export default function X64App() {
     const rt = new X64Runtime(); rtRef.current = rt;
     (window as unknown as { __x64?: X64Runtime }).__x64 = rt;   // debugging aid (e2e / devtools): the live runtime of the last opened Programs window
     rt.onConsole = (_fd, text) => { consoleBuf.current = (consoleBuf.current + text).slice(-60000); setConsoleText(consoleBuf.current); };
-    rt.onLog = (text) => { if (text.startsWith('[gltrace]')) { setGlTrace(l => [...l.slice(-1599), text.trimEnd()]); return; } setLog(l => [...l.slice(-199), text.trimEnd()]); };
+    rt.onLog = (text) => { if (text.startsWith('[gltrace]')) { setGlTrace(l => [...l.slice(-2399), text.trimEnd()]); return; } setLog(l => [...l.slice(-199), text.trimEnd()]); };
     rt.onStdinWait = (w) => { setWaitingStdin(w); if (w) { setTab('console'); setTimeout(() => stdinRef.current?.focus(), 30); } };
     rt.onPresent = (px, w, h) => { presenterRef.current?.present(px, w, h); setFrames(f => { if (f === 0 && autoTabRef.current) setTab('screen'); return f + 1; }); };
     rt.onGlPresent = (cv, x, y, w, h) => presenterRef.current?.setGl(cv, x, y, w, h) ?? false;

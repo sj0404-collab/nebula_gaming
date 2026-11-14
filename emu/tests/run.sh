@@ -60,6 +60,13 @@ check "x64 honest no-GL"   "wglCreateContext failed (2000): no OpenGL on this ho
 out=$(X64_LOG=1 $X --quiet --no-stdin --max-ms 10000 tests/gltri32.exe 2>&1 || true)
 check "x86 pixel format"   "pixel format: color=32 depth=24 stencil=8 double=1" "$out"
 check "x86 honest no-GL"   "wglCreateContext failed (2000): no OpenGL on this host" "$out"
+echo "[1f3b] glsprite.exe / glsprite32.exe (2D sprite-engine GL path runs to the end on the null driver; pixel checks need WebGL2 → e2e)"
+out=$(X64_GL_NULL=1 X64_LOG=1 $X --quiet --no-stdin --max-ms 20000 tests/glsprite.exe 2>&1 || true)
+check "x64 sprite programs link" "program textured linked=1" "$out"
+check "x64 sprite path to the end" "glsprite ok" "$out"
+out=$(X64_GL_NULL=1 X64_LOG=1 $X --quiet --no-stdin --max-ms 20000 tests/glsprite32.exe 2>&1 || true)
+check "x86 sprite programs link" "program textured linked=1" "$out"
+check "x86 sprite path to the end" "glsprite ok" "$out"
 out=$(X64_GL_NULL=1 X64_LOG=1 $X --quiet --no-stdin --max-ms 20000 tests/gltri.exe 2>&1 || true)
 check "x64 GL null driver: context + GLSL + loop"   "gltri ok" "$out"
 check "x64 GL null driver: program linked"          "program 330 linked=1" "$out"
