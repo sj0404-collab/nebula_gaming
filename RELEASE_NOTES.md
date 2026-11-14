@@ -1,3 +1,36 @@
+# v1.51.4 — the sprite-engine GL path is proven pixel by pixel; the Report reads the vertices by itself
+
+The v1.51.3 report from the phone for SteamWorld Dig showed something new: **no lost context**, 36 textures with real
+data (RGBA, `GL_UNSIGNED_INT_8_8_8_8_REV`, nearest filtering), two linked programs, ~140 sprite draws per frame — and
+still a surface that is 100 % alpha-0 at frame 1200 after being white at frames 30 and 240.  So the lost-context
+theory of v1.51.3 is wrong for this game and the question moved to *what the draws carry*.
+
+* **`glsprite.exe` / `glsprite32.exe` (Library · tests)** — a new test program that performs the exact sequence of
+  this family of 2D engines: legacy WGL context, GLSL without `#version` and with `lowp/mediump/highp` defines,
+  `glBindAttribLocation`, shaders detached and deleted right after linking, a non-power-of-two RGBA texture uploaded as
+  `GL_UNSIGNED_INT_8_8_8_8_REV` with a transparent corner, a streaming VBO refilled with `glBufferSubData`
+  (position 3 floats · colour 4 normalized bytes · texcoords 2 floats, stride 24), a `GL_UNSIGNED_SHORT` index buffer,
+  premultiplied blending (`ONE, ONE_MINUS_SRC_ALPHA`) over `glClear(0,0,0,0)`, a colour-only program on a second VBO
+  and a client-side-array draw.  Every quad is read back with `glReadPixels` and compared; a failing stage prints a
+  `FAIL q1…q4/bg` line naming it.  **Both the 64-bit and the 32-bit exe pass in the browser on the GitHub runner**
+  (textured quads (0,255,0,255)/(0,0,128,255), colour quad (255,255,0,255), client arrays (0,255,0,255), background
+  (0,0,0,0)) — the WebGL2 bridge draws this path correctly: the byte-order conversion of `8_8_8_8_REV`, normalized
+  byte colours, the scratch-VBO path for client arrays and USHORT indices are all right.  The test runs in `e2e`
+  (pixel checks) and in `run.sh` (null driver, both bitnesses) on every push.
+* **GL vertex digest in the Report.**  After the surface probes at frames 240 and 1200 the next frame's first eight
+  draw calls are recorded automatically: program id, viewport, blend/scissor/depth state, the bound texture with its
+  upload statistics, and the first two vertices of every enabled attribute (client pointers and VBOs alike — colour
+  bytes, texcoords, positions).  A black frame caused by the game feeding alpha-0 vertex colours (a fade that never
+  progresses), texcoords in a transparent region or positions outside the viewport is readable from the Report
+  without pressing the trace button.
+* The automatic one-frame call trace also arms itself at frame 1200 (not only 240) when the surface is black.
+* `GL shaders` labels the stages correctly for programs whose shaders were detached and deleted after linking (the
+  sources are snapshotted at link time); v1.51.3 printed `[vertex shader 0]` for both stages.
+* The GL trace buffer in the Report grew to 2400 lines.
+
+Known limits: unchanged from v1.51.3 — a lost context is not restored; the digest covers eight draws per probe, the
+full frame is in the trace.
+
 # v1.51.3 — one GL session per program, and a Report that names the culprit
 
 Driven by two v1.51.2 reports from the phone taken in one sitting: SteamWorld Dig (white, then black surface with 140
